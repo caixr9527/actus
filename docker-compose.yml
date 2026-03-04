@@ -88,7 +88,7 @@ services:
     container_name: actus-frontend
     restart: unless-stopped
     depends_on:
-      actus-api:
+      actus-backend:
         condition: service_healthy
     networks:
       - actus-network
