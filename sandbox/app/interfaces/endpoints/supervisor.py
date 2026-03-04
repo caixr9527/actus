@@ -26,7 +26,7 @@ router = APIRouter(prefix="/supervisor", tags=["supervisor模块"])
 async def get_status(
         supervisor_service: SupervisorService = Depends(get_supervisor_service)
 ) -> Response[List[ProcessInfo]]:
-    processes = await supervisor_service.get_all_process()
+    processes = await supervisor_service.get_all_processes()
     return Response.success(
         msg="获取沙箱服务进程成功",
         data=processes
