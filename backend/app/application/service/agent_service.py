@@ -22,7 +22,6 @@ from app.domain.models import (
     A2AConfig,
     Session,
     MessageEvent,
-    File,
     Event,
     DoneEvent,
     WaitEvent
@@ -161,17 +160,22 @@ class AgentService:
                         timestamp=timestamp or datetime.now(),
                     )
 
+                # 从文件数据库中查询数据并更新attachments实际内容, 并返回人类消息事件
+                async with self._uow:
+                    db_attachments = [await self._uow.file.get_by_id(id) for id in attachments]
+
                 # 创建用户消息事件
                 message_event = MessageEvent(
                     role="user",
                     message=message,
-                    attachments=[File(id=attachment) for attachment in attachments] if attachments else [],
+                    attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
 
                 # 将消息事件放入任务输入流
                 event_id = await task.input_stream.put(message_event.model_dump_json())
                 message_event.id = event_id
 
+                yield message_event
                 # 将消息事件保存到会话历史中
                 async with self._uow:
                     await self._uow.session.add_event(session_id=session_id, event=message_event)

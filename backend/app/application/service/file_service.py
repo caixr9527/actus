@@ -16,7 +16,7 @@ from app.domain.repositories import IUnitOfWork
 
 
 class FileService:
-    """MoocManus文件系统服务"""
+    """Actus文件系统服务"""
 
     def __init__(
             self,

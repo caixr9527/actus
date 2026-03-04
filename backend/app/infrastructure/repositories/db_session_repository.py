@@ -6,9 +6,9 @@
 @File   : db_session_repository.py
 """
 from datetime import datetime
-from typing import List, Optional, cast
+from typing import List, Optional
 
-from sqlalchemy import select, delete, update, func
+from sqlalchemy import select, delete, update, func, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 

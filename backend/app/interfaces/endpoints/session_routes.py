@@ -184,7 +184,7 @@ async def chat(
             if sse_event:
                 yield ServerSentEvent(
                     event=sse_event.event,
-                    data=sse_event.model_dump_json(),
+                    data=sse_event.data.model_dump_json(),
                 )
 
     return EventSourceResponse(event_generator())
@@ -317,7 +317,7 @@ async def vnc_websocket(
 
         # 建立到沙箱VNC服务器的WebSocket连接
         async with websockets.connect(sandbox_vnc_url) as sandbox_ws:
-            
+
             # 定义从客户端向沙箱转发数据的协程函数
             async def forward_to_sandbox():
                 try:
@@ -360,7 +360,7 @@ async def vnc_websocket(
             # 取消仍在运行的任务
             for task in pending:
                 task.cancel()
-                
+
     except ConnectionError as connection_e:
         # 处理连接沙箱环境失败的情况
         logger.error(f"连接沙箱环境失败: {str(connection_e)}")

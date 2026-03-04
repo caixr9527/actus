@@ -17,7 +17,7 @@ from app.interfaces.schemas import Response, ListMCPServerResponse, ListA2AServe
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api-config", tags=["设置模块"])
+router = APIRouter(prefix="/app-config", tags=["设置模块"])
 
 
 @router.get(

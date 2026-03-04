@@ -229,8 +229,6 @@ class MCPClientManager:
             logger.error(f"缓存MCP服务器 {server_name} 的工具失败: {e}")
             # 缓存失败时，为该服务器设置空的工具列表
             self._tools[server_name] = []
-            # 重新抛出异常，让上层调用者能够捕获和处理
-            raise
 
     async def get_all_tools(self) -> List[Dict[str, Any]]:
         """

@@ -15,6 +15,7 @@ from typing import Optional, Self, BinaryIO
 import docker
 import httpx
 from async_lru import alru_cache
+from docker.errors import NotFound, APIError
 from docker.models.resource import Model
 
 from app.domain.external import Sandbox, Browser
@@ -169,27 +170,60 @@ class DockerSandbox(Sandbox):
             return False
 
     @classmethod
-    @alru_cache(maxsize=128, typed=True)
-    async def get(cls, id: str) -> Self:
-        # 获取系统配置
+    async def get(cls, id: str) -> Optional[Self]:
+        # 获取全局配置
         settings = get_settings()
 
-        # 如果配置了沙盒地址，则直接使用该地址创建沙盒实例
+        # 如果配置了固定的沙箱地址，则直接使用该地址
         if settings.sandbox_address:
-            # 解析沙盒地址为IP地址
-            ip = await cls._resolve_hostname_to_ip(settings.sandbox_address)
-            # 创建并返回DockerSandbox实例
-            return DockerSandbox(ip=ip, container_name=id)
+            try:
+                # 解析沙箱地址为主机IP地址
+                ip = await cls._resolve_hostname_to_ip(settings.sandbox_address)
+                # 返回已存在的沙箱实例
+                return DockerSandbox(ip=ip, container_name=id)
+            except Exception as e:
+                # 记录解析沙箱地址失败的日志
+                logger.error(f"解析沙箱地址失败: {str(e)}")
+                return None
 
-        # 从Docker获取指定名称的容器
-        docker_client = docker.from_env()
-        container = docker_client.containers.get(id)
-        # 重新加载容器信息以获取最新状态
-        container.reload()
-        # 获取容器IP地址
-        ip = cls._get_container_ip(container)
-        # 创建并返回DockerSandbox实例
-        return DockerSandbox(ip=ip, container_name=id)
+        # 如果没有配置固定地址，则从Docker中查找指定ID的容器
+        try:
+            # 创建Docker客户端
+            docker_client = docker.from_env()
+
+            try:
+                # 根据ID获取容器对象
+                container = docker_client.containers.get(id)
+                # 重新加载容器信息以获取最新状态
+                container.reload()
+
+                # 检查容器是否正在运行
+                if container.status != "running":
+                    logger.warning(f"容器存在但未运行, 容器名字: {id}")
+                    return None
+
+                # 获取容器的IP地址
+                ip = cls._get_container_ip(container)
+                if not ip:
+                    return None
+
+                # 返回对应的沙箱实例
+                return DockerSandbox(ip=ip, container_name=id)
+            except NotFound:
+                # 容器不存在或已被销毁
+                logger.warning(f"该容器找不到可能被销毁: {str(id)}")
+                return None
+            except APIError as e:
+                # Docker API调用出错
+                logger.error(f"Docker API出错: {str(e)}")
+                return None
+            finally:
+                # 关闭Docker客户端连接
+                docker_client.close()
+        except Exception as e:
+            # 记录获取沙箱时发生的未知错误
+            logger.error(f"获取沙箱发生未知错误: {str(e)}")
+            return None
 
     async def get_browser(self) -> Browser:
         # todo 扩展llm

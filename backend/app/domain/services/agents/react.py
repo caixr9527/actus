@@ -135,7 +135,7 @@ class ReActAgent(BaseAgent):
                 # 将解析结果转换为Message对象
                 message = Message.model_validate(parsed_obj)
 
-                # 根据附件路径创建File对象列表
+                # 根据附件路径创建File对象列表 todo
                 attachments = [File(filepath=filepath) for filepath in message.attachments]
                 # 产出包含总结结果的消息事件
                 yield MessageEvent(

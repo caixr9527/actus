@@ -241,7 +241,7 @@ class Sandbox(Protocol):
         ...
 
     @classmethod
-    async def get(cls, id: str) -> Self:
+    async def get(cls, id: str) -> Optional[Self]:
         """
         获取沙盒
         :param id: 沙盒ID

@@ -91,7 +91,7 @@ class SessionService:
             return FileReadResponse(**result.data)
 
         # 文件读取失败，抛出服务器错误
-        raise ServerError(msg=result.msg)
+        raise ServerError(msg=result.message)
 
     async def read_shell_output(self, session_id: str, shell_session_id: str) -> ShellReadResponse:
         logger.info(f"获取会话：{session_id} 中Shell会话ID：{shell_session_id} 的输出")
@@ -114,7 +114,7 @@ class SessionService:
         if result.success:
             # 读取成功，返回结果
             return ShellReadResponse(**result.data)
-        raise ServerError(msg=result.msg)
+        raise ServerError(msg=result.message)
 
     async def get_vnc_url(self, session_id: str) -> str:
         logger.info(f"获取会话：{session_id} 的VNC地址")

@@ -52,6 +52,7 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.flows import PlannerReActFlow
 from app.domain.services.tools import MCPTool, A2ATool
+from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -242,10 +243,13 @@ class AgentTaskRunner(TaskRunner):
         file = await self._file_storage.upload_file(
             upload_file=UploadFile(
                 file=io.BytesIO(screenshot),
-                filename=f"{str(uuid.uuid4())}.png"
+                filename=f"{str(uuid.uuid4())}.png",
+                size=self._get_stream_size(io.BytesIO(screenshot))
             )
         )
-        return file.id
+        settings = get_settings()
+        # todo 修改为配置
+        return f"https://{settings.cos_bucket}.cos.{settings.cos_region}.myqcloud.com/{file.key}"
 
     async def _handle_tool_event(self, event: ToolEvent) -> None:
         try:
@@ -269,7 +273,9 @@ class AgentTaskRunner(TaskRunner):
                             session_id=event.function_args["session_id"],
                             console=True
                         )
-                        event.tool_content = ShellToolContent(console=shell_result.data.get("console_records", []))
+                        event.tool_content = ShellToolContent(
+                            console=(shell_result.data or {}).get("console_records", [])
+                        )
                     else:
                         # 如果没有session_id参数，设置默认值
                         event.tool_content = ShellToolContent(console="(No console)")
@@ -279,7 +285,7 @@ class AgentTaskRunner(TaskRunner):
                         # 从函数参数中获取文件路径
                         filepath = event.function_args["filepath"]
                         # 从沙箱中读取文件内容
-                        file_read_result = await self._sandbox.read_file(filepath)
+                        file_read_result = await self._sandbox.read_file(file_path=filepath)
                         file_content: str = (file_read_result.data or {}).get("content", "")
                         event.tool_content = FileToolContent(content=file_content)
                         # 将文件同步到沙存储

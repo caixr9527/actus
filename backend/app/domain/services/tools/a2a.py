@@ -51,15 +51,19 @@ class A2AClientManager:
             raise BadRequestError("A2A客户端初始化失败")
 
     async def _get_a2a_agent_cards(self) -> None:
-        for a2a_server in self._a2a_config.a2a_servers:
+        for a2a_server_config in self._a2a_config.a2a_servers:
             try:
-                response = await self._httpx_clients.get(
-                    url=f"{a2a_server.base_url}/.well-known/agent-card.json",
+                agent_card_response = await self._httpx_client.get(
+                    f"{a2a_server_config.base_url}/.well-known/agent-card.json"
                 )
-                response.raise_for_status()
-                self._agent_cards[a2a_server.id] = response.json()
+                agent_card_response.raise_for_status()
+                agent_card = agent_card_response.json()
+
+                # 存储到agent_cards
+                agent_card["enabled"] = a2a_server_config.enabled
+                self._agent_cards[a2a_server_config.id] = agent_card
             except Exception as e:
-                logger.error(f"加载A2A服务 {a2a_server.id} 失败: {e}")
+                logger.error(f"加载A2A服务 {a2a_server_config.id} 失败: {e}")
                 continue
 
     async def invoke(self, agent_id: str, query: str) -> ToolResult:
@@ -86,7 +90,7 @@ class A2AClientManager:
                     "method": "message/send",
                     "params": {
                         "message": {
-                            "messageId": uuid.uuid4().hex,
+                            "messageId": str(uuid.uuid4()),
                             "role": "user",
                             "parts": [
                                 {"kind": "text", "text": query},
@@ -107,7 +111,7 @@ class A2AClientManager:
             logger.error(f"调用A2A服务 {agent_id} 失败: {e}")
             return ToolResult(
                 success=False,
-                message=f"调用A2A服务失败: {e}",
+                message=f"调用A2A服务 {agent_id} : {url} 失败: {e}",
             )
 
     async def cleanup(self) -> None:

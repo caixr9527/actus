@@ -49,7 +49,7 @@ class PlannerAgent(BaseAgent):
         """
         # 构造创建计划的查询提示词，包含用户消息内容和附件信息
         query = CREATE_PLAN_PROMPT.format(
-            message=message.content,
+            message=message.message,
             attachments="\n".join(message.attachments),
         )
 

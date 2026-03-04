@@ -91,6 +91,7 @@ class BaseAgent(ABC):
         # 构造响应格式参数
         response_format = {"type": format} if format else None
 
+        error = "调用语言模型发生错误"
         # 最多重试max_retries次
         for _ in range(self._agent_config.max_retries):
             try:
@@ -135,8 +136,11 @@ class BaseAgent(ABC):
             except Exception as e:
                 # 捕获异常，记录错误日志并等待重试间隔后继续重试
                 logger.error(f"调用大语言模型失败: {e}")
+                error = str(e)
                 await asyncio.sleep(self._retry_interval)
                 continue
+        raise RuntimeError(f"调用语言模型失败, 已达到最大重试次数({self._agent_config.max_retries}): {error}")
+
 
     async def _invoke_tool(self, tool: BaseTool, tool_name: str, arguments: Dict[str, Any]) -> ToolResult:
         # 初始化错误信息为空字符串
@@ -149,7 +153,7 @@ class BaseAgent(ABC):
             except Exception as e:
                 # 捕获异常，记录错误日志，并保存错误信息
                 err = str(e)
-                logger.error(f"调用工具失败: {e}")
+                logger.exception(f"调用工具[{tool_name}]出错, 错误: {str(e)}")
                 # 等待重试间隔后继续重试
                 await asyncio.sleep(self._retry_interval)
                 continue
@@ -290,4 +294,7 @@ class BaseAgent(ABC):
             yield ErrorEvent(error=f"迭代次数超出限制:{self._agent_config.max_iterations},任务处理失败")
 
         # 在指定步骤内完成了迭代则返回消息事件
-        yield MessageEvent(message=message["content"])
+        if message and message.get("content") is not None:
+            yield MessageEvent(message=message["content"])
+        else:
+            yield ErrorEvent(error="Agent未能生成有效回复内容")
