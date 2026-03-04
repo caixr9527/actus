@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     env: str = "development"
     log_level: str = "INFO"
     app_config_filepath: str = "config.yaml"
+    auto_run_db_migrations: bool = True
+    db_migration_log_interval_seconds: float = 3.0
 
     sqlalchemy_database_uri: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/lingxi-mas"
 

@@ -7,7 +7,7 @@
 """
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from alembic import command
 from alembic.config import Config
@@ -24,7 +24,7 @@ from core.config import get_settings
 settings = get_settings()
 
 setup_logging()
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 openapi_tags = [
     {
@@ -34,14 +34,41 @@ openapi_tags = [
 ]
 
 
+async def _log_migration_heartbeat(interval_seconds: float) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        logger.info("数据库迁移进行中, 服务将在迁移完成后继续启动")
+
+
+async def run_startup_migrations() -> None:
+    if not settings.auto_run_db_migrations:
+        logger.info("已跳过启动数据库迁移(AUTO_RUN_DB_MIGRATIONS=false)")
+        return
+
+    logger.info("开始执行数据库迁移")
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.attributes["configure_logger"] = False
+
+    heartbeat_interval = max(settings.db_migration_log_interval_seconds, 0.5)
+    heartbeat_task = asyncio.create_task(_log_migration_heartbeat(heartbeat_interval))
+
+    try:
+        await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+        logger.info("数据库迁移完成")
+    except Exception:
+        logger.exception("数据库迁移失败, 服务启动终止")
+        raise
+    finally:
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """生命周期上下文管理"""
-    setup_logging()
     logger.info(f"{settings.env} 模式下启动服务")
-    # 运行数据库迁移
-    alembic_cfg = Config("alembic.ini")
-    command.upgrade(alembic_cfg, "head")
+    await run_startup_migrations()
 
     # 初始化数据库连接
     await get_redis_client().init()
