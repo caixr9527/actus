@@ -22,7 +22,6 @@ from app.domain.models import (
     A2AConfig,
     Session,
     MessageEvent,
-    File,
     Event,
     DoneEvent,
     WaitEvent
