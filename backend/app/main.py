@@ -22,6 +22,8 @@ from app.interfaces.service_dependencies import get_agent_service
 from core.config import get_settings
 
 settings = get_settings()
+is_production_env = settings.env.lower() in {"production", "prod"}
+enable_api_docs = not is_production_env
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -68,6 +70,7 @@ async def run_startup_migrations() -> None:
 async def lifespan(app: FastAPI):
     """生命周期上下文管理"""
     logger.info(f"{settings.env} 模式下启动服务")
+    logger.info("Swagger文档已%s", "关闭" if not enable_api_docs else "开启")
     await run_startup_migrations()
 
     # 初始化数据库连接
@@ -98,11 +101,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="灵析通用智能体",
-    description="灵析是一个通用的AI Agent系统,可以完全私有化部署,使用A2A+MCP连接Agent/Tool。",
+    title="Actus通用智能体",
+    description="Actus是一个通用的AI Agent系统,可以完全私有化部署,使用A2A+MCP连接Agent/Tool。",
     lifespan=lifespan,
     openapi_tags=openapi_tags,
     version="0.1.0",
+    docs_url="/docs" if enable_api_docs else None,
+    redoc_url="/redoc" if enable_api_docs else None,
+    openapi_url="/openapi.json" if enable_api_docs else None,
 )
 
 # 跨域处理
