@@ -1,36 +1,84 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Actus Frontend
 
-## Getting Started
+Actus 前端基于 Next.js 16 + React 19，负责会话交互、计划展示、工具预览与 VNC 远程界面承载。
 
-First, run the development server:
+## 1. 环境要求
+
+- Node.js >= 20
+- npm >= 10
+
+## 2. 本地开发
 
 ```bash
+cd frontend
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+默认访问：`http://localhost:3000`
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 3. 环境变量
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+前端通过 `NEXT_PUBLIC_API_BASE_URL` 指向后端 API 网关。
 
-## Learn More
+示例：
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+# frontend/.env.local
+NEXT_PUBLIC_API_BASE_URL=http://localhost:23140/api
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+未配置时，默认值为 `http://localhost:23140/api`。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 4. 常用命令
 
-## Deploy on Vercel
+```bash
+# 开发（默认使用 webpack，规避当前 Turbopack dev 解析问题）
+npm run dev
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+# 可选：Turbopack 开发模式
+npm run dev:turbo
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+# 生产构建
+npm run build
+
+# 启动生产服务
+npm run start
+
+# 静态检查
+npm run lint
+
+# Smoke baseline（最小可执行回归入口）
+npm run test:smoke
+# 等价于：npm run lint && npm run build
+```
+
+## 5. 快捷键
+
+- `⌘/Ctrl + B`：折叠/展开侧边栏
+- `⌘/Ctrl + K`：新建任务（跳转首页）
+- `⌘/Ctrl + Enter`：发送消息
+
+## 6. 常见问题
+
+### 6.1 `npm run dev` 启动后出现样式依赖解析错误
+
+当前默认脚本已切换到 `next dev --webpack`，如手动使用 `dev:turbo` 出现 `Can't resolve 'tailwindcss'`，请先回退到 `npm run dev`。
+
+### 6.2 页面请求失败 / 数据为空
+
+优先检查：
+
+1. 后端是否已启动并可访问 `NEXT_PUBLIC_API_BASE_URL`
+2. 浏览器 Network 中 `/api/...` 请求是否 2xx
+3. 本地代理、跨域或网关配置是否正确
+
+## 7. CI 建议基线
+
+最小质量闸门建议：
+
+```bash
+npm run test:smoke
+```
+
+后续可在此基础上增加单元测试与 E2E 测试。
