@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { PlanPanel } from '@/components/plan-panel'
@@ -48,8 +47,16 @@ function findLatestTool(timeline: TimelineItem[]): ToolEvent | null {
   return null
 }
 
+function removeInitQueryParamFromUrl(): void {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (!url.searchParams.has('init')) return
+  url.searchParams.delete('init')
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`
+  window.history.replaceState(window.history.state, '', nextUrl)
+}
+
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
-  const router = useRouter()
   const {
     session,
     files,
@@ -101,6 +108,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }, [previewTool, timeline])
 
   // 任务运行中自动追踪最新工具预览（VNC 打开时暂停）
+  // 该副作用职责是将流式事件同步到预览 UI。
   useEffect(() => {
     if (session?.status !== 'running' || vncOpen) return
 
@@ -112,6 +120,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     }, 0)
 
     if (toolCount > prevToolCountRef.current && latestTool) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPreviewTool(latestTool)
       setPreviewFile(null)
       scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
@@ -120,25 +129,20 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }, [timeline, session?.status, vncOpen])
 
   useEffect(() => {
-    if (
-      initialMessage &&
-      !initialMessageSentRef.current &&
-      session &&
-      !loading &&
-      !streaming
-    ) {
-      initialMessageSentRef.current = true
-      sendMessage(initialMessage, initialAttachments || [])
-        .then(() => {
-          setTimeout(() => {
-            router.replace(`/sessions/${sessionId}`)
-          }, 100)
-        })
-        .catch((e) => {
-          toast.error(e instanceof Error ? e.message : '发送消息失败')
-        })
+    if (!initialMessage || initialMessageSentRef.current || !session || loading || streaming) {
+      return
     }
-  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage, sessionId, router])
+
+    initialMessageSentRef.current = true
+
+    sendMessage(initialMessage, initialAttachments || [])
+      .then(() => {
+        removeInitQueryParamFromUrl()
+      })
+      .catch((e) => {
+        toast.error(e instanceof Error ? e.message : '发送消息失败')
+      })
+  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage])
 
   const handleSend = useCallback(
     async (message: string, uploadedFiles: FileInfo[]) => {
@@ -212,6 +216,9 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     }
   }, [session, sessionId, refresh])
 
+  const shouldShowThinking =
+    streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
+
   if (loading && !session) {
     return (
       <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
@@ -284,7 +291,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                   />
                 ))}
 
-                {(session?.status === 'running' || (hasInitialMessage && !initialMessageSentRef.current)) && (
+                {shouldShowThinking && (
                   <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
                     <Loader2 className="size-4 animate-spin" />
                     <span>正在思考中...</span>

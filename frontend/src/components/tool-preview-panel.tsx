@@ -63,18 +63,26 @@ function getToolDescription(kind: ToolKind): string {
   return map[kind]
 }
 
-function getToolIcon(kind: ToolKind) {
-  const map: Record<ToolKind, typeof Terminal> = {
-    bash: Terminal,
-    browser: Globe,
-    search: Search,
-    file: FileSearch,
-    mcp: Wrench,
-    a2a: Bot,
-    message: Monitor,
-    default: Monitor,
+function renderToolIcon(kind: ToolKind) {
+  switch (kind) {
+    case "bash":
+      return <Terminal size={14} className="flex-shrink-0 text-gray-500" />
+    case "browser":
+      return <Globe size={14} className="flex-shrink-0 text-gray-500" />
+    case "search":
+      return <Search size={14} className="flex-shrink-0 text-gray-500" />
+    case "file":
+      return <FileSearch size={14} className="flex-shrink-0 text-gray-500" />
+    case "mcp":
+      return <Wrench size={14} className="flex-shrink-0 text-gray-500" />
+    case "a2a":
+      return <Bot size={14} className="flex-shrink-0 text-gray-500" />
+    case "message":
+    case "default":
+      return <Monitor size={14} className="flex-shrink-0 text-gray-500" />
+    default:
+      return <Monitor size={14} className="flex-shrink-0 text-gray-500" />
   }
-  return map[kind]
 }
 
 /* ------------------------------------------------------------------ */
@@ -398,7 +406,6 @@ export function ToolPreviewPanel({
 }: ToolPreviewPanelProps) {
   const kind = getToolKind(tool)
   const label = getFriendlyToolLabel(tool)
-  const ToolIcon = getToolIcon(kind)
   const toolDesc = getToolDescription(kind)
 
   return (
@@ -425,7 +432,7 @@ export function ToolPreviewPanel({
           <span className="font-medium text-gray-800">{toolDesc}</span>
         </div>
         <div className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 border border-gray-200 bg-gray-100 text-gray-700 text-xs w-fit max-w-full">
-          <ToolIcon size={14} className="flex-shrink-0 text-gray-500" />
+          {renderToolIcon(kind)}
           <span className="truncate">{label}</span>
         </div>
       </div>
