@@ -16,7 +16,7 @@ import type {Session} from '@/lib/api'
 export function SessionList() {
   const router = useRouter()
   const params = useParams()
-  const {sessions, loading, error, refresh, deleteSession} = useSessions()
+  const {sessions, loading, error, realtimeStatus, reconnectCount, realtimeAlert, refresh, resumeRealtime, deleteSession} = useSessions()
 
   // 待删除的会话
   const [pendingDeleteSession, setPendingDeleteSession] = useState<Session | null>(null)
@@ -53,6 +53,11 @@ export function SessionList() {
       setPendingDeleteSession(null)
     }
   }, [])
+
+  const handleRealtimeRetry = useCallback(() => {
+    resumeRealtime()
+    void refresh()
+  }, [refresh, resumeRealtime])
 
   // 加载态：骨架屏
   if (loading) {
@@ -92,14 +97,47 @@ export function SessionList() {
   // 空态
   if (sessions.length === 0) {
     return (
-      <div className="py-8 text-center text-sm text-muted-foreground">
-        暂无任务
+      <div className="space-y-3">
+        {realtimeAlert && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <div className="flex items-center justify-between gap-2">
+              <span>{realtimeAlert}</span>
+              <button
+                type="button"
+                className="text-amber-900 underline underline-offset-2 cursor-pointer"
+                onClick={handleRealtimeRetry}
+              >
+                重试
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="py-8 text-center text-sm text-muted-foreground">
+          暂无任务
+        </div>
       </div>
     )
   }
 
   return (
     <>
+      {realtimeAlert && (
+        <div className="mb-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <div className="flex items-center justify-between gap-2">
+            <span>
+              {realtimeAlert}
+              {realtimeStatus === 'reconnecting' ? `（第 ${reconnectCount} 次）` : ''}
+            </span>
+            <button
+              type="button"
+              className="text-amber-900 underline underline-offset-2 cursor-pointer"
+              onClick={handleRealtimeRetry}
+            >
+              重试
+            </button>
+          </div>
+        </div>
+      )}
       <ItemGroup className="gap-1">
         {sessions.map((session) => (
           <SessionItem
@@ -121,4 +159,3 @@ export function SessionList() {
     </>
   )
 }
-

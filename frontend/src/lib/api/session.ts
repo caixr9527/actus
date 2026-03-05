@@ -78,8 +78,11 @@ export const sessionApi = {
             }
           },
           (error) => {
-            if (!controller.signal.aborted && onError) {
-              onError(error);
+            if (!controller.signal.aborted) {
+              controller.abort();
+              if (onError) {
+                onError(error);
+              }
             }
           }
         );
@@ -165,8 +168,11 @@ export const sessionApi = {
             } as SSEEventData);
           },
           (error) => {
-            if (!controller.signal.aborted && onError) {
-              onError(error);
+            if (!controller.signal.aborted) {
+              controller.abort();
+              if (onError) {
+                onError(error);
+              }
             }
           }
         );
@@ -253,4 +259,3 @@ export const sessionApi = {
     );
   },
 };
-

@@ -225,6 +225,10 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     }
   }, [session, sessionId, refresh])
 
+  const handleRealtimeRecover = useCallback(() => {
+    void refresh()
+  }, [refresh])
+
   const shouldShowThinking =
     streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
 
@@ -282,6 +286,21 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                 onFileClick={handleFileClick}
               />
             </div>
+
+            {error && (
+              <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <div className="flex items-center justify-between gap-2">
+                  <span>{error.message}</span>
+                  <button
+                    type="button"
+                    className="text-amber-900 underline underline-offset-2 cursor-pointer"
+                    onClick={handleRealtimeRecover}
+                  >
+                    重试
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
               <div className="flex flex-col w-full gap-3 pt-3">
