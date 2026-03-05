@@ -3,13 +3,18 @@
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react'
 import {sessionApi} from '@/lib/api'
 import type {Session} from '@/lib/api'
+import {canRetry, computeRetryDelayMs, type RetryPolicy} from '@/lib/session-stream-policy'
 
 /** 重连配置 */
-const RETRY_CONFIG = {
+const RETRY_POLICY: RetryPolicy = {
   maxRetries: 10,
-  baseDelay: 1000,
-  maxDelay: 30_000,
-} as const
+  baseDelayMs: 1000,
+  maxDelayMs: 30_000,
+}
+
+const FALLBACK_POLL_INTERVAL_MS = 15_000
+
+export type RealtimeStatus = 'connected' | 'reconnecting' | 'degraded'
 
 /**
  * 从 API 返回值中安全提取 Session 数组
@@ -31,8 +36,12 @@ type SessionsContextValue = {
   sessions: Session[]
   loading: boolean
   error: string | null
+  realtimeStatus: RealtimeStatus
+  reconnectCount: number
+  realtimeAlert: string | null
   /** 手动刷新（通过 REST 接口拉取一次） */
   refresh: () => Promise<void>
+  resumeRealtime: () => void
   deleteSession: (sessionId: string) => Promise<boolean>
 }
 
@@ -55,40 +64,102 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>('connected')
+  const [reconnectCount, setReconnectCount] = useState(0)
+  const [realtimeAlert, setRealtimeAlert] = useState<string | null>(null)
 
   const cleanupRef = useRef<(() => void) | null>(null)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fallbackPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const retryCountRef = useRef(0)
+  const connectRef = useRef<(() => void) | null>(null)
+  const unmountedRef = useRef(false)
   /** 确保 REST 初始请求只发起一次（防止 Strict Mode 重复） */
   const initialFetchedRef = useRef(false)
   /** 标记 SSE 是否已经推送过数据，防止 REST 回调覆盖更新的 SSE 数据 */
   const sseReceivedRef = useRef(false)
+
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current)
+      retryTimerRef.current = null
+    }
+  }, [])
+
+  const clearFallbackPollTimer = useCallback(() => {
+    if (fallbackPollTimerRef.current) {
+      clearInterval(fallbackPollTimerRef.current)
+      fallbackPollTimerRef.current = null
+    }
+  }, [])
+
+  const fetchSessionsSnapshot = useCallback(async () => {
+    const raw = await sessionApi.getSessions()
+    return normalizeSessions(raw)
+  }, [])
+
+  const startFallbackPolling = useCallback(() => {
+    if (fallbackPollTimerRef.current) return
+    fallbackPollTimerRef.current = setInterval(() => {
+      if (unmountedRef.current) return
+      void fetchSessionsSnapshot()
+        .then((nextSessions) => {
+          if (unmountedRef.current) return
+          setSessions(nextSessions)
+          setLoading(false)
+        })
+        .catch((err) => {
+          console.warn('[Sessions] 降级同步失败:', err)
+        })
+    }, FALLBACK_POLL_INTERVAL_MS)
+  }, [fetchSessionsSnapshot])
+
+  const markRealtimeConnected = useCallback(() => {
+    retryCountRef.current = 0
+    setReconnectCount(0)
+    setRealtimeStatus('connected')
+    setRealtimeAlert(null)
+    clearFallbackPollTimer()
+  }, [clearFallbackPollTimer])
+
+  const resumeRealtime = useCallback(() => {
+    retryCountRef.current = 0
+    setReconnectCount(0)
+    setRealtimeStatus('reconnecting')
+    setRealtimeAlert('正在恢复实时连接...')
+    clearRetryTimer()
+    clearFallbackPollTimer()
+    connectRef.current?.()
+  }, [clearFallbackPollTimer, clearRetryTimer])
 
   // ---------- 手动刷新 ----------
   const refresh = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
-      const raw = await sessionApi.getSessions()
-      setSessions(normalizeSessions(raw))
+      const nextSessions = await fetchSessionsSnapshot()
+      setSessions(nextSessions)
+      if (realtimeStatus === 'degraded') {
+        resumeRealtime()
+      }
     } catch (err) {
       console.error('[Sessions] REST 获取失败:', err)
       setError(err instanceof Error ? err.message : '获取会话列表失败')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [fetchSessionsSnapshot, realtimeStatus, resumeRealtime])
 
   // ---------- 初始 REST 请求（仅一次） ----------
   useEffect(() => {
     if (initialFetchedRef.current) return
     initialFetchedRef.current = true
 
-    sessionApi
-      .getSessions()
+    fetchSessionsSnapshot()
       .then((raw) => {
         // 仅在 SSE 尚未推送过数据时更新，防止用旧数据覆盖 SSE 已推送的新数据
         if (!sseReceivedRef.current) {
-          setSessions(normalizeSessions(raw))
+          setSessions(raw)
         }
         setLoading(false)
         setError(null)
@@ -98,15 +169,17 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
         setError(err instanceof Error ? err.message : '获取会话列表失败')
         setLoading(false)
       })
-  }, [])
+  }, [fetchSessionsSnapshot])
 
   // ---------- SSE 实时订阅 ----------
   useEffect(() => {
+    unmountedRef.current = false
     let mounted = true
-    let retryCount = 0
 
     const connect = () => {
       if (!mounted) return
+
+      clearRetryTimer()
 
       // 清理上一次连接
       if (cleanupRef.current) {
@@ -118,7 +191,7 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
         // onSessions
         (newSessions) => {
           if (!mounted) return
-          retryCount = 0
+          markRealtimeConnected()
           sseReceivedRef.current = true
           setSessions(newSessions)
           setLoading(false)
@@ -129,17 +202,20 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
           if (!mounted) return
           console.warn('[Sessions] SSE 断开:', err.message)
 
-          if (retryCount >= RETRY_CONFIG.maxRetries) {
-            console.error('[Sessions] 超过最大重试次数，停止重连')
+          if (!canRetry(retryCountRef.current, RETRY_POLICY)) {
+            setRealtimeStatus('degraded')
+            setRealtimeAlert('实时连接已中断，已切换为降级同步。点击“重试”恢复实时连接。')
+            startFallbackPolling()
+            console.error('[Sessions] 超过最大重试次数，已切换为降级同步')
             return
           }
 
-          const delay = Math.min(
-            RETRY_CONFIG.baseDelay * Math.pow(2, retryCount),
-            RETRY_CONFIG.maxDelay,
-          )
-          retryCount++
-          console.log(`[Sessions] ${delay}ms 后尝试重连（第 ${retryCount} 次）`)
+          const delay = computeRetryDelayMs(retryCountRef.current, RETRY_POLICY)
+          retryCountRef.current += 1
+          setReconnectCount(retryCountRef.current)
+          setRealtimeStatus('reconnecting')
+          setRealtimeAlert(`实时连接中断，${Math.ceil(delay / 1000)} 秒后进行第 ${retryCountRef.current} 次重连`)
+          console.log(`[Sessions] ${delay}ms 后尝试重连（第 ${retryCountRef.current} 次）`)
           retryTimerRef.current = setTimeout(connect, delay)
         },
       )
@@ -147,20 +223,21 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
       cleanupRef.current = cleanup
     }
 
+    connectRef.current = connect
     connect()
 
     return () => {
       mounted = false
+      unmountedRef.current = true
+      connectRef.current = null
       if (cleanupRef.current) {
         cleanupRef.current()
         cleanupRef.current = null
       }
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current)
-        retryTimerRef.current = null
-      }
+      clearRetryTimer()
+      clearFallbackPollTimer()
     }
-  }, [])
+  }, [clearFallbackPollTimer, clearRetryTimer, markRealtimeConnected, startFallbackPolling])
 
   // ---------- 删除会话 ----------
   const deleteSession = useCallback(async (sessionId: string): Promise<boolean> => {
@@ -174,7 +251,17 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <SessionsContext.Provider value={{sessions, loading, error, refresh, deleteSession}}>
+    <SessionsContext.Provider value={{
+      sessions,
+      loading,
+      error,
+      realtimeStatus,
+      reconnectCount,
+      realtimeAlert,
+      refresh,
+      resumeRealtime,
+      deleteSession,
+    }}>
       {children}
     </SessionsContext.Provider>
   )
@@ -194,4 +281,3 @@ export function useSessions(): SessionsContextValue {
   }
   return ctx
 }
-

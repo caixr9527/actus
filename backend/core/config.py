@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     auto_run_db_migrations: bool = True
     db_migration_log_interval_seconds: float = 3.0
 
-    sqlalchemy_database_uri: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/lingxi-mas"
+    sqlalchemy_database_uri: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/actus"
 
     redis_host: str = "localhost"
     redis_port: int = 6379

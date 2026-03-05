@@ -6,6 +6,7 @@ import { ChatHeader } from "@/components/chat-header"
 import { ChatInput, type ChatInputRef } from "@/components/chat-input"
 import { SuggestedQuestions } from "@/components/suggested-questions"
 import { sessionApi } from "@/lib/api/session"
+import { saveInitialMessageDraft } from "@/lib/initial-message-draft"
 import type { FileInfo } from "@/lib/api/types"
 import { toast } from "sonner"
 
@@ -28,14 +29,18 @@ export default function Page() {
       const session = await sessionApi.createSession()
       const sessionId = session.session_id
 
-      // 2. 将消息数据编码到 URL，在详情页发送
+      // 2. 优先写入 sessionStorage，避免 URL 长度与可见性问题
       const attachments = files.map((file) => file.id)
-      const payload = JSON.stringify({ message, attachments })
-      // 使用 Base64 编码避免 URL 特殊字符问题
-      const encoded = btoa(encodeURIComponent(payload))
+      const stored = saveInitialMessageDraft(sessionId, message, attachments)
 
-      // 3. 跳转到详情页，携带编码后的初始消息
-      router.push(`/sessions/${sessionId}?init=${encoded}`)
+      // 3. 跳转到详情页。若 sessionStorage 不可用，回退到旧 query 参数链路
+      if (stored) {
+        router.push(`/sessions/${sessionId}`)
+      } else {
+        const payload = JSON.stringify({ message, attachments })
+        const encoded = btoa(encodeURIComponent(payload))
+        router.push(`/sessions/${sessionId}?init=${encoded}`)
+      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "创建会话失败"

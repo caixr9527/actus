@@ -15,7 +15,7 @@ import type {
   StepEvent,
   ToolEvent,
   SessionFile,
-} from "@/lib/api/types";
+} from "./api/types";
 
 /** 后端返回的原始事件（可能用 event 或 type 表示类型） */
 type RawEvent = { event?: string; type?: string; data?: unknown };

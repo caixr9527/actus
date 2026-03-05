@@ -295,7 +295,7 @@ function A2ASetting({
                   <DialogDescription className="text-gray-500">
                     Actus 使用标准的 A2A 协议来连接远程 Agent。
                     <br />
-                    请将您的配置粘贴到下方，然后点击"添加"即可添加 Agent。
+                    请将您的配置粘贴到下方，然后点击“添加”即可添加 Agent。
                   </DialogDescription>
                 </DialogHeader>
                 <form
@@ -517,7 +517,7 @@ function MCPSetting({
                   </DialogTitle>
                   <DialogDescription className="text-gray-500">
                     Actus 使用标准的 JSON MCP 配置来创建新服务器。
-                    请将您的配置粘贴到下方，然后点击"添加"即可添加新服务器。
+                    请将您的配置粘贴到下方，然后点击“添加”即可添加新服务器。
                   </DialogDescription>
                 </DialogHeader>
                 <form

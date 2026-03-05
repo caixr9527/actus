@@ -1,7 +1,6 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { PlanPanel } from '@/components/plan-panel'
@@ -48,8 +47,18 @@ function findLatestTool(timeline: TimelineItem[]): ToolEvent | null {
   return null
 }
 
+function removeInitQueryParamFromUrl(): void {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (!url.searchParams.has('init')) return
+  url.searchParams.delete('init')
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`
+  window.history.replaceState(window.history.state, '', nextUrl)
+}
+
+const TIMELINE_WINDOW_SIZE = 120
+
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
-  const router = useRouter()
   const {
     session,
     files,
@@ -68,12 +77,19 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const [fileListOpen, setFileListOpen] = useState(false)
   const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null)
   const [previewTool, setPreviewTool] = useState<ToolEvent | null>(null)
+  const [expandedTimelineSessionId, setExpandedTimelineSessionId] = useState<string | null>(null)
   const [vncOpen, setVncOpen] = useState(false)
   const initialMessageSentRef = useRef(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevToolCountRef = useRef(0)
 
   const hasPreview = previewFile !== null || previewTool !== null
+  const showFullTimeline = expandedTimelineSessionId === sessionId
+  const visibleTimeline = useMemo(() => {
+    if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
+    return timeline.slice(-TIMELINE_WINDOW_SIZE)
+  }, [showFullTimeline, timeline])
+  const hiddenTimelineCount = timeline.length - visibleTimeline.length
 
   /**
    * 将 previewTool 解析为 timeline 中最新版本的工具对象。
@@ -101,6 +117,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }, [previewTool, timeline])
 
   // 任务运行中自动追踪最新工具预览（VNC 打开时暂停）
+  // 该副作用职责是将流式事件同步到预览 UI。
   useEffect(() => {
     if (session?.status !== 'running' || vncOpen) return
 
@@ -112,6 +129,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     }, 0)
 
     if (toolCount > prevToolCountRef.current && latestTool) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPreviewTool(latestTool)
       setPreviewFile(null)
       scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
@@ -120,25 +138,20 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }, [timeline, session?.status, vncOpen])
 
   useEffect(() => {
-    if (
-      initialMessage &&
-      !initialMessageSentRef.current &&
-      session &&
-      !loading &&
-      !streaming
-    ) {
-      initialMessageSentRef.current = true
-      sendMessage(initialMessage, initialAttachments || [])
-        .then(() => {
-          setTimeout(() => {
-            router.replace(`/sessions/${sessionId}`)
-          }, 100)
-        })
-        .catch((e) => {
-          toast.error(e instanceof Error ? e.message : '发送消息失败')
-        })
+    if (!initialMessage || initialMessageSentRef.current || !session || loading || streaming) {
+      return
     }
-  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage, sessionId, router])
+
+    initialMessageSentRef.current = true
+
+    sendMessage(initialMessage, initialAttachments || [])
+      .then(() => {
+        removeInitQueryParamFromUrl()
+      })
+      .catch((e) => {
+        toast.error(e instanceof Error ? e.message : '发送消息失败')
+      })
+  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage])
 
   const handleSend = useCallback(
     async (message: string, uploadedFiles: FileInfo[]) => {
@@ -212,6 +225,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     }
   }, [session, sessionId, refresh])
 
+  const handleRealtimeRecover = useCallback(() => {
+    void refresh()
+  }, [refresh])
+
+  const shouldShowThinking =
+    streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
+
   if (loading && !session) {
     return (
       <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
@@ -267,14 +287,51 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
               />
             </div>
 
+            {error && (
+              <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <div className="flex items-center justify-between gap-2">
+                  <span>{error.message}</span>
+                  <button
+                    type="button"
+                    className="text-amber-900 underline underline-offset-2 cursor-pointer"
+                    onClick={handleRealtimeRecover}
+                  >
+                    重试
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
               <div className="flex flex-col w-full gap-3 pt-3">
+                {hiddenTimelineCount > 0 && (
+                  <div className="flex justify-center py-1">
+                    <button
+                      type="button"
+                      className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
+                      onClick={() => setExpandedTimelineSessionId(sessionId)}
+                    >
+                      显示更早的 {hiddenTimelineCount} 条记录
+                    </button>
+                  </div>
+                )}
+                {showFullTimeline && timeline.length > TIMELINE_WINDOW_SIZE && (
+                  <div className="flex justify-center py-1">
+                    <button
+                      type="button"
+                      className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
+                      onClick={() => setExpandedTimelineSessionId(null)}
+                    >
+                      仅显示最近 {TIMELINE_WINDOW_SIZE} 条
+                    </button>
+                  </div>
+                )}
                 {timeline.length === 0 && !streaming && !hasInitialMessage && (
                   <div className="flex items-center justify-center py-8 text-sm text-gray-500">
                     暂无对话记录，在下方输入任务或提问
                   </div>
                 )}
-                {timeline.map((item) => (
+                {visibleTimeline.map((item) => (
                   <ChatMessage
                     key={item.id}
                     item={item}
@@ -284,7 +341,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                   />
                 ))}
 
-                {(session?.status === 'running' || (hasInitialMessage && !initialMessageSentRef.current)) && (
+                {shouldShowThinking && (
                   <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
                     <Loader2 className="size-4 animate-spin" />
                     <span>正在思考中...</span>

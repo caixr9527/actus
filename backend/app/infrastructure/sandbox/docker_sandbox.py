@@ -43,7 +43,7 @@ class DockerSandbox(Sandbox):
     @property
     def id(self) -> str:
         if not self._container_name:
-            return "lingxi-sandbox"
+            return "actus-sandbox"
         return self._container_name
 
     @property

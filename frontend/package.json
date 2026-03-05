@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
+    "dev:turbo": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "npm run test:unit && npm run test:smoke",
+    "test:unit": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests && rm -rf .tmp-tests",
+    "test:smoke": "npm run lint && npm run build"
   },
   "dependencies": {
     "@novnc/novnc": "^1.5.0",

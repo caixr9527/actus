@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { sessionApi } from '@/lib/api/session'
 import { normalizeEvent, normalizeEvents } from '@/lib/session-events'
-import type { SessionDetail, SSEEventData, SessionFile } from '@/lib/api/types'
+import { canRetry, computeRetryDelayMs, shouldStartEmptySessionStream, type RetryPolicy } from '@/lib/session-stream-policy'
+import {
+  classifyMessageStreamCloseReason,
+  reduceSessionRuntimeStateOnEvent,
+  shouldReloadSnapshotAfterMessageStreamClose,
+} from '@/lib/session-detail-runtime'
+import type { SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
 
 export type UseSessionDetailResult = {
   session: SessionDetail | null
@@ -15,6 +21,13 @@ export type UseSessionDetailResult = {
   refreshFiles: () => Promise<void>
   sendMessage: (message: string, attachmentIds: string[]) => Promise<void>
   streaming: boolean
+}
+
+const EMPTY_STREAM_RECONNECT_DELAY = 500
+const EMPTY_STREAM_RETRY_POLICY: RetryPolicy = {
+  maxRetries: 8,
+  baseDelayMs: 1000,
+  maxDelayMs: 10_000,
 }
 
 /**
@@ -34,8 +47,44 @@ export function useSessionDetail(
   const [skipEmptyStream, setSkipEmptyStream] = useState(initialSkipEmptyStream || false)
   const emptyStreamCleanupRef = useRef<(() => void) | null>(null)
   const messageStreamCleanupRef = useRef<(() => void) | null>(null)
+  const emptyStreamReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const emptyStreamRetryCountRef = useRef(0)
+  const emptyStreamInstanceIdRef = useRef(0)
   const isSendMessageRef = useRef(false)
   const lastEventIdRef = useRef<string | null>(null)
+  const sessionEpochRef = useRef(0)
+  const currentSessionIdRef = useRef<string | null>(sessionId)
+  const sessionStatusRef = useRef<SessionStatus | null>(null)
+  const streamingRef = useRef(false)
+  currentSessionIdRef.current = sessionId
+
+  const setStreamingState = useCallback((nextStreaming: boolean) => {
+    streamingRef.current = nextStreaming
+    setStreaming(nextStreaming)
+  }, [])
+
+  const clearEmptyStreamReconnectTimer = useCallback(() => {
+    if (emptyStreamReconnectTimerRef.current) {
+      clearTimeout(emptyStreamReconnectTimerRef.current)
+      emptyStreamReconnectTimerRef.current = null
+    }
+  }, [])
+
+  const stopEmptyStream = useCallback(() => {
+    emptyStreamInstanceIdRef.current += 1
+    clearEmptyStreamReconnectTimer()
+    if (emptyStreamCleanupRef.current) {
+      emptyStreamCleanupRef.current()
+      emptyStreamCleanupRef.current = null
+    }
+  }, [clearEmptyStreamReconnectTimer])
+
+  const stopMessageStream = useCallback(() => {
+    if (messageStreamCleanupRef.current) {
+      messageStreamCleanupRef.current()
+      messageStreamCleanupRef.current = null
+    }
+  }, [])
 
   const appendEvent = useCallback((ev: SSEEventData) => {
     let evToAppend = ev
@@ -48,87 +97,113 @@ export function useSessionDetail(
     if (eventId) lastEventIdRef.current = eventId
 
     setEvents((prev) => [...prev, evToAppend])
-    
+
     // 更新会话标题
     if (evToAppend.type === 'title' && evToAppend.data && typeof (evToAppend.data as { title?: string }).title === 'string') {
       setSession((prev) =>
         prev ? { ...prev, title: (evToAppend.data as { title: string }).title } : null
       )
     }
-    
-    // 监听事件更新会话状态
-    if (evToAppend.type === 'step') {
-      const stepData = evToAppend.data as { status?: string }
-      if (stepData.status === 'running') {
-        setSession((prev) => prev ? { ...prev, status: 'running' } : null)
-      }
-      if (stepData.status === 'waiting') {
-        setSession((prev) => prev ? { ...prev, status: 'waiting' } : null)
-        setStreaming(false)
-      }
+
+    // 统一运行时状态迁移（status + streaming）
+    const nextRuntime = reduceSessionRuntimeStateOnEvent(
+      { status: sessionStatusRef.current, streaming: streamingRef.current },
+      evToAppend,
+    )
+    if (nextRuntime.streaming !== streamingRef.current) {
+      setStreamingState(nextRuntime.streaming)
+    }
+    if (nextRuntime.status !== sessionStatusRef.current) {
+      sessionStatusRef.current = nextRuntime.status
+      setSession((prev) => {
+        if (!prev || !nextRuntime.status || prev.status === nextRuntime.status) return prev
+        return { ...prev, status: nextRuntime.status }
+      })
+    }
+  }, [setStreamingState])
+
+  const startEmptyStream = useCallback((expectedEpoch?: number) => {
+    const streamSessionId = sessionId
+    if (!streamSessionId) return
+
+    const streamEpoch = expectedEpoch ?? sessionEpochRef.current
+    if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+      return
     }
 
-    // message_ask_user calling → 等待用户输入，切换为 waiting
-    if (evToAppend.type === 'tool') {
-      const toolData = evToAppend.data as { function?: string; status?: string }
-      if (toolData.function === 'message_ask_user' && toolData.status === 'calling') {
-        setSession((prev) => prev ? { ...prev, status: 'waiting' } : null)
-        setStreaming(false)
-      }
-    }
+    stopEmptyStream()
+    const streamInstanceId = emptyStreamInstanceIdRef.current + 1
+    emptyStreamInstanceIdRef.current = streamInstanceId
 
-    // wait 事件 → 等待用户输入
-    if (evToAppend.type === 'wait') {
-      setSession((prev) => prev ? { ...prev, status: 'waiting' } : null)
-      setStreaming(false)
-    }
-    
-    // done 事件时更新为 completed
-    if (evToAppend.type === 'done') {
-      setSession((prev) => prev ? { ...prev, status: 'completed' } : null)
-    }
-    
-    // error 事件时也可以认为任务结束
-    if (evToAppend.type === 'error') {
-      setSession((prev) => prev ? { ...prev, status: 'completed' } : null)
-    }
-  }, [])
-
-  const startEmptyStream = useCallback(() => {
-    if (!sessionId) return
-    if (emptyStreamCleanupRef.current) {
-      emptyStreamCleanupRef.current()
-      emptyStreamCleanupRef.current = null
-    }
     emptyStreamCleanupRef.current = sessionApi.chat(
-      sessionId,
+      streamSessionId,
       { event_id: lastEventIdRef.current || undefined },
-      (ev) => appendEvent(ev),
+      (ev) => {
+        if (
+          streamEpoch !== sessionEpochRef.current ||
+          streamSessionId !== currentSessionIdRef.current ||
+          streamInstanceId !== emptyStreamInstanceIdRef.current
+        ) {
+          return
+        }
+        emptyStreamRetryCountRef.current = 0
+        setError(null)
+        appendEvent(ev)
+      },
       (err) => {
+        if (
+          streamEpoch !== sessionEpochRef.current ||
+          streamSessionId !== currentSessionIdRef.current ||
+          streamInstanceId !== emptyStreamInstanceIdRef.current
+        ) {
+          return
+        }
         if (err.name === 'AbortError') {
           return
         }
+
+        const cleanup = emptyStreamCleanupRef.current
+        emptyStreamCleanupRef.current = null
+        cleanup?.()
+
+        const scheduleReconnect = () => {
+          if (streamInstanceId !== emptyStreamInstanceIdRef.current) return
+          if (!canRetry(emptyStreamRetryCountRef.current, EMPTY_STREAM_RETRY_POLICY)) {
+            setError(new Error('会话实时连接中断，请点击重试恢复'))
+            return
+          }
+
+          const retryDelayMs = err.message === 'SSE_STREAM_END'
+            ? EMPTY_STREAM_RECONNECT_DELAY
+            : computeRetryDelayMs(emptyStreamRetryCountRef.current, EMPTY_STREAM_RETRY_POLICY)
+
+          emptyStreamRetryCountRef.current += 1
+          clearEmptyStreamReconnectTimer()
+          emptyStreamReconnectTimerRef.current = setTimeout(() => {
+            if (
+              streamEpoch !== sessionEpochRef.current ||
+              streamSessionId !== currentSessionIdRef.current ||
+              streamInstanceId !== emptyStreamInstanceIdRef.current
+            ) {
+              return
+            }
+            if (!emptyStreamCleanupRef.current && !isSendMessageRef.current) {
+              startEmptyStream(streamEpoch)
+            }
+          }, retryDelayMs)
+        }
+
         // 流正常结束（服务端关闭连接），延迟重连
         if (err.message === 'SSE_STREAM_END') {
-          emptyStreamCleanupRef.current = null
-          setTimeout(() => {
-            if (!emptyStreamCleanupRef.current && !isSendMessageRef.current) {
-              startEmptyStream()
-            }
-          }, 500)
+          scheduleReconnect()
           return
         }
+
         console.warn('Session detail empty stream error:', err)
+        scheduleReconnect()
       }
     )
-  }, [sessionId, appendEvent])
-
-  const stopEmptyStream = useCallback(() => {
-    if (emptyStreamCleanupRef.current) {
-      emptyStreamCleanupRef.current()
-      emptyStreamCleanupRef.current = null
-    }
-  }, [])
+  }, [appendEvent, clearEmptyStreamReconnectTimer, sessionId, stopEmptyStream])
 
   const normalizeFileList = useCallback((raw: unknown): SessionFile[] => {
     if (Array.isArray(raw)) return raw as SessionFile[]
@@ -141,15 +216,20 @@ export function useSessionDetail(
     return []
   }, [])
 
-  const refresh = useCallback(async () => {
-    if (!sessionId) return
-    setError(null)
+  const loadSessionSnapshot = useCallback(async (targetSessionId: string, targetEpoch: number): Promise<SessionDetail | null> => {
     try {
       const [detail, fileListRaw] = await Promise.all([
-        sessionApi.getSessionDetail(sessionId),
-        sessionApi.getSessionFiles(sessionId),
+        sessionApi.getSessionDetail(targetSessionId),
+        sessionApi.getSessionFiles(targetSessionId),
       ])
+
+      if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
+        return null
+      }
+
+      setError(null)
       setSession(detail)
+      sessionStatusRef.current = detail.status
       setFiles(normalizeFileList(fileListRaw))
       const rawEvents = (detail as { events?: unknown }).events
       if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
@@ -157,18 +237,49 @@ export function useSessionDetail(
         setEvents(normalized)
         const lastEvId = (normalized[normalized.length - 1]?.data as { event_id?: string })?.event_id
         if (lastEvId) lastEventIdRef.current = lastEvId
+      } else {
+        setEvents([])
+        lastEventIdRef.current = null
       }
+      return detail
     } catch (e) {
+      if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
+        return null
+      }
       setError(e instanceof Error ? e : new Error('加载失败'))
+      return null
     } finally {
-      setLoading(false)
+      if (targetEpoch === sessionEpochRef.current && targetSessionId === currentSessionIdRef.current) {
+        setLoading(false)
+      }
     }
-  }, [sessionId, normalizeFileList])
+  }, [normalizeFileList])
+
+  const refresh = useCallback(async () => {
+    if (!sessionId) return
+    const targetEpoch = sessionEpochRef.current
+    setLoading(true)
+    setError(null)
+    const detail = await loadSessionSnapshot(sessionId, targetEpoch)
+    if (
+      detail &&
+      targetEpoch === sessionEpochRef.current &&
+      sessionId === currentSessionIdRef.current &&
+      shouldStartEmptySessionStream(detail.status, isSendMessageRef.current, skipEmptyStream)
+    ) {
+      startEmptyStream(targetEpoch)
+    }
+  }, [loadSessionSnapshot, sessionId, skipEmptyStream, startEmptyStream])
 
   const refreshFiles = useCallback(async () => {
     if (!sessionId) return
+    const targetEpoch = sessionEpochRef.current
+    const targetSessionId = sessionId
     try {
-      const fileListRaw = await sessionApi.getSessionFiles(sessionId)
+      const fileListRaw = await sessionApi.getSessionFiles(targetSessionId)
+      if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
+        return
+      }
       setFiles(normalizeFileList(fileListRaw))
     } catch (e) {
       console.error('刷新文件列表失败:', e)
@@ -176,115 +287,135 @@ export function useSessionDetail(
   }, [sessionId, normalizeFileList])
 
   useEffect(() => {
+    sessionEpochRef.current += 1
+    const currentEpoch = sessionEpochRef.current
+
+    stopMessageStream()
+    stopEmptyStream()
+    isSendMessageRef.current = false
+    setStreamingState(false)
+    setSkipEmptyStream(Boolean(initialSkipEmptyStream))
+    lastEventIdRef.current = null
+    emptyStreamRetryCountRef.current = 0
+
     if (!sessionId) {
       setLoading(false)
       setSession(null)
+      sessionStatusRef.current = null
       setFiles([])
       setEvents([])
       setError(null)
-      stopEmptyStream()
       return
     }
+
     setLoading(true)
-    refresh().then(() => {
-      // 由下面的 effect 根据 session 状态决定是否开空流
-    })
+    setSession(null)
+    sessionStatusRef.current = null
+    setFiles([])
+    setEvents([])
+    setError(null)
+
+    void loadSessionSnapshot(sessionId, currentEpoch)
+
     return () => {
+      if (sessionEpochRef.current !== currentEpoch) return
+      stopMessageStream()
       stopEmptyStream()
+      isSendMessageRef.current = false
     }
-  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [initialSkipEmptyStream, loadSessionSnapshot, sessionId, setStreamingState, stopEmptyStream, stopMessageStream])
 
   useEffect(() => {
-    if (!sessionId || !session) return
-    const status = session.status
-    const completed = status === 'completed'
-    // 如果标记了跳过空流（比如有初始消息待发送），则不启动空流
-    if (!completed && !isSendMessageRef.current && !skipEmptyStream) {
-      startEmptyStream()
+    const status = session?.status
+    if (!sessionId) return
+    const currentEpoch = sessionEpochRef.current
+    if (shouldStartEmptySessionStream(status, isSendMessageRef.current, skipEmptyStream)) {
+      startEmptyStream(currentEpoch)
     }
     return () => {
+      if (sessionEpochRef.current !== currentEpoch) return
       stopEmptyStream()
     }
   }, [sessionId, session?.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
 
-  // 组件卸载时清理消息流
+  // 组件卸载时清理所有流，避免连接泄漏
   useEffect(() => {
     return () => {
-      if (messageStreamCleanupRef.current) {
-        messageStreamCleanupRef.current()
-        messageStreamCleanupRef.current = null
-      }
+      stopMessageStream()
+      stopEmptyStream()
+      isSendMessageRef.current = false
+      sessionStatusRef.current = null
     }
-  }, [])
+  }, [stopEmptyStream, stopMessageStream])
 
   const sendMessage = useCallback(
     async (message: string, attachmentIds: string[]) => {
       if (!sessionId) return
+
+      const streamEpoch = sessionEpochRef.current
+      const streamSessionId = sessionId
+
       stopEmptyStream()
-      // 清理已有的消息流连接（如 waiting 状态时用户再次发送）
-      if (messageStreamCleanupRef.current) {
-        messageStreamCleanupRef.current()
-        messageStreamCleanupRef.current = null
-      }
+      stopMessageStream()
+      emptyStreamRetryCountRef.current = 0
+
       // 发送消息时，清除跳过空流的标记
       setSkipEmptyStream(false)
       isSendMessageRef.current = true
-      setStreaming(true)
-      
+      setStreamingState(true)
+
       // 立即更新状态为 running，不等待 SSE 事件
+      sessionStatusRef.current = 'running'
       setSession((prev) => prev ? { ...prev, status: 'running' } : null)
-      
+
+      const finalizeMessageStream = () => {
+        if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+          return
+        }
+        setStreamingState(false)
+        isSendMessageRef.current = false
+        stopMessageStream()
+      }
+
       const onEvent = (ev: SSEEventData) => {
+        if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+          return
+        }
         appendEvent(ev)
         if (ev.type === 'done') {
-          setStreaming(false)
-          isSendMessageRef.current = false
-          // 清理消息流的 cleanup
-          if (messageStreamCleanupRef.current) {
-            messageStreamCleanupRef.current()
-            messageStreamCleanupRef.current = null
-          }
+          finalizeMessageStream()
           setSession((prev) => prev ? { ...prev } : null)
-          startEmptyStream()
         }
       }
+
       const messageStreamCleanup = sessionApi.chat(
-        sessionId,
+        streamSessionId,
         { message, attachments: attachmentIds },
         onEvent,
         (err) => {
-          if (err.name === 'AbortError') {
-            setStreaming(false)
-            isSendMessageRef.current = false
+          if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
             return
           }
-          // 流正常结束（服务端关闭连接），重置状态并启动空流监听后续事件
-          if (err.message === 'SSE_STREAM_END') {
-            setStreaming(false)
-            isSendMessageRef.current = false
-            if (messageStreamCleanupRef.current) {
-              messageStreamCleanupRef.current()
-              messageStreamCleanupRef.current = null
-            }
-            startEmptyStream()
-            return
+          const closeReason = classifyMessageStreamCloseReason(err)
+          if (closeReason === 'error') {
+            setError(err instanceof Error ? err : new Error('流式响应异常'))
           }
-          // 实际错误
-          setError(err instanceof Error ? err : new Error('流式响应异常'))
-          setStreaming(false)
-          isSendMessageRef.current = false
-          setSession((prev) => prev ? { ...prev, status: 'completed' } : null)
-          if (messageStreamCleanupRef.current) {
-            messageStreamCleanupRef.current()
-            messageStreamCleanupRef.current = null
+          finalizeMessageStream()
+          if (shouldReloadSnapshotAfterMessageStreamClose(closeReason)) {
+            void loadSessionSnapshot(streamSessionId, streamEpoch)
           }
-          startEmptyStream()
         }
       )
+
+      if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+        messageStreamCleanup()
+        return
+      }
+
       // 将消息流的 cleanup 存到独立的 ref，不与 emptyStream 混淆
       messageStreamCleanupRef.current = messageStreamCleanup
     },
-    [sessionId, appendEvent, startEmptyStream, stopEmptyStream]
+    [sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream]
   )
 
   return {
