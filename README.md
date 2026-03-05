@@ -13,3 +13,6 @@ Actus 是一个支持私有化部署的通用 AI Agent 系统，围绕「会话 
 - 前端：Next.js（`frontend/`），负责会话交互、任务展示和工具预览。
 - 后端：FastAPI（`backend/`），负责 Agent 编排、会话管理、工具调用与接口服务。
 - 基础设施：Redis + PostgreSQL + Nginx + Docker Compose（`docker-compose.yml`），用于状态管理、数据存储与统一网关。
+
+## 本地开发
+- 前端本地启动文档：请参考 [frontend/README.md](./frontend/README.md)。
