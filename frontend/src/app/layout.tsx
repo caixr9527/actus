@@ -15,6 +15,11 @@ export const metadata: Metadata = {
   },
 }
 
+const sidebarLayoutStyle = {
+  "--sidebar-width": "300px",
+  "--sidebar-width-icon": "300px",
+} as React.CSSProperties
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -25,12 +30,7 @@ export default function RootLayout({
       <body className="h-screen overflow-hidden">
         <SessionsProvider>
           <SidebarProvider
-            style={{
-              // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-              // @ts-expect-error
-              "--sidebar-width": "300px",
-              "--sidebar-width-icon": "300px",
-            }}
+            style={sidebarLayoutStyle}
           >
             {/* 左侧的面板 */}
             <LeftPanel />

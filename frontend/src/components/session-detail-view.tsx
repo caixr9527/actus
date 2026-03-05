@@ -56,6 +56,8 @@ function removeInitQueryParamFromUrl(): void {
   window.history.replaceState(window.history.state, '', nextUrl)
 }
 
+const TIMELINE_WINDOW_SIZE = 120
+
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   const {
     session,
@@ -75,12 +77,19 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const [fileListOpen, setFileListOpen] = useState(false)
   const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null)
   const [previewTool, setPreviewTool] = useState<ToolEvent | null>(null)
+  const [expandedTimelineSessionId, setExpandedTimelineSessionId] = useState<string | null>(null)
   const [vncOpen, setVncOpen] = useState(false)
   const initialMessageSentRef = useRef(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevToolCountRef = useRef(0)
 
   const hasPreview = previewFile !== null || previewTool !== null
+  const showFullTimeline = expandedTimelineSessionId === sessionId
+  const visibleTimeline = useMemo(() => {
+    if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
+    return timeline.slice(-TIMELINE_WINDOW_SIZE)
+  }, [showFullTimeline, timeline])
+  const hiddenTimelineCount = timeline.length - visibleTimeline.length
 
   /**
    * 将 previewTool 解析为 timeline 中最新版本的工具对象。
@@ -276,12 +285,34 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
             <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
               <div className="flex flex-col w-full gap-3 pt-3">
+                {hiddenTimelineCount > 0 && (
+                  <div className="flex justify-center py-1">
+                    <button
+                      type="button"
+                      className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
+                      onClick={() => setExpandedTimelineSessionId(sessionId)}
+                    >
+                      显示更早的 {hiddenTimelineCount} 条记录
+                    </button>
+                  </div>
+                )}
+                {showFullTimeline && timeline.length > TIMELINE_WINDOW_SIZE && (
+                  <div className="flex justify-center py-1">
+                    <button
+                      type="button"
+                      className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
+                      onClick={() => setExpandedTimelineSessionId(null)}
+                    >
+                      仅显示最近 {TIMELINE_WINDOW_SIZE} 条
+                    </button>
+                  </div>
+                )}
                 {timeline.length === 0 && !streaming && !hasInitialMessage && (
                   <div className="flex items-center justify-center py-8 text-sm text-gray-500">
                     暂无对话记录，在下方输入任务或提问
                   </div>
                 )}
-                {timeline.map((item) => (
+                {visibleTimeline.map((item) => (
                   <ChatMessage
                     key={item.id}
                     item={item}
