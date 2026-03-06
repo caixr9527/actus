@@ -56,7 +56,6 @@ class PlannerReActFlow(BaseFlow):
         # 初始化会话ID和会话仓库，用于后续的交互和状态管理
         self._session_id = session_id
         self._uow_factory = uow_factory
-        self._uow = uow_factory()
 
         # 设置流程初始状态为待机状态，并初始化计划为空
         self.status = FlowStatus.IDLE
@@ -98,8 +97,8 @@ class PlannerReActFlow(BaseFlow):
 
     async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         # 获取当前会话信息，如果会话不存在则抛出异常
-        async with self._uow:
-            session = await self._uow.session.get_by_id(self._session_id)
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(self._session_id)
         if not session:
             raise ValueError(f"会话不存在: {self._session_id}, 请确认会话ID是否正确")
 
@@ -119,8 +118,9 @@ class PlannerReActFlow(BaseFlow):
             self.status = FlowStatus.EXECUTING
 
         # 更新会话状态为RUNNING
-        async with self._uow:
-            await self._uow.session.update_status(self._session_id, SessionStatus.RUNNING)
+        # 采用独立短事务更新会话状态，避免跨调用复用同一UoW实例。
+        async with self._uow_factory() as uow:
+            await uow.session.update_status(self._session_id, SessionStatus.RUNNING)
 
         # 获取最新的计划
         self.plan = session.get_latest_plan()

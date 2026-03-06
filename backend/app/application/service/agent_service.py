@@ -53,7 +53,6 @@ class AgentService:
         self._search_engine = search_engine
         self._file_storage = file_storage
         self._uow_factory = uow_factory
-        self._uow = uow_factory()
         self._mcp_config = mcp_config
         self._llm = llm
         self._agent_config = agent_config
@@ -78,8 +77,9 @@ class AgentService:
         if not sandbox:
             sandbox = await self._sandbox_cls.create()
             session.sandbox_id = sandbox.id
-            async with self._uow:
-                await self._uow.session.save(session=session)
+            # 沙箱ID写回采用短事务，确保当前调用与其他请求完全隔离。
+            async with self._uow_factory() as uow:
+                await uow.session.save(session=session)
 
         # 获取沙箱中的浏览器实例
         browser = await sandbox.get_browser()
@@ -106,8 +106,9 @@ class AgentService:
         task = self._task_cls.create(task_runner=task_runner)
 
         session.task_id = task.id
-        async with self._uow:
-            await self._uow.session.save(session=session)
+        # 任务ID写回同样使用独立UoW，避免服务实例持有会话状态。
+        async with self._uow_factory() as uow:
+            await uow.session.save(session=session)
         return task
 
     async def _safe_update_unread_count(self, session_id: str) -> None:
@@ -134,8 +135,8 @@ class AgentService:
     ) -> AsyncGenerator[BaseEvent, None]:
         try:
             # 获取会话信息
-            async with self._uow:
-                session = await self._uow.session.get_by_id(session_id=session_id)
+            async with self._uow_factory() as uow:
+                session = await uow.session.get_by_id(session_id=session_id)
             if not session:
                 logger.error(f"会话{session_id}不存在")
                 raise RuntimeError(f"会话{session_id}不存在")
@@ -145,6 +146,9 @@ class AgentService:
 
             # 处理用户发送的消息
             if message:
+                # 统一归一化可选参数，避免后续列表处理触发None错误。
+                attachments = attachments or []
+
                 # 如果会话未处于运行状态，或者没有任务，则创建新任务
                 if session.status != SessionStatus.RUNNING or task is None:
                     task = await self._create_task(session)
@@ -152,17 +156,15 @@ class AgentService:
                         logger.error(f"会话{session_id}的聊天请求失败: 创建任务失败")
                         raise RuntimeError(f"会话{session_id}的聊天请求失败: 创建任务失败")
 
-                # 更新会话的最新消息
-                async with self._uow:
-                    await self._uow.session.update_latest_message(
+                # 阶段1：在同一事务中完成“最新消息更新 + 附件查询”。
+                # 该阶段保持原子性，减少拆分事务导致的短暂不一致窗口。
+                async with self._uow_factory() as uow:
+                    await uow.session.update_latest_message(
                         session_id=session_id,
                         message=message,
                         timestamp=timestamp or datetime.now(),
                     )
-
-                # 从文件数据库中查询数据并更新attachments实际内容, 并返回人类消息事件
-                async with self._uow:
-                    db_attachments = [await self._uow.file.get_by_id(id) for id in attachments]
+                    db_attachments = [await uow.file.get_by_id(file_id) for file_id in attachments]
 
                 # 创建用户消息事件
                 message_event = MessageEvent(
@@ -171,14 +173,22 @@ class AgentService:
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
 
-                # 将消息事件放入任务输入流
+                # 阶段2：输入流投递 + 事件历史落库。
+                # 若落库失败，执行输入流补偿删除，尽量降低Redis/DB分叉概率。
                 event_id = await task.input_stream.put(message_event.model_dump_json())
                 message_event.id = event_id
+                try:
+                    async with self._uow_factory() as uow:
+                        await uow.session.add_event(session_id=session_id, event=message_event)
+                except Exception as add_err:
+                    logger.error(f"会话{session_id}保存用户事件失败，开始补偿输入流消息: {add_err}")
+                    try:
+                        await task.input_stream.delete_message(event_id)
+                    except Exception as compensate_err:
+                        logger.error(f"会话{session_id}输入流补偿删除失败: {compensate_err}")
+                    raise
 
                 yield message_event
-                # 将消息事件保存到会话历史中
-                async with self._uow:
-                    await self._uow.session.add_event(session_id=session_id, event=message_event)
 
                 # 启动任务执行
                 await task.invoke()
@@ -202,8 +212,8 @@ class AgentService:
                 logger.debug(f"会话{session_id},输出队列中已发现事件: {type(event).__name__}")
 
                 # 重置未读消息计数
-                async with self._uow:
-                    await self._uow.session.update_unread_message_count(session_id=session_id, count=0)
+                async with self._uow_factory() as uow:
+                    await uow.session.update_unread_message_count(session_id=session_id, count=0)
 
                 # 返回事件给调用方
                 yield event
@@ -218,8 +228,8 @@ class AgentService:
             logger.error(f"会话{session_id}的聊天请求失败: {e}")
             event = ErrorEvent(error=str(e))
             try:
-                async with self._uow:
-                    await self._uow.session.add_event(session_id, event)
+                async with self._uow_factory() as uow:
+                    await uow.session.add_event(session_id, event)
             except (asyncio.CancelledError, Exception) as add_err:
                 logger.error(f"会话{session_id}的聊天请求失败,添加错误事件失败(可能是客户端断开连接): {add_err}")
             yield event
@@ -240,8 +250,8 @@ class AgentService:
 
     async def stop_session(self, session_id: str) -> None:
         # 获取指定会话的信息
-        async with self._uow:
-            session = await self._uow.session.get_by_id(session_id=session_id)
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=session_id)
         # 如果会话不存在，记录错误日志并抛出异常
         if not session:
             logger.error(f"会话{session_id}不存在")
@@ -254,8 +264,8 @@ class AgentService:
             task.cancel()
 
         # 更新会话状态为已完成
-        async with self._uow:
-            await self._uow.session.update_status(session_id=session_id, status=SessionStatus.COMPLETED)
+        async with self._uow_factory() as uow:
+            await uow.session.update_status(session_id=session_id, status=SessionStatus.COMPLETED)
 
     async def shutdown(self) -> None:
         """关闭会话服务"""

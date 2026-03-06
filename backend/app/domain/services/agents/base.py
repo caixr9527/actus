@@ -52,7 +52,6 @@ class BaseAgent(ABC):
         """
         self._session_id = session_id
         self._uow_factory = uow_factory
-        self._uow = uow_factory()
         self._agent_config = agent_config
         self._llm = llm
         self._memory: Optional[Memory] = None
@@ -61,8 +60,9 @@ class BaseAgent(ABC):
 
     async def _ensure_memory(self) -> None:
         if self._memory is None:
-            async with self._uow:
-                self._memory = await self._uow.session.get_memory(self._session_id, self.name)
+            # 懒加载记忆时使用短生命周期UoW，避免Agent对象持久化事务状态。
+            async with self._uow_factory() as uow:
+                self._memory = await uow.session.get_memory(self._session_id, self.name)
 
     def _get_available_tools(self) -> List[Dict[str, Any]]:
         """获取可用的工具列表"""
@@ -180,14 +180,14 @@ class BaseAgent(ABC):
 
         # 将传入的消息列表添加到记忆存储中
         self._memory.add_messages(messages)
-        async with self._uow:
-            await self._uow.session.save_memory(self._session_id, self.name, self._memory)
+        async with self._uow_factory() as uow:
+            await uow.session.save_memory(self._session_id, self.name, self._memory)
 
     async def compact_memory(self) -> None:
         await self._ensure_memory()
         self._memory.compact()
-        async with self._uow:
-            await self._uow.session.save_memory(self._session_id, self.name, self._memory)
+        async with self._uow_factory() as uow:
+            await uow.session.save_memory(self._session_id, self.name, self._memory)
 
     async def roll_back(self, message: Message) -> None:
         """状态回滚，确保Agent消息列表状态是正确的，用于发送新消息、暂停/停止任务、通知用户"""
@@ -218,8 +218,8 @@ class BaseAgent(ABC):
         else:
             # 否则执行记忆存储回滚操作
             self._memory.roll_back()
-        async with self._uow:
-            await self._uow.session.save_memory(self._session_id, self.name, self._memory)
+        async with self._uow_factory() as uow:
+            await uow.session.save_memory(self._session_id, self.name, self._memory)
 
     async def invoke(self, query: str, format: Optional[str] = None) -> AsyncGenerator[Event, None]:
         """
