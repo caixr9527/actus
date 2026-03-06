@@ -59,6 +59,23 @@ class SessionRepository(Protocol):
         """往会话中新增事件"""
         ...
 
+    async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
+        """按事件ID幂等地新增事件，返回值表示是否新增成功"""
+        ...
+
+    async def add_event_with_snapshot_if_absent(
+            self,
+            session_id: str,
+            event: BaseEvent,
+            title: Optional[str] = None,
+            latest_message: Optional[str] = None,
+            latest_message_at: Optional[datetime] = None,
+            increment_unread: bool = False,
+            status: Optional[SessionStatus] = None,
+    ) -> bool:
+        """按事件ID幂等新增事件，并在同一事务中更新会话投影字段"""
+        ...
+
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
         ...

@@ -123,6 +123,88 @@ class DBSessionRepository(SessionRepository):
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
 
+    async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
+        """按事件ID幂等新增事件"""
+        # 这里使用行级锁而不是直接JSONB append，目的是保证“存在性判断+写入”原子化。
+        stmt = (
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+        # 读取当前事件列表，缺省时按空列表处理。
+        current_events = list(record.events or [])
+        event_id = str(event.id)
+
+        # 幂等判断：只要事件ID已存在就视为已处理，直接返回False。
+        for current_event in current_events:
+            if str(current_event.get("id", "")) == event_id:
+                return False
+
+        # 事件不存在才追加，确保同一event_id不会重复入库。
+        current_events.append(event.model_dump(mode="json"))
+        record.events = current_events
+        return True
+
+    async def add_event_with_snapshot_if_absent(
+            self,
+            session_id: str,
+            event: BaseEvent,
+            title: Optional[str] = None,
+            latest_message: Optional[str] = None,
+            latest_message_at: Optional[datetime] = None,
+            increment_unread: bool = False,
+            status: Optional[SessionStatus] = None,
+    ) -> bool:
+        """按事件ID幂等新增事件，并在同一事务中更新会话投影"""
+        # 与add_event_if_absent一致：使用悲观锁保证并发安全和幂等判断准确性。
+        stmt = (
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+        # 事件幂等判断：已存在时不再重复更新投影，防止未读数重复累加。
+        current_events = list(record.events or [])
+        event_id = str(event.id)
+        for current_event in current_events:
+            if str(current_event.get("id", "")) == event_id:
+                return False
+
+        # 先追加事件历史，再更新投影字段，确保两者在同一数据库事务内提交。
+        current_events.append(event.model_dump(mode="json"))
+        record.events = current_events
+
+        # 标题属于会话投影的一部分，按调用方意图进行更新。
+        if title is not None:
+            record.title = title
+
+        # 最新消息投影用于会话列表展示，只在显式传入时更新。
+        if latest_message is not None:
+            record.latest_message = latest_message
+
+        # 时间戳与最新消息成对更新，避免出现文本和时间不同步。
+        if latest_message_at is not None:
+            record.latest_message_at = latest_message_at
+
+        # 未读数仅在“新事件写入成功”后递增，保证幂等重放不会重复累计。
+        if increment_unread:
+            record.unread_message_count = int(record.unread_message_count or 0) + 1
+
+        # 状态投影同样与事件一起提交，避免“事件已存在但状态未变”的分叉。
+        if status is not None:
+            record.status = status.value
+
+        return True
+
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
 

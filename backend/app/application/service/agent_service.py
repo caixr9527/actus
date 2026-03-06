@@ -67,19 +67,20 @@ class AgentService:
         return self._task_cls.get(task_id=task_id)
 
     async def _create_task(self, session: Session) -> Task:
-        # 获取沙箱实例
+        # 获取沙箱实例。
+        # 注意：这里不再在“创建沙箱后立即单独落库”，而是统一在任务创建完成后一次性写回。
+        # 这样可以把sandbox_id/task_id收敛为同一事务边界，减少跨阶段窗口。
         sandbox = None
         sandbox_id = session.sandbox_id
+        created_new_sandbox = False
         if sandbox_id:
             sandbox = await self._sandbox_cls.get(id=sandbox_id)
 
-        # 如果没有沙箱，则创建新的沙箱并保存到会话中
+        # 如果没有沙箱，则创建新的沙箱。
+        # 这里先只在内存中持有，等任务也创建成功后再统一写回会话。
         if not sandbox:
             sandbox = await self._sandbox_cls.create()
-            session.sandbox_id = sandbox.id
-            # 沙箱ID写回采用短事务，确保当前调用与其他请求完全隔离。
-            async with self._uow_factory() as uow:
-                await uow.session.save(session=session)
+            created_new_sandbox = True
 
         # 获取沙箱中的浏览器实例
         browser = await sandbox.get_browser()
@@ -105,11 +106,43 @@ class AgentService:
         # 创建任务并关联到会话
         task = self._task_cls.create(task_runner=task_runner)
 
+        # 记录旧值，用于异常时回滚内存态与数据库态。
+        previous_sandbox_id = session.sandbox_id
+        previous_task_id = session.task_id
+
+        # 统一写回两个跨资源关联字段，确保会话视图一次提交完成。
+        session.sandbox_id = sandbox.id
         session.task_id = task.id
-        # 任务ID写回同样使用独立UoW，避免服务实例持有会话状态。
-        async with self._uow_factory() as uow:
-            await uow.session.save(session=session)
-        return task
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.save(session=session)
+            return task
+        except Exception as save_err:
+            logger.error(f"会话{session.id}写回sandbox/task关联失败，开始补偿: {save_err}")
+
+            # 补偿1：先从任务注册表移除刚创建的任务，避免无主任务残留。
+            try:
+                task.cancel()
+            except Exception as cancel_err:
+                logger.error(f"会话{session.id}补偿取消任务失败: {cancel_err}")
+
+            # 补偿2：若本次新建了沙箱，写回失败时立即销毁，避免外部资源泄露。
+            if created_new_sandbox:
+                try:
+                    await sandbox.destroy()
+                except Exception as destroy_err:
+                    logger.error(f"会话{session.id}补偿销毁沙箱失败: {destroy_err}")
+
+            # 补偿3：回滚会话对象状态，并尽力写回数据库，避免出现悬挂关联字段。
+            session.sandbox_id = previous_sandbox_id
+            session.task_id = previous_task_id
+            try:
+                async with self._uow_factory() as uow:
+                    await uow.session.save(session=session)
+            except Exception as rollback_err:
+                logger.error(f"会话{session.id}补偿回滚关联字段失败: {rollback_err}")
+
+            raise
 
     async def _safe_update_unread_count(self, session_id: str) -> None:
         """在独立的后台任务中安全地更新未读消息计数
@@ -124,6 +157,20 @@ class AgentService:
                 await uow.session.update_unread_message_count(session_id, 0)
         except Exception as e:
             logger.warning(f"会话[{session_id}]后台更新未读消息计数失败: {e}")
+
+    async def _repair_output_event_history(self, session_id: str, event: Event) -> None:
+        """基于输出流事件对会话历史做幂等修复
+
+        设计目的：
+        1. 覆盖“Redis已写成功，但DB写入/补偿未完成”的崩溃窗口。
+        2. 使用事件ID做幂等保护，避免重复消费导致事件历史重复。
+        """
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.add_event_if_absent(session_id=session_id, event=event)
+        except Exception as e:
+            # 修复失败不影响当前SSE消息继续下发，避免用户流式体验被阻断。
+            logger.warning(f"会话{session_id}输出流事件历史修复失败: {e}")
 
     async def chat(
             self,
@@ -156,14 +203,9 @@ class AgentService:
                         logger.error(f"会话{session_id}的聊天请求失败: 创建任务失败")
                         raise RuntimeError(f"会话{session_id}的聊天请求失败: 创建任务失败")
 
-                # 阶段1：在同一事务中完成“最新消息更新 + 附件查询”。
-                # 该阶段保持原子性，减少拆分事务导致的短暂不一致窗口。
+                # 先查询附件元数据，构建完整消息事件。
+                # 该步骤为只读，不涉及会话投影写入，因此不会产生“先写latest_message”的窗口。
                 async with self._uow_factory() as uow:
-                    await uow.session.update_latest_message(
-                        session_id=session_id,
-                        message=message,
-                        timestamp=timestamp or datetime.now(),
-                    )
                     db_attachments = [await uow.file.get_by_id(file_id) for file_id in attachments]
 
                 # 创建用户消息事件
@@ -173,13 +215,18 @@ class AgentService:
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
 
-                # 阶段2：输入流投递 + 事件历史落库。
-                # 若落库失败，执行输入流补偿删除，尽量降低Redis/DB分叉概率。
+                # 阶段2：输入流投递后，在单事务中同步“事件历史 + latest_message投影”。
+                # 这里将两项数据库写操作合并，避免“最新消息已更新但事件未落库”的拆分问题。
                 event_id = await task.input_stream.put(message_event.model_dump_json())
                 message_event.id = event_id
                 try:
                     async with self._uow_factory() as uow:
-                        await uow.session.add_event(session_id=session_id, event=message_event)
+                        await uow.session.add_event_with_snapshot_if_absent(
+                            session_id=session_id,
+                            event=message_event,
+                            latest_message=message,
+                            latest_message_at=timestamp or datetime.now(),
+                        )
                 except Exception as add_err:
                     logger.error(f"会话{session_id}保存用户事件失败，开始补偿输入流消息: {add_err}")
                     try:
@@ -210,6 +257,9 @@ class AgentService:
                 event = TypeAdapter(Event).validate_json(event_str)
                 event.id = event_id
                 logger.debug(f"会话{session_id},输出队列中已发现事件: {type(event).__name__}")
+
+                # 消费输出流时做一次幂等补写，用于修复“消息入流成功但DB历史缺失”的情况。
+                await self._repair_output_event_history(session_id=session_id, event=event)
 
                 # 重置未读消息计数
                 async with self._uow_factory() as uow:
