@@ -25,6 +25,20 @@ settings = get_settings()
 is_production_env = settings.env.lower() in {"production", "prod"}
 enable_api_docs = not is_production_env
 
+
+def _parse_cors_allowed_origins(origins: str) -> list[str]:
+    items = [item.strip() for item in origins.split(",") if item.strip()]
+    return items
+
+
+cors_allowed_origins = _parse_cors_allowed_origins(settings.cors_allowed_origins)
+if not cors_allowed_origins:
+    raise RuntimeError("CORS_ALLOWED_ORIGINS 不能为空")
+if settings.cors_allow_credentials and "*" in cors_allowed_origins:
+    raise RuntimeError("CORS_ALLOW_CREDENTIALS=true 时，CORS_ALLOWED_ORIGINS 不能包含 '*'")
+if is_production_env and "*" in cors_allowed_origins:
+    raise RuntimeError("生产环境下 CORS_ALLOWED_ORIGINS 禁止使用 '*' 通配符")
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -114,8 +128,8 @@ app = FastAPI(
 # 跨域处理
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_allowed_origins,
+    allow_credentials=settings.cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

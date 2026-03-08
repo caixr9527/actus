@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     app_config_filepath: str = "config.yaml"
     auto_run_db_migrations: bool = True
     db_migration_log_interval_seconds: float = 3.0
+    cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_allow_credentials: bool = False
 
     sqlalchemy_database_uri: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/actus"
 
