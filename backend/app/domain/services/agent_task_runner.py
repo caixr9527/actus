@@ -222,38 +222,35 @@ class AgentTaskRunner(TaskRunner):
         return size
 
     async def _sync_file_to_storage(self, filepath: str) -> File:
-
         try:
-            # 根据文件路径从会话存储中获取文件信息
+            # 根据文件路径从会话存储中获取旧文件信息（如存在）
             async with self._uow_factory() as uow:
-                file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
+                old_file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
 
             # 从沙箱环境中下载文件数据
             file_data = await self._sandbox.download_file(file_path=filepath)
 
-            # 如果文件存在，则从会话存储中移除该文件
-            if file:
-                async with self._uow_factory() as uow:
-                    await uow.session.remove_file(session_id=self._session_id, file_id=file.filepath)
-
             # 从路径中提取文件名
             filename = filepath.split("/")[-1]
 
-            # 创建UploadFile对象用于上传
-            upload_file = UploadFile(file=file_data, filename=filename, size=self._get_stream_size(file_data))
+            # 创建 UploadFile 对象用于上传
+            upload_file = UploadFile(
+                file=file_data,
+                filename=filename,
+                size=self._get_stream_size(file_data),
+            )
 
-            # 将文件上传到文件存储系统
-            await self._file_storage.upload_file(upload_file=upload_file)
+            # 上传并接收新文件对象，后续会话映射以该对象为准
+            new_file = await self._file_storage.upload_file(upload_file=upload_file)
+            new_file.filepath = filepath
 
-            # 更新文件的存储路径
-            file.filepath = filepath
-
-            # 将文件重新添加到会话存储中
+            # 原子更新会话文件索引：删除旧引用（若存在）并新增新引用
             async with self._uow_factory() as uow:
-                await uow.session.add_file(session_id=self._session_id, file=file)
+                if old_file:
+                    await uow.session.remove_file(session_id=self._session_id, file_id=old_file.id)
+                await uow.session.add_file(session_id=self._session_id, file=new_file)
 
-            # 返回同步后的文件对象
-            return file
+            return new_file
         except Exception as e:
             # 记录同步文件到存储时发生的异常
             logger.exception(f"同步文件到存储失败: {e}")
