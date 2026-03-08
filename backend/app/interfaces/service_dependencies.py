@@ -36,7 +36,6 @@ def get_app_config_service() -> AppConfigService:
     return AppConfigService(app_config_repository=FileAppConfigRepository(settings.app_config_filepath))
 
 
-@lru_cache()
 def get_status_service(
         db_session: AsyncSession = Depends(get_db_session),
         redis_client: RedisClient = Depends(get_redis_client)
