@@ -73,7 +73,10 @@ class SessionRepository(Protocol):
             increment_unread: bool = False,
             status: Optional[SessionStatus] = None,
     ) -> bool:
-        """按事件ID幂等新增事件，并在同一事务中更新会话投影字段"""
+        """按事件ID幂等新增事件，并在同一事务中更新会话投影字段
+
+        返回值仅表示“事件历史是否新增成功”，不代表投影字段是否被更新。
+        """
         ...
 
     async def add_file(self, session_id: str, file: File) -> None:

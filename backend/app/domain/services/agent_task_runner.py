@@ -401,6 +401,15 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             logger.warning(f"清理A2A工具资源时出错: {e}")
 
+    async def _mark_session_completed_fallback(self, scene: str) -> None:
+        """在事件写入失败时兜底更新会话状态为COMPLETED"""
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+        except Exception as fallback_err:
+            # 兜底再失败时保留错误日志，便于后续排障或离线修复。
+            logger.error(f"会话[{self._session_id}]在{scene}状态兜底失败: {fallback_err}")
+
     async def invoke(self, task: Task) -> None:
         try:
             # 记录任务开始执行的日志
@@ -487,23 +496,31 @@ class AgentTaskRunner(TaskRunner):
         except asyncio.CancelledError:
             # 处理任务被取消的情况
             logger.info(f"AgentTaskRunner任务运行取消")
-            # 取消时将Done事件和状态完成合并入同一事务，避免“done已记录但状态未完成”。
-            await self._put_and_add_event(
-                task=task,
-                event=DoneEvent(),
-                status=SessionStatus.COMPLETED,
-            )
+            # 取消时优先写入Done事件+状态；如果该路径失败，再走独立状态兜底。
+            try:
+                await self._put_and_add_event(
+                    task=task,
+                    event=DoneEvent(),
+                    status=SessionStatus.COMPLETED,
+                )
+            except Exception as done_err:
+                logger.error(f"任务取消分支写入Done事件失败: {done_err}")
+                await self._mark_session_completed_fallback(scene="取消分支")
             # 抛出异常
             raise
         except Exception as e:
             # 处理其他异常情况
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
-            # 异常时同样保证“错误事件 + 状态完成”原子提交。
-            await self._put_and_add_event(
-                task=task,
-                event=ErrorEvent(error=f"AgentTaskRunner出错: {str(e)}"),
-                status=SessionStatus.COMPLETED,
-            )
+            # 异常时优先提交“错误事件 + 状态完成”，失败时降级为状态兜底更新。
+            try:
+                await self._put_and_add_event(
+                    task=task,
+                    event=ErrorEvent(error=f"{str(e)}"),
+                    status=SessionStatus.COMPLETED,
+                )
+            except Exception as error_event_err:
+                logger.error(f"异常分支写入Error事件失败: {error_event_err}")
+                await self._mark_session_completed_fallback(scene="异常分支")
         finally:
             # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamablehttp_client内部使用anyio.create_task_group()，

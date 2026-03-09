@@ -172,16 +172,21 @@ class DBSessionRepository(SessionRepository):
         if not record:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
 
-        # 事件幂等判断：已存在时不再重复更新投影，防止未读数重复累加。
+        # 事件幂等判断与投影更新要分离：
+        # 1) 事件历史只允许按event_id写入一次；
+        # 2) 会话投影(status/title/latest)在幂等重放时仍应收敛到最新值。
         current_events = list(record.events or [])
         event_id = str(event.id)
+        event_inserted = True
         for current_event in current_events:
             if str(current_event.get("id", "")) == event_id:
-                return False
+                event_inserted = False
+                break
 
-        # 先追加事件历史，再更新投影字段，确保两者在同一数据库事务内提交。
-        current_events.append(event.model_dump(mode="json"))
-        record.events = current_events
+        # 事件不存在才写入历史，保证event_id幂等。
+        if event_inserted:
+            current_events.append(event.model_dump(mode="json"))
+            record.events = current_events
 
         # 标题属于会话投影的一部分，按调用方意图进行更新。
         if title is not None:
@@ -195,15 +200,16 @@ class DBSessionRepository(SessionRepository):
         if latest_message_at is not None:
             record.latest_message_at = latest_message_at
 
-        # 未读数仅在“新事件写入成功”后递增，保证幂等重放不会重复累计。
-        if increment_unread:
+        # 未读数只能在事件首次写入时递增，避免重放消息导致重复累计。
+        if increment_unread and event_inserted:
             record.unread_message_count = int(record.unread_message_count or 0) + 1
 
-        # 状态投影同样与事件一起提交，避免“事件已存在但状态未变”的分叉。
+        # 状态投影在同一事务内收敛。即使事件已存在，也允许补齐状态。
         if status is not None:
             record.status = status.value
 
-        return True
+        # 返回值只表示“事件历史是否新增”，不表示投影是否更新。
+        return event_inserted
 
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
