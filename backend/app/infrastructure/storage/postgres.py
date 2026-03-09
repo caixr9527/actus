@@ -38,9 +38,16 @@ class Postgres:
         try:
             # 创建异步引擎
             logger.info("正在初始化Postgres连接...")
+            # SQLAlchemy Engine 的 echo 会直接触发 SQL 输出，按统一日志模式控制：
+            # - all: 始终开启
+            # - 白名单前缀模式: 仅当包含 sqlalchemy.engine.Engine 时开启
+            enable_engine_echo = (
+                self._settings.is_log_output_all
+                or self._settings.is_logger_allowed_by_output_mode("sqlalchemy.engine.Engine")
+            )
             self._engine = create_async_engine(
                 self._settings.sqlalchemy_database_uri,
-                echo=True if self._settings.env == "development" else False,
+                echo=enable_engine_echo,
                 pool_pre_ping=True,  # 启用连接池预检，检查数据库连接是否正常
             )
 
