@@ -111,14 +111,25 @@ class RedisStreamTask(Task):
     @classmethod
     async def destroy(cls) -> None:
         """销毁任务"""
-        # 遍历所有注册的任务实例
-        for task_id, task in RedisStreamTask._task_registry.items():
-            # 取消每个任务的执行
-            task.cancel()
+        # 先对任务注册表做快照，避免 cancel() 触发 _cleanup_registry() 时
+        # 在迭代过程中修改字典导致 RuntimeError。
+        tasks = list(cls._task_registry.values())
 
-            # 如果任务关联了任务运行器，则调用其销毁方法释放资源
+        # 第一阶段：取消任务执行，尽快停止运行态。
+        for task in tasks:
+            try:
+                task.cancel()
+            except Exception as e:
+                logger.error(f"取消任务失败: {task.id}, 错误信息: {e}")
+
+        # 第二阶段：释放任务运行器持有的外部资源（如沙箱连接等）。
+        # 与“取消执行”分离可以避免状态遍历与状态修改交叉。
+        for task in tasks:
             if task._task_runner:
-                await task._task_runner.destroy()
+                try:
+                    await task._task_runner.destroy()
+                except Exception as e:
+                    logger.error(f"销毁任务运行器失败: {task.id}, 错误信息: {e}")
 
         # 清空任务注册表，释放所有任务引用
         cls._task_registry.clear()
