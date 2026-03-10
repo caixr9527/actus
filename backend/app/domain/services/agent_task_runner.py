@@ -137,12 +137,12 @@ class AgentTaskRunner(TaskRunner):
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
 
-    async def _pop_event(self, task: Task) -> Event:
+    async def _pop_event(self, task: Task) -> Optional[Event]:
         # 从输入流中取出事件数据
         event_id, event_str = await task.input_stream.pop()
         if event_str is None:
             logger.warning(f"接收到空消息")
-            return
+            return None
 
         # 解析JSON字符串为Event对象
         event = TypeAdapter(Event).validate_json(event_str)
@@ -426,6 +426,9 @@ class AgentTaskRunner(TaskRunner):
             while not await task.input_stream.is_empty():
                 # 从输入流中取出事件
                 event = await self._pop_event(task)
+                if event is None:
+                    # 空读场景直接跳过，避免后续访问空对象字段导致任务中断。
+                    continue
 
                 # 初始化消息变量
                 message = ""

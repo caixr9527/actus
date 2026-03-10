@@ -25,7 +25,7 @@ class A2AClientManager:
     def __init__(self, a2a_config: Optional[A2AConfig] = None):
         self._a2a_config = a2a_config
         self._exit_stack: AsyncExitStack = AsyncExitStack()
-        self._httpx_clients: Optional[httpx.AsyncClient] = None
+        self._httpx_client: Optional[httpx.AsyncClient] = None
         self._agent_cards: Dict[str, Any] = {}
         self._initialized: bool = False
 
@@ -38,7 +38,7 @@ class A2AClientManager:
             return
 
         try:
-            self._httpx_clients = await self._exit_stack.enter_async_context(
+            self._httpx_client = await self._exit_stack.enter_async_context(
                 httpx.AsyncClient(timeout=600),
             )
 
@@ -82,7 +82,7 @@ class A2AClientManager:
             )
 
         try:
-            response = await self._httpx_clients.post(
+            response = await self._httpx_client.post(
                 url=url,
                 json={
                     "id": str(uuid.uuid4()),
