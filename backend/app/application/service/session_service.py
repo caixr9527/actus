@@ -64,7 +64,7 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise RuntimeError(f"任务会话不存在: {session_id}")
+            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
         return session.files
 
     async def read_file(self, session_id: str, filepath: str) -> FileReadResponse:
@@ -74,7 +74,7 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise RuntimeError(f"任务会话不存在: {session_id}")
+            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
 
         # 检查会话是否关联了沙盒
         if not session.sandbox_id:
@@ -101,7 +101,7 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise RuntimeError(f"任务会话不存在: {session_id}")
+            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
 
         # 检查会话是否关联了沙盒
         if not session.sandbox_id:
@@ -124,7 +124,7 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise RuntimeError(f"任务会话不存在: {session_id}")
+            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
 
         # 检查会话是否关联了沙盒
         if not session.sandbox_id:

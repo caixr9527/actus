@@ -12,6 +12,7 @@ from typing import AsyncGenerator, Optional, List, Type, Callable
 
 from pydantic import TypeAdapter
 
+from app.application.errors import NotFoundError
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage
 from app.domain.models import (
     BaseEvent,
@@ -186,7 +187,7 @@ class AgentService:
                 session = await uow.session.get_by_id(session_id=session_id)
             if not session:
                 logger.error(f"会话{session_id}不存在")
-                raise RuntimeError(f"会话{session_id}不存在")
+                raise NotFoundError(msg=f"会话{session_id}不存在")
 
             # 获取当前会话的任务实例
             task = await self._get_task(session)
@@ -305,7 +306,7 @@ class AgentService:
         # 如果会话不存在，记录错误日志并抛出异常
         if not session:
             logger.error(f"会话{session_id}不存在")
-            raise RuntimeError(f"会话{session_id}不存在")
+            raise NotFoundError(msg=f"会话{session_id}不存在")
 
         # 获取与会话关联的任务实例
         task = await self._get_task(session)

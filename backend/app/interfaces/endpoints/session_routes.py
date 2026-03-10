@@ -165,9 +165,13 @@ async def delete_session(
 async def chat(
         session_id: str,
         request: ChatRequest,
+        session_service: SessionService = Depends(get_session_service),
         agent_service: AgentService = Depends(get_agent_service),
 ) -> EventSourceResponse:
     """根据传递的会话id+chat请求数据向指定会话发起聊天请求"""
+    session = await session_service.get_session(session_id=session_id)
+    if not session:
+        raise NotFoundError("该会话不存在，请核实后重试")
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""
