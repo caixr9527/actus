@@ -136,6 +136,14 @@ class RedisStreamMessageQueue(MessageQueue):
         """清除redis-stream中的所有消息"""
         await self._redis.client.xtrim(self._stream_name, 0)
 
+    async def delete_stream(self) -> bool:
+        """删除整个stream key，释放任务生命周期资源"""
+        try:
+            await self._redis.client.delete(self._stream_name)
+            return True
+        except Exception:
+            return False
+
     async def is_empty(self) -> bool:
         """检查redis-stream是否为空"""
         return await self.size() == 0
