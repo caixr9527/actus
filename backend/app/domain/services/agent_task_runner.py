@@ -254,6 +254,7 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             # 记录同步文件到存储时发生的异常
             logger.exception(f"同步文件到存储失败: {e}")
+            raise
 
     async def _sync_message_attachments_to_storage(self, event: MessageEvent) -> None:
         attachments: List[File] = []
@@ -271,6 +272,7 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             # 记录同步附件到存储时发生的异常
             logger.exception(f"同步消息附件到存储失败: {e}")
+            raise
 
     async def _get_browser_screenshot(self) -> str:
         # 获取浏览器截图

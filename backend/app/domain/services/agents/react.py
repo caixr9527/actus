@@ -6,7 +6,7 @@
 @File   : react.py
 """
 import logging
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from app.domain.models import Plan, Step, Message, Event, ExecutionStatus, File
 from app.domain.models.event import (
@@ -31,6 +31,7 @@ class ReActAgent(BaseAgent):
     name: str = "ReAct"
     _system_prompt: str = SYSTEM_PROMPT + REACT_SYSTEM_PROMPT
     _format: str = "json_object"
+    _tool_choice: Optional[str] = "auto"  # 工具选择策略
 
     async def execute_step(self, plan: Plan, step: Step, message: Message) -> AsyncGenerator[Event, None]:
         """
