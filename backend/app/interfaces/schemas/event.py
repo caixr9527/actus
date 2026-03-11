@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Any, Dict, Self, Type, Literal, List, Union, get_args
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_serializer
 
 from app.domain.models import (
     Event,
@@ -27,10 +27,10 @@ class BaseEventData(BaseModel):
     event_id: Optional[str] = None  # 事件id
     created_at: datetime = Field(default_factory=datetime.now)  # 事件时间
 
-    # pydantic v2写法，序列化时将datetime转换为时间戳
-    model_config = ConfigDict(json_encoders={
-        datetime: lambda v: int(v.timestamp())
-    })
+    @field_serializer("created_at", when_used="json")
+    def serialize_created_at(self, value: datetime) -> int:
+        """将 created_at 序列化为秒级时间戳。"""
+        return int(value.timestamp())
 
     @classmethod
     def base_event_data(cls, event: Event) -> Dict[str, Any]:
@@ -69,12 +69,7 @@ class BaseSSEEvent(BaseModel):
 
 class CommonEventData(BaseEventData):
     """通用事件数据，让结构允许填充额外的数据"""
-    model_config = ConfigDict(
-        json_encoders={
-            datetime: lambda v: int(v.timestamp()),
-        },
-        extra="allow",
-    )
+    model_config = ConfigDict(extra="allow")
 
 
 class CommonSSEEvent(BaseSSEEvent):
