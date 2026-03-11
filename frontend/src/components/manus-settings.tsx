@@ -43,6 +43,7 @@ import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { configApi } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import type {
   AgentConfig,
   LLMConfig,
@@ -415,9 +416,9 @@ function A2ASetting({
                       ))}
                       <Badge
                         variant={server.streaming ? "secondary" : "outline"}
-                        className={
+                        className={cn(
                           server.streaming ? "text-gray-500" : "text-gray-400"
-                        }
+                        )}
                       >
                         流式输出: {server.streaming ? "开启" : "关闭"}
                       </Badge>
@@ -425,11 +426,11 @@ function A2ASetting({
                         variant={
                           server.push_notifications ? "secondary" : "outline"
                         }
-                        className={
+                        className={cn(
                           server.push_notifications
                             ? "text-gray-500"
                             : "text-gray-400"
-                        }
+                        )}
                       >
                         推送通知: {server.push_notifications ? "开启" : "关闭"}
                       </Badge>

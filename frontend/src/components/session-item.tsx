@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import {Item, ItemActions, ItemContent, ItemDescription, ItemMedia} from '@/components/ui/item'
 import {Avatar, AvatarGroupCount} from '@/components/ui/avatar'
-import {formatRelativeDate} from '@/lib/utils'
+import {cn, formatRelativeDate} from '@/lib/utils'
 import type {Session} from '@/lib/api'
 
 type SessionItemProps = {
@@ -41,7 +41,7 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
 
   return (
     <Item
-      className={`p-2 hover:bg-white cursor-pointer gap-2 items-start ${isActive ? 'bg-white' : ''}`}
+      className={cn('p-2 hover:bg-white cursor-pointer gap-2 items-start', isActive && 'bg-white')}
       onClick={handleClick}
     >
       {/* 左侧图标 */}
@@ -93,4 +93,3 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
     </Item>
   )
 }
-
