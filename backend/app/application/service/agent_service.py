@@ -255,7 +255,9 @@ class AgentService:
                     start_id=latest_event_id,
                     block_ms=OUTPUT_STREAM_BLOCK_MS,
                 )
-                latest_event_id = event_id
+                # 仅在成功读取到事件ID时推进游标，避免空读将游标重置为None导致重复回放首条消息。
+                if event_id is not None:
+                    latest_event_id = event_id
                 if event_str is None:
                     logger.debug(f"会话{session_id},输出队列中未发现事件内容")
                     continue
