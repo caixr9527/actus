@@ -32,6 +32,9 @@ from app.domain.services.agent_task_runner import AgentTaskRunner
 
 logger = logging.getLogger(__name__)
 
+# 输出流读取阻塞时间（毫秒）。使用阻塞读取避免空闲时 busy polling 占满 CPU。
+OUTPUT_STREAM_BLOCK_MS = 1000
+
 
 class AgentService:
 
@@ -248,7 +251,10 @@ class AgentService:
             # 持续监听任务输出流，直到任务完成
             while task and not task.done:
                 # 从输出流获取下一个事件
-                event_id, event_str = await task.output_stream.get(start_id=latest_event_id, block_ms=0)
+                event_id, event_str = await task.output_stream.get(
+                    start_id=latest_event_id,
+                    block_ms=OUTPUT_STREAM_BLOCK_MS,
+                )
                 latest_event_id = event_id
                 if event_str is None:
                     logger.debug(f"会话{session_id},输出队列中未发现事件内容")
