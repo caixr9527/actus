@@ -78,7 +78,7 @@ async def get_agent_config(
     summary="更新Agent配置信息",
     description="更新Agent配置信息"
 )
-async def update_llm_config(
+async def update_agent_config(
         new_agent_config: AgentConfig,
         app_config_service: AppConfigService = Depends(get_app_config_service)
 ) -> Response[AgentConfig]:
