@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { eventsToTimeline } from '../src/lib/session-events'
+import {
+  appendTimelineEvent,
+  createTimelineBuildContext,
+  eventsToTimeline,
+} from '../src/lib/session-events'
 import type { SSEEventData } from '../src/lib/api/types'
 
 function eventOf(type: SSEEventData['type'], data: unknown): SSEEventData {
@@ -65,4 +69,39 @@ test('eventsToTimeline should merge tool updates and reset step context across u
   if (errorItems[0]?.kind === 'error') {
     assert.equal(errorItems[0].error, 'broken')
   }
+})
+
+test('appendTimelineEvent should match full timeline build in append-only stream', () => {
+  const events: SSEEventData[] = [
+    eventOf('message', { role: 'user', message: 'q1' }),
+    eventOf('step', { id: 's-1', status: 'running', description: 'step 1 running' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-1',
+      name: 'search',
+      function: 'search_web',
+      args: { q: 'hello' },
+      status: 'calling',
+    }),
+    eventOf('tool', {
+      tool_call_id: 'tool-1',
+      name: 'search',
+      function: 'search_web',
+      args: { q: 'hello' },
+      status: 'called',
+      content: { results: [] },
+    }),
+    eventOf('step', { id: 's-1', status: 'completed', description: 'step 1 done' }),
+    eventOf('message', { role: 'assistant', message: 'answer' }),
+    eventOf('message', { role: 'user', message: 'q2' }),
+    eventOf('step', { id: 's-1', status: 'running', description: 'step 2 running' }),
+    eventOf('error', { error: 'boom' }),
+  ]
+
+  const context = createTimelineBuildContext()
+  for (const event of events) {
+    appendTimelineEvent(context, event)
+  }
+
+  const full = eventsToTimeline(events)
+  assert.deepEqual(context.list, full)
 })

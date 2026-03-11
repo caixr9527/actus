@@ -88,6 +88,32 @@ function stableId(prefix: string, index: number, suffix: string): string {
   return `${prefix}-${index}-${suffix}`;
 }
 
+export type TimelineBuildContext = {
+  list: TimelineItem[];
+  lastStepId: string | null;
+  messageIndex: number;
+  toolIndex: number;
+  stepIndex: number;
+  errorIndex: number;
+  stepIndexById: Map<string, number>;
+  stepToolIndexByStepId: Map<string, Map<string, number>>;
+  standaloneToolIndexByCallId: Map<string, number>;
+};
+
+export function createTimelineBuildContext(): TimelineBuildContext {
+  return {
+    list: [],
+    lastStepId: null,
+    messageIndex: 0,
+    toolIndex: 0,
+    stepIndex: 0,
+    errorIndex: 0,
+    stepIndexById: new Map<string, number>(),
+    stepToolIndexByStepId: new Map<string, Map<string, number>>(),
+    standaloneToolIndexByCallId: new Map<string, number>(),
+  };
+}
+
 /** 将时间戳格式化为相对时间，如 2天前、刚刚 */
 function formatTimeLabel(ts: number | string | undefined): string | undefined {
   if (ts === undefined || ts === null) return undefined;
@@ -118,188 +144,235 @@ export function getToolTimeLabel(tool: ToolEvent): string | undefined {
   return formatTimeLabel(ts);
 }
 
+function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): void {
+  if (msg.role === "user") {
+    // 用户消息标志着新的对话轮次，清除 step 上下文
+    context.lastStepId = null;
+
+    context.list.push({
+      kind: "user",
+      id: stableId("user", context.messageIndex++, String(context.list.length)),
+      data: msg,
+    });
+    if (msg.attachments && msg.attachments.length > 0) {
+      context.list.push({
+        kind: "attachments",
+        id: stableId("att", context.messageIndex, "user"),
+        role: "user",
+        files: msg.attachments.map(chatAttachmentToDisplay),
+      });
+    }
+    return;
+  }
+
+  if (msg.role === "assistant") {
+    context.list.push({
+      kind: "assistant",
+      id: stableId("assistant", context.messageIndex++, String(context.list.length)),
+      data: msg,
+    });
+    if (msg.attachments && msg.attachments.length > 0) {
+      context.list.push({
+        kind: "attachments",
+        id: stableId("att", context.messageIndex, "assistant"),
+        role: "assistant",
+        files: msg.attachments.map(chatAttachmentToDisplay),
+      });
+    }
+  }
+}
+
+function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
+  const shouldUpdateCurrentStep = context.lastStepId !== null && context.lastStepId === step.id;
+  const existingIdx = context.stepIndexById.get(step.id);
+
+  if (shouldUpdateCurrentStep && existingIdx !== undefined) {
+    const existing = context.list[existingIdx];
+    if (existing?.kind === "step") {
+      context.list[existingIdx] = {
+        kind: "step",
+        id: existing.id,
+        data: step,
+        tools: existing.tools, // 保留已有的 tools
+      };
+    } else {
+      const newIdx = context.list.length;
+      context.list.push({
+        kind: "step",
+        id: stableId("step", context.stepIndex++, step.id + "_" + String(context.list.length)),
+        data: step,
+        tools: [],
+      });
+      context.stepIndexById.set(step.id, newIdx);
+      context.stepToolIndexByStepId.set(step.id, new Map<string, number>());
+    }
+  } else {
+    const newIdx = context.list.length;
+    context.list.push({
+      kind: "step",
+      id: stableId("step", context.stepIndex++, step.id + "_" + String(context.list.length)),
+      data: step,
+      tools: [],
+    });
+    context.stepIndexById.set(step.id, newIdx);
+    // 相同 step.id 在新轮次中可能复用，需要清理旧索引
+    context.stepToolIndexByStepId.set(step.id, new Map<string, number>());
+  }
+
+  // 只要 step 不是 completed/failed 状态，就保持跟踪
+  if (step.status === "completed" || step.status === "failed") {
+    context.lastStepId = null;
+  } else {
+    context.lastStepId = step.id;
+  }
+}
+
+function appendToolEvent(context: TimelineBuildContext, tool: ToolEvent): void {
+  const toolCallId = (tool as { tool_call_id?: string }).tool_call_id;
+  const activeStepId = context.lastStepId;
+
+  if (activeStepId !== null) {
+    const stepIdx = context.stepIndexById.get(activeStepId);
+    if (stepIdx !== undefined) {
+      const stepItem = context.list[stepIdx];
+      if (stepItem?.kind === "step") {
+        if (toolCallId != null) {
+          const stepToolIndexes = context.stepToolIndexByStepId.get(activeStepId) ?? new Map<string, number>();
+          context.stepToolIndexByStepId.set(activeStepId, stepToolIndexes);
+          const existingToolIdx = stepToolIndexes.get(toolCallId);
+          if (
+            existingToolIdx !== undefined &&
+            existingToolIdx >= 0 &&
+            existingToolIdx < stepItem.tools.length
+          ) {
+            const newTools = [...stepItem.tools];
+            newTools[existingToolIdx] = tool;
+            context.list[stepIdx] = { ...stepItem, tools: newTools };
+            return;
+          }
+          const nextToolIdx = stepItem.tools.length;
+          context.list[stepIdx] = { ...stepItem, tools: [...stepItem.tools, tool] };
+          stepToolIndexes.set(toolCallId, nextToolIdx);
+          return;
+        }
+
+        context.list[stepIdx] = { ...stepItem, tools: [...stepItem.tools, tool] };
+        return;
+      }
+    }
+  }
+
+  if (toolCallId != null) {
+    const existingStandaloneIdx = context.standaloneToolIndexByCallId.get(toolCallId);
+    if (existingStandaloneIdx !== undefined) {
+      const existingItem = context.list[existingStandaloneIdx];
+      if (existingItem?.kind === "tool") {
+        context.list[existingStandaloneIdx] = { ...existingItem, data: tool };
+        return;
+      }
+    }
+  }
+
+  const nextIdx = context.list.length;
+  context.list.push({
+    kind: "tool",
+    id: stableId("tool", context.toolIndex++, (tool.name || "") + (tool.function || "")),
+    data: tool,
+    timeLabel: getToolTimeLabel(tool),
+  });
+  if (toolCallId != null) {
+    context.standaloneToolIndexByCallId.set(toolCallId, nextIdx);
+  }
+}
+
+function appendErrorEvent(context: TimelineBuildContext, data: unknown): void {
+  const errorData = data as { error?: string; created_at?: number; event_id?: string; [key: string]: unknown };
+  if (!errorData.error) return;
+  context.list.push({
+    kind: "error",
+    id: stableId("error", context.errorIndex++, String(context.list.length)),
+    error: errorData.error,
+    timestamp: errorData.created_at,
+  });
+}
+
+/**
+ * 将单条 SSE 事件增量归并到时间线 context。
+ * 适用于 append-only 的事件流场景，可避免每次全量重算。
+ */
+export function appendTimelineEvent(context: TimelineBuildContext, ev: SSEEventData): void {
+  switch (ev.type) {
+    case "message":
+      appendMessageEvent(context, ev.data as ChatMessage);
+      break;
+    case "step":
+      appendStepEvent(context, ev.data as StepEvent);
+      break;
+    case "tool":
+      appendToolEvent(context, ev.data as ToolEvent);
+      break;
+    case "error":
+      appendErrorEvent(context, ev.data);
+      break;
+    case "title":
+    case "plan":
+    case "wait":
+    case "done":
+      break;
+    default:
+      break;
+  }
+}
+
+function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildContext {
+  return {
+    list: [...source.list],
+    lastStepId: source.lastStepId,
+    messageIndex: source.messageIndex,
+    toolIndex: source.toolIndex,
+    stepIndex: source.stepIndex,
+    errorIndex: source.errorIndex,
+    stepIndexById: new Map(source.stepIndexById),
+    stepToolIndexByStepId: new Map(
+      Array.from(source.stepToolIndexByStepId.entries()).map(([stepId, indexMap]) => [stepId, new Map(indexMap)])
+    ),
+    standaloneToolIndexByCallId: new Map(source.standaloneToolIndexByCallId),
+  };
+}
+
+let timelineCacheEvents: SSEEventData[] | null = null;
+let timelineCacheContext: TimelineBuildContext | null = null;
+
 /**
  * 将 SSE 事件列表归并为时间线展示项（顺序与设计一致）
  */
 export function eventsToTimeline(events: SSEEventData[]): TimelineItem[] {
-  const list: TimelineItem[] = [];
-  let lastStepId: string | null = null;
-  let messageIndex = 0;
-  let toolIndex = 0;
-  let stepIndex = 0;
-  let errorIndex = 0;
+  const cachedEvents = timelineCacheEvents;
+  const cachedContext = timelineCacheContext;
 
-  for (const ev of events) {
-    switch (ev.type) {
-      case "message": {
-        const msg = ev.data as ChatMessage;
-        if (msg.role === "user") {
-          // 用户消息标志着新的对话轮次，清除 step 上下文
-          lastStepId = null;
-          
-          list.push({
-            kind: "user",
-            id: stableId("user", messageIndex++, String(list.length)),
-            data: msg,
-          });
-          if (msg.attachments && msg.attachments.length > 0) {
-            list.push({
-              kind: "attachments",
-              id: stableId("att", messageIndex, "user"),
-              role: "user",
-              files: msg.attachments.map(chatAttachmentToDisplay),
-            });
-          }
-        } else if (msg.role === "assistant") {
-          // 所有 assistant 消息都直接添加，不去重
-          list.push({
-            kind: "assistant",
-            id: stableId("assistant", messageIndex++, String(list.length)),
-            data: msg,
-          });
-          if (msg.attachments && msg.attachments.length > 0) {
-            list.push({
-              kind: "attachments",
-              id: stableId("att", messageIndex, "assistant"),
-              role: "assistant",
-              files: msg.attachments.map(chatAttachmentToDisplay),
-            });
-          }
-        }
-        break;
-      }
-      case "step": {
-        const step = ev.data as StepEvent;
-        
-        // 判断是更新现有 step 还是创建新 step
-        // 关键：只有当 lastStepId === step.id 时才是同一个 step 的状态更新
-        if (lastStepId !== null && lastStepId === step.id) {
-          // 这是同一个 step 的状态更新（running -> completed）
-          // 从后往前查找，确保找到最新的（最后一个）匹配的 step
-          let existingIdx = -1;
-          for (let i = list.length - 1; i >= 0; i--) {
-            const item = list[i];
-            if (item.kind === "step" && item.data.id === step.id) {
-              existingIdx = i;
-              break;
-            }
-          }
-          
-          if (existingIdx >= 0) {
-            const existing = list[existingIdx];
-            if (existing.kind === "step") {
-              list[existingIdx] = { 
-                kind: "step", 
-                id: existing.id, 
-                data: step, 
-                tools: existing.tools // 保留已有的 tools
-              };
-            }
-          }
-        } else {
-          // 新的 step (第一次出现或新对话轮次的 step)
-          list.push({
-            kind: "step",
-            id: stableId("step", stepIndex++, step.id + "_" + String(list.length)),
-            data: step,
-            tools: [], // 初始为空，tools 会在后续添加
-          });
-        }
-        
-        // 更新 lastStepId 跟踪
-        // 只要 step 不是 completed/failed 状态，就保持跟踪
-        if (step.status === 'completed' || step.status === 'failed') {
-          lastStepId = null;
-        } else {
-          // running, pending 等其他状态都设置 lastStepId
-          lastStepId = step.id;
-        }
-        
-        break;
-      }
-      case "tool": {
-        const tool = ev.data as ToolEvent;
-        const toolCallId = (tool as { tool_call_id?: string }).tool_call_id;
+  const isAppendOnly =
+    cachedEvents !== null &&
+    cachedContext !== null &&
+    events.length > cachedEvents.length &&
+    (cachedEvents.length === 0 ||
+      (
+        events[0] === cachedEvents[0] &&
+        events[cachedEvents.length - 1] === cachedEvents[cachedEvents.length - 1]
+      ));
 
-        if (lastStepId !== null) {
-          // 工具属于当前 step，添加到 step 的 tools 中
-          // 重要：从后往前查找，确保找到最新的（最后一个）匹配的 step
-          let stepIdx = -1;
-          for (let i = list.length - 1; i >= 0; i--) {
-            const item = list[i];
-            if (item.kind === "step" && item.data.id === lastStepId) {
-              stepIdx = i;
-              break;
-            }
-          }
-          
-          if (stepIdx >= 0) {
-            const step = list[stepIdx];
-            if (step.kind === "step") {
-              if (toolCallId != null) {
-                // 检查是否已存在相同 tool_call_id 的工具（更新场景）
-                const existingToolIdx = step.tools.findIndex(
-                  (t) => (t as { tool_call_id?: string }).tool_call_id === toolCallId
-                );
-                if (existingToolIdx >= 0) {
-                  // 更新现有工具
-                  const newTools = [...step.tools];
-                  newTools[existingToolIdx] = tool;
-                  list[stepIdx] = { ...step, tools: newTools };
-                  break;
-                }
-              }
-              // 添加新工具
-              list[stepIdx] = { ...step, tools: [...step.tools, tool] };
-            }
-          }
-        } else {
-          // 工具不属于任何 step，作为独立工具添加
-          if (toolCallId != null) {
-            const last = list[list.length - 1];
-            if (
-              last?.kind === "tool" &&
-              (last.data as { tool_call_id?: string }).tool_call_id === toolCallId
-            ) {
-              // 更新最后一个独立工具
-              list[list.length - 1] = { ...last, data: tool };
-              break;
-            }
-          }
-          // 添加新的独立工具
-          list.push({
-            kind: "tool",
-            id: stableId("tool", toolIndex++, (tool.name || "") + (tool.function || "")),
-            data: tool,
-            timeLabel: getToolTimeLabel(tool),
-          });
-        }
-        break;
-      }
-      case "title":
-      case "plan":
-      case "wait":
-      case "done":
-        break;
-      case "error": {
-        // 处理错误事件
-        const errorData = ev.data as { error?: string; created_at?: number; event_id?: string; [key: string]: unknown };
-        if (errorData.error) {
-          list.push({
-            kind: "error",
-            id: stableId("error", errorIndex++, String(list.length)),
-            error: errorData.error,
-            timestamp: errorData.created_at,
-          });
-        }
-        break;
-      }
-      default:
-        break;
-    }
+  const context = isAppendOnly && cachedContext
+    ? cloneTimelineBuildContext(cachedContext)
+    : createTimelineBuildContext();
+
+  const startIndex = isAppendOnly && cachedEvents ? cachedEvents.length : 0;
+  for (let i = startIndex; i < events.length; i++) {
+    const ev = events[i];
+    appendTimelineEvent(context, ev);
   }
 
-  return list;
+  timelineCacheEvents = events;
+  timelineCacheContext = context;
+  return context.list;
 }
 
 /**
