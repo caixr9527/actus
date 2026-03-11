@@ -8,17 +8,22 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
+from typing import cast
 
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import State
 
 from app.infrastructure.logging import setup_logging
 from app.infrastructure.storage import get_redis_client, get_postgres, get_cos
 from app.interfaces.endpoints.routes import router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
-from app.interfaces.service_dependencies import get_agent_service
+from app.interfaces.service_dependencies import (
+    get_agent_service_for_lifespan,
+    clear_agent_service_for_lifespan_cache,
+)
 from core.config import get_settings
 
 settings = get_settings()
@@ -48,6 +53,11 @@ openapi_tags = [
         "description": "包含 **状态监测** 等API接口，用于监测系统的运行状态。"
     }
 ]
+
+
+def _get_app_state(app: FastAPI) -> State:
+    """获取应用 state 对象，规避静态检查误报。"""
+    return cast(State, getattr(app, "state"))
 
 
 async def _log_migration_heartbeat(interval_seconds: float) -> None:
@@ -91,6 +101,8 @@ async def lifespan(app: FastAPI):
     await get_redis_client().init()
     await get_postgres().init()
     await get_cos().init()
+    app_state = _get_app_state(app)
+    app_state.agent_service = get_agent_service_for_lifespan()
 
     try:
         # lifespan分界点
@@ -99,12 +111,21 @@ async def lifespan(app: FastAPI):
         try:
             # 等待agent服务关闭
             logger.info("正在关闭Agent服务")
-            await asyncio.wait_for(get_agent_service().shutdown(), timeout=30.0)
+            app_state = _get_app_state(app)
+            agent_service = getattr(app_state, "agent_service", None)
+            if agent_service is None:
+                agent_service = get_agent_service_for_lifespan()
+            await asyncio.wait_for(agent_service.shutdown(), timeout=30.0)
             logger.info("Agent服务成功关闭")
         except asyncio.TimeoutError:
             logger.warning("Agent服务关闭超时, 强制关闭, 部分任务将被释放")
         except Exception as e:
             logger.error(f"Agent服务关闭期间出现错误: {str(e)}")
+        finally:
+            app_state = _get_app_state(app)
+            if hasattr(app_state, "agent_service"):
+                delattr(app_state, "agent_service")
+            clear_agent_service_for_lifespan_cache()
 
         # 关闭其他应用
         await get_redis_client().close()
