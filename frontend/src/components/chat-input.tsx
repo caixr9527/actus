@@ -87,7 +87,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
           setFiles((prev) => [...prev, ...uploadedFiles])
           toast.success(`成功上传 ${uploadedFiles.length} 个文件`)
         }
-      } catch (error) {
+      } catch {
         toast.error('文件上传过程中发生错误')
       } finally {
         setUploading(false)

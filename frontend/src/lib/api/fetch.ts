@@ -280,7 +280,6 @@ export function del<T = unknown>(
 export function createSSEConnection(
   endpoint: string,
   data?: unknown,
-  options?: RequestOptions,
 ): EventSource {
   const url = resolveRequestUrl(endpoint)
 

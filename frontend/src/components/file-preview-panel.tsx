@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import Image from 'next/image'
 import { fileApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Download, FileText, X } from 'lucide-react'
@@ -228,9 +229,12 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
         {!loading && !error && fileType.type === 'image' && imageUrl && (
           <ScrollArea className="h-full">
             <div className="p-4">
-              <img 
-                src={imageUrl} 
+              <Image
+                src={imageUrl}
                 alt={file.filename}
+                width={1200}
+                height={800}
+                unoptimized
                 className="max-w-full h-auto rounded-lg border"
               />
             </div>

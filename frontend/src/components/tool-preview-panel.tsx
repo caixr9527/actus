@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo } from "react"
+import Image from "next/image"
 import type { ToolEvent } from "@/lib/api/types"
 import {
   getToolKind,
@@ -171,7 +172,14 @@ function BrowserPreview({
       <div className="flex-1 rounded-lg overflow-hidden border min-h-0 relative">
         {screenshot ? (
           <ScrollArea className="h-full">
-            <img src={screenshot} alt="浏览器截图" className="w-full h-auto" />
+            <Image
+              src={screenshot}
+              alt="浏览器截图"
+              width={1280}
+              height={720}
+              unoptimized
+              className="w-full h-auto"
+            />
           </ScrollArea>
         ) : (
           <div className="flex items-center justify-center h-full text-sm text-gray-500">

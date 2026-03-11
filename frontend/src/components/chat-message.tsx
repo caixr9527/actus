@@ -154,7 +154,6 @@ function StepBlock({
 }) {
   const [expanded, setExpanded] = useState(true)
   const { data, tools } = stepItem
-  const isCompleted = data.status === 'completed'
 
   return (
     <div className={cn('flex flex-col mt-3', className)}>
