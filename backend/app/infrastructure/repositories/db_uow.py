@@ -6,7 +6,7 @@
 @File   : db_uow.py
 """
 import logging
-from typing import Optional
+from typing import Optional, Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
@@ -49,12 +49,29 @@ class DBUnitOfWork(IUnitOfWork):
         # 为每个上下文开启一个新的会话。
         self.db_session = self.session_factory()
         self._entered = True
+        self.db_session.info["post_commit_hooks"] = []
+        self.db_session.info["session_list_changed_ids"] = set()
 
         # 初始化所有数据库仓库。
         self.file = DBFileRepository(db_session=self.db_session)
         self.session = DBSessionRepository(db_session=self.db_session)
 
         return self
+
+    async def _run_post_commit_hooks(self) -> None:
+        """在事务提交成功后执行注册的回调（best-effort）"""
+        if self.db_session is None:
+            return
+
+        hooks: list[Callable[[], Awaitable[None]]] = list(
+            self.db_session.info.get("post_commit_hooks", [])
+        )
+        for hook in hooks:
+            try:
+                await hook()
+            except Exception as e:
+                # 提交已成功，回调失败不应回滚业务结果；按告警记录并依赖兜底机制恢复。
+                logger.warning(f"执行post-commit回调失败: {e}", exc_info=True)
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """退出上下文：出现异常回滚，否则提交。
@@ -82,6 +99,7 @@ class DBUnitOfWork(IUnitOfWork):
                 # 正常路径提交失败不可吞掉，必须反馈给上层调用方。
                 try:
                     await self.commit()
+                    await self._run_post_commit_hooks()
                 except Exception as e:
                     tx_error = e
                     logger.warning(f"UoW提交失败: {e}", exc_info=True)
@@ -95,6 +113,9 @@ class DBUnitOfWork(IUnitOfWork):
                 logger.warning(f"UoW关闭数据库会话失败: {e}", exc_info=True)
             finally:
                 # 无条件复位UoW状态，避免后续误复用当前实例。
+                if self.db_session is not None:
+                    self.db_session.info.pop("post_commit_hooks", None)
+                    self.db_session.info.pop("session_list_changed_ids", None)
                 self.db_session = None
                 self._entered = False
 
