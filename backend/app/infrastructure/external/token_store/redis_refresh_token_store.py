@@ -7,6 +7,7 @@
 """
 import json
 from datetime import datetime
+from typing import Any, cast
 
 from app.domain.external.refresh_token_store import RefreshTokenStore
 from app.infrastructure.storage import RedisClient
@@ -43,7 +44,10 @@ class RedisRefreshTokenStore(RefreshTokenStore):
         )
 
         pipeline = self._redis_client.client.pipeline(transaction=True)
-        await pipeline.set(token_key, payload, ex=expires_in_seconds)
-        await pipeline.sadd(user_tokens_key, refresh_token)
-        await pipeline.expire(user_tokens_key, expires_in_seconds)
+        # Pipeline 的 set/sadd/expire 仅入队命令；实际 I/O 在 execute() 执行。
+        # 这里通过类型收窄规避静态检查器把它们误判为“未 await 协程”。
+        pipeline_commands = cast(Any, pipeline)
+        pipeline_commands.set(token_key, payload, ex=expires_in_seconds)
+        pipeline_commands.sadd(user_tokens_key, refresh_token)
+        pipeline_commands.expire(user_tokens_key, expires_in_seconds)
         await pipeline.execute()
