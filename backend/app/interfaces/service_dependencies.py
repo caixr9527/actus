@@ -85,10 +85,10 @@ def get_session_service() -> SessionService:
     return SessionService(uow_factory=get_uow, sandbox_cls=DockerSandbox)
 
 
-@lru_cache()
-def get_auth_service(redis_client: RedisClient = Depends(get_redis_client)) -> AuthService:
+def get_auth_service() -> AuthService:
     """获取认证服务"""
     logger.info("加载获取AuthService")
+    redis_client = get_redis_client()
     refresh_token_store = RedisRefreshTokenStore(redis_client=redis_client)
     register_verification_code_store = RedisRegisterVerificationCodeStore(redis_client=redis_client)
     email_sender = SMTPEmailSender()

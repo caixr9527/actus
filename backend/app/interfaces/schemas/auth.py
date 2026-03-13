@@ -12,10 +12,11 @@ from typing import Optional, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.domain.models import UserStatus, User, UserProfile
+from core.config import get_settings
 
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 PASSWORD_ALLOWED_REGEX = re.compile(r"^[A-Za-z0-9!@#$%^&*._\-]+$")
-VERIFICATION_CODE_REGEX = re.compile(r"^\d{6}$")
+VERIFICATION_CODE_DIGITS_REGEX = re.compile(r"^[0-9]+$")
 
 
 def validate_password_strength(value: str) -> str:
@@ -57,8 +58,9 @@ class RegisterRequest(BaseModel):
         """验证码格式校验（仅在传值时校验）"""
         if value is None:
             return None
-        if not VERIFICATION_CODE_REGEX.match(value):
-            raise ValueError("验证码格式不正确，应为6位数字")
+        expected_length = get_settings().auth_register_code_length
+        if not VERIFICATION_CODE_DIGITS_REGEX.match(value) or len(value) != expected_length:
+            raise ValueError(f"验证码格式不正确，应为{expected_length}位数字")
         return value
 
 
