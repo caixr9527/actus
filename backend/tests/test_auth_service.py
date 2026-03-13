@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -118,19 +119,22 @@ def _build_auth_service(
         email_sender: Optional[_FakeEmailSender] = None,
         email_verification_enabled: bool = False,
 ) -> AuthService:
-    return AuthService(
+    service = AuthService(
         uow_factory=lambda: _FakeUoW(user_repo),
         refresh_token_store=refresh_token_store or _FakeRefreshTokenStore(),
-        jwt_secret="unit-test-secret",
-        jwt_algorithm="HS256",
-        access_token_expires_in=1800,
-        refresh_token_expires_in=604800,
-        email_verification_enabled=email_verification_enabled,
-        register_code_expires_in=300,
         register_verification_code_store=register_verification_code_store,
         email_sender=email_sender,
-        register_verification_code_length=6,
     )
+    service._setting = SimpleNamespace(
+        auth_jwt_secret="unit-test-secret",
+        auth_jwt_algorithm="HS256",
+        auth_access_token_expires_in=1800,
+        auth_refresh_token_expires_in=604800,
+        auth_register_code_expires_in=300,
+        auth_register_code_length=6,
+        auth_register_verification_enabled=email_verification_enabled,
+    )
+    return service
 
 
 def test_register_should_create_user_and_profile() -> None:

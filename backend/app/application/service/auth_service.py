@@ -176,7 +176,7 @@ class AuthService:
                 profile=profile,
                 access_token=access_token,
                 refresh_token=refresh_token,
-                access_token_expires_in=self._setting.auth_refresh_token_expires_in,
+                access_token_expires_in=self._setting.auth_access_token_expires_in,
                 refresh_token_expires_in=self._setting.auth_refresh_token_expires_in,
             )
 
