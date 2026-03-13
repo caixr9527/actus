@@ -42,6 +42,7 @@ from .plan import Plan, Step, ExecutionStatus
 from .search import SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
+from .user import User, UserProfile, UserStatus
 
 __all__ = [
     "AppConfig",
@@ -81,4 +82,7 @@ __all__ = [
     "FileToolContent",
     "MCPToolContent",
     "A2AToolContent",
+    "User",
+    "UserProfile",
+    "UserStatus",
 ]

@@ -33,6 +33,19 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str | None = None
 
+    auth_jwt_secret: str = "change-this-to-a-secure-random-secret"
+    auth_jwt_algorithm: str = "HS256"
+    auth_access_token_expires_in: int = 30 * 60
+    auth_refresh_token_expires_in: int = 7 * 24 * 60 * 60
+    auth_register_code_expires_in: int = 5 * 60
+    auth_register_code_length: int = 6
+
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
+
     cos_region: str = "ap-guangzhou"
     cos_secret_id: str = ""
     cos_secret_key: str = ""
@@ -60,6 +73,16 @@ class Settings(BaseSettings):
     def is_log_output_all(self) -> bool:
         """判断是否为 all 模式"""
         return self.log_output_mode.strip().lower() == "all"
+
+    @property
+    def is_production_env(self) -> bool:
+        """判断是否为生产环境"""
+        return self.env.strip().lower() in {"production", "prod"}
+
+    @property
+    def auth_register_verification_enabled(self) -> bool:
+        """注册是否强制邮箱验证码（仅生产环境开启）"""
+        return self.is_production_env
 
     @property
     def log_output_allowed_logger_prefixes(self) -> tuple[str, ...]:

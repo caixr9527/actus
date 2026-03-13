@@ -22,6 +22,11 @@ cp .env.example .env
 - `ENV`：运行环境（`development` / `production`）。
 - `SQLALCHEMY_DATABASE_URI`：PostgreSQL 连接串。
 - `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD`：Redis 连接信息。
+- `AUTH_JWT_SECRET`：JWT 签名密钥（生产环境必须替换）。
+- `AUTH_ACCESS_TOKEN_EXPIRES_IN`：Access Token 过期秒数（默认 `1800`）。
+- `AUTH_REFRESH_TOKEN_EXPIRES_IN`：Refresh Token 过期秒数（默认 `604800`）。
+- `AUTH_REGISTER_CODE_EXPIRES_IN`：注册验证码有效期秒数（默认 `300`）。
+- `SMTP_HOST` / `SMTP_PORT` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL`：SMTP 邮件配置（生产环境注册验证码发送必填）。
 - `AUTO_RUN_DB_MIGRATIONS`：启动时是否自动执行 Alembic 迁移（默认 `true`）。
 - `CORS_ALLOWED_ORIGINS`：逗号分隔白名单。
 - `CORS_ALLOW_CREDENTIALS`：为 `true` 时，`CORS_ALLOWED_ORIGINS` 不能包含 `*`。
@@ -76,15 +81,15 @@ curl -i http://127.0.0.1:23140/api/status
 ## 8. 常见故障排查
 
 1. 启动时迁移失败：
-   - 检查 `SQLALCHEMY_DATABASE_URI` 是否可达。
-   - 确认数据库用户具备建表/扩展权限（`uuid-ossp`）。
+    - 检查 `SQLALCHEMY_DATABASE_URI` 是否可达。
+    - 确认数据库用户具备建表/扩展权限（`uuid-ossp`）。
 2. Redis 健康检查失败：
-   - 检查 `REDIS_HOST`、`REDIS_PORT`、`REDIS_PASSWORD`。
+    - 检查 `REDIS_HOST`、`REDIS_PORT`、`REDIS_PASSWORD`。
 3. 启动时报 CORS 配置错误：
-   - 当 `CORS_ALLOW_CREDENTIALS=true` 时，`CORS_ALLOWED_ORIGINS` 不能使用 `*`。
-   - 生产环境禁止 `CORS_ALLOWED_ORIGINS=*`。
+    - 当 `CORS_ALLOW_CREDENTIALS=true` 时，`CORS_ALLOWED_ORIGINS` 不能使用 `*`。
+    - 生产环境禁止 `CORS_ALLOWED_ORIGINS=*`。
 4. 文档页不可访问：
-   - `production` 环境默认关闭 `/docs` 与 `/redoc`。
+    - `production` 环境默认关闭 `/docs` 与 `/redoc`。
 
 ## 9. 测试
 

@@ -8,11 +8,13 @@
 from .db_file_repository import DBFileRepository
 from .db_session_repository import DBSessionRepository
 from .db_uow import DBUnitOfWork
+from .db_user_repository import DBUserRepository
 from .file_app_config_repository import FileAppConfigRepository
 
 __all__ = [
     "FileAppConfigRepository",
     "DBFileRepository",
     "DBSessionRepository",
+    "DBUserRepository",
     "DBUnitOfWork",
 ]

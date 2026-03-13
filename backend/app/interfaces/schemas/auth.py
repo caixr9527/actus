@@ -11,8 +11,11 @@ from typing import Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.domain.models import UserStatus, User, UserProfile
+
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 PASSWORD_ALLOWED_REGEX = re.compile(r"^[A-Za-z0-9!@#$%^&*._\-]+$")
+VERIFICATION_CODE_REGEX = re.compile(r"^\d{6}$")
 
 
 def validate_password_strength(value: str) -> str:
@@ -32,8 +35,10 @@ class RegisterRequest(BaseModel):
     """邮箱注册请求结构"""
     email: str
     password: str = Field(min_length=8)
+    verification_code: Optional[str] = None
 
     @field_validator("email")
+    @classmethod
     def validate_email(cls, value: str) -> str:
         """邮箱格式基础校验"""
         if not EMAIL_REGEX.match(value):
@@ -41,9 +46,20 @@ class RegisterRequest(BaseModel):
         return value
 
     @field_validator("password")
+    @classmethod
     def validate_password(cls, value: str) -> str:
         """注册密码强度校验"""
         return validate_password_strength(value)
+
+    @field_validator("verification_code")
+    @classmethod
+    def validate_verification_code(cls, value: Optional[str]) -> Optional[str]:
+        """验证码格式校验（仅在传值时校验）"""
+        if value is None:
+            return None
+        if not VERIFICATION_CODE_REGEX.match(value):
+            raise ValueError("验证码格式不正确，应为6位数字")
+        return value
 
 
 class RegisterResponse(BaseModel):
@@ -51,8 +67,28 @@ class RegisterResponse(BaseModel):
     user_id: str
     email: str
     auth_provider: str = "email"
-    status: str = "active"
+    status: UserStatus = UserStatus.ACTIVE
     created_at: datetime
+
+
+class SendRegisterCodeRequest(BaseModel):
+    """发送注册验证码请求结构"""
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        """邮箱格式基础校验"""
+        if not EMAIL_REGEX.match(value):
+            raise ValueError("邮箱格式不正确")
+        return value
+
+
+class SendRegisterCodeResponse(BaseModel):
+    """发送注册验证码响应结构"""
+    email: str
+    verification_required: bool
+    expires_in_seconds: int
 
 
 class LoginRequest(BaseModel):
@@ -61,6 +97,7 @@ class LoginRequest(BaseModel):
     password: str
 
     @field_validator("email")
+    @classmethod
     def validate_email(cls, value: str) -> str:
         """邮箱格式基础校验"""
         if not EMAIL_REGEX.match(value):
@@ -86,7 +123,7 @@ class CurrentUserResponse(BaseModel):
     timezone: str = "Asia/Shanghai"
     locale: str = "zh-CN"
     auth_provider: str = "email"
-    status: str = "active"
+    status: UserStatus = UserStatus.ACTIVE
     created_at: datetime
     updated_at: datetime
     last_login_at: Optional[datetime] = None
@@ -128,6 +165,24 @@ class UpdatePasswordRequest(BaseModel):
     new_password: str = Field(min_length=8)
 
     @field_validator("old_password", "new_password")
+    @classmethod
     def validate_password(cls, value: str) -> str:
         """修改密码强度校验"""
         return validate_password_strength(value)
+
+
+class LoginResult(BaseModel):
+    """登录结果数据"""
+    user: User
+    profile: UserProfile
+    access_token: str
+    refresh_token: str
+    access_token_expires_in: int
+    refresh_token_expires_in: int
+
+
+class RegisterVerificationCodeResult(BaseModel):
+    """发送注册验证码结果"""
+
+    verification_required: bool
+    expires_in_seconds: int

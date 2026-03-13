@@ -14,6 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.domain.models import UserProfile
 from .base import Base
 
 
@@ -47,3 +48,18 @@ class UserProfileModel(Base):
         nullable=False,
         server_default=text("'zh-CN'::character varying"),
     )  # 语言地区
+
+    @classmethod
+    def from_domain(cls, profile: UserProfile) -> "UserProfileModel":
+        """从领域模型创建ORM模型"""
+        return cls(**profile.model_dump(mode="json"))
+
+    def to_domain(self) -> UserProfile:
+        """将ORM模型转换为领域模型"""
+        return UserProfile.model_validate(self, from_attributes=True)
+
+    def update_from_domain(self, profile: UserProfile) -> None:
+        """根据领域模型更新ORM模型"""
+        profile_data = profile.model_dump(mode="json")
+        for field, value in profile_data.items():
+            setattr(self, field, value)

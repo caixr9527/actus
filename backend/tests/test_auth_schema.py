@@ -4,12 +4,23 @@ import pytest
 from pydantic import ValidationError
 
 from app.interfaces.schemas.auth import (
+    SendRegisterCodeRequest,
     RegisterRequest,
     LoginRequest,
     TokenPairResponse,
     CurrentUserResponse,
     UpdatePasswordRequest,
 )
+
+
+def test_send_register_code_request_invalid_email_should_raise_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        SendRegisterCodeRequest(email="invalid-email")
+
+
+def test_send_register_code_request_valid_email_should_pass_validation() -> None:
+    payload = SendRegisterCodeRequest(email="tester@example.com")
+    assert payload.email == "tester@example.com"
 
 
 def test_register_request_invalid_email_should_raise_validation_error() -> None:
@@ -30,6 +41,24 @@ def test_register_request_password_with_illegal_symbol_should_raise_validation_e
 def test_register_request_password_with_common_symbol_should_pass_validation() -> None:
     payload = RegisterRequest(email="tester@example.com", password="Password123!")
     assert payload.password == "Password123!"
+
+
+def test_register_request_verification_code_with_non_digits_should_raise_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        RegisterRequest(
+            email="tester@example.com",
+            password="Password123!",
+            verification_code="12ab56",
+        )
+
+
+def test_register_request_verification_code_with_valid_digits_should_pass_validation() -> None:
+    payload = RegisterRequest(
+        email="tester@example.com",
+        password="Password123!",
+        verification_code="123456",
+    )
+    assert payload.verification_code == "123456"
 
 
 def test_login_request_valid_email_should_pass_validation() -> None:

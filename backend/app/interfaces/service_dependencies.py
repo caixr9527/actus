@@ -13,14 +13,17 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
-from app.application.service import AppConfigService, FileService, StatusService, AgentService
+from app.application.service import AppConfigService, FileService, StatusService, AgentService, AuthService
 from app.application.service.session_service import SessionService
+from app.infrastructure.external.email_sender import SMTPEmailSender
 from app.infrastructure.external.file_storage import CosFileStorage
 from app.infrastructure.external.health_checker import PostgresHealthChecker, RedisHealthChecker
 from app.infrastructure.external.json_parser import RepairJsonParser
 from app.infrastructure.external.llm import OpenAILLM
 from app.infrastructure.external.search import BingSearchEngine
 from app.infrastructure.external.task import RedisStreamTask
+from app.infrastructure.external.token_store import RedisRefreshTokenStore
+from app.infrastructure.external.verification_code_store import RedisRegisterVerificationCodeStore
 from app.infrastructure.repositories import FileAppConfigRepository
 from app.infrastructure.sandbox.docker_sandbox import DockerSandbox
 from app.infrastructure.storage import get_db_session, RedisClient, get_redis_client, Cos, get_cos, get_uow
@@ -80,6 +83,21 @@ def get_session_service() -> SessionService:
     """获取会话服务"""
     logger.info("加载获取SessionService")
     return SessionService(uow_factory=get_uow, sandbox_cls=DockerSandbox)
+
+
+@lru_cache()
+def get_auth_service(redis_client: RedisClient = Depends(get_redis_client)) -> AuthService:
+    """获取认证服务"""
+    logger.info("加载获取AuthService")
+    refresh_token_store = RedisRefreshTokenStore(redis_client=redis_client)
+    register_verification_code_store = RedisRegisterVerificationCodeStore(redis_client=redis_client)
+    email_sender = SMTPEmailSender()
+    return AuthService(
+        uow_factory=get_uow,
+        refresh_token_store=refresh_token_store,
+        register_verification_code_store=register_verification_code_store,
+        email_sender=email_sender,
+    )
 
 
 def build_agent_service(cos: Cos) -> AgentService:

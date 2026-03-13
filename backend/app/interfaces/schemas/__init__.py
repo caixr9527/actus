@@ -7,6 +7,8 @@
 """
 from .app_config import ListMCPServerResponse, ListMCPServerItem, ListA2AServerItem, ListA2AServerResponse
 from .auth import (
+    SendRegisterCodeRequest,
+    SendRegisterCodeResponse,
     RegisterRequest,
     RegisterResponse,
     LoginRequest,
@@ -57,6 +59,8 @@ __all__ = [
     "ListMCPServerItem",
     "ListA2AServerItem",
     "ListA2AServerResponse",
+    "SendRegisterCodeRequest",
+    "SendRegisterCodeResponse",
     "RegisterRequest",
     "RegisterResponse",
     "LoginRequest",

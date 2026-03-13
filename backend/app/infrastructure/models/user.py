@@ -18,6 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.domain.models import User, UserStatus
 from .base import Base
 
 
@@ -56,7 +57,7 @@ class UserModel(Base):
         String(255),
         nullable=True,
     )  # SSO外部ID
-    status: Mapped[str] = mapped_column(
+    status: Mapped[UserStatus] = mapped_column(
         String(255),
         nullable=False,
         server_default=text("'active'::character varying"),
@@ -80,3 +81,18 @@ class UserModel(Base):
         String(64),
         nullable=True,
     )  # 最近登录IP
+
+    @classmethod
+    def from_domain(cls, user: User) -> "UserModel":
+        """从领域模型创建ORM模型"""
+        return cls(**user.model_dump(mode="json"))
+
+    def to_domain(self) -> User:
+        """将ORM模型转换为领域模型"""
+        return User.model_validate(self, from_attributes=True)
+
+    def update_from_domain(self, user: User) -> None:
+        """根据领域模型更新ORM模型"""
+        user_data = user.model_dump(mode="json")
+        for field, value in user_data.items():
+            setattr(self, field, value)
