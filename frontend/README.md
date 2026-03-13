@@ -30,6 +30,16 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:23140/api
 
 未配置时，默认值为 `http://localhost:23140/api`。
 
+如果 `NEXT_PUBLIC_API_BASE_URL` 使用了跨域地址（例如前端 `http://localhost:3000` 调后端 `http://localhost:23140/api`），
+需要保证后端 `.env` 的 `CORS_ALLOWED_ORIGINS` 包含前端页面来源（Origin），否则浏览器会直接拦截请求。
+
+示例：
+
+```bash
+# backend/.env
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
 ## 4. 常用命令
 
 ```bash
@@ -72,6 +82,7 @@ npm run test:smoke
 1. 后端是否已启动并可访问 `NEXT_PUBLIC_API_BASE_URL`
 2. 浏览器 Network 中 `/api/...` 请求是否 2xx
 3. 本地代理、跨域或网关配置是否正确
+4. 若控制台提示 `CORS_ALLOWED_ORIGINS`，请将当前页面 Origin 加入后端白名单
 
 ## 7. CI 建议基线
 

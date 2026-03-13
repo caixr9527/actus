@@ -5,8 +5,9 @@
 @Author : caixiaorong01@outlook.com
 @File   : db_session_repository.py
 """
+import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from sqlalchemy import select, delete, update, func, cast
 from sqlalchemy.dialects.postgresql import JSONB
@@ -15,12 +16,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory
 from app.domain.repositories import SessionRepository
 from app.infrastructure.models import SessionModel
+from app.infrastructure.storage.redis import get_redis_client
+from core.realtime import SESSION_LIST_CHANGE_CHANNEL
+
+logger = logging.getLogger(__name__)
 
 
 class DBSessionRepository(SessionRepository):
 
     def __init__(self, db_session: AsyncSession) -> None:
         self.db_session = db_session
+
+    def _register_session_list_changed(self, session_id: str) -> None:
+        """注册会话列表变更通知，在事务提交成功后再执行发布。"""
+        changed_ids = self.db_session.info.setdefault("session_list_changed_ids", set())
+        if session_id in changed_ids:
+            return
+        changed_ids.add(session_id)
+
+        post_commit_hooks: list[Callable[[], Awaitable[None]]] = self.db_session.info.setdefault(
+            "post_commit_hooks",
+            [],
+        )
+
+        async def _publish() -> None:
+            try:
+                redis_client = get_redis_client()
+                await redis_client.client.publish(SESSION_LIST_CHANGE_CHANNEL, session_id)
+            except Exception as e:
+                # 通知失败不影响主事务结果，SSE 会回退到周期兜底刷新。
+                logger.debug(f"发布会话列表变更通知失败（已忽略）: {e}")
+
+        post_commit_hooks.append(_publish)
 
     async def save(self, session: Session) -> None:
         # 查询数据库中是否存在具有相同ID的会话记录
@@ -32,10 +59,11 @@ class DBSessionRepository(SessionRepository):
         if not record:
             record = SessionModel.from_domain(session)
             self.db_session.add(record)
-            return
+        else:
+            # 如果记录已存在，则用新的域对象更新现有的数据库记录
+            record.update_from_domain(session)
 
-        # 如果记录已存在，则用新的域对象更新现有的数据库记录
-        record.update_from_domain(session)
+        self._register_session_list_changed(session.id)
 
     async def get_all(self) -> List[Session]:
         """获取所有会话列表"""
@@ -67,7 +95,9 @@ class DBSessionRepository(SessionRepository):
         stmt = delete(SessionModel).where(SessionModel.id == session_id)
 
         # 执行删除操作
-        await self.db_session.execute(stmt)
+        result = await self.db_session.execute(stmt)
+        if result.rowcount:
+            self._register_session_list_changed(session_id)
 
     async def update_title(self, session_id: str, title: str) -> None:
         """更新会话标题"""
@@ -83,6 +113,7 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
 
     async def update_latest_message(self, session_id: str, message: str, timestamp: datetime) -> None:
         """更新会话最新消息"""
@@ -101,6 +132,7 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
 
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
@@ -122,6 +154,95 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+    async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
+        """按事件ID幂等新增事件"""
+        # 这里使用行级锁而不是直接JSONB append，目的是保证“存在性判断+写入”原子化。
+        stmt = (
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+        # 读取当前事件列表，缺省时按空列表处理。
+        current_events = list(record.events or [])
+        event_id = str(event.id)
+
+        # 幂等判断：只要事件ID已存在就视为已处理，直接返回False。
+        for current_event in current_events:
+            if str(current_event.get("id", "")) == event_id:
+                return False
+
+        # 事件不存在才追加，确保同一event_id不会重复入库。
+        current_events.append(event.model_dump(mode="json"))
+        record.events = current_events
+        return True
+
+    async def add_event_with_snapshot_if_absent(
+            self,
+            session_id: str,
+            event: BaseEvent,
+            title: Optional[str] = None,
+            latest_message: Optional[str] = None,
+            latest_message_at: Optional[datetime] = None,
+            increment_unread: bool = False,
+            status: Optional[SessionStatus] = None,
+    ) -> bool:
+        """按事件ID幂等新增事件，并在同一事务中更新会话投影"""
+        # 与add_event_if_absent一致：使用悲观锁保证并发安全和幂等判断准确性。
+        stmt = (
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+        # 事件幂等判断与投影更新要分离：
+        # 1) 事件历史只允许按event_id写入一次；
+        # 2) 会话投影(status/title/latest)在幂等重放时仍应收敛到最新值。
+        current_events = list(record.events or [])
+        event_id = str(event.id)
+        event_inserted = True
+        for current_event in current_events:
+            if str(current_event.get("id", "")) == event_id:
+                event_inserted = False
+                break
+
+        # 事件不存在才写入历史，保证event_id幂等。
+        if event_inserted:
+            current_events.append(event.model_dump(mode="json"))
+            record.events = current_events
+
+        # 标题属于会话投影的一部分，按调用方意图进行更新。
+        if title is not None:
+            record.title = title
+
+        # 最新消息投影用于会话列表展示，只在显式传入时更新。
+        if latest_message is not None:
+            record.latest_message = latest_message
+
+        # 时间戳与最新消息成对更新，避免出现文本和时间不同步。
+        if latest_message_at is not None:
+            record.latest_message_at = latest_message_at
+
+        # 未读数只能在事件首次写入时递增，避免重放消息导致重复累计。
+        if increment_unread and event_inserted:
+            record.unread_message_count = int(record.unread_message_count or 0) + 1
+
+        # 状态投影在同一事务内收敛。即使事件已存在，也允许补齐状态。
+        if status is not None:
+            record.status = status.value
+
+        # 返回值只表示“事件历史是否新增”，不表示投影是否更新。
+        self._register_session_list_changed(session_id)
+        return event_inserted
 
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
@@ -210,6 +331,7 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
 
     async def update_unread_message_count(self, session_id: str, count: int) -> None:
         """更新会话的未读消息数"""
@@ -225,6 +347,7 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
 
     async def increment_unread_message_count(self, session_id: str) -> None:
         """新增会话的未读消息数"""
@@ -242,6 +365,7 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
 
     async def decrement_unread_message_count(self, session_id: str) -> None:
         """将会话中的未读消息数-1"""
@@ -262,6 +386,7 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
 
     async def save_memory(self, session_id: str, agent_name: str, memory: Memory) -> None:
         """存储或者更新会话中的记忆(字典直接覆盖)"""

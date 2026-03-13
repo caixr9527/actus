@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Body
 
 from app.application.service import AppConfigService
 from app.domain.models import LLMConfig, AgentConfig, MCPConfig
-from app.interfaces import get_app_config_service
+from app.interfaces.service_dependencies import get_app_config_service
 from app.interfaces.schemas import Response, ListMCPServerResponse, ListA2AServerResponse
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ async def get_agent_config(
     summary="更新Agent配置信息",
     description="更新Agent配置信息"
 )
-async def update_llm_config(
+async def update_agent_config(
         new_agent_config: AgentConfig,
         app_config_service: AppConfigService = Depends(get_app_config_service)
 ) -> Response[AgentConfig]:

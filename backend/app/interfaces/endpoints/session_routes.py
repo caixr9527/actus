@@ -12,12 +12,14 @@ from typing import Optional, Dict, AsyncGenerator
 
 import websockets
 from fastapi import APIRouter, Depends
+from redis.exceptions import RedisError
 from sse_starlette import EventSourceResponse, ServerSentEvent
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets import ConnectionClosed
 
 from app.application.errors import NotFoundError
 from app.application.service import SessionService, AgentService
+from app.infrastructure.storage import get_redis_client
 from app.interfaces.schemas import (
     CreateSessionResponse,
     ListSessionResponse,
@@ -33,11 +35,26 @@ from app.interfaces.schemas import (
 )
 from app.interfaces.schemas import Response
 from app.interfaces.service_dependencies import get_session_service, get_agent_service
+from core.realtime import SESSION_LIST_CHANGE_CHANNEL, SESSION_LIST_FALLBACK_REFRESH_SECONDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["会话模块"])
-# 流式获取会话详情睡眠间隔
-SESSION_SLEEP_INTERVAL = 5
+
+
+async def _build_session_list_payload(session_service: SessionService) -> str:
+    sessions = await session_service.get_all_sessions()
+    session_items = [
+        ListSessionItem(
+            session_id=session.id,
+            title=session.title,
+            latest_message=session.latest_message,
+            latest_message_at=session.latest_message_at,
+            status=session.status,
+            unread_message_count=session.unread_message_count,
+        )
+        for session in sessions
+    ]
+    return ListSessionResponse(sessions=session_items).model_dump_json()
 
 
 @router.post(
@@ -60,40 +77,52 @@ async def create_session(
 @router.post(
     path="/stream",
     summary="流式获取所有会话基础信息列表",
-    description="间隔指定时间流式获取所有会话基础信息列表",
+    description="基于 Redis Pub/Sub 增量推送会话列表，并定期兜底校准",
 )
 async def stream_sessions(
         session_service: SessionService = Depends(get_session_service),
 ) -> EventSourceResponse:
-    """间隔指定时间流式获取所有会话基础信息列表"""
+    """基于事件驱动流式获取会话列表，减少固定轮询带来的数据库压力"""
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
-        """定义一个异步迭代器，用于获取所有会话列表"""
-        while True:
-            # 获取所有会话信息
-            sessions = await session_service.get_all_sessions()
+        previous_payload: str | None = None
+        pubsub = None
 
-            # 将会话信息转换为ListSessionItem对象列表
-            session_items = [
-                ListSessionItem(
-                    session_id=session.id,
-                    title=session.title,
-                    latest_message=session.latest_message,
-                    latest_message_at=session.latest_message_at,
-                    status=session.status,
-                    unread_message_count=session.unread_message_count,
-                )
-                for session in sessions
-            ]
+        # 连接建立后先返回一次完整快照，避免客户端首屏等待。
+        initial_payload = await _build_session_list_payload(session_service)
+        previous_payload = initial_payload
+        yield ServerSentEvent(event="sessions", data=initial_payload)
 
-            # 通过ServerSentEvent发送会话列表数据
-            yield ServerSentEvent(
-                event="sessions",
-                data=ListSessionResponse(sessions=session_items).model_dump_json(),
-            )
+        try:
+            pubsub = get_redis_client().client.pubsub()
+            await pubsub.subscribe(SESSION_LIST_CHANGE_CHANNEL)
+        except (RuntimeError, RedisError, Exception) as e:
+            # Redis 异常时降级到周期兜底，保证能力可用。
+            logger.warning(f"订阅会话列表变更通道失败，降级为周期校准: {e}")
+            pubsub = None
 
-            # 等待指定时间间隔后继续下一次循环
-            await asyncio.sleep(SESSION_SLEEP_INTERVAL)
+        try:
+            while True:
+                if pubsub is not None:
+                    # 事件触发增量刷新；超时后执行兜底校准，防止漏通知。
+                    await pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=SESSION_LIST_FALLBACK_REFRESH_SECONDS,
+                    )
+                else:
+                    await asyncio.sleep(SESSION_LIST_FALLBACK_REFRESH_SECONDS)
+
+                payload = await _build_session_list_payload(session_service)
+                if payload == previous_payload:
+                    continue
+                previous_payload = payload
+                yield ServerSentEvent(event="sessions", data=payload)
+        finally:
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe(SESSION_LIST_CHANGE_CHANNEL)
+                finally:
+                    await pubsub.aclose()
 
     # 返回EventSourceResponse对象，用于流式传输会话列表数据
     return EventSourceResponse(event_generator())
@@ -165,9 +194,13 @@ async def delete_session(
 async def chat(
         session_id: str,
         request: ChatRequest,
+        session_service: SessionService = Depends(get_session_service),
         agent_service: AgentService = Depends(get_agent_service),
 ) -> EventSourceResponse:
     """根据传递的会话id+chat请求数据向指定会话发起聊天请求"""
+    session = await session_service.get_session(session_id=session_id)
+    if not session:
+        raise NotFoundError("该会话不存在，请核实后重试")
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""

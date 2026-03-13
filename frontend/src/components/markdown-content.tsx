@@ -35,40 +35,40 @@ const headingClasses: Record<string, string> = {
 }
 
 const components: React.ComponentProps<typeof ReactMarkdown>['components'] = {
-  h1: ({ node, className, ...props }) => (
+  h1: ({ className, ...props }) => (
     <h1 className={cn(headingClasses.h1, className)} {...props} />
   ),
-  h2: ({ node, className, ...props }) => (
+  h2: ({ className, ...props }) => (
     <h2 className={cn(headingClasses.h2, className)} {...props} />
   ),
-  h3: ({ node, className, ...props }) => (
+  h3: ({ className, ...props }) => (
     <h3 className={cn(headingClasses.h3, className)} {...props} />
   ),
-  h4: ({ node, className, ...props }) => (
+  h4: ({ className, ...props }) => (
     <h4 className={cn(headingClasses.h4, className)} {...props} />
   ),
-  h5: ({ node, className, ...props }) => (
+  h5: ({ className, ...props }) => (
     <h5 className={cn(headingClasses.h5, className)} {...props} />
   ),
-  h6: ({ node, className, ...props }) => (
+  h6: ({ className, ...props }) => (
     <h6 className={cn(headingClasses.h6, className)} {...props} />
   ),
-  p: ({ node, className, ...props }) => (
+  p: ({ className, ...props }) => (
     <p className={cn('text-sm text-gray-700 leading-relaxed mb-2 last:mb-0', className)} {...props} />
   ),
-  ul: ({ node, className, ...props }) => (
+  ul: ({ className, ...props }) => (
     <ul className={cn('text-sm text-gray-700 list-disc pl-5 mb-2 space-y-0.5', className)} {...props} />
   ),
-  ol: ({ node, className, ...props }) => (
+  ol: ({ className, ...props }) => (
     <ol className={cn('text-sm text-gray-700 list-decimal pl-5 mb-2 space-y-0.5', className)} {...props} />
   ),
-  li: ({ node, className, ...props }) => (
+  li: ({ className, ...props }) => (
     <li className={cn('leading-relaxed', className)} {...props} />
   ),
-  strong: ({ node, className, ...props }) => (
+  strong: ({ className, ...props }) => (
     <strong className={cn('font-semibold text-gray-900', className)} {...props} />
   ),
-  code: ({ node, className, children, ...props }) => {
+  code: ({ className, children, ...props }) => {
     const text = typeof children === 'string' ? children : ''
     const isBlock = text.includes('\n')
     return (
@@ -85,10 +85,10 @@ const components: React.ComponentProps<typeof ReactMarkdown>['components'] = {
       </code>
     )
   },
-  pre: ({ node, className, ...props }) => (
+  pre: ({ className, ...props }) => (
     <pre className={cn('my-2 overflow-x-auto', className)} {...props} />
   ),
-  blockquote: ({ node, className, ...props }) => (
+  blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(
         'border-l-4 border-gray-200 pl-3 py-0.5 my-2 text-sm text-gray-600 italic',
@@ -97,7 +97,7 @@ const components: React.ComponentProps<typeof ReactMarkdown>['components'] = {
       {...props}
     />
   ),
-  a: ({ node, className, href, children, ...props }) => {
+  a: ({ className, href, children, ...props }) => {
     // 安全兜底：如果 href 包含 CJK 字符，说明 autolink 仍然误判，降级为纯文本
     if (href && /[\u4E00-\u9FFF\u3000-\u303F\uFF00-\uFFEF]/.test(href)) {
       return <span className="text-sm text-gray-700">{children}</span>

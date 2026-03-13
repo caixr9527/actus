@@ -25,6 +25,7 @@ class RedisStreamTask(Task):
         self._task_runner = task_runner
         self._id = str(uuid.uuid4())
         self._execution_task: Optional[asyncio.Task] = None
+        self._streams_cleaned = False
 
         input_stream_name = f"task:input:{self._id}"
         output_stream_name = f"task:output:{self._id}"
@@ -40,8 +41,37 @@ class RedisStreamTask(Task):
             del RedisStreamTask._task_registry[self._id]
             logger.info(f"清除任务缓存: {self._id}")
 
+    async def _cleanup_streams(self) -> None:
+        """清理任务输入/输出流，避免Redis Stream key与消息残留"""
+        if self._streams_cleaned:
+            return
+
+        cleanup_success = True
+        for stream_name, stream in (("input", self._input_stream), ("output", self._output_stream)):
+            try:
+                ok = await stream.delete_stream()
+                if ok:
+                    logger.info(f"清理任务{self._id}的{stream_name}流成功")
+                else:
+                    cleanup_success = False
+                    logger.warning(f"清理任务{self._id}的{stream_name}流返回失败")
+            except Exception as e:
+                cleanup_success = False
+                logger.error(f"清理任务{self._id}的{stream_name}流失败: {e}")
+
+        if cleanup_success:
+            self._streams_cleaned = True
+
+    def _schedule_cleanup_streams(self) -> None:
+        try:
+            asyncio.create_task(self._cleanup_streams())
+        except RuntimeError as e:
+            logger.warning(f"任务{self._id}调度流清理失败: {e}")
+
     def _on_task_done(self) -> None:
         """任务完成回调"""
+        self._schedule_cleanup_streams()
+
         if self._task_runner:
             asyncio.create_task(self._task_runner.on_done(self))
 
@@ -70,9 +100,11 @@ class RedisStreamTask(Task):
         if not self.done and self._execution_task:
             self._execution_task.cancel()
             logger.info(f"取消任务: {self._id}")
+            self._schedule_cleanup_streams()
             self._cleanup_registry()
             return True
 
+        self._schedule_cleanup_streams()
         self._cleanup_registry()
         return False
 
@@ -111,14 +143,32 @@ class RedisStreamTask(Task):
     @classmethod
     async def destroy(cls) -> None:
         """销毁任务"""
-        # 遍历所有注册的任务实例
-        for task_id, task in RedisStreamTask._task_registry.items():
-            # 取消每个任务的执行
-            task.cancel()
+        # 先对任务注册表做快照，避免 cancel() 触发 _cleanup_registry() 时
+        # 在迭代过程中修改字典导致 RuntimeError。
+        tasks = list(cls._task_registry.values())
 
-            # 如果任务关联了任务运行器，则调用其销毁方法释放资源
+        # 第一阶段：取消任务执行，尽快停止运行态。
+        for task in tasks:
+            try:
+                task.cancel()
+            except Exception as e:
+                logger.error(f"取消任务失败: {task.id}, 错误信息: {e}")
+
+        # 第二阶段：释放任务运行器持有的外部资源（如沙箱连接等）。
+        # 与“取消执行”分离可以避免状态遍历与状态修改交叉。
+        for task in tasks:
             if task._task_runner:
-                await task._task_runner.destroy()
+                try:
+                    await task._task_runner.destroy()
+                except Exception as e:
+                    logger.error(f"销毁任务运行器失败: {task.id}, 错误信息: {e}")
+
+        # 第三阶段：回收Redis Stream资源，避免任务结束后残留流key/历史消息。
+        for task in tasks:
+            try:
+                await task._cleanup_streams()
+            except Exception as e:
+                logger.error(f"清理任务流失败: {task.id}, 错误信息: {e}")
 
         # 清空任务注册表，释放所有任务引用
         cls._task_registry.clear()

@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { PlanPanel } from '@/components/plan-panel'
@@ -8,12 +9,15 @@ import { ChatMessage } from '@/components/chat-message'
 import { FilePreviewPanel } from '@/components/file-preview-panel'
 import { ToolPreviewPanel } from '@/components/tool-preview-panel'
 import { VNCOverlay } from '@/components/vnc-overlay'
+import { Button } from '@/components/ui/button'
 import { useSessionDetail } from '@/hooks/use-session-detail'
 import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
   getLatestPlanFromEvents,
 } from '@/lib/session-events'
+import { cn } from '@/lib/utils'
+import { useIsMobile } from '@/hooks/use-mobile'
 import type { ToolEvent, FileInfo } from '@/lib/api/types'
 import type { AttachmentFile, TimelineItem } from '@/lib/session-events'
 import { sessionApi } from '@/lib/api/session'
@@ -59,6 +63,8 @@ function removeInitQueryParamFromUrl(): void {
 const TIMELINE_WINDOW_SIZE = 120
 
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
+  const router = useRouter()
+  const isMobile = useIsMobile()
   const {
     session,
     files,
@@ -229,6 +235,14 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     void refresh()
   }, [refresh])
 
+  const isSessionNotFoundError = Boolean(
+    error &&
+    (
+      (error as { code?: number }).code === 404 ||
+      /\b404\b|not found|不存在|未找到/i.test(error.message)
+    )
+  )
+
   const shouldShowThinking =
     streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
 
@@ -248,9 +262,39 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }
 
   if (error && !session) {
+    if (isSessionNotFoundError) {
+      return (
+        <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center gap-3">
+          <p className="text-base text-gray-700">任务会话不存在或已被删除</p>
+          <p className="text-sm text-gray-500 text-center">
+            你可以返回首页发起新任务，或稍后重试。
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => refresh()}
+            >
+              重试
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => router.push('/')}
+            >
+              返回首页
+            </Button>
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center gap-2">
-        <p className="text-sm text-red-600">{error.message}</p>
+        <p className="text-sm text-red-600">加载任务失败：{error.message}</p>
         <button
           type="button"
           onClick={() => refresh()}
@@ -264,8 +308,15 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
   if (!session) {
     return (
-      <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
+      <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center gap-3">
         <p className="text-sm text-gray-500">未找到该任务</p>
+        <button
+          type="button"
+          className="text-sm text-primary underline underline-offset-2 cursor-pointer"
+          onClick={() => router.push('/')}
+        >
+          返回首页
+        </button>
       </div>
     )
   }
@@ -275,7 +326,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
       <div className="flex flex-row h-screen w-full overflow-hidden">
         {/* 主内容区 */}
         <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
-          <div className={`flex flex-col h-full mx-auto w-full min-w-0 px-4 ${hasPreview ? '' : 'max-w-[768px]'}`}>
+          <div className={cn('flex flex-col h-full mx-auto w-full min-w-0 px-4', !hasPreview && 'max-w-[768px]')}>
             <div className="flex-shrink-0">
               <SessionHeader
                 title={session.title}
@@ -366,14 +417,28 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
         {/* 文件预览面板 */}
         {previewFile && (
-          <div className="flex-shrink-0 w-[600px] h-full animate-in slide-in-from-right duration-300">
+          <div
+            className={cn(
+              'animate-in slide-in-from-right duration-300',
+              isMobile
+                ? 'fixed inset-0 z-40 bg-white'
+                : 'flex-shrink-0 h-full w-[420px] lg:w-[520px] xl:w-[600px]'
+            )}
+          >
             <FilePreviewPanel file={previewFile} onClose={handleClosePreview} />
           </div>
         )}
 
         {/* 工具预览面板 */}
         {resolvedPreviewTool && (
-          <div className="flex-shrink-0 w-[600px] h-full py-2 pr-2 animate-in slide-in-from-right duration-300">
+          <div
+            className={cn(
+              'animate-in slide-in-from-right duration-300',
+              isMobile
+                ? 'fixed inset-0 z-40 bg-white'
+                : 'flex-shrink-0 h-full w-[420px] lg:w-[520px] xl:w-[600px] py-2 pr-2'
+            )}
+          >
             <ToolPreviewPanel
               tool={resolvedPreviewTool}
               onClose={handleClosePreview}

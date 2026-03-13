@@ -18,13 +18,11 @@ const CARD_HEIGHT = 72
 
 function FileCard({
   file,
-  index,
   sizeLabel,
   role,
   onClick,
 }: {
   file: AttachmentFile
-  index: number
   sizeLabel: string
   role: 'user' | 'assistant'
   onClick?: () => void
@@ -84,7 +82,6 @@ export function AttachmentsMessage({
             <FileCard
               key={file.id ? `${file.id}-${index}` : `file-${index}`}
               file={file}
-              index={index}
               sizeLabel={sizeLabel(file)}
               role="user"
               onClick={() => onFileClick?.(file)}
@@ -104,7 +101,6 @@ export function AttachmentsMessage({
           <FileCard
             key={file.id ? `${file.id}-${index}` : `file-${index}`}
             file={file}
-            index={index}
             sizeLabel={sizeLabel(file)}
             role="assistant"
             onClick={() => onFileClick?.(file)}

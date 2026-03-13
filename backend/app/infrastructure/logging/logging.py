@@ -11,6 +11,21 @@ import sys
 from core.config import get_settings
 
 
+class ProjectLoggerOnlyFilter(logging.Filter):
+    """仅放行指定 logger 前缀的日志记录。"""
+
+    def __init__(self, allowed_prefixes: tuple[str, ...]):
+        super().__init__()
+        self._allowed_prefixes = allowed_prefixes
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        logger_name = record.name
+        for prefix in self._allowed_prefixes:
+            if logger_name == prefix or logger_name.startswith(f"{prefix}."):
+                return True
+        return False
+
+
 def setup_logging():
     settings = get_settings()
 
@@ -28,6 +43,10 @@ def setup_logging():
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(formatter)
     console_handler.setLevel(log_level)
+    if not settings.is_log_output_all:
+        # 非 all 模式时，按 LOG_OUTPUT_MODE 配置的前缀白名单过滤日志输出。
+        console_handler.addFilter(ProjectLoggerOnlyFilter(settings.log_output_allowed_logger_prefixes))
 
     root_logger.addHandler(console_handler)
+
     root_logger.info("Logging setup complete.")

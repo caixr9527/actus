@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import Image from 'next/image'
 import { fileApi } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Download, FileText, X } from 'lucide-react'
@@ -53,8 +54,17 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const previewRequestIdRef = useRef(0)
+  const previewAbortControllerRef = useRef<AbortController | null>(null)
+  const previewObjectUrlRef = useRef<string | null>(null)
 
   const fileType = file ? isSupportedFileType(file.extension) : { type: 'unsupported' as const }
+
+  const cleanupPreviewObjectUrl = useCallback(() => {
+    if (!previewObjectUrlRef.current) return
+    URL.revokeObjectURL(previewObjectUrlRef.current)
+    previewObjectUrlRef.current = null
+  }, [])
 
   // 加载文件内容
   const loadFileContent = useCallback(async (fileId: string, type: 'text' | 'image' | 'unsupported') => {
@@ -62,31 +72,45 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
       return
     }
 
+    previewRequestIdRef.current += 1
+    const requestId = previewRequestIdRef.current
+    previewAbortControllerRef.current?.abort()
+    const controller = new AbortController()
+    previewAbortControllerRef.current = controller
+
     setLoading(true)
     setError(null)
     setContent(null)
+    cleanupPreviewObjectUrl()
     setImageUrl(null)
 
     try {
       if (type === 'image') {
         // 图片类型：生成预览 URL
-        const blob = await fileApi.downloadFile(fileId)
+        const blob = await fileApi.downloadFile(fileId, { signal: controller.signal })
+        if (controller.signal.aborted || requestId !== previewRequestIdRef.current) return
         const url = URL.createObjectURL(blob)
+        previewObjectUrlRef.current = url
         setImageUrl(url)
       } else {
         // 文本类型：读取内容
-        const blob = await fileApi.downloadFile(fileId)
+        const blob = await fileApi.downloadFile(fileId, { signal: controller.signal })
+        if (controller.signal.aborted || requestId !== previewRequestIdRef.current) return
         const text = await blob.text()
+        if (controller.signal.aborted || requestId !== previewRequestIdRef.current) return
         setContent(text)
       }
     } catch (err) {
+      if (controller.signal.aborted || requestId !== previewRequestIdRef.current) return
       const msg = err instanceof Error ? err.message : '加载文件内容失败'
       setError(msg)
       toast.error(msg)
     } finally {
-      setLoading(false)
+      if (requestId === previewRequestIdRef.current) {
+        setLoading(false)
+      }
     }
-  }, [])
+  }, [cleanupPreviewObjectUrl])
 
   // 下载文件
   const handleDownload = useCallback(async () => {
@@ -119,11 +143,12 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   // 清理函数：关闭时释放资源
   useEffect(() => {
     return () => {
-      if (imageUrl) {
-        URL.revokeObjectURL(imageUrl)
-      }
+      previewRequestIdRef.current += 1
+      previewAbortControllerRef.current?.abort()
+      previewAbortControllerRef.current = null
+      cleanupPreviewObjectUrl()
     }
-  }, [imageUrl])
+  }, [cleanupPreviewObjectUrl])
 
   if (!file) {
     return null
@@ -204,9 +229,12 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
         {!loading && !error && fileType.type === 'image' && imageUrl && (
           <ScrollArea className="h-full">
             <div className="p-4">
-              <img 
-                src={imageUrl} 
+              <Image
+                src={imageUrl}
                 alt={file.filename}
+                width={1200}
+                height={800}
+                unoptimized
                 className="max-w-full h-auto rounded-lg border"
               />
             </div>

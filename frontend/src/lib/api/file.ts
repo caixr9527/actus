@@ -33,11 +33,16 @@ export const fileApi = {
   /**
    * 下载文件
    * @param fileId 文件 ID
+   * @param options 下载选项（可选）
    * @returns Blob 对象
    */
-  downloadFile: async (fileId: string): Promise<Blob> => {
+  downloadFile: async (
+    fileId: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<Blob> => {
     const response = await fetch(
       `${process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:23140/api"}/files/${fileId}/download`,
+      { signal: options?.signal },
     )
 
     if (!response.ok) {

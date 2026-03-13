@@ -8,7 +8,7 @@
 import logging
 from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response as FastAPIResponse
 
 from app.application.service import StatusService
 from app.domain.models import HealthStatus
@@ -26,10 +26,13 @@ router = APIRouter(prefix="/status", tags=["状态模块"])
     description="系统健康监测",
 )
 async def get_status(
-        status_service: StatusService = Depends(get_status_service)
+        http_response: FastAPIResponse,
+        status_service: StatusService = Depends(get_status_service),
 ) -> Response[List[HealthStatus]]:
     """系统健康监测"""
     status = await status_service.check_all()
     if any(item.status == 'ERROR' or item.status == 'error' for item in status):
+        # 健康检查失败时同步返回真实HTTP状态码，避免网关/探针误判为200。
+        http_response.status_code = 503
         return Response.fail(503, "系统服务存在异常", status)
     return Response.success(msg="系统服务正常", data=status)

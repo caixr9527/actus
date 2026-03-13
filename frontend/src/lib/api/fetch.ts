@@ -8,6 +8,33 @@ const API_CONFIG = {
   timeout: 30000, // 30秒
 } as const
 
+function resolveRequestUrl(endpoint: string): string {
+  return endpoint.startsWith("http")
+    ? endpoint
+    : `${API_CONFIG.baseURL}${endpoint}`
+}
+
+function getCorsAllowedOriginsHint(requestUrl: string): string | null {
+  if (typeof window === "undefined") return null
+
+  try {
+    const pageOrigin = window.location.origin
+    const targetOrigin = new URL(requestUrl, pageOrigin).origin
+    if (targetOrigin === pageOrigin) return null
+    return `检测到跨域请求（${pageOrigin} -> ${targetOrigin}），请将 ${pageOrigin} 加入后端 CORS_ALLOWED_ORIGINS`
+  } catch {
+    return null
+  }
+}
+
+function toNetworkApiError(requestUrl: string): ApiError {
+  const corsHint = getCorsAllowedOriginsHint(requestUrl)
+  if (corsHint) {
+    return new ApiError(500, `网络请求失败。${corsHint}`)
+  }
+  return new ApiError(500, "网络连接失败，请检查网络设置")
+}
+
 /**
  * 自定义错误类
  */
@@ -109,9 +136,7 @@ export async function request<T = unknown>(
   endpoint: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const url = endpoint.startsWith("http")
-    ? endpoint
-    : `${API_CONFIG.baseURL}${endpoint}`
+  const url = resolveRequestUrl(endpoint)
 
   const {
     timeout = API_CONFIG.timeout,
@@ -166,8 +191,11 @@ export async function request<T = unknown>(
     }
 
     // 处理网络错误
-    if (error instanceof TypeError && error.message === "Failed to fetch") {
-      throw new ApiError(500, "网络连接失败，请检查网络设置")
+    if (
+      error instanceof TypeError &&
+      /failed to fetch|load failed/i.test(error.message)
+    ) {
+      throw toNetworkApiError(url)
     }
 
     throw new ApiError(500, error instanceof Error ? error.message : "未知错误")
@@ -252,11 +280,8 @@ export function del<T = unknown>(
 export function createSSEConnection(
   endpoint: string,
   data?: unknown,
-  options?: RequestOptions,
 ): EventSource {
-  const url = endpoint.startsWith("http")
-    ? endpoint
-    : `${API_CONFIG.baseURL}${endpoint}`
+  const url = resolveRequestUrl(endpoint)
 
   // 对于 POST 请求，使用 fetch + ReadableStream 方式
   if (data !== undefined) {
@@ -278,9 +303,7 @@ export async function createSSEStream(
   data?: unknown,
   options?: RequestOptions,
 ): Promise<ReadableStream<Uint8Array>> {
-  const url = endpoint.startsWith("http")
-    ? endpoint
-    : `${API_CONFIG.baseURL}${endpoint}`
+  const url = resolveRequestUrl(endpoint)
 
   const {
     timeout = API_CONFIG.timeout,
@@ -348,6 +371,12 @@ export async function createSSEStream(
     }
     if (error instanceof ApiError) {
       throw error
+    }
+    if (
+      error instanceof TypeError &&
+      /failed to fetch|load failed/i.test(error.message)
+    ) {
+      throw toNetworkApiError(url)
     }
     throw new ApiError(500, error instanceof Error ? error.message : "未知错误")
   }

@@ -35,7 +35,6 @@ class CosFileStorage(FileStorage):
         self.bucket = bucket
         self.cos = cos
         self._uow_factory = uow_factory
-        self._uow = uow_factory()
 
     async def upload_file(self, upload_file: UploadFile) -> File:
         """根据传递的文件源将文件上传到腾讯云cos"""
@@ -71,8 +70,9 @@ class CosFileStorage(FileStorage):
                 mime_type=upload_file.content_type or "",
                 size=upload_file.size,
             )
-            async with self._uow:
-                await self._uow.file.save(file)
+            # 文件元数据持久化使用独立UoW，确保每次调用都有独立事务边界。
+            async with self._uow_factory() as uow:
+                await uow.file.save(file)
 
             return file
         except Exception as e:
@@ -83,8 +83,8 @@ class CosFileStorage(FileStorage):
         """根据文件id查询数据并下载文件"""
         try:
             # 根据文件ID从数据库获取文件记录
-            async with self._uow:
-                file = await self._uow.file.get_by_id(file_id)
+            async with self._uow_factory() as uow:
+                file = await uow.file.get_by_id(file_id)
             if not file:
                 raise ValueError(f"该文件不存在, 文件id: {file_id}")
 

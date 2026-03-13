@@ -7,9 +7,11 @@
 """
 import logging
 from functools import lru_cache
+from typing import cast
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import State
 
 from app.application.service import AppConfigService, FileService, StatusService, AgentService
 from app.application.service.session_service import SessionService
@@ -29,6 +31,14 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _get_app_state(app: object) -> State:
+    """获取应用 state 对象，便于静态检查工具识别。"""
+    state = getattr(app, "state", None)
+    if state is None:
+        raise RuntimeError("应用对象缺少 state 属性，无法获取 AgentService")
+    return cast(State, state)
+
+
 @lru_cache()
 def get_app_config_service() -> AppConfigService:
     """获取应用配置服务"""
@@ -36,7 +46,6 @@ def get_app_config_service() -> AppConfigService:
     return AppConfigService(app_config_repository=FileAppConfigRepository(settings.app_config_filepath))
 
 
-@lru_cache()
 def get_status_service(
         db_session: AsyncSession = Depends(get_db_session),
         redis_client: RedisClient = Depends(get_redis_client)
@@ -73,9 +82,8 @@ def get_session_service() -> SessionService:
     return SessionService(uow_factory=get_uow, sandbox_cls=DockerSandbox)
 
 
-def get_agent_service(
-        cos: Cos = Depends(get_cos),
-) -> AgentService:
+def build_agent_service(cos: Cos) -> AgentService:
+    """纯构造函数：根据显式传入依赖构建 AgentService。"""
     app_config_repository = FileAppConfigRepository(config_path=settings.app_config_filepath)
     app_config = app_config_repository.load()
 
@@ -98,3 +106,23 @@ def get_agent_service(
         file_storage=file_storage,
         uow_factory=get_uow,
     )
+
+
+@lru_cache()
+def get_agent_service_for_lifespan() -> AgentService:
+    """生命周期使用：构建并缓存单例 AgentService。"""
+    logger.info("加载获取AgentService")
+    return build_agent_service(cos=get_cos())
+
+
+def clear_agent_service_for_lifespan_cache() -> None:
+    """清理生命周期 AgentService 缓存。"""
+    get_agent_service_for_lifespan.cache_clear()
+
+
+def get_agent_service(request: Request) -> AgentService:
+    """路由依赖适配：优先读取 app.state，其次回退到生命周期单例。"""
+    app_service = getattr(_get_app_state(request.app), "agent_service", None)
+    if app_service is not None:
+        return app_service
+    return get_agent_service_for_lifespan()

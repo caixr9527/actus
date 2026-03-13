@@ -9,7 +9,8 @@ import asyncio
 import io
 import logging
 import uuid
-from typing import List, AsyncGenerator, Callable, BinaryIO
+from datetime import datetime
+from typing import List, AsyncGenerator, Callable, BinaryIO, Optional
 
 from fastapi import UploadFile
 from pydantic import TypeAdapter
@@ -85,7 +86,6 @@ class AgentTaskRunner(TaskRunner):
         self._file_storage = file_storage
         self._browser = browser
         self._uow_factory = uow_factory
-        self._uow = uow_factory()
         self._flow = PlannerReActFlow(
             llm=llm,
             agent_config=agent_config,
@@ -99,27 +99,65 @@ class AgentTaskRunner(TaskRunner):
             a2a_tool=self._a2a_tool,
         )
 
-    async def _put_and_add_event(self, task: Task, event: Event) -> None:
-        # 将事件数据放入输出流并获取事件ID
-        event_id = await task.output_stream.put(event.model_dump_json())
-        # 设置事件ID
-        event.id = event_id
-        # 将事件添加到会话存储中
-        async with self._uow:
-            await self._uow.session.add_event(self._session_id, event)
+    async def _put_and_add_event(
+            self,
+            task: Task,
+            event: Event,
+            title: Optional[str] = None,
+            latest_message: Optional[str] = None,
+            latest_message_at: Optional[datetime] = None,
+            increment_unread: bool = False,
+            status: Optional[SessionStatus] = None,
+    ) -> None:
+        event_id = None
+        try:
+            # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
+            event_id = await task.output_stream.put(event.model_dump_json())
+            event.id = event_id
 
-    @classmethod
-    async def _pop_event(cls, task: Task) -> Event:
+            # 再把同一事件和会话投影在单事务内落库。
+            # 这样可以保证“事件历史”与“会话列表投影(latest/status/title/unread)”一致提交。
+            async with self._uow_factory() as uow:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=self._session_id,
+                    event=event,
+                    title=title,
+                    latest_message=latest_message,
+                    latest_message_at=latest_message_at,
+                    increment_unread=increment_unread,
+                    status=status,
+                )
+        except Exception as e:
+            # 落库失败时补偿删除输出流，尽量降低Redis/DB分叉概率。
+            logger.error(f"写入输出流后保存事件历史失败: {e}")
+            if event_id is not None:
+                try:
+                    await task.output_stream.delete_message(event_id)
+                except Exception as rollback_err:
+                    logger.error(f"输出流补偿删除失败: {rollback_err}")
+            raise
+
+    async def _pop_event(self, task: Task) -> Optional[Event]:
         # 从输入流中取出事件数据
         event_id, event_str = await task.input_stream.pop()
         if event_str is None:
             logger.warning(f"接收到空消息")
-            return
+            return None
 
         # 解析JSON字符串为Event对象
         event = TypeAdapter(Event).validate_json(event_str)
         # 设置事件ID
         event.id = event_id
+
+        # 输入流消费阶段补写事件历史：
+        # 如果之前发生“入流成功但写库失败/进程中断”，这里会按event_id幂等补齐。
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.add_event_if_absent(self._session_id, event)
+        except Exception as e:
+            # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
+            logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")
+
         return event
 
     async def _sync_file_to_sandbox(self, file_id: str) -> File:
@@ -140,8 +178,8 @@ class AgentTaskRunner(TaskRunner):
             # 如果上传成功，则更新文件的存储路径并保存到文件仓库
             if tool_result.success:
                 file.filepath = filepath
-                async with self._uow:
-                    await self._uow.file.save(file=file)
+                async with self._uow_factory() as uow:
+                    await uow.file.save(file=file)
                 return file
         except Exception as e:
             # 记录同步文件到沙箱时出现的异常
@@ -161,8 +199,8 @@ class AgentTaskRunner(TaskRunner):
                         # 添加到附件列表
                         attachments.append(file)
                         # 将文件添加到会话存储中
-                        async with self._uow:
-                            await self._uow.session.add_file(session_id=self._session_id, file=file)
+                        async with self._uow_factory() as uow:
+                            await uow.session.add_file(session_id=self._session_id, file=file)
 
                 # 更新事件中的附件列表为已同步的文件
                 event.attachments = attachments
@@ -184,41 +222,39 @@ class AgentTaskRunner(TaskRunner):
         return size
 
     async def _sync_file_to_storage(self, filepath: str) -> File:
-
         try:
-            # 根据文件路径从会话存储中获取文件信息
-            async with self._uow:
-                file = await self._uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
+            # 根据文件路径从会话存储中获取旧文件信息（如存在）
+            async with self._uow_factory() as uow:
+                old_file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
 
             # 从沙箱环境中下载文件数据
             file_data = await self._sandbox.download_file(file_path=filepath)
 
-            # 如果文件存在，则从会话存储中移除该文件
-            if file:
-                async with self._uow:
-                    await self._uow.session.remove_file(session_id=self._session_id, file_id=file.filepath)
-
             # 从路径中提取文件名
             filename = filepath.split("/")[-1]
 
-            # 创建UploadFile对象用于上传
-            upload_file = UploadFile(file=file_data, filename=filename, size=self._get_stream_size(file_data))
+            # 创建 UploadFile 对象用于上传
+            upload_file = UploadFile(
+                file=file_data,
+                filename=filename,
+                size=self._get_stream_size(file_data),
+            )
 
-            # 将文件上传到文件存储系统
-            await self._file_storage.upload_file(upload_file=upload_file)
+            # 上传并接收新文件对象，后续会话映射以该对象为准
+            new_file = await self._file_storage.upload_file(upload_file=upload_file)
+            new_file.filepath = filepath
 
-            # 更新文件的存储路径
-            file.filepath = filepath
+            # 原子更新会话文件索引：删除旧引用（若存在）并新增新引用
+            async with self._uow_factory() as uow:
+                if old_file:
+                    await uow.session.remove_file(session_id=self._session_id, file_id=old_file.id)
+                await uow.session.add_file(session_id=self._session_id, file=new_file)
 
-            # 将文件重新添加到会话存储中
-            async with self._uow:
-                await self._uow.session.add_file(session_id=self._session_id, file=file)
-
-            # 返回同步后的文件对象
-            return file
+            return new_file
         except Exception as e:
             # 记录同步文件到存储时发生的异常
             logger.exception(f"同步文件到存储失败: {e}")
+            raise
 
     async def _sync_message_attachments_to_storage(self, event: MessageEvent) -> None:
         attachments: List[File] = []
@@ -236,6 +272,7 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             # 记录同步附件到存储时发生的异常
             logger.exception(f"同步消息附件到存储失败: {e}")
+            raise
 
     async def _get_browser_screenshot(self) -> str:
         # 获取浏览器截图
@@ -366,6 +403,15 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             logger.warning(f"清理A2A工具资源时出错: {e}")
 
+    async def _mark_session_completed_fallback(self, scene: str) -> None:
+        """在事件写入失败时兜底更新会话状态为COMPLETED"""
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+        except Exception as fallback_err:
+            # 兜底再失败时保留错误日志，便于后续排障或离线修复。
+            logger.error(f"会话[{self._session_id}]在{scene}状态兜底失败: {fallback_err}")
+
     async def invoke(self, task: Task) -> None:
         try:
             # 记录任务开始执行的日志
@@ -380,6 +426,9 @@ class AgentTaskRunner(TaskRunner):
             while not await task.input_stream.is_empty():
                 # 从输入流中取出事件
                 event = await self._pop_event(task)
+                if event is None:
+                    # 空读场景直接跳过，避免后续访问空对象字段导致任务中断。
+                    continue
 
                 # 初始化消息变量
                 message = ""
@@ -402,53 +451,81 @@ class AgentTaskRunner(TaskRunner):
 
                 # 运行流程并处理每个产生的事件
                 async for event in self._run_flow(message_obj):
-                    # 将事件添加到输出流和会话存储
-                    await self._put_and_add_event(task, event)
-
-                    # 根据事件类型更新会话状态或信息
+                    # 将事件写入输出流+数据库，并在同一事务中更新会话投影字段。
+                    # 说明：每种事件对应的投影更新在这里统一声明，便于审计事务边界。
                     if isinstance(event, TitleEvent):
-                        # 更新会话标题
-                        async with self._uow:
-                            await self._uow.session.update_title(session_id=self._session_id, title=event.title)
+                        # 标题事件：事件历史 + 标题投影。
+                        await self._put_and_add_event(
+                            task=task,
+                            event=event,
+                            title=event.title,
+                        )
                     elif isinstance(event, MessageEvent):
-                        # 更新会话最新消息和未读消息计数
-                        async with self._uow:
-                            await self._uow.session.update_latest_message(
-                                session_id=self._session_id,
-                                message=event.message,
-                                timestamp=event.created_at,
-                            )
-                            await self._uow.session.increment_unread_message_count(session_id=self._session_id)
+                        # 消息事件：事件历史 + latest_message + 未读数递增。
+                        await self._put_and_add_event(
+                            task=task,
+                            event=event,
+                            latest_message=event.message,
+                            latest_message_at=event.created_at,
+                            increment_unread=True,
+                        )
                     elif isinstance(event, WaitEvent):
-                        # 如果是等待事件，将会话状态设置为等待并返回
-                        async with self._uow:
-                            await self._uow.session.update_status(
-                                session_id=self._session_id,
-                                status=SessionStatus.WAITING
-                            )
+                        # 等待事件：事件历史 + 状态切换为WAITING，并立即结束本轮消费。
+                        await self._put_and_add_event(
+                            task=task,
+                            event=event,
+                            status=SessionStatus.WAITING,
+                        )
                         return
+                    elif isinstance(event, DoneEvent):
+                        # Done事件优先走原子提交：
+                        # 当输入队列已空时，和COMPLETED状态一并落库，避免事件/状态分叉。
+                        has_more_input = not await task.input_stream.is_empty()
+                        await self._put_and_add_event(
+                            task=task,
+                            event=event,
+                            status=None if has_more_input else SessionStatus.COMPLETED,
+                        )
+                    else:
+                        # 其他事件：仅记录事件历史。
+                        await self._put_and_add_event(task=task, event=event)
 
                     # 检查输入流是否还有更多事件，如果没有则退出循环
                     if not await task.input_stream.is_empty():
                         break
 
-            # 所有事件处理完成后，将会话状态更新为已完成
-            async with self._uow:
-                await self._uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+            # 所有事件处理完成后，执行一次状态兜底：
+            # 正常情况下Done事件已将状态置为COMPLETED，这里仅作为防御性保障。
+            async with self._uow_factory() as uow:
+                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
         except asyncio.CancelledError:
             # 处理任务被取消的情况
             logger.info(f"AgentTaskRunner任务运行取消")
-            await self._put_and_add_event(task=task, event=DoneEvent())
-            async with self._uow:
-                await self._uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+            # 取消时优先写入Done事件+状态；如果该路径失败，再走独立状态兜底。
+            try:
+                await self._put_and_add_event(
+                    task=task,
+                    event=DoneEvent(),
+                    status=SessionStatus.COMPLETED,
+                )
+            except Exception as done_err:
+                logger.error(f"任务取消分支写入Done事件失败: {done_err}")
+                await self._mark_session_completed_fallback(scene="取消分支")
             # 抛出异常
             raise
         except Exception as e:
             # 处理其他异常情况
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
-            await self._put_and_add_event(task=task, event=ErrorEvent(error=f"AgentTaskRunner出错: {str(e)}"))
-            async with self._uow:
-                await self._uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+            # 异常时优先提交“错误事件 + 状态完成”，失败时降级为状态兜底更新。
+            try:
+                await self._put_and_add_event(
+                    task=task,
+                    event=ErrorEvent(error=f"{str(e)}"),
+                    status=SessionStatus.COMPLETED,
+                )
+            except Exception as error_event_err:
+                logger.error(f"异常分支写入Error事件失败: {error_event_err}")
+                await self._mark_session_completed_fallback(scene="异常分支")
         finally:
             # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamablehttp_client内部使用anyio.create_task_group()，
