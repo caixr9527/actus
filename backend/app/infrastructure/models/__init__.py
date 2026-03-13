@@ -8,5 +8,7 @@
 from .base import Base
 from .file import FileModel
 from .session import SessionModel
+from .user import UserModel
+from .user_profile import UserProfileModel
 
-__all__ = ["Base", "SessionModel", "FileModel"]
+__all__ = ["Base", "SessionModel", "FileModel", "UserModel", "UserProfileModel"]

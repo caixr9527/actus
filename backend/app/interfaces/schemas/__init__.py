@@ -6,6 +6,19 @@
 @File   : __init__.py.py
 """
 from .app_config import ListMCPServerResponse, ListMCPServerItem, ListA2AServerItem, ListA2AServerResponse
+from .auth import (
+    RegisterRequest,
+    RegisterResponse,
+    LoginRequest,
+    TokenPairResponse,
+    CurrentUserResponse,
+    LoginResponse,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
+    UpdateCurrentUserRequest,
+    UpdateCurrentUserResponse,
+    UpdatePasswordRequest,
+)
 from .base import Response
 from .event import (
     BaseEventData,
@@ -44,6 +57,17 @@ __all__ = [
     "ListMCPServerItem",
     "ListA2AServerItem",
     "ListA2AServerResponse",
+    "RegisterRequest",
+    "RegisterResponse",
+    "LoginRequest",
+    "TokenPairResponse",
+    "CurrentUserResponse",
+    "LoginResponse",
+    "RefreshTokenRequest",
+    "RefreshTokenResponse",
+    "UpdateCurrentUserRequest",
+    "UpdateCurrentUserResponse",
+    "UpdatePasswordRequest",
     "CreateSessionResponse",
     "ListSessionResponse",
     "ListSessionItem",
