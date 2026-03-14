@@ -1,7 +1,7 @@
 import asyncio
 
 # 先初始化依赖模块，避免触发 app.application.service 的历史循环导入路径。
-from app.interfaces.service_dependencies import get_agent_service  # noqa: F401
+from app.interfaces.dependencies.services import get_agent_service  # noqa: F401
 from app.application.service.agent_service import AgentService, OUTPUT_STREAM_BLOCK_MS
 from app.domain.models import SessionStatus, MessageEvent, DoneEvent
 

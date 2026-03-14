@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : routes.py
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.interfaces.endpoints import (
     status_routes,
@@ -14,6 +14,7 @@ from app.interfaces.endpoints import (
     session_routes,
     auth_routes,
 )
+from app.interfaces.dependencies.auth import get_current_user
 
 
 def create_api_route() -> APIRouter:
@@ -21,9 +22,9 @@ def create_api_route() -> APIRouter:
     api_router = APIRouter()
 
     api_router.include_router(status_routes.router)
-    api_router.include_router(app_config_routes.router)
-    api_router.include_router(file_routes.router)
-    api_router.include_router(session_routes.router)
+    api_router.include_router(app_config_routes.router, dependencies=[Depends(get_current_user)])
+    api_router.include_router(file_routes.router, dependencies=[Depends(get_current_user)])
+    api_router.include_router(session_routes.router, dependencies=[Depends(get_current_user)])
     api_router.include_router(auth_routes.router)
     return api_router
 

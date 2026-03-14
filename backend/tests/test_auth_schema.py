@@ -10,6 +10,8 @@ from app.interfaces.schemas.auth import (
     RegisterRequest,
     LoginRequest,
     TokenPairResponse,
+    RefreshTokenRequest,
+    LogoutResponse,
     CurrentUserResponse,
     UpdatePasswordRequest,
 )
@@ -117,6 +119,16 @@ def test_current_user_response_should_allow_optional_login_fields() -> None:
     )
     assert payload.last_login_at is None
     assert payload.last_login_ip is None
+
+
+def test_refresh_token_request_should_store_refresh_token() -> None:
+    payload = RefreshTokenRequest(refresh_token="rt-1")
+    assert payload.refresh_token == "rt-1"
+
+
+def test_logout_response_should_default_success_true() -> None:
+    payload = LogoutResponse()
+    assert payload.success is True
 
 
 def test_update_password_request_should_validate_min_length() -> None:

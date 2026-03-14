@@ -6,5 +6,6 @@
 @File   : __init__.py
 """
 from .redis_refresh_token_store import RedisRefreshTokenStore
+from .redis_access_token_blacklist_store import RedisAccessTokenBlacklistStore
 
-__all__ = ["RedisRefreshTokenStore"]
+__all__ = ["RedisRefreshTokenStore", "RedisAccessTokenBlacklistStore"]

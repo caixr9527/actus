@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.application.errors import NotFoundError
 from app.interfaces.endpoints.session_routes import router as session_router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
-from app.interfaces.service_dependencies import get_agent_service, get_session_service
+from app.interfaces.dependencies.services import get_agent_service, get_session_service
 from app.application.service.agent_service import AgentService
 from app.application.service.session_service import SessionService
 

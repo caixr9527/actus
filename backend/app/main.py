@@ -20,7 +20,7 @@ from app.infrastructure.logging import setup_logging
 from app.infrastructure.storage import get_redis_client, get_postgres, get_cos
 from app.interfaces.endpoints.routes import router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
-from app.interfaces.service_dependencies import (
+from app.interfaces.dependencies.services import (
     get_agent_service_for_lifespan,
     clear_agent_service_for_lifespan_cache,
 )

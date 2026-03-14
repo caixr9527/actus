@@ -148,6 +148,16 @@ class RefreshTokenResponse(BaseModel):
     tokens: TokenPairResponse
 
 
+class LogoutRequest(BaseModel):
+    """退出登录请求结构"""
+    refresh_token: str
+
+
+class LogoutResponse(BaseModel):
+    """退出登录响应结构"""
+    success: bool = True
+
+
 class UpdateCurrentUserRequest(BaseModel):
     """更新个人资料请求结构"""
     nickname: Optional[str] = None
@@ -188,3 +198,12 @@ class RegisterVerificationCodeResult(BaseModel):
 
     verification_required: bool
     expires_in_seconds: int
+
+
+class RefreshResult(BaseModel):
+    """刷新 Token 结果数据"""
+
+    access_token: str
+    refresh_token: str
+    access_token_expires_in: int
+    refresh_token_expires_in: int

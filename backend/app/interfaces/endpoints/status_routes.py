@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Response as FastAPIResponse
 from app.application.service import StatusService
 from app.domain.models import HealthStatus
 from app.interfaces.schemas import Response
-from app.interfaces.service_dependencies import get_status_service
+from app.interfaces.dependencies.services import get_status_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/status", tags=["状态模块"])

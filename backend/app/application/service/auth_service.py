@@ -13,12 +13,18 @@ from app.application.errors import BadRequestError, ServerError
 from app.application.utils import PasswordHasher, AuthTokenManager, VerificationCodeManager
 from app.domain.external import (
     RefreshTokenStore,
+    AccessTokenBlacklistStore,
+    RefreshTokenConsumeStatus,
     RegisterVerificationCodeStore,
     EmailSender,
 )
 from app.domain.models import User, UserProfile, UserStatus
 from app.domain.repositories import IUnitOfWork
-from app.interfaces.schemas.auth import LoginResult, RegisterVerificationCodeResult
+from app.interfaces.schemas.auth import (
+    LoginResult,
+    RegisterVerificationCodeResult,
+    RefreshResult,
+)
 from core.config import get_settings
 
 
@@ -29,11 +35,13 @@ class AuthService:
             self,
             uow_factory: Callable[[], IUnitOfWork],
             refresh_token_store: RefreshTokenStore,
+            access_token_blacklist_store: Optional[AccessTokenBlacklistStore] = None,
             register_verification_code_store: Optional[RegisterVerificationCodeStore] = None,
             email_sender: Optional[EmailSender] = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._refresh_token_store = refresh_token_store
+        self._access_token_blacklist_store = access_token_blacklist_store
         self._register_verification_code_store = register_verification_code_store
         self._email_sender = email_sender
         self._setting = get_settings()
@@ -179,6 +187,87 @@ class AuthService:
                 access_token_expires_in=self._setting.auth_access_token_expires_in,
                 refresh_token_expires_in=self._setting.auth_refresh_token_expires_in,
             )
+
+    async def refresh_tokens(self, refresh_token: str) -> RefreshResult:
+        """刷新 Token（Refresh Token 轮转）。"""
+        normalized_refresh_token = refresh_token.strip()
+        if not normalized_refresh_token:
+            raise BadRequestError(msg="Refresh Token 不能为空")
+
+        try:
+            consume_result = await self._refresh_token_store.consume_refresh_token(normalized_refresh_token)
+        except Exception as e:
+            raise ServerError(msg="刷新失败，请稍后重试") from e
+
+        if consume_result.status == RefreshTokenConsumeStatus.NOT_FOUND:
+            raise BadRequestError(msg="Refresh Token 无效或已过期")
+
+        if consume_result.status == RefreshTokenConsumeStatus.REPLAYED:
+            if consume_result.user_id:
+                await self._refresh_token_store.revoke_user_refresh_tokens(consume_result.user_id)
+            raise BadRequestError(msg="检测到登录状态异常，请重新登录")
+
+        if consume_result.user_id is None:
+            raise ServerError(msg="刷新失败，请稍后重试")
+
+        async with self._uow_factory() as uow:
+            user = await uow.user.get_by_id(consume_result.user_id)
+            if user is None:
+                await self._refresh_token_store.revoke_user_refresh_tokens(consume_result.user_id)
+                raise BadRequestError(msg="用户不存在，请重新登录")
+            if user.status != UserStatus.ACTIVE:
+                await self._refresh_token_store.revoke_user_refresh_tokens(user.id)
+                raise BadRequestError(msg="账号状态异常，暂不可登录")
+
+        access_token = AuthTokenManager.generate_access_token(
+            user_id=user.id,
+            email=user.email,
+            secret_key=self._setting.auth_jwt_secret,
+            algorithm=self._setting.auth_jwt_algorithm,
+            expires_in_seconds=self._setting.auth_access_token_expires_in,
+        )
+        next_refresh_token = AuthTokenManager.generate_refresh_token()
+
+        try:
+            await self._refresh_token_store.save_refresh_token(
+                refresh_token=next_refresh_token,
+                user_id=user.id,
+                email=user.email,
+                expires_in_seconds=self._setting.auth_refresh_token_expires_in,
+            )
+        except Exception as e:
+            raise ServerError(msg="刷新失败，请稍后重试") from e
+
+        return RefreshResult(
+            access_token=access_token,
+            refresh_token=next_refresh_token,
+            access_token_expires_in=self._setting.auth_access_token_expires_in,
+            refresh_token_expires_in=self._setting.auth_refresh_token_expires_in,
+        )
+
+    async def logout(
+            self,
+            refresh_token: str,
+            access_token: str,
+            access_token_expires_in_seconds: int,
+    ) -> None:
+        """退出登录（删除 Refresh Token + 拉黑当前 Access Token）。"""
+        normalized_refresh_token = refresh_token.strip()
+        if not normalized_refresh_token:
+            raise BadRequestError(msg="Refresh Token 不能为空")
+        normalized_access_token = access_token.strip()
+        if not normalized_access_token:
+            raise BadRequestError(msg="Access Token 不能为空")
+        try:
+            await self._refresh_token_store.delete_refresh_token(normalized_refresh_token)
+            if self._access_token_blacklist_store is None:
+                raise ServerError(msg="认证服务未配置，请联系管理员")
+            await self._access_token_blacklist_store.add_access_token_to_blacklist(
+                access_token=normalized_access_token,
+                expires_in_seconds=access_token_expires_in_seconds,
+            )
+        except Exception as e:
+            raise ServerError(msg="退出失败，请稍后重试") from e
 
     def _ensure_register_verification_code_store(self) -> RegisterVerificationCodeStore:
         if self._register_verification_code_store is None:

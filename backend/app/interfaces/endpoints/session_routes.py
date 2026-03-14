@@ -34,7 +34,7 @@ from app.interfaces.schemas import (
     ShellReadRequest
 )
 from app.interfaces.schemas import Response
-from app.interfaces.service_dependencies import get_session_service, get_agent_service
+from app.interfaces.dependencies.services import get_session_service, get_agent_service
 from core.realtime import SESSION_LIST_CHANGE_CHANNEL, SESSION_LIST_FALLBACK_REFRESH_SECONDS
 
 logger = logging.getLogger(__name__)

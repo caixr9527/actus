@@ -7,6 +7,7 @@ import pytest
 from app.application.errors import BadRequestError
 from app.application.service.auth_service import AuthService
 from app.application.utils import PasswordHasher
+from app.domain.external import RefreshTokenConsumeResult, RefreshTokenConsumeStatus
 from app.domain.models import User, UserProfile, UserStatus
 
 
@@ -36,6 +37,10 @@ class _FakeUserRepository:
 class _FakeRefreshTokenStore:
     def __init__(self) -> None:
         self.records: list[dict[str, str | int]] = []
+        self.consume_results: dict[str, RefreshTokenConsumeResult] = {}
+        self.consumed_tokens: list[str] = []
+        self.revoked_user_ids: list[str] = []
+        self.deleted_tokens: list[str] = []
 
     async def save_refresh_token(
             self,
@@ -53,6 +58,39 @@ class _FakeRefreshTokenStore:
                 "expires_in_seconds": expires_in_seconds,
             }
         )
+
+    async def consume_refresh_token(self, refresh_token: str) -> RefreshTokenConsumeResult:
+        self.consumed_tokens.append(refresh_token)
+        return self.consume_results.get(
+            refresh_token,
+            RefreshTokenConsumeResult(status=RefreshTokenConsumeStatus.NOT_FOUND),
+        )
+
+    async def revoke_user_refresh_tokens(self, user_id: str) -> None:
+        self.revoked_user_ids.append(user_id)
+
+    async def delete_refresh_token(self, refresh_token: str) -> None:
+        self.deleted_tokens.append(refresh_token)
+
+
+class _FakeAccessTokenBlacklistStore:
+    def __init__(self) -> None:
+        self.records: list[dict[str, str | int]] = []
+
+    async def add_access_token_to_blacklist(
+            self,
+            access_token: str,
+            expires_in_seconds: int,
+    ) -> None:
+        self.records.append(
+            {
+                "access_token": access_token,
+                "expires_in_seconds": expires_in_seconds,
+            }
+        )
+
+    async def is_access_token_blacklisted(self, access_token: str) -> bool:
+        return any(record["access_token"] == access_token for record in self.records)
 
 
 class _FakeRegisterVerificationCodeStore:
@@ -115,6 +153,7 @@ class _FakeUoW:
 def _build_auth_service(
         user_repo: _FakeUserRepository,
         refresh_token_store: Optional[_FakeRefreshTokenStore] = None,
+        access_token_blacklist_store: Optional[_FakeAccessTokenBlacklistStore] = None,
         register_verification_code_store: Optional[_FakeRegisterVerificationCodeStore] = None,
         email_sender: Optional[_FakeEmailSender] = None,
         email_verification_enabled: bool = False,
@@ -122,6 +161,7 @@ def _build_auth_service(
     service = AuthService(
         uow_factory=lambda: _FakeUoW(user_repo),
         refresh_token_store=refresh_token_store or _FakeRefreshTokenStore(),
+        access_token_blacklist_store=access_token_blacklist_store or _FakeAccessTokenBlacklistStore(),
         register_verification_code_store=register_verification_code_store,
         email_sender=email_sender,
     )
@@ -347,3 +387,112 @@ def test_login_should_raise_bad_request_when_user_status_is_disabled() -> None:
             )
         )
     assert exc.value.msg == "账号状态异常，暂不可登录"
+
+
+def test_refresh_tokens_should_issue_new_token_pair_when_refresh_token_valid() -> None:
+    user_repo = _FakeUserRepository()
+    refresh_token_store = _FakeRefreshTokenStore()
+    service = _build_auth_service(user_repo, refresh_token_store)
+
+    existing = User(
+        email="tester@example.com",
+        password="hashed-password",
+        password_salt="salt",
+    )
+    user_repo.users_by_id[existing.id] = existing
+    user_repo.users_by_email[existing.email] = existing
+    refresh_token_store.consume_results["rt-valid"] = RefreshTokenConsumeResult(
+        status=RefreshTokenConsumeStatus.CONSUMED,
+        user_id=existing.id,
+        email=existing.email,
+    )
+
+    result = asyncio.run(service.refresh_tokens("rt-valid"))
+
+    assert result.access_token
+    assert result.refresh_token
+    assert result.refresh_token != "rt-valid"
+    assert result.access_token_expires_in == 1800
+    assert result.refresh_token_expires_in == 604800
+    assert refresh_token_store.consumed_tokens == ["rt-valid"]
+    assert len(refresh_token_store.records) == 1
+    assert refresh_token_store.records[0]["user_id"] == existing.id
+
+
+def test_refresh_tokens_should_raise_bad_request_when_refresh_token_missing() -> None:
+    user_repo = _FakeUserRepository()
+    refresh_token_store = _FakeRefreshTokenStore()
+    service = _build_auth_service(user_repo, refresh_token_store)
+
+    with pytest.raises(BadRequestError) as exc:
+        asyncio.run(service.refresh_tokens("rt-not-found"))
+
+    assert exc.value.msg == "Refresh Token 无效或已过期"
+
+
+def test_refresh_tokens_should_revoke_user_tokens_when_refresh_token_replayed() -> None:
+    user_repo = _FakeUserRepository()
+    refresh_token_store = _FakeRefreshTokenStore()
+    service = _build_auth_service(user_repo, refresh_token_store)
+    compromised_user_id = "user-1"
+    refresh_token_store.consume_results["rt-replayed"] = RefreshTokenConsumeResult(
+        status=RefreshTokenConsumeStatus.REPLAYED,
+        user_id=compromised_user_id,
+        email="tester@example.com",
+    )
+
+    with pytest.raises(BadRequestError) as exc:
+        asyncio.run(service.refresh_tokens("rt-replayed"))
+
+    assert exc.value.msg == "检测到登录状态异常，请重新登录"
+    assert refresh_token_store.revoked_user_ids == [compromised_user_id]
+
+
+def test_refresh_tokens_should_revoke_user_tokens_when_user_status_is_disabled() -> None:
+    user_repo = _FakeUserRepository()
+    refresh_token_store = _FakeRefreshTokenStore()
+    service = _build_auth_service(user_repo, refresh_token_store)
+
+    existing = User(
+        email="tester@example.com",
+        password="hashed-password",
+        password_salt="salt",
+        status=UserStatus.DISABLED,
+    )
+    user_repo.users_by_id[existing.id] = existing
+    user_repo.users_by_email[existing.email] = existing
+    refresh_token_store.consume_results["rt-valid"] = RefreshTokenConsumeResult(
+        status=RefreshTokenConsumeStatus.CONSUMED,
+        user_id=existing.id,
+        email=existing.email,
+    )
+
+    with pytest.raises(BadRequestError) as exc:
+        asyncio.run(service.refresh_tokens("rt-valid"))
+
+    assert exc.value.msg == "账号状态异常，暂不可登录"
+    assert refresh_token_store.revoked_user_ids == [existing.id]
+
+
+def test_logout_should_delete_refresh_token() -> None:
+    user_repo = _FakeUserRepository()
+    refresh_token_store = _FakeRefreshTokenStore()
+    access_token_blacklist_store = _FakeAccessTokenBlacklistStore()
+    service = _build_auth_service(
+        user_repo,
+        refresh_token_store=refresh_token_store,
+        access_token_blacklist_store=access_token_blacklist_store,
+    )
+
+    asyncio.run(
+        service.logout(
+            refresh_token="  rt-logout  ",
+            access_token="  access-token  ",
+            access_token_expires_in_seconds=60,
+        )
+    )
+
+    assert refresh_token_store.deleted_tokens == ["rt-logout"]
+    assert access_token_blacklist_store.records == [
+        {"access_token": "access-token", "expires_in_seconds": 60}
+    ]

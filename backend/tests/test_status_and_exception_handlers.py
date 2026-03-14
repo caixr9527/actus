@@ -5,7 +5,7 @@ from app.application.errors import NotFoundError
 from app.domain.models import HealthStatus
 from app.interfaces.endpoints.status_routes import router as status_router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
-from app.interfaces.service_dependencies import get_status_service
+from app.interfaces.dependencies.services import get_status_service
 
 
 class _FakeStatusService:

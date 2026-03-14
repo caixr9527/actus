@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Body
 
 from app.application.service import AppConfigService
 from app.domain.models import LLMConfig, AgentConfig, MCPConfig
-from app.interfaces.service_dependencies import get_app_config_service
+from app.interfaces.dependencies.services import get_app_config_service
 from app.interfaces.schemas import Response, ListMCPServerResponse, ListA2AServerResponse
 
 logger = logging.getLogger(__name__)

@@ -7,7 +7,7 @@
 """
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import (
     String,
@@ -82,10 +82,21 @@ class UserModel(Base):
         nullable=True,
     )  # 最近登录IP
 
+    @staticmethod
+    def _build_orm_payload(user: User) -> dict[str, Any]:
+        """将领域模型转换为 ORM 可写入的数据结构。"""
+        # 使用 python 模式保留 datetime 原始类型，避免 DateTime 列收到字符串。
+        user_data = user.model_dump(mode="python")
+        # status 列为字符串存储，显式展开枚举值。
+        status = user_data.get("status")
+        if isinstance(status, UserStatus):
+            user_data["status"] = status.value
+        return user_data
+
     @classmethod
     def from_domain(cls, user: User) -> "UserModel":
         """从领域模型创建ORM模型"""
-        return cls(**user.model_dump(mode="json"))
+        return cls(**cls._build_orm_payload(user))
 
     def to_domain(self) -> User:
         """将ORM模型转换为领域模型"""
@@ -93,6 +104,6 @@ class UserModel(Base):
 
     def update_from_domain(self, user: User) -> None:
         """根据领域模型更新ORM模型"""
-        user_data = user.model_dump(mode="json")
+        user_data = self._build_orm_payload(user)
         for field, value in user_data.items():
             setattr(self, field, value)

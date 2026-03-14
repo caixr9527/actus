@@ -10,6 +10,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Request
 
 from app.application.service import AuthService
+from app.interfaces.dependencies.auth import (
+    AuthContext,
+    get_current_auth_context,
+    get_access_token_ttl_seconds,
+)
 from app.interfaces.schemas import Response
 from app.interfaces.schemas.auth import (
     SendRegisterCodeRequest,
@@ -18,10 +23,14 @@ from app.interfaces.schemas.auth import (
     RegisterResponse,
     LoginRequest,
     LoginResponse,
+    RefreshTokenRequest,
+    RefreshTokenResponse,
+    LogoutRequest,
+    LogoutResponse,
     TokenPairResponse,
     CurrentUserResponse,
 )
-from app.interfaces.service_dependencies import get_auth_service
+from app.interfaces.dependencies.services import get_auth_service
 
 router = APIRouter(prefix="/auth", tags=["认证模块"])
 
@@ -130,4 +139,52 @@ async def login(
                 last_login_ip=result.user.last_login_ip,
             ),
         ),
+    )
+
+
+@router.post(
+    path="/refresh",
+    response_model=Response[RefreshTokenResponse],
+    summary="刷新登录 Token",
+    description="通过 Refresh Token 轮转签发新的 Access Token 与 Refresh Token",
+)
+async def refresh_tokens(
+        payload: RefreshTokenRequest,
+        auth_service: AuthService = Depends(get_auth_service),
+) -> Response[RefreshTokenResponse]:
+    """刷新 Token 接口"""
+    result = await auth_service.refresh_tokens(refresh_token=payload.refresh_token)
+    return Response.success(
+        msg="刷新成功",
+        data=RefreshTokenResponse(
+            tokens=TokenPairResponse(
+                access_token=result.access_token,
+                refresh_token=result.refresh_token,
+                access_token_expires_in=result.access_token_expires_in,
+                refresh_token_expires_in=result.refresh_token_expires_in,
+            )
+        ),
+    )
+
+
+@router.post(
+    path="/logout",
+    response_model=Response[LogoutResponse],
+    summary="退出登录",
+    description="删除当前会话对应的 Refresh Token，使登录态失效",
+)
+async def logout(
+        payload: LogoutRequest,
+        auth_context: AuthContext = Depends(get_current_auth_context),
+        auth_service: AuthService = Depends(get_auth_service),
+) -> Response[LogoutResponse]:
+    """退出登录接口"""
+    await auth_service.logout(
+        refresh_token=payload.refresh_token,
+        access_token=auth_context.access_token,
+        access_token_expires_in_seconds=get_access_token_ttl_seconds(auth_context.token_payload),
+    )
+    return Response.success(
+        msg="退出成功",
+        data=LogoutResponse(success=True),
     )

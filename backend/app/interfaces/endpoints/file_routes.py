@@ -14,7 +14,7 @@ from starlette.responses import StreamingResponse
 from app.application.service.file_service import FileService
 from app.domain.models.file import File as FileInfo
 from app.interfaces.schemas import Response
-from app.interfaces.service_dependencies import get_file_service
+from app.interfaces.dependencies.services import get_file_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/files", tags=["文件模块"])

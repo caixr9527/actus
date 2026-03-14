@@ -28,6 +28,12 @@ class BadRequestError(AppException):
         super().__init__(code=400, status_code=400, msg=msg)
 
 
+class UnauthorizedError(AppException):
+
+    def __init__(self, msg: str = "未授权访问"):
+        super().__init__(code=401, status_code=401, msg=msg)
+
+
 class NotFoundError(AppException):
 
     def __init__(self, msg: str = "资源未找到"):
