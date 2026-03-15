@@ -5,15 +5,19 @@
 // 核心 fetch 封装
 export {
   request,
+  requestRaw,
   get,
   post,
   put,
   del,
+  registerAuthHooks,
+  getApiBaseUrl,
   createSSEConnection,
   createSSEStream,
   parseSSEStream,
   ApiError,
 } from "./fetch";
+export type { RequestOptions, AuthHooks } from "./fetch";
 
 // 类型定义
 export type {
@@ -55,4 +59,3 @@ export type {
 export { configApi } from "./config";
 export { fileApi } from "./file";
 export { sessionApi } from "./session";
-

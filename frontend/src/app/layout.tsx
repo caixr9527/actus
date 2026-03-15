@@ -1,10 +1,9 @@
 import React from "react"
 import type { Metadata } from "next"
-import { SidebarProvider } from "@/components/ui/sidebar"
-import { SessionsProvider } from "@/providers/sessions-provider"
+import { AuthProvider } from "@/providers/auth-provider"
+import { AppShell } from "@/providers/app-shell"
 import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
-import { LeftPanel } from "@/components/left-panel"
 
 export const metadata: Metadata = {
   title: "Actus",
@@ -15,11 +14,6 @@ export const metadata: Metadata = {
   },
 }
 
-const sidebarLayoutStyle = {
-  "--sidebar-width": "300px",
-  "--sidebar-width-icon": "300px",
-} as React.CSSProperties
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -28,18 +22,9 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <body className="h-screen overflow-hidden">
-        <SessionsProvider>
-          <SidebarProvider
-            style={sidebarLayoutStyle}
-          >
-            {/* 左侧的面板 */}
-            <LeftPanel />
-            {/* 右侧的内容 */}
-            <div className="flex-1 bg-[#f8f8f7] h-screen overflow-hidden">
-              {children}
-            </div>
-          </SidebarProvider>
-        </SessionsProvider>
+        <AuthProvider>
+          <AppShell>{children}</AppShell>
+        </AuthProvider>
         <Toaster position="top-center" richColors />
       </body>
     </html>

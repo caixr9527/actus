@@ -15,6 +15,7 @@ interface ChatInputProps {
   className?: string
   onInputValueChange?: (value: string) => void
   onSend?: (message: string, files: FileInfo[]) => Promise<void>
+  onRequireAuth?: (action: 'send' | 'upload', message: string) => boolean | Promise<boolean>
   disabled?: boolean
   /** 当前会话 ID，上传附件时会关联到该会话 */
   sessionId?: string | null
@@ -31,7 +32,7 @@ export interface ChatInputRef {
 }
 
 export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
-  ({ className, onInputValueChange, onSend, disabled = false, sessionId, isRunning = false, onStop }, ref) => {
+  ({ className, onInputValueChange, onSend, onRequireAuth, disabled = false, sessionId, isRunning = false, onStop }, ref) => {
     const [files, setFiles] = useState<FileInfo[]>([])
     const [uploading, setUploading] = useState(false)
     const [sending, setSending] = useState(false)
@@ -98,7 +99,22 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
       }
     }
 
-    const handleUploadClick = () => {
+    const checkAuthGate = async (action: 'send' | 'upload', message: string): Promise<boolean> => {
+      if (!onRequireAuth) {
+        return true
+      }
+      try {
+        return await onRequireAuth(action, message)
+      } catch {
+        return false
+      }
+    }
+
+    const handleUploadClick = async () => {
+      const allowed = await checkAuthGate('upload', inputValue)
+      if (!allowed) {
+        return
+      }
       fileInputRef.current?.click()
     }
 
@@ -113,6 +129,11 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
       if (!trimmedMessage) {
         toast.error('请输入消息内容')
         textareaRef.current?.focus()
+        return
+      }
+
+      const allowed = await checkAuthGate('send', inputValue)
+      if (!allowed) {
         return
       }
 
@@ -216,7 +237,9 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
           <Button
             variant="outline"
             className="rounded-full w-8 h-8 cursor-pointer"
-            onClick={handleUploadClick}
+            onClick={() => {
+              void handleUploadClick()
+            }}
             disabled={uploading}
           >
             {uploading ? (

@@ -1,22 +1,88 @@
 "use client"
 
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { ChatHeader } from "@/components/chat-header"
 import { ChatInput, type ChatInputRef } from "@/components/chat-input"
 import { SuggestedQuestions } from "@/components/suggested-questions"
+import { AuthLoginDialog } from "@/components/auth-login-dialog"
 import { sessionApi } from "@/lib/api/session"
 import { saveInitialMessageDraft } from "@/lib/initial-message-draft"
+import {
+  clearGuestPendingAction,
+  clearGuestPendingMessage,
+  loadGuestPendingAction,
+  loadGuestPendingMessage,
+  saveGuestPendingAction,
+  saveGuestPendingMessage,
+  type GuestPendingActionType,
+} from "@/lib/guest-auth-draft"
+import { useAuth } from "@/hooks/use-auth"
 import type { FileInfo } from "@/lib/api/types"
 import { toast } from "sonner"
 
 export default function Page() {
   const router = useRouter()
+  const { isLoggedIn } = useAuth()
   const chatInputRef = useRef<ChatInputRef>(null)
   const [sending, setSending] = useState(false)
+  const [authDialogOpen, setAuthDialogOpen] = useState(false)
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      return
+    }
+
+    const pendingMessage = loadGuestPendingMessage()
+    const pendingAction = loadGuestPendingAction()
+
+    if (pendingMessage) {
+      requestAnimationFrame(() => {
+        chatInputRef.current?.setInputText(pendingMessage)
+      })
+    }
+
+    if (pendingAction === "upload") {
+      toast.info("请重新选择需要上传的附件")
+    }
+
+    clearGuestPendingMessage()
+    clearGuestPendingAction()
+  }, [isLoggedIn])
 
   const handleQuestionClick = (question: string) => {
     chatInputRef.current?.setInputText(question)
+  }
+
+  const openLoginDialog = (action: GuestPendingActionType, message: string) => {
+    saveGuestPendingAction(action)
+    saveGuestPendingMessage(message)
+    setAuthDialogOpen(true)
+  }
+
+  const handleRequireAuth = async (
+    action: "send" | "upload",
+    message: string,
+  ): Promise<boolean> => {
+    if (isLoggedIn) {
+      return true
+    }
+
+    openLoginDialog(action, message)
+    return false
+  }
+
+  const handleLoginClick = () => {
+    const currentMessage = chatInputRef.current?.getInputValue() || ""
+    openLoginDialog("manual_login", currentMessage)
+  }
+
+  const handleAuthDialogOpenChange = (open: boolean) => {
+    setAuthDialogOpen(open)
+    if (!open && !isLoggedIn) {
+      clearGuestPendingAction()
+      clearGuestPendingMessage()
+    }
   }
 
   const handleSend = async (message: string, files: FileInfo[]) => {
@@ -53,7 +119,7 @@ export default function Page() {
   return (
     <div className="h-full flex flex-col">
       {/* 顶部header */}
-      <ChatHeader />
+      <ChatHeader onLoginClick={handleLoginClick} />
       {/* 中间对话框 - 垂直居中，视觉上移一个导航栏高度 */}
       <div className="flex-1 flex items-center justify-center px-4 py-6 sm:py-8 -mt-12 sm:-mt-16">
         <div className="w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] mx-auto">
@@ -67,12 +133,18 @@ export default function Page() {
             ref={chatInputRef}
             className="mb-4 sm:mb-6"
             onSend={handleSend}
+            onRequireAuth={handleRequireAuth}
             disabled={sending}
           />
           {/* 推荐对话内容 */}
           <SuggestedQuestions onQuestionClick={handleQuestionClick} />
         </div>
       </div>
+
+      <AuthLoginDialog
+        open={authDialogOpen}
+        onOpenChange={handleAuthDialogOpenChange}
+      />
     </div>
   )
 }

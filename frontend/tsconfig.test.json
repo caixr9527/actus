@@ -13,6 +13,10 @@
     "sourceMap": false
   },
   "include": [
+    "src/lib/api/fetch.ts",
+    "src/lib/api/file.ts",
+    "src/lib/auth/**/*.ts",
+    "src/lib/guest-auth-draft.ts",
     "src/lib/session-stream-policy.ts",
     "src/lib/session-detail-runtime.ts",
     "src/lib/session-events.ts",
