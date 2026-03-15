@@ -20,6 +20,7 @@ from app.infrastructure.logging import setup_logging
 from app.infrastructure.storage import get_redis_client, get_postgres, get_cos
 from app.interfaces.endpoints.routes import router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
+from app.interfaces.dependencies.auth_guard import validate_api_auth_coverage
 from app.interfaces.dependencies.services import (
     get_agent_service_for_lifespan,
     clear_agent_service_for_lifespan_cache,
@@ -95,6 +96,8 @@ async def lifespan(app: FastAPI):
     """生命周期上下文管理"""
     logger.info(f"{settings.env} 模式下启动服务")
     logger.info("Swagger文档已%s", "关闭" if not enable_api_docs else "开启")
+    # 启动期校验鉴权覆盖，避免新增 API 路由漏挂鉴权依赖后直接上线。
+    validate_api_auth_coverage(app)
     await run_startup_migrations()
 
     # 初始化数据库连接

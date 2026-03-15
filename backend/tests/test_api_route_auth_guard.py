@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from app.domain.models import HealthStatus
 from app.interfaces.endpoints.routes import router as api_router
+from app.interfaces.dependencies.auth_guard import validate_api_auth_coverage
 from app.interfaces.errors.exception_handlers import register_exception_handlers
 from app.interfaces.schemas.auth import RefreshResult
 from app.interfaces.dependencies.services import get_status_service, get_auth_service
@@ -72,3 +73,39 @@ def test_session_vnc_websocket_should_require_authorization_header() -> None:
                 pass
 
     assert exc.value.code == 1008
+
+
+def test_validate_api_auth_coverage_should_pass_for_current_router() -> None:
+    app = FastAPI()
+    app.include_router(api_router, prefix="/api")
+
+    validate_api_auth_coverage(app)
+
+
+def test_validate_api_auth_coverage_should_fail_for_http_route_without_auth_dependency() -> None:
+    app = FastAPI()
+
+    @app.get("/api/internal/unsafe")
+    async def unsafe_endpoint() -> dict[str, bool]:
+        return {"ok": True}
+
+    with pytest.raises(RuntimeError) as exc:
+        validate_api_auth_coverage(app)
+
+    message = str(exc.value)
+    assert "GET /api/internal/unsafe" in message
+    assert "Depends(get_current_user)" in message
+
+
+def test_validate_api_auth_coverage_should_fail_for_websocket_route_without_auth_dependency() -> None:
+    app = FastAPI()
+
+    @app.websocket("/api/internal/ws")
+    async def unsafe_websocket(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close()
+
+    with pytest.raises(RuntimeError) as exc:
+        validate_api_auth_coverage(app)
+
+    assert "WEBSOCKET /api/internal/ws" in str(exc.value)
