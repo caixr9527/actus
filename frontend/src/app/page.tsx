@@ -49,7 +49,7 @@ export default function Page() {
   const queryInitialEmail = (authQueryEmail ?? "").trim().toLowerCase()
   const queryRedirectTarget = normalizeAuthRedirectTarget(authQueryRedirect)
 
-  const effectiveDialogOpen = authDialogOpen || queryDialogMode !== null
+  const effectiveDialogOpen = !isLoggedIn && (authDialogOpen || queryDialogMode !== null)
   const effectiveDialogMode = queryDialogMode ?? authDialogMode
   const effectiveInitialEmail = loginDialogInitialEmail || queryInitialEmail
 

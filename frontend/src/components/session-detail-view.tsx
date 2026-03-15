@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { PlanPanel } from '@/components/plan-panel'
@@ -18,6 +18,7 @@ import {
 } from '@/lib/session-events'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { useAuth } from '@/hooks/use-auth'
 import type { ToolEvent, FileInfo } from '@/lib/api/types'
 import type { AttachmentFile, TimelineItem } from '@/lib/session-events'
 import { sessionApi } from '@/lib/api/session'
@@ -64,7 +65,14 @@ const TIMELINE_WINDOW_SIZE = 120
 
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const { isHydrated, isLoggedIn } = useAuth()
   const isMobile = useIsMobile()
+  const currentPath = useMemo(() => {
+    const query = searchParams.toString()
+    return query ? `${pathname}?${query}` : pathname
+  }, [pathname, searchParams])
   const {
     session,
     files,
@@ -75,7 +83,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     refreshFiles,
     sendMessage,
     streaming,
-  } = useSessionDetail(sessionId, hasInitialMessage)
+  } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
   const timeline = useMemo(() => eventsToTimeline(events), [events])
   const planSteps = useMemo(() => getLatestPlanFromEvents(events), [events])
@@ -88,6 +96,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const initialMessageSentRef = useRef(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevToolCountRef = useRef(0)
+
+  useEffect(() => {
+    if (!isHydrated || isLoggedIn) {
+      return
+    }
+    router.replace(`/?auth=login&redirect=${encodeURIComponent(currentPath)}`)
+  }, [currentPath, isHydrated, isLoggedIn, router])
 
   const hasPreview = previewFile !== null || previewTool !== null
   const showFullTimeline = expandedTimelineSessionId === sessionId
@@ -245,6 +260,28 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
   const shouldShowThinking =
     streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
+
+  if (!isHydrated) {
+    return (
+      <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
+        <p className="text-sm text-gray-500">加载中...</p>
+      </div>
+    )
+  }
+
+  if (!isLoggedIn) {
+    return (
+      <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
+        <div className="w-full max-w-[420px] rounded-2xl border bg-white px-6 py-7 text-center shadow-sm">
+          <p className="text-base font-medium text-gray-700">需要先登录后继续</p>
+          <div className="mt-3 inline-flex items-center gap-2 text-sm text-gray-500">
+            <Loader2 className="size-4 animate-spin" />
+            <span>正在打开登录弹窗...</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (loading && !session) {
     return (

@@ -36,7 +36,8 @@ const EMPTY_STREAM_RETRY_POLICY: RetryPolicy = {
  */
 export function useSessionDetail(
   sessionId: string | null,
-  initialSkipEmptyStream?: boolean
+  initialSkipEmptyStream?: boolean,
+  enabled: boolean = true,
 ): UseSessionDetailResult {
   const [session, setSession] = useState<SessionDetail | null>(null)
   const [files, setFiles] = useState<SessionFile[]>([])
@@ -256,7 +257,7 @@ export function useSessionDetail(
   }, [normalizeFileList])
 
   const refresh = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId || !enabled) return
     const targetEpoch = sessionEpochRef.current
     setLoading(true)
     setError(null)
@@ -269,10 +270,10 @@ export function useSessionDetail(
     ) {
       startEmptyStream(targetEpoch)
     }
-  }, [loadSessionSnapshot, sessionId, skipEmptyStream, startEmptyStream])
+  }, [enabled, loadSessionSnapshot, sessionId, skipEmptyStream, startEmptyStream])
 
   const refreshFiles = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId || !enabled) return
     const targetEpoch = sessionEpochRef.current
     const targetSessionId = sessionId
     try {
@@ -284,7 +285,7 @@ export function useSessionDetail(
     } catch (e) {
       console.error('刷新文件列表失败:', e)
     }
-  }, [sessionId, normalizeFileList])
+  }, [enabled, sessionId, normalizeFileList])
 
   useEffect(() => {
     sessionEpochRef.current += 1
@@ -299,6 +300,16 @@ export function useSessionDetail(
     emptyStreamRetryCountRef.current = 0
 
     if (!sessionId) {
+      setLoading(false)
+      setSession(null)
+      sessionStatusRef.current = null
+      setFiles([])
+      setEvents([])
+      setError(null)
+      return
+    }
+
+    if (!enabled) {
       setLoading(false)
       setSession(null)
       sessionStatusRef.current = null
@@ -323,11 +334,11 @@ export function useSessionDetail(
       stopEmptyStream()
       isSendMessageRef.current = false
     }
-  }, [initialSkipEmptyStream, loadSessionSnapshot, sessionId, setStreamingState, stopEmptyStream, stopMessageStream])
+  }, [enabled, initialSkipEmptyStream, loadSessionSnapshot, sessionId, setStreamingState, stopEmptyStream, stopMessageStream])
 
   useEffect(() => {
     const status = session?.status
-    if (!sessionId) return
+    if (!sessionId || !enabled) return
     const currentEpoch = sessionEpochRef.current
     if (shouldStartEmptySessionStream(status, isSendMessageRef.current, skipEmptyStream)) {
       startEmptyStream(currentEpoch)
@@ -336,7 +347,7 @@ export function useSessionDetail(
       if (sessionEpochRef.current !== currentEpoch) return
       stopEmptyStream()
     }
-  }, [sessionId, session?.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
+  }, [enabled, sessionId, session?.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
 
   // 组件卸载时清理所有流，避免连接泄漏
   useEffect(() => {
@@ -350,7 +361,7 @@ export function useSessionDetail(
 
   const sendMessage = useCallback(
     async (message: string, attachmentIds: string[]) => {
-      if (!sessionId) return
+      if (!sessionId || !enabled) return
 
       const streamEpoch = sessionEpochRef.current
       const streamSessionId = sessionId
@@ -415,7 +426,7 @@ export function useSessionDetail(
       // 将消息流的 cleanup 存到独立的 ref，不与 emptyStream 混淆
       messageStreamCleanupRef.current = messageStreamCleanup
     },
-    [sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream]
+    [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream]
   )
 
   return {

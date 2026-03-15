@@ -448,11 +448,7 @@ export function AuthLoginDialog({
               />
               {emailError ? (
                 <p className="text-sm text-destructive">{emailError}</p>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  开发环境可直接注册；生产环境需先发送并填写邮箱验证码。
-                </p>
-              )}
+              ) : null}
             </div>
 
             <div className="space-y-2">

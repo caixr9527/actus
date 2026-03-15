@@ -4,6 +4,7 @@ import { type CSSProperties, type ReactNode } from "react"
 import { SidebarProvider } from "@/components/ui/sidebar"
 import { LeftPanel } from "@/components/left-panel"
 import { useAuth } from "@/hooks/use-auth"
+import { AuthRouteGuard } from "@/providers/auth-route-guard"
 import { SessionsProvider } from "@/providers/sessions-provider"
 
 const sidebarLayoutStyle = {
@@ -15,9 +16,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { isLoggedIn } = useAuth()
 
   const content = (
-    <div className="flex-1 bg-[#f8f8f7] h-screen overflow-hidden">
-      {children}
-    </div>
+    <>
+      <AuthRouteGuard />
+      <div className="flex-1 bg-[#f8f8f7] h-screen overflow-hidden">
+        {children}
+      </div>
+    </>
   )
 
   if (!isLoggedIn) {
