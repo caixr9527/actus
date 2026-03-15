@@ -50,10 +50,13 @@ class AuthService:
             self,
             email: str,
             password: str,
+            confirm_password: str,
             verification_code: Optional[str] = None,
     ) -> User:
         """邮箱注册"""
         email = email.strip().lower()
+        if password != confirm_password:
+            raise BadRequestError(msg="密码不一致")
 
         async with self._uow_factory() as uow:
             existing_user = await uow.user.get_by_email(email)

@@ -15,6 +15,7 @@ from app.interfaces.dependencies.auth import (
     get_current_auth_context,
     get_access_token_ttl_seconds,
 )
+from app.interfaces.dependencies.services import get_auth_service
 from app.interfaces.schemas import Response
 from app.interfaces.schemas.auth import (
     SendRegisterCodeRequest,
@@ -30,7 +31,6 @@ from app.interfaces.schemas.auth import (
     TokenPairResponse,
     CurrentUserResponse,
 )
-from app.interfaces.dependencies.services import get_auth_service
 
 router = APIRouter(prefix="/auth", tags=["认证模块"])
 
@@ -84,6 +84,7 @@ async def register(
     user = await auth_service.register(
         email=request.email,
         password=request.password,
+        confirm_password=request.confirm_password,
         verification_code=request.verification_code,
     )
     return Response.success(

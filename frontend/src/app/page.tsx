@@ -1,11 +1,14 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
+import {
+  AuthLoginDialog,
+  type AuthDialogMode,
+} from "@/components/auth-login-dialog"
 import { ChatHeader } from "@/components/chat-header"
 import { ChatInput, type ChatInputRef } from "@/components/chat-input"
 import { SuggestedQuestions } from "@/components/suggested-questions"
-import { AuthLoginDialog } from "@/components/auth-login-dialog"
 import { sessionApi } from "@/lib/api/session"
 import { saveInitialMessageDraft } from "@/lib/initial-message-draft"
 import {
@@ -17,16 +20,38 @@ import {
   saveGuestPendingMessage,
   type GuestPendingActionType,
 } from "@/lib/guest-auth-draft"
+import { normalizeAuthRedirectTarget } from "@/lib/auth"
 import { useAuth } from "@/hooks/use-auth"
 import type { FileInfo } from "@/lib/api/types"
 import { toast } from "sonner"
 
 export default function Page() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { isLoggedIn } = useAuth()
   const chatInputRef = useRef<ChatInputRef>(null)
   const [sending, setSending] = useState(false)
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
+  const [authDialogMode, setAuthDialogMode] = useState<AuthDialogMode>("login")
+  const [loginDialogInitialEmail, setLoginDialogInitialEmail] = useState("")
+
+  const authQuery = searchParams.get("auth")
+  const authQueryEmail = searchParams.get("email")
+  const authQueryRedirect = searchParams.get("redirect")
+
+  const queryDialogMode: AuthDialogMode | null =
+    authQuery === "register"
+      ? "register"
+      : authQuery === "login"
+        ? "login"
+        : null
+
+  const queryInitialEmail = (authQueryEmail ?? "").trim().toLowerCase()
+  const queryRedirectTarget = normalizeAuthRedirectTarget(authQueryRedirect)
+
+  const effectiveDialogOpen = authDialogOpen || queryDialogMode !== null
+  const effectiveDialogMode = queryDialogMode ?? authDialogMode
+  const effectiveInitialEmail = loginDialogInitialEmail || queryInitialEmail
 
   useEffect(() => {
     if (!isLoggedIn) {
@@ -54,9 +79,15 @@ export default function Page() {
     chatInputRef.current?.setInputText(question)
   }
 
-  const openLoginDialog = (action: GuestPendingActionType, message: string) => {
+  const openAuthDialog = (
+    mode: AuthDialogMode,
+    action: GuestPendingActionType,
+    message: string,
+  ) => {
     saveGuestPendingAction(action)
     saveGuestPendingMessage(message)
+    setAuthDialogMode(mode)
+    setLoginDialogInitialEmail("")
     setAuthDialogOpen(true)
   }
 
@@ -68,20 +99,39 @@ export default function Page() {
       return true
     }
 
-    openLoginDialog(action, message)
+    openAuthDialog("login", action, message)
     return false
   }
 
   const handleLoginClick = () => {
     const currentMessage = chatInputRef.current?.getInputValue() || ""
-    openLoginDialog("manual_login", currentMessage)
+    openAuthDialog("login", "manual_login", currentMessage)
+  }
+
+  const handleAuthDialogModeChange = (mode: AuthDialogMode) => {
+    setAuthDialogMode(mode)
   }
 
   const handleAuthDialogOpenChange = (open: boolean) => {
     setAuthDialogOpen(open)
+    if (!open && queryDialogMode && !isLoggedIn) {
+      router.replace("/")
+    }
     if (!open && !isLoggedIn) {
       clearGuestPendingAction()
       clearGuestPendingMessage()
+    }
+  }
+
+  const handleAuthSuccess = () => {
+    const target = queryRedirectTarget
+    if (target && target !== "/") {
+      router.replace(target)
+      return
+    }
+
+    if (authQuery || authQueryEmail || authQueryRedirect) {
+      router.replace("/")
     }
   }
 
@@ -142,8 +192,12 @@ export default function Page() {
       </div>
 
       <AuthLoginDialog
-        open={authDialogOpen}
+        open={effectiveDialogOpen}
         onOpenChange={handleAuthDialogOpenChange}
+        initialEmail={effectiveInitialEmail}
+        initialMode={effectiveDialogMode}
+        onModeChange={handleAuthDialogModeChange}
+        onSuccess={handleAuthSuccess}
       />
     </div>
   )

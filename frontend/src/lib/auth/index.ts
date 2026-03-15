@@ -1,5 +1,8 @@
 export { authApi } from "./api"
 export {
+  normalizeAuthRedirectTarget,
+} from "./redirect"
+export {
   clearAuthenticatedSession,
   getAuthSnapshot,
   hydrateAuthStoreFromStorage,
@@ -22,4 +25,6 @@ export type {
   RefreshTokenResponseData,
   RegisterRequestPayload,
   RegisterResponseData,
+  SendRegisterCodeRequestPayload,
+  SendRegisterCodeResponseData,
 } from "./types"

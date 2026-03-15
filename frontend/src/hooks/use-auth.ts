@@ -25,7 +25,7 @@ function redirectToLoginPage(): void {
     return
   }
 
-  window.location.assign("/auth/login")
+  window.location.assign("/?auth=login")
 }
 
 export type UseAuthResult = {

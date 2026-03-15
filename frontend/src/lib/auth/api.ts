@@ -6,11 +6,22 @@ import type {
   RefreshTokenResponseData,
   RegisterRequestPayload,
   RegisterResponseData,
+  SendRegisterCodeRequestPayload,
+  SendRegisterCodeResponseData,
 } from "./types"
 
 export const authApi = {
   register: (payload: RegisterRequestPayload): Promise<RegisterResponseData> => {
     return post<RegisterResponseData>("/auth/register", payload, {
+      skipAuth: true,
+      skipAuthRefresh: true,
+    })
+  },
+
+  sendRegisterCode: (
+    payload: SendRegisterCodeRequestPayload,
+  ): Promise<SendRegisterCodeResponseData> => {
+    return post<SendRegisterCodeResponseData>("/auth/register/send-code", payload, {
       skipAuth: true,
       skipAuthRefresh: true,
     })

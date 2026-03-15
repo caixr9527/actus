@@ -36,6 +36,7 @@ class RegisterRequest(BaseModel):
     """邮箱注册请求结构"""
     email: str
     password: str = Field(min_length=8)
+    confirm_password: str = Field(min_length=8)
     verification_code: Optional[str] = None
 
     @field_validator("email")
@@ -46,7 +47,7 @@ class RegisterRequest(BaseModel):
             raise ValueError("邮箱格式不正确")
         return value
 
-    @field_validator("password")
+    @field_validator("password", "confirm_password")
     @classmethod
     def validate_password(cls, value: str) -> str:
         """注册密码强度校验"""

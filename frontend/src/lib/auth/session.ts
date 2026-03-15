@@ -20,7 +20,7 @@ function redirectToLogin(): void {
   }
 
   const redirect = `${window.location.pathname}${window.location.search}`
-  const nextUrl = `/auth/login?redirect=${encodeURIComponent(redirect)}`
+  const nextUrl = `/?auth=login&redirect=${encodeURIComponent(redirect)}`
   window.location.assign(nextUrl)
 }
 

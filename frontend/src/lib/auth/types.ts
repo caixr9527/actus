@@ -36,6 +36,7 @@ export type LoginResponseData = {
 export type RegisterRequestPayload = {
   email: string
   password: string
+  confirm_password: string
   verification_code?: string
 }
 
@@ -45,6 +46,16 @@ export type RegisterResponseData = {
   auth_provider: string
   status: string
   created_at: string
+}
+
+export type SendRegisterCodeRequestPayload = {
+  email: string
+}
+
+export type SendRegisterCodeResponseData = {
+  email: string
+  verification_required: boolean
+  expires_in_seconds: number
 }
 
 export type RefreshTokenResponseData = {
