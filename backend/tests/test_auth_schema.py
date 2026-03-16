@@ -9,8 +9,7 @@ from app.interfaces.schemas.auth import (
     SendRegisterCodeRequest,
     RegisterRequest,
     LoginRequest,
-    TokenPairResponse,
-    RefreshTokenRequest,
+    AccessTokenResponse,
     LogoutResponse,
     CurrentUserResponse,
     UpdatePasswordRequest,
@@ -119,14 +118,12 @@ def test_login_request_valid_email_should_pass_validation() -> None:
     assert payload.email == "tester@example.com"
 
 
-def test_token_pair_response_should_use_expected_defaults() -> None:
-    payload = TokenPairResponse(
+def test_access_token_response_should_use_expected_defaults() -> None:
+    payload = AccessTokenResponse(
         access_token="access-token",
-        refresh_token="refresh-token",
     )
     assert payload.token_type == "Bearer"
     assert payload.access_token_expires_in == 1800
-    assert payload.refresh_token_expires_in == 604800
 
 
 def test_current_user_response_should_allow_optional_login_fields() -> None:
@@ -138,11 +135,6 @@ def test_current_user_response_should_allow_optional_login_fields() -> None:
     )
     assert payload.last_login_at is None
     assert payload.last_login_ip is None
-
-
-def test_refresh_token_request_should_store_refresh_token() -> None:
-    payload = RefreshTokenRequest(refresh_token="rt-1")
-    assert payload.refresh_token == "rt-1"
 
 
 def test_logout_response_should_default_success_true() -> None:

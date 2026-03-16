@@ -212,11 +212,13 @@ async function fetchWithAuthRetry(
       accessToken,
       skipAuth,
     )
+    const credentials = fetchOptions.credentials ?? "include"
 
     return fetchWithTimeout(
       requestUrl,
       {
         ...fetchOptions,
+        credentials,
         headers: normalizedHeaders,
       },
       timeout,

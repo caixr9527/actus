@@ -5,7 +5,6 @@
 @Author : caixiaorong01@outlook.com
 @File   : user_service.py
 """
-import secrets
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -88,17 +87,11 @@ class UserService:
             if user is None:
                 raise BadRequestError(msg="用户不存在，请重新登录")
 
-            current_password = PasswordHasher.hash_password_with_salt(
-                old_password,
-                user.password_salt,
-            )
-            if not secrets.compare_digest(current_password, user.password):
+            if not PasswordHasher.verify_password(old_password, user.password):
                 raise BadRequestError(msg="旧密码错误")
 
-            next_salt = PasswordHasher.generate_password_salt()
-            next_password = PasswordHasher.hash_password_with_salt(new_password, next_salt)
+            next_password = PasswordHasher.hash_password(new_password)
 
-            user.password_salt = next_salt
             user.password = next_password
             user.updated_at = datetime.now()
             await uow.user.save(user)

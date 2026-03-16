@@ -53,9 +53,9 @@ def test_whitelisted_routes_should_not_require_authorization_header() -> None:
 
     with TestClient(app) as client:
         status_response = client.get("/api/status")
+        client.cookies.set("actus_refresh_token", "rt-1")
         refresh_response = client.post(
             "/api/auth/refresh",
-            json={"refresh_token": "rt-1"},
         )
 
     assert status_response.status_code == 200

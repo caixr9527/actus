@@ -1,4 +1,4 @@
-import { get, post, request } from "@/lib/api/fetch"
+import { get, post, request } from "../api/fetch"
 import type {
   GetCurrentUserResponseData,
   LoginRequestPayload,
@@ -39,10 +39,10 @@ export const authApi = {
     })
   },
 
-  refresh: (refreshToken: string): Promise<RefreshTokenResponseData> => {
+  refresh: (): Promise<RefreshTokenResponseData> => {
     return post<RefreshTokenResponseData>(
       "/auth/refresh",
-      { refresh_token: refreshToken },
+      undefined,
       {
         skipAuth: true,
         skipAuthRefresh: true,
@@ -50,10 +50,8 @@ export const authApi = {
     )
   },
 
-  logout: (refreshToken: string): Promise<LogoutResponseData> => {
-    return post<LogoutResponseData>("/auth/logout", {
-      refresh_token: refreshToken,
-    })
+  logout: (): Promise<LogoutResponseData> => {
+    return post<LogoutResponseData>("/auth/logout")
   },
 
   me: (): Promise<GetCurrentUserResponseData> => {

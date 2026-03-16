@@ -7,6 +7,7 @@
 """
 from .browser import Browser
 from .access_token_blacklist_store import AccessTokenBlacklistStore
+from .auth_rate_limit_store import AuthRateLimitStore
 from .email_sender import EmailSender
 from .file_storage import FileStorage
 from .health_checker import HealthChecker
@@ -26,6 +27,7 @@ from .task import Task, TaskRunner
 __all__ = [
     "LLM",
     "AccessTokenBlacklistStore",
+    "AuthRateLimitStore",
     "HealthChecker",
     "Task",
     "TaskRunner",

@@ -108,13 +108,11 @@ class LoginRequest(BaseModel):
         return value
 
 
-class TokenPairResponse(BaseModel):
-    """Token对响应结构"""
+class AccessTokenResponse(BaseModel):
+    """Access Token响应结构"""
     access_token: str
-    refresh_token: str
     token_type: Literal["Bearer"] = "Bearer"
     access_token_expires_in: int = 1800
-    refresh_token_expires_in: int = 7 * 24 * 60 * 60
 
 
 class CurrentUserResponse(BaseModel):
@@ -135,23 +133,13 @@ class CurrentUserResponse(BaseModel):
 
 class LoginResponse(BaseModel):
     """邮箱登录响应结构"""
-    tokens: TokenPairResponse
+    tokens: AccessTokenResponse
     user: CurrentUserResponse
-
-
-class RefreshTokenRequest(BaseModel):
-    """刷新Token请求结构"""
-    refresh_token: str
 
 
 class RefreshTokenResponse(BaseModel):
     """刷新Token响应结构"""
-    tokens: TokenPairResponse
-
-
-class LogoutRequest(BaseModel):
-    """退出登录请求结构"""
-    refresh_token: str
+    tokens: AccessTokenResponse
 
 
 class LogoutResponse(BaseModel):

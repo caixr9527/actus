@@ -11,27 +11,8 @@ import {
 } from "../src/lib/auth/store"
 import type { AuthTokenPair, AuthUser } from "../src/lib/auth/types"
 
-const REFRESH_TOKEN_STORAGE_KEY = "actus.auth.refresh_token"
-
-class MemoryStorage {
-  private readonly data = new Map<string, string>()
-
-  getItem(key: string): string | null {
-    return this.data.has(key) ? this.data.get(key)! : null
-  }
-
-  setItem(key: string, value: string): void {
-    this.data.set(key, value)
-  }
-
-  removeItem(key: string): void {
-    this.data.delete(key)
-  }
-}
-
-function installWindow(storage: MemoryStorage): void {
+function installWindow(): void {
   ;(globalThis as { window?: unknown }).window = {
-    localStorage: storage,
     location: {
       pathname: "/",
       search: "",
@@ -57,10 +38,8 @@ const demoUser: AuthUser = {
 
 const demoTokens: AuthTokenPair = {
   access_token: "access-token",
-  refresh_token: "refresh-token",
   token_type: "Bearer",
   access_token_expires_in: 1800,
-  refresh_token_expires_in: 604800,
 }
 
 test.afterEach(() => {
@@ -68,24 +47,20 @@ test.afterEach(() => {
   delete (globalThis as { window?: unknown }).window
 })
 
-test("hydrateAuthStoreFromStorage should load refresh token from localStorage", () => {
+test("hydrateAuthStoreFromStorage should mark state as hydrated", () => {
   __resetAuthStoreForTest()
-  const storage = new MemoryStorage()
-  storage.setItem(REFRESH_TOKEN_STORAGE_KEY, "persisted-refresh-token")
-  installWindow(storage)
+  installWindow()
 
   hydrateAuthStoreFromStorage()
 
   const snapshot = getAuthSnapshot()
   assert.equal(snapshot.hydrated, true)
-  assert.equal(snapshot.refreshToken, "persisted-refresh-token")
   assert.equal(snapshot.accessToken, null)
 })
 
-test("setAuthenticatedSession should persist refresh token and update in-memory state", () => {
+test("setAuthenticatedSession should update in-memory state", () => {
   __resetAuthStoreForTest()
-  const storage = new MemoryStorage()
-  installWindow(storage)
+  installWindow()
 
   setAuthenticatedSession({
     tokens: demoTokens,
@@ -94,15 +69,12 @@ test("setAuthenticatedSession should persist refresh token and update in-memory 
 
   const snapshot = getAuthSnapshot()
   assert.equal(snapshot.accessToken, "access-token")
-  assert.equal(snapshot.refreshToken, "refresh-token")
   assert.equal(snapshot.user?.email, "tester@example.com")
-  assert.equal(storage.getItem(REFRESH_TOKEN_STORAGE_KEY), "refresh-token")
 })
 
-test("clearAuthenticatedSession should clear localStorage and in-memory state", () => {
+test("clearAuthenticatedSession should clear in-memory state", () => {
   __resetAuthStoreForTest()
-  const storage = new MemoryStorage()
-  installWindow(storage)
+  installWindow()
 
   setAuthenticatedSession({
     tokens: demoTokens,
@@ -112,16 +84,13 @@ test("clearAuthenticatedSession should clear localStorage and in-memory state", 
 
   const snapshot = getAuthSnapshot()
   assert.equal(snapshot.accessToken, null)
-  assert.equal(snapshot.refreshToken, null)
   assert.equal(snapshot.user, null)
   assert.equal(snapshot.hydrated, true)
-  assert.equal(storage.getItem(REFRESH_TOKEN_STORAGE_KEY), null)
 })
 
 test("isAuthenticatedSnapshot should treat access token as logged in even without user", () => {
   __resetAuthStoreForTest()
-  const storage = new MemoryStorage()
-  installWindow(storage)
+  installWindow()
 
   setAuthenticatedSession({
     tokens: demoTokens,

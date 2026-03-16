@@ -1,8 +1,9 @@
-import { registerAuthHooks } from "@/lib/api/fetch"
+import { registerAuthHooks } from "../api/fetch"
 import { authApi } from "./api"
 import {
   clearAuthenticatedSession,
   getAuthSnapshot,
+  hasAuthSessionHint,
   hydrateAuthStoreFromStorage,
   setCurrentUser,
   setAuthenticatedSession,
@@ -71,17 +72,12 @@ async function loadCurrentUserIfNeeded(force = false): Promise<void> {
 export async function refreshAccessToken(): Promise<string | null> {
   hydrateAuthStoreFromStorage()
 
-  const refreshToken = getAuthSnapshot().refreshToken
-  if (!refreshToken) {
-    return null
-  }
-
   if (refreshPromise) {
     return refreshPromise
   }
 
   refreshPromise = authApi
-    .refresh(refreshToken)
+    .refresh()
     .then((result) => {
       setAuthenticatedSession({ tokens: result.tokens })
       void loadCurrentUserIfNeeded()
@@ -116,8 +112,8 @@ export async function initializeAuth(): Promise<void> {
   initializePromise = (async () => {
     hydrateAuthStoreFromStorage()
 
-    const { accessToken, refreshToken } = getAuthSnapshot()
-    if (!accessToken && refreshToken) {
+    const { accessToken } = getAuthSnapshot()
+    if (!accessToken && hasAuthSessionHint()) {
       await refreshAccessToken()
     }
 
@@ -131,14 +127,23 @@ export async function initializeAuth(): Promise<void> {
   return initializePromise
 }
 
+export function __resetAuthSessionForTest(): void {
+  hooksRegistered = false
+  initialized = false
+  initializePromise = null
+  refreshPromise = null
+  loadUserPromise = null
+  registerAuthHooks(null)
+}
+
 export async function logoutFromServer(): Promise<void> {
-  const refreshToken = getAuthSnapshot().refreshToken
-  if (!refreshToken) {
+  const accessToken = getAuthSnapshot().accessToken
+  if (!accessToken) {
     return
   }
 
   try {
-    await authApi.logout(refreshToken)
+    await authApi.logout()
   } catch {
     // 退出链路采用尽力而为策略，本地仍会清理登录态。
   }

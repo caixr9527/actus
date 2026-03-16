@@ -1,25 +1,52 @@
 import type { AuthTokenPair, AuthUser } from "./types"
 
-const REFRESH_TOKEN_STORAGE_KEY = "actus.auth.refresh_token"
-
 export type AuthSnapshot = {
   user: AuthUser | null
   accessToken: string | null
-  refreshToken: string | null
   hydrated: boolean
 }
+
+const AUTH_SESSION_HINT_STORAGE_KEY = "auth_has_refresh_session"
 
 const INITIAL_SNAPSHOT: AuthSnapshot = {
   user: null,
   accessToken: null,
-  refreshToken: null,
   hydrated: false,
 }
 
 let snapshot: AuthSnapshot = { ...INITIAL_SNAPSHOT }
-let hasHydratedFromStorage = false
+let hasHydrated = false
 
 const listeners = new Set<() => void>()
+
+function getLocalStorageSafe(): Storage | null {
+  if (typeof window === "undefined") {
+    return null
+  }
+
+  try {
+    return window.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+function setAuthSessionHint(enabled: boolean): void {
+  const localStorage = getLocalStorageSafe()
+  if (!localStorage) {
+    return
+  }
+
+  try {
+    if (enabled) {
+      localStorage.setItem(AUTH_SESSION_HINT_STORAGE_KEY, "1")
+      return
+    }
+    localStorage.removeItem(AUTH_SESSION_HINT_STORAGE_KEY)
+  } catch {
+    // 忽略浏览器存储异常，避免影响认证主流程。
+  }
+}
 
 function emitChange(): void {
   listeners.forEach((listener) => listener())
@@ -28,30 +55,6 @@ function emitChange(): void {
 function setSnapshot(next: AuthSnapshot): void {
   snapshot = next
   emitChange()
-}
-
-function readRefreshTokenFromStorage(): string | null {
-  if (typeof window === "undefined") return null
-
-  try {
-    return window.localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY)
-  } catch {
-    return null
-  }
-}
-
-function writeRefreshTokenToStorage(refreshToken: string | null): void {
-  if (typeof window === "undefined") return
-
-  try {
-    if (refreshToken) {
-      window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, refreshToken)
-    } else {
-      window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY)
-    }
-  } catch {
-    // 忽略存储异常（例如隐私模式禁用 localStorage）
-  }
 }
 
 export function subscribeAuthStore(listener: () => void): () => void {
@@ -76,16 +79,28 @@ export function hydrateAuthStoreFromStorage(): void {
     return
   }
 
-  if (hasHydratedFromStorage) {
+  if (hasHydrated) {
     return
   }
 
-  hasHydratedFromStorage = true
+  hasHydrated = true
   setSnapshot({
     ...snapshot,
-    refreshToken: readRefreshTokenFromStorage(),
     hydrated: true,
   })
+}
+
+export function hasAuthSessionHint(): boolean {
+  const localStorage = getLocalStorageSafe()
+  if (!localStorage) {
+    return false
+  }
+
+  try {
+    return localStorage.getItem(AUTH_SESSION_HINT_STORAGE_KEY) === "1"
+  } catch {
+    return false
+  }
 }
 
 export function setAuthenticatedSession(params: {
@@ -94,15 +109,14 @@ export function setAuthenticatedSession(params: {
 }): void {
   const nextUser = params.user === undefined ? snapshot.user : params.user
 
+  setAuthSessionHint(true)
+
   setSnapshot({
     ...snapshot,
     user: nextUser,
     accessToken: params.tokens.access_token,
-    refreshToken: params.tokens.refresh_token,
     hydrated: true,
   })
-
-  writeRefreshTokenToStorage(params.tokens.refresh_token)
 }
 
 export function setCurrentUser(user: AuthUser | null): void {
@@ -114,19 +128,19 @@ export function setCurrentUser(user: AuthUser | null): void {
 }
 
 export function clearAuthenticatedSession(): void {
+  setAuthSessionHint(false)
+
   setSnapshot({
     ...snapshot,
     user: null,
     accessToken: null,
-    refreshToken: null,
     hydrated: true,
   })
-
-  writeRefreshTokenToStorage(null)
 }
 
 export function __resetAuthStoreForTest(): void {
+  setAuthSessionHint(false)
   snapshot = { ...INITIAL_SNAPSHOT }
-  hasHydratedFromStorage = false
+  hasHydrated = false
   listeners.clear()
 }

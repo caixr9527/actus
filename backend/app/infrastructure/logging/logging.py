@@ -6,9 +6,22 @@
 @File   : logging.py
 """
 import logging
+import re
 import sys
 
 from core.config import get_settings
+
+
+_SENSITIVE_KEY_VALUE_PATTERN = re.compile(
+    r'(?i)("?(?:password|old_password|new_password|confirm_password|access_token|refresh_token|token|cookie|set-cookie|authorization)"?\s*[:=]\s*)("[^"]*"|\'[^\']*\'|[^,\s;]+)'
+)
+_BEARER_TOKEN_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b")
+
+
+def _mask_sensitive_text(text: str) -> str:
+    masked = _BEARER_TOKEN_PATTERN.sub("Bearer ***", text)
+    masked = _SENSITIVE_KEY_VALUE_PATTERN.sub(r"\1***", masked)
+    return masked
 
 
 class ProjectLoggerOnlyFilter(logging.Filter):
@@ -24,6 +37,18 @@ class ProjectLoggerOnlyFilter(logging.Filter):
             if logger_name == prefix or logger_name.startswith(f"{prefix}."):
                 return True
         return False
+
+
+class SensitiveDataMaskingFilter(logging.Filter):
+    """统一脱敏日志中的敏感字段值。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        masked_message = _mask_sensitive_text(message)
+        if masked_message != message:
+            record.msg = masked_message
+            record.args = ()
+        return True
 
 
 def setup_logging():
@@ -43,6 +68,7 @@ def setup_logging():
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(formatter)
     console_handler.setLevel(log_level)
+    console_handler.addFilter(SensitiveDataMaskingFilter())
     if not settings.is_log_output_all:
         # 非 all 模式时，按 LOG_OUTPUT_MODE 配置的前缀白名单过滤日志输出。
         console_handler.addFilter(ProjectLoggerOnlyFilter(settings.log_output_allowed_logger_prefixes))

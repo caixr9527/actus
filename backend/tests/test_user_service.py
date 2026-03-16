@@ -70,12 +70,10 @@ def _build_service(user_repo: _FakeUserRepository) -> UserService:
 
 
 def _build_user(*, email: str = "tester@example.com", raw_password: str = "Password123!") -> User:
-    salt = "test-salt"
-    hashed_password = PasswordHasher.hash_password_with_salt(raw_password, salt)
+    hashed_password = PasswordHasher.hash_password(raw_password)
     return User(
         email=email,
         password=hashed_password,
-        password_salt=salt,
         created_at=datetime.now(),
         updated_at=datetime.now(),
     )
@@ -171,14 +169,13 @@ def test_update_current_user_password_should_raise_when_old_password_is_wrong() 
     assert exc.value.msg == "旧密码错误"
 
 
-def test_update_current_user_password_should_update_hash_and_salt() -> None:
+def test_update_current_user_password_should_update_hash() -> None:
     user_repo = _FakeUserRepository()
     user = _build_user()
     user_repo.users_by_id[user.id] = user
     service = _build_service(user_repo)
 
     before_hash = user.password
-    before_salt = user.password_salt
 
     asyncio.run(
         service.update_current_user_password(
@@ -190,11 +187,7 @@ def test_update_current_user_password_should_update_hash_and_salt() -> None:
     )
 
     assert user.password != before_hash
-    assert user.password_salt != before_salt
-    assert (
-        user.password
-        == PasswordHasher.hash_password_with_salt("Password456!", user.password_salt)
-    )
+    assert PasswordHasher.verify_password("Password456!", user.password)
 
 
 def test_update_current_user_password_should_revoke_sessions_when_stores_provided() -> None:

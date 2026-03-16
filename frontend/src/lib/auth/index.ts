@@ -13,6 +13,7 @@ export {
 export {
   clearAuthenticatedSession,
   getAuthSnapshot,
+  hasAuthSessionHint,
   hydrateAuthStoreFromStorage,
   isAuthenticatedSnapshot,
   setAuthenticatedSession,
@@ -20,7 +21,12 @@ export {
   subscribeAuthStore,
   __resetAuthStoreForTest,
 } from "./store"
-export { initializeAuth, logoutFromServer, refreshAccessToken } from "./session"
+export {
+  __resetAuthSessionForTest,
+  initializeAuth,
+  logoutFromServer,
+  refreshAccessToken,
+} from "./session"
 export type {
   AuthSnapshot,
 } from "./store"

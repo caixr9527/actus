@@ -43,11 +43,7 @@ class UserModel(Base):
     password: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
-    )  # 密码哈希
-    password_salt: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )  # 加盐值
+    )  # Argon2 密码哈希编码串
     auth_provider: Mapped[str] = mapped_column(
         String(255),
         nullable=False,

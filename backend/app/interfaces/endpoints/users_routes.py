@@ -16,6 +16,7 @@ from app.interfaces.dependencies.auth import (
     get_access_token_ttl_seconds,
     get_current_user,
 )
+from app.interfaces.dependencies.request_security import require_https_request, apply_auth_security_headers
 from app.interfaces.dependencies.services import (
     get_access_token_blacklist_store,
     get_refresh_token_store,
@@ -96,7 +97,8 @@ async def update_current_user_profile(
     path="/me/password",
     response_model=Response[UpdatePasswordResponse],
     summary="更新当前用户密码",
-    description="接收 old_password/new_password/confirm_password，校验后更新加盐密码",
+    description="接收 old_password/new_password/confirm_password，校验后更新 Argon2 密码哈希",
+    dependencies=[Depends(require_https_request), Depends(apply_auth_security_headers)],
 )
 async def update_current_user_password(
         payload: UpdatePasswordRequest,

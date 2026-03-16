@@ -97,7 +97,6 @@ def test_get_current_auth_context_should_parse_user_and_write_state(monkeypatch)
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
     )
     _patch_auth_dependency_runtime(monkeypatch, user=user)
     access_token = _build_access_token(user_id=user.id)
@@ -117,7 +116,6 @@ def test_get_current_auth_context_should_reject_when_authorization_header_missin
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
     )
     _patch_auth_dependency_runtime(monkeypatch, user=user)
     connection = _build_http_connection(None)
@@ -132,7 +130,6 @@ def test_get_current_auth_context_should_reject_blacklisted_access_token(monkeyp
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
     )
     access_token = _build_access_token(user_id=user.id)
     _patch_auth_dependency_runtime(monkeypatch, user=user, blacklisted_tokens={access_token})
@@ -148,7 +145,6 @@ def test_get_current_auth_context_should_reject_invalid_signature_token(monkeypa
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
     )
     _patch_auth_dependency_runtime(monkeypatch, user=user)
     token_with_other_secret = _build_access_token(user_id=user.id, secret_key="another-secret")
@@ -164,7 +160,6 @@ def test_get_current_auth_context_should_reject_disabled_user(monkeypatch) -> No
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
         status=UserStatus.DISABLED,
     )
     _patch_auth_dependency_runtime(monkeypatch, user=user)
@@ -181,7 +176,6 @@ def test_get_current_auth_context_should_reject_expired_token(monkeypatch) -> No
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
     )
     _patch_auth_dependency_runtime(monkeypatch, user=user)
     expired_access_token = _build_access_token(
@@ -200,7 +194,6 @@ def test_get_current_auth_context_should_support_websocket_connection(monkeypatc
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
     )
     _patch_auth_dependency_runtime(monkeypatch, user=user)
     access_token = _build_access_token(user_id=user.id)

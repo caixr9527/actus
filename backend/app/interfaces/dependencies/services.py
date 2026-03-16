@@ -29,6 +29,7 @@ from app.infrastructure.external.json_parser import RepairJsonParser
 from app.infrastructure.external.llm import OpenAILLM
 from app.infrastructure.external.search import BingSearchEngine
 from app.infrastructure.external.task import RedisStreamTask
+from app.infrastructure.external.rate_limit_store import RedisAuthRateLimitStore
 from app.infrastructure.external.token_store import (
     RedisRefreshTokenStore,
     RedisAccessTokenBlacklistStore,
@@ -101,12 +102,14 @@ def get_auth_service() -> AuthService:
     redis_client = get_redis_client()
     refresh_token_store = RedisRefreshTokenStore(redis_client=redis_client)
     access_token_blacklist_store = RedisAccessTokenBlacklistStore(redis_client=redis_client)
+    auth_rate_limit_store = RedisAuthRateLimitStore(redis_client=redis_client)
     register_verification_code_store = RedisRegisterVerificationCodeStore(redis_client=redis_client)
     email_sender = SMTPEmailSender()
     return AuthService(
         uow_factory=get_uow,
         refresh_token_store=refresh_token_store,
         access_token_blacklist_store=access_token_blacklist_store,
+        auth_rate_limit_store=auth_rate_limit_store,
         register_verification_code_store=register_verification_code_store,
         email_sender=email_sender,
     )

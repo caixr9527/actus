@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -15,12 +16,19 @@ from app.interfaces.endpoints.users_routes import router as users_router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
 
 
+def _assert_auth_security_headers(response) -> None:
+    assert response.headers.get("cache-control") == "no-store"
+    assert response.headers.get("pragma") == "no-cache"
+    assert response.headers.get("x-frame-options") == "SAMEORIGIN"
+    assert response.headers.get("x-content-type-options") == "nosniff"
+    assert response.headers.get("referrer-policy") == "strict-origin-when-cross-origin"
+
+
 def _build_current_user() -> User:
     return User(
         id="user-1",
         email="tester@example.com",
         password="hashed-password",
-        password_salt="salt",
         created_at=datetime.now(),
         updated_at=datetime.now(),
     )
@@ -190,6 +198,72 @@ def test_update_current_user_password_route_should_return_success_response() -> 
     )
     assert fake_user_service.last_password_update_kwargs["current_access_token"] == "access-token-1"
     assert fake_user_service.last_password_update_kwargs["access_token_expires_in_seconds"] > 0
+    _assert_auth_security_headers(response)
+
+
+def test_update_current_user_password_route_should_reject_http_when_auth_require_https_enabled(
+        monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.interfaces.dependencies.request_security.get_settings",
+        lambda: SimpleNamespace(auth_require_https=True),
+    )
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(users_router, prefix="/api")
+    app.dependency_overrides[get_user_service] = lambda: _FakeUserService()
+    app.dependency_overrides[get_current_auth_context] = _build_auth_context
+    app.dependency_overrides[get_refresh_token_store] = lambda: _FakeRefreshTokenStore()
+    app.dependency_overrides[get_access_token_blacklist_store] = lambda: _FakeAccessTokenBlacklistStore()
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/users/me/password",
+            json={
+                "old_password": "Password123!",
+                "new_password": "Password456!",
+                "confirm_password": "Password456!",
+            },
+        )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["code"] == 400
+    assert payload["msg"] == "当前环境仅允许通过 HTTPS 访问该接口"
+
+
+def test_update_current_user_password_route_should_allow_x_forwarded_proto_https_when_required(
+        monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.interfaces.dependencies.request_security.get_settings",
+        lambda: SimpleNamespace(auth_require_https=True),
+    )
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(users_router, prefix="/api")
+    app.dependency_overrides[get_user_service] = lambda: _FakeUserService()
+    app.dependency_overrides[get_current_auth_context] = _build_auth_context
+    app.dependency_overrides[get_refresh_token_store] = lambda: _FakeRefreshTokenStore()
+    app.dependency_overrides[get_access_token_blacklist_store] = lambda: _FakeAccessTokenBlacklistStore()
+
+    with TestClient(app) as client:
+        response = client.patch(
+            "/api/users/me/password",
+            headers={"x-forwarded-proto": "https"},
+            json={
+                "old_password": "Password123!",
+                "new_password": "Password456!",
+                "confirm_password": "Password456!",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code"] == 200
+    assert payload["msg"] == "密码更新成功"
+    _assert_auth_security_headers(response)
+    assert response.headers.get("strict-transport-security") == "max-age=31536000; includeSubDomains"
 
 
 def test_update_current_user_password_route_should_map_bad_request_error() -> None:

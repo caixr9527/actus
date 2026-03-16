@@ -25,7 +25,6 @@ class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: str
     password: str
-    password_salt: str
     auth_provider: str = "email"
     external_id: Optional[str] = None
     status: UserStatus = UserStatus.ACTIVE

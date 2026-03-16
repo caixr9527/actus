@@ -2,10 +2,8 @@ export type AuthTokenType = "Bearer"
 
 export type AuthTokenPair = {
   access_token: string
-  refresh_token: string
   token_type: AuthTokenType
   access_token_expires_in: number
-  refresh_token_expires_in: number
 }
 
 export type AuthUser = {
