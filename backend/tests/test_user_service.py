@@ -45,6 +45,26 @@ class _FakeUoW:
         return False
 
 
+class _FakeRefreshTokenStore:
+    def __init__(self) -> None:
+        self.revoked_user_ids: list[str] = []
+
+    async def revoke_user_refresh_tokens(self, user_id: str) -> None:
+        self.revoked_user_ids.append(user_id)
+
+
+class _FakeAccessTokenBlacklistStore:
+    def __init__(self) -> None:
+        self.blacklisted_tokens: list[tuple[str, int]] = []
+
+    async def add_access_token_to_blacklist(
+            self,
+            access_token: str,
+            expires_in_seconds: int,
+    ) -> None:
+        self.blacklisted_tokens.append((access_token, expires_in_seconds))
+
+
 def _build_service(user_repo: _FakeUserRepository) -> UserService:
     return UserService(uow_factory=lambda: _FakeUoW(user_repo))
 
@@ -175,3 +195,28 @@ def test_update_current_user_password_should_update_hash_and_salt() -> None:
         user.password
         == PasswordHasher.hash_password_with_salt("Password456!", user.password_salt)
     )
+
+
+def test_update_current_user_password_should_revoke_sessions_when_stores_provided() -> None:
+    user_repo = _FakeUserRepository()
+    user = _build_user()
+    user_repo.users_by_id[user.id] = user
+    service = _build_service(user_repo)
+    refresh_token_store = _FakeRefreshTokenStore()
+    access_token_blacklist_store = _FakeAccessTokenBlacklistStore()
+
+    asyncio.run(
+        service.update_current_user_password(
+            user_id=user.id,
+            old_password="Password123!",
+            new_password="Password456!",
+            confirm_password="Password456!",
+            refresh_token_store=refresh_token_store,
+            access_token_blacklist_store=access_token_blacklist_store,
+            current_access_token="access-token-1",
+            access_token_expires_in_seconds=120,
+        )
+    )
+
+    assert refresh_token_store.revoked_user_ids == [user.id]
+    assert access_token_blacklist_store.blacklisted_tokens == [("access-token-1", 120)]

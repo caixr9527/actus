@@ -65,3 +65,26 @@ export type RefreshTokenResponseData = {
 export type LogoutResponseData = {
   success: boolean
 }
+
+export type GetCurrentUserResponseData = AuthUser
+
+export type UpdateCurrentUserPayload = {
+  nickname?: string | null
+  avatar_url?: string | null
+  timezone?: string
+  locale?: string
+}
+
+export type UpdateCurrentUserResponseData = {
+  user: AuthUser
+}
+
+export type UpdatePasswordPayload = {
+  old_password: string
+  new_password: string
+  confirm_password: string
+}
+
+export type UpdatePasswordResponseData = {
+  success: boolean
+}

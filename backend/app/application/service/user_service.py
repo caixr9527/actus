@@ -7,10 +7,11 @@
 """
 import secrets
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Optional
 
-from app.application.errors import BadRequestError
+from app.application.errors import BadRequestError, ServerError
 from app.application.utils import PasswordHasher
+from app.domain.external import RefreshTokenStore, AccessTokenBlacklistStore
 from app.domain.models import User, UserProfile
 from app.domain.repositories import IUnitOfWork
 
@@ -73,6 +74,10 @@ class UserService:
             old_password: str,
             new_password: str,
             confirm_password: str,
+            refresh_token_store: Optional[RefreshTokenStore] = None,
+            access_token_blacklist_store: Optional[AccessTokenBlacklistStore] = None,
+            current_access_token: Optional[str] = None,
+            access_token_expires_in_seconds: Optional[int] = None,
     ) -> None:
         """更新当前用户密码（校验旧密码 + 新密码确认）。"""
         if new_password != confirm_password:
@@ -97,3 +102,16 @@ class UserService:
             user.password = next_password
             user.updated_at = datetime.now()
             await uow.user.save(user)
+
+        # 密码变更后使所有会话失效，要求用户重新登录。
+        try:
+            if refresh_token_store is not None:
+                await refresh_token_store.revoke_user_refresh_tokens(user_id)
+
+            if access_token_blacklist_store is not None and current_access_token:
+                await access_token_blacklist_store.add_access_token_to_blacklist(
+                    access_token=current_access_token,
+                    expires_in_seconds=max(1, access_token_expires_in_seconds or 1),
+                )
+        except Exception as e:
+            raise ServerError(msg="密码已更新，但登录态清理失败，请重新登录") from e

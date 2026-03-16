@@ -3,7 +3,6 @@
 import Link from 'next/link'
 import {useRouter} from 'next/navigation'
 import {SidebarTrigger, useSidebar} from '@/components/ui/sidebar'
-import {ManusSettings} from '@/components/manus-settings'
 import {Button} from '@/components/ui/button'
 import {useAuth} from '@/hooks/use-auth'
 
@@ -32,10 +31,8 @@ export function ChatHeader({onLoginClick}: ChatHeaderProps) {
         {/* Logo占位符 */}
         <Link href="/" className="block bg-white w-[80px] h-9 rounded-md"/>
       </div>
-      {/* 右侧：未登录显示登录按钮，已登录显示设置入口 */}
-      {isLoggedIn ? (
-        <ManusSettings/>
-      ) : (
+      {/* 右侧：未登录显示登录按钮 */}
+      {!isLoggedIn ? (
         <Button
           size="default"
           className="group cursor-pointer h-9 px-4 font-semibold rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] motion-safe:transition-all motion-safe:duration-200 motion-safe:hover:-translate-y-0.5 motion-safe:hover:shadow-[0_8px_20px_rgba(0,0,0,0.22)] motion-safe:active:translate-y-0"
@@ -43,7 +40,7 @@ export function ChatHeader({onLoginClick}: ChatHeaderProps) {
         >
           登录
         </Button>
-      )}
+      ) : null}
     </header>
   )
 }

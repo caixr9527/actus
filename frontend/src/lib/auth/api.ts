@@ -1,5 +1,6 @@
-import { post } from "@/lib/api/fetch"
+import { get, post, request } from "@/lib/api/fetch"
 import type {
+  GetCurrentUserResponseData,
   LoginRequestPayload,
   LoginResponseData,
   LogoutResponseData,
@@ -8,6 +9,10 @@ import type {
   RegisterResponseData,
   SendRegisterCodeRequestPayload,
   SendRegisterCodeResponseData,
+  UpdateCurrentUserPayload,
+  UpdateCurrentUserResponseData,
+  UpdatePasswordPayload,
+  UpdatePasswordResponseData,
 } from "./types"
 
 export const authApi = {
@@ -48,6 +53,28 @@ export const authApi = {
   logout: (refreshToken: string): Promise<LogoutResponseData> => {
     return post<LogoutResponseData>("/auth/logout", {
       refresh_token: refreshToken,
+    })
+  },
+
+  me: (): Promise<GetCurrentUserResponseData> => {
+    return get<GetCurrentUserResponseData>("/users/me")
+  },
+
+  updateCurrentUser: (
+    payload: UpdateCurrentUserPayload,
+  ): Promise<UpdateCurrentUserResponseData> => {
+    return request<UpdateCurrentUserResponseData>("/users/me", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    })
+  },
+
+  updatePassword: (
+    payload: UpdatePasswordPayload,
+  ): Promise<UpdatePasswordResponseData> => {
+    return request<UpdatePasswordResponseData>("/users/me/password", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
     })
   },
 }

@@ -2,11 +2,19 @@
 
 import {useCallback, useEffect} from 'react'
 import {useRouter} from 'next/navigation'
-import {Sidebar, SidebarContent, SidebarHeader, SidebarTrigger} from '@/components/ui/sidebar'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarSeparator,
+  SidebarTrigger,
+} from '@/components/ui/sidebar'
 import {Button} from '@/components/ui/button'
 import {Plus} from 'lucide-react'
 import {Kbd, KbdGroup} from '@/components/ui/kbd'
 import {SessionList} from '@/components/session-list'
+import {LeftPanelAccountMenu} from '@/components/left-panel-account-menu'
 
 const NEW_TASK_SHORTCUT_KEY = 'k'
 
@@ -70,6 +78,10 @@ export function LeftPanel() {
         {/* 会话列表 */}
         <SessionList/>
       </SidebarContent>
+      <SidebarSeparator />
+      <SidebarFooter className="p-2 pt-1">
+        <LeftPanelAccountMenu />
+      </SidebarFooter>
     </Sidebar>
   )
 }

@@ -1,4 +1,12 @@
 export { authApi } from "./api"
+export { getAvatarFileId, toAvatarFileRef } from "./avatar"
+export { getUserDisplayName, maskEmail } from "./display"
+export {
+  ensureOptionExists,
+  filterSelectOptions,
+  getLocaleOptions,
+  getTimeZoneOptions,
+} from "./options"
 export {
   normalizeAuthRedirectTarget,
 } from "./redirect"
@@ -22,9 +30,14 @@ export type {
   LoginRequestPayload,
   LoginResponseData,
   LogoutResponseData,
+  GetCurrentUserResponseData,
   RefreshTokenResponseData,
   RegisterRequestPayload,
   RegisterResponseData,
   SendRegisterCodeRequestPayload,
   SendRegisterCodeResponseData,
+  UpdateCurrentUserPayload,
+  UpdateCurrentUserResponseData,
+  UpdatePasswordPayload,
+  UpdatePasswordResponseData,
 } from "./types"

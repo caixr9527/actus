@@ -4,6 +4,7 @@ import {
   clearAuthenticatedSession,
   getAuthSnapshot,
   hydrateAuthStoreFromStorage,
+  setCurrentUser,
   setAuthenticatedSession,
 } from "./store"
 
@@ -11,6 +12,7 @@ let hooksRegistered = false
 let initialized = false
 let initializePromise: Promise<void> | null = null
 let refreshPromise: Promise<string | null> | null = null
+let loadUserPromise: Promise<void> | null = null
 
 function redirectToLogin(): void {
   if (typeof window === "undefined") return
@@ -39,6 +41,33 @@ function ensureHooksRegistered(): void {
   hooksRegistered = true
 }
 
+async function loadCurrentUserIfNeeded(force = false): Promise<void> {
+  const snapshot = getAuthSnapshot()
+  if (!snapshot.accessToken) {
+    return
+  }
+  if (!force && snapshot.user) {
+    return
+  }
+  if (loadUserPromise) {
+    return loadUserPromise
+  }
+
+  loadUserPromise = authApi
+    .me()
+    .then((user) => {
+      setCurrentUser(user)
+    })
+    .catch(() => {
+      // 获取用户信息失败时不阻断主流程，401 会由请求层统一清理登录态。
+    })
+    .finally(() => {
+      loadUserPromise = null
+    })
+
+  return loadUserPromise
+}
+
 export async function refreshAccessToken(): Promise<string | null> {
   hydrateAuthStoreFromStorage()
 
@@ -55,6 +84,7 @@ export async function refreshAccessToken(): Promise<string | null> {
     .refresh(refreshToken)
     .then((result) => {
       setAuthenticatedSession({ tokens: result.tokens })
+      void loadCurrentUserIfNeeded()
       return result.tokens.access_token
     })
     .catch(() => {
@@ -90,6 +120,8 @@ export async function initializeAuth(): Promise<void> {
     if (!accessToken && refreshToken) {
       await refreshAccessToken()
     }
+
+    await loadCurrentUserIfNeeded()
 
     initialized = true
   })().finally(() => {

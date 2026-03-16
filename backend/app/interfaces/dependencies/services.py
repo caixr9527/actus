@@ -124,6 +124,12 @@ def get_access_token_blacklist_store() -> RedisAccessTokenBlacklistStore:
     return RedisAccessTokenBlacklistStore(redis_client=redis_client)
 
 
+def get_refresh_token_store() -> RedisRefreshTokenStore:
+    """获取 Refresh Token 存储服务"""
+    redis_client = get_redis_client()
+    return RedisRefreshTokenStore(redis_client=redis_client)
+
+
 def build_agent_service(cos: Cos) -> AgentService:
     """纯构造函数：根据显式传入依赖构建 AgentService。"""
     app_config_repository = FileAppConfigRepository(config_path=settings.app_config_filepath)

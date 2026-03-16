@@ -658,7 +658,17 @@ const SETTING_MENUS: Array<{
   { key: "mcp-setting", icon: Wrench, title: "MCP 服务器" },
 ]
 
-export function ManusSettings() {
+type ManusSettingsProps = {
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  showTrigger?: boolean
+}
+
+export function ManusSettings({
+  open: openProp,
+  onOpenChange,
+  showTrigger = true,
+}: ManusSettingsProps = {}) {
   // ---- 防止 SSR hydration 不匹配（Radix Dialog 在服务端/客户端生成不同的 aria-controls ID）----
   const [mounted, setMounted] = useState(false)
   useEffect(() => {
@@ -666,7 +676,17 @@ export function ManusSettings() {
   }, [])
 
   // ---- 弹窗 & 导航 ----
-  const [open, setOpen] = useState(false)
+  const [internalOpen, setInternalOpen] = useState(false)
+  const open = openProp ?? internalOpen
+  const setOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (openProp === undefined) {
+        setInternalOpen(nextOpen)
+      }
+      onOpenChange?.(nextOpen)
+    },
+    [openProp, onOpenChange],
+  )
   const [activeSetting, setActiveSetting] =
     useState<SettingTab>("common-setting")
 
@@ -888,6 +908,9 @@ export function ManusSettings() {
 
   // 客户端挂载前，仅渲染普通按钮占位，避免 Radix Dialog SSR hydration 不匹配
   if (!mounted) {
+    if (!showTrigger) {
+      return null
+    }
     return (
       <Button variant="outline" size="icon-sm" className="cursor-pointer">
         <Settings />
@@ -897,12 +920,13 @@ export function ManusSettings() {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      {/* 触发按钮 */}
-      <DialogTrigger asChild>
-        <Button variant="outline" size="icon-sm" className="cursor-pointer">
-          <Settings />
-        </Button>
-      </DialogTrigger>
+      {showTrigger ? (
+        <DialogTrigger asChild>
+          <Button variant="outline" size="icon-sm" className="cursor-pointer">
+            <Settings />
+          </Button>
+        </DialogTrigger>
+      ) : null}
 
       {/* 弹窗内容 */}
       <DialogContent className="!max-w-[850px]">

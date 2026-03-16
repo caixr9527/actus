@@ -13,11 +13,11 @@ import {
 } from '@/components/ui/dialog'
 import {useAuth} from '@/hooks/use-auth'
 import {authApi} from '@/lib/auth'
+import {validatePasswordStrength} from '@/lib/auth/validators'
 import {ApiError} from '@/lib/api'
 import {toast} from 'sonner'
 
 const EMAIL_REGEX = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
-const PASSWORD_ALLOWED_REGEX = /^[A-Za-z0-9!@#$%^&*._-]+$/
 
 export type AuthDialogMode = 'login' | 'register'
 
@@ -28,22 +28,6 @@ type AuthLoginDialogProps = {
   initialMode?: AuthDialogMode
   onModeChange?: (mode: AuthDialogMode) => void
   onSuccess?: () => void
-}
-
-function validatePasswordStrength(value: string): string | null {
-  if (value.length < 8) {
-    return '密码长度不能少于8位'
-  }
-  if (!/[A-Za-z]/.test(value)) {
-    return '密码必须包含字母'
-  }
-  if (!/\d/.test(value)) {
-    return '密码必须包含数字'
-  }
-  if (!PASSWORD_ALLOWED_REGEX.test(value)) {
-    return '密码仅允许字母、数字和常见符号 !@#$%^&*._-'
-  }
-  return null
 }
 
 export function AuthLoginDialog({

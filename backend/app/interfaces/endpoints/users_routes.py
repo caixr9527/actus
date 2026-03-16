@@ -8,9 +8,19 @@
 from fastapi import APIRouter, Depends
 
 from app.application.service import UserService
+from app.domain.external import AccessTokenBlacklistStore, RefreshTokenStore
 from app.domain.models import User, UserProfile
-from app.interfaces.dependencies.auth import get_current_user
-from app.interfaces.dependencies.services import get_user_service
+from app.interfaces.dependencies.auth import (
+    AuthContext,
+    get_current_auth_context,
+    get_access_token_ttl_seconds,
+    get_current_user,
+)
+from app.interfaces.dependencies.services import (
+    get_access_token_blacklist_store,
+    get_refresh_token_store,
+    get_user_service,
+)
 from app.interfaces.schemas import Response
 from app.interfaces.schemas.auth import (
     CurrentUserResponse,
@@ -90,15 +100,21 @@ async def update_current_user_profile(
 )
 async def update_current_user_password(
         payload: UpdatePasswordRequest,
-        current_user: User = Depends(get_current_user),
+        auth_context: AuthContext = Depends(get_current_auth_context),
         user_service: UserService = Depends(get_user_service),
+        access_token_blacklist_store: AccessTokenBlacklistStore = Depends(get_access_token_blacklist_store),
+        refresh_token_store: RefreshTokenStore = Depends(get_refresh_token_store),
 ) -> Response[UpdatePasswordResponse]:
     """更新当前用户密码接口"""
     await user_service.update_current_user_password(
-        user_id=current_user.id,
+        user_id=auth_context.user.id,
         old_password=payload.old_password,
         new_password=payload.new_password,
         confirm_password=payload.confirm_password,
+        refresh_token_store=refresh_token_store,
+        access_token_blacklist_store=access_token_blacklist_store,
+        current_access_token=auth_context.access_token,
+        access_token_expires_in_seconds=get_access_token_ttl_seconds(auth_context.token_payload),
     )
     return Response.success(
         msg="密码更新成功",
