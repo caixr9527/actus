@@ -19,7 +19,7 @@ class _FakeAuthService:
             expires_in_seconds=300,
         )
 
-    async def register(self, *, email: str, password: str, verification_code=None):
+    async def register(self, *, email: str, password: str, confirm_password: str, verification_code=None):
         return User(
             email=email.lower(),
             password="hashed-password",
@@ -70,7 +70,7 @@ class _ErrorAuthService:
     async def send_register_verification_code(self, email: str):
         raise BadRequestError("该邮箱已注册，请直接登录")
 
-    async def register(self, *, email: str, password: str, verification_code=None):
+    async def register(self, *, email: str, password: str, confirm_password: str, verification_code=None):
         raise BadRequestError("该邮箱已注册，请直接登录")
 
     async def login(self, *, email: str, password: str, client_ip=None):
@@ -152,7 +152,11 @@ def test_register_route_should_return_success_response() -> None:
     with TestClient(app) as client:
         response = client.post(
             "/api/auth/register",
-            json={"email": "tester@example.com", "password": "Password123!"},
+            json={
+                "email": "tester@example.com",
+                "password": "Password123!",
+                "confirm_password": "Password123!",
+            },
         )
 
     assert response.status_code == 200
@@ -171,7 +175,11 @@ def test_register_route_should_map_bad_request_error() -> None:
     with TestClient(app) as client:
         response = client.post(
             "/api/auth/register",
-            json={"email": "tester@example.com", "password": "Password123!"},
+            json={
+                "email": "tester@example.com",
+                "password": "Password123!",
+                "confirm_password": "Password123!",
+            },
         )
 
     assert response.status_code == 400

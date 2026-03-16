@@ -11,6 +11,7 @@ from .app_config_service import AppConfigService
 from .file_service import FileService
 from .session_service import SessionService
 from .status_service import StatusService
+from .user_service import UserService
 
 __all__ = [
     "AuthService",
@@ -18,5 +19,6 @@ __all__ = [
     "StatusService",
     "FileService",
     "SessionService",
-    "AgentService"
+    "AgentService",
+    "UserService",
 ]

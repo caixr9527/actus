@@ -176,12 +176,18 @@ class UpdatePasswordRequest(BaseModel):
     """更新密码请求结构"""
     old_password: str = Field(min_length=8)
     new_password: str = Field(min_length=8)
+    confirm_password: str = Field(min_length=8)
 
-    @field_validator("old_password", "new_password")
+    @field_validator("old_password", "new_password", "confirm_password")
     @classmethod
     def validate_password(cls, value: str) -> str:
         """修改密码强度校验"""
         return validate_password_strength(value)
+
+
+class UpdatePasswordResponse(BaseModel):
+    """更新密码响应结构"""
+    success: bool = True
 
 
 class LoginResult(BaseModel):

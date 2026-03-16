@@ -29,21 +29,37 @@ def test_send_register_code_request_valid_email_should_pass_validation() -> None
 
 def test_register_request_invalid_email_should_raise_validation_error() -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(email="invalid-email", password="Password123")
+        RegisterRequest(
+            email="invalid-email",
+            password="Password123",
+            confirm_password="Password123",
+        )
 
 
 def test_register_request_weak_password_should_raise_validation_error() -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(email="tester@example.com", password="Password")
+        RegisterRequest(
+            email="tester@example.com",
+            password="Password",
+            confirm_password="Password",
+        )
 
 
 def test_register_request_password_with_illegal_symbol_should_raise_validation_error() -> None:
     with pytest.raises(ValidationError):
-        RegisterRequest(email="tester@example.com", password="Password123~")
+        RegisterRequest(
+            email="tester@example.com",
+            password="Password123~",
+            confirm_password="Password123~",
+        )
 
 
 def test_register_request_password_with_common_symbol_should_pass_validation() -> None:
-    payload = RegisterRequest(email="tester@example.com", password="Password123!")
+    payload = RegisterRequest(
+        email="tester@example.com",
+        password="Password123!",
+        confirm_password="Password123!",
+    )
     assert payload.password == "Password123!"
 
 
@@ -60,6 +76,7 @@ def test_register_request_verification_code_with_valid_digits_should_pass_valida
     payload = RegisterRequest(
         email="tester@example.com",
         password="Password123!",
+        confirm_password="Password123!",
         verification_code="123456",
     )
     assert payload.verification_code == "123456"
@@ -74,6 +91,7 @@ def test_register_request_verification_code_should_follow_configured_length(monk
     payload = RegisterRequest(
         email="tester@example.com",
         password="Password123!",
+        confirm_password="Password123!",
         verification_code="1234",
     )
     assert payload.verification_code == "1234"
@@ -91,6 +109,7 @@ def test_register_request_verification_code_with_wrong_configured_length_should_
         RegisterRequest(
             email="tester@example.com",
             password="Password123!",
+            confirm_password="Password123!",
             verification_code="123456",
         )
 
@@ -133,9 +152,17 @@ def test_logout_response_should_default_success_true() -> None:
 
 def test_update_password_request_should_validate_min_length() -> None:
     with pytest.raises(ValidationError):
-        UpdatePasswordRequest(old_password="short", new_password="Password123")
+        UpdatePasswordRequest(
+            old_password="short",
+            new_password="Password123",
+            confirm_password="Password123",
+        )
 
 
 def test_update_password_request_should_validate_old_password_strength() -> None:
     with pytest.raises(ValidationError):
-        UpdatePasswordRequest(old_password="12345678", new_password="Password123")
+        UpdatePasswordRequest(
+            old_password="12345678",
+            new_password="Password123",
+            confirm_password="Password123",
+        )

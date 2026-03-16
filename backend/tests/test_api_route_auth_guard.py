@@ -35,11 +35,13 @@ def test_protected_http_routes_should_require_authorization_header() -> None:
         sessions_response = client.get("/api/sessions")
         files_response = client.get("/api/files/file-1")
         app_config_response = client.get("/api/app-config/llm")
+        users_response = client.get("/api/users/me")
 
     assert sessions_response.status_code == 401
     assert sessions_response.json()["code"] == 401
     assert files_response.status_code == 401
     assert app_config_response.status_code == 401
+    assert users_response.status_code == 401
 
 
 def test_whitelisted_routes_should_not_require_authorization_header() -> None:

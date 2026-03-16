@@ -22,6 +22,7 @@ from .auth import (
     UpdateCurrentUserRequest,
     UpdateCurrentUserResponse,
     UpdatePasswordRequest,
+    UpdatePasswordResponse,
 )
 from .base import Response
 from .event import (
@@ -76,6 +77,7 @@ __all__ = [
     "UpdateCurrentUserRequest",
     "UpdateCurrentUserResponse",
     "UpdatePasswordRequest",
+    "UpdatePasswordResponse",
     "CreateSessionResponse",
     "ListSessionResponse",
     "ListSessionItem",

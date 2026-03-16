@@ -185,6 +185,7 @@ def test_register_should_create_user_and_profile() -> None:
         service.register(
             email="Tester@Example.com",
             password="Password123!",
+            confirm_password="Password123!",
         )
     )
 
@@ -211,6 +212,7 @@ def test_register_should_raise_bad_request_when_email_exists() -> None:
             service.register(
                 email="tester@example.com",
                 password="Password123!",
+                confirm_password="Password123!",
             )
         )
     assert "该邮箱已注册" in exc.value.msg
@@ -252,6 +254,7 @@ def test_register_should_require_verification_code_when_enabled() -> None:
             service.register(
                 email="tester@example.com",
                 password="Password123!",
+                confirm_password="Password123!",
             )
         )
     assert "请输入邮箱验证码" in exc.value.msg
@@ -274,6 +277,7 @@ def test_register_should_raise_bad_request_when_verification_code_invalid() -> N
             service.register(
                 email="tester@example.com",
                 password="Password123!",
+                confirm_password="Password123!",
                 verification_code="654321",
             )
         )
@@ -296,6 +300,7 @@ def test_register_should_pass_with_verification_code_when_enabled() -> None:
         service.register(
             email="tester@example.com",
             password="Password123!",
+            confirm_password="Password123!",
             verification_code="123456",
         )
     )

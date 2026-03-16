@@ -13,7 +13,14 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
-from app.application.service import AppConfigService, FileService, StatusService, AgentService, AuthService
+from app.application.service import (
+    AppConfigService,
+    FileService,
+    StatusService,
+    AgentService,
+    AuthService,
+    UserService,
+)
 from app.application.service.session_service import SessionService
 from app.infrastructure.external.email_sender import SMTPEmailSender
 from app.infrastructure.external.file_storage import CosFileStorage
@@ -103,6 +110,12 @@ def get_auth_service() -> AuthService:
         register_verification_code_store=register_verification_code_store,
         email_sender=email_sender,
     )
+
+
+def get_user_service() -> UserService:
+    """获取用户资料服务"""
+    logger.info("加载获取UserService")
+    return UserService(uow_factory=get_uow)
 
 
 def get_access_token_blacklist_store() -> RedisAccessTokenBlacklistStore:
