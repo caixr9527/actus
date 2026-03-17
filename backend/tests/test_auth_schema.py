@@ -12,6 +12,7 @@ from app.interfaces.schemas.auth import (
     AccessTokenResponse,
     LogoutResponse,
     CurrentUserResponse,
+    UpdateCurrentUserRequest,
     UpdatePasswordRequest,
 )
 
@@ -135,6 +136,27 @@ def test_current_user_response_should_allow_optional_login_fields() -> None:
     )
     assert payload.last_login_at is None
     assert payload.last_login_ip is None
+
+
+def test_current_user_response_should_reject_unsupported_locale() -> None:
+    with pytest.raises(ValidationError):
+        CurrentUserResponse(
+            user_id="u-1",
+            email="tester@example.com",
+            locale="ja-JP",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+
+
+def test_update_current_user_request_should_accept_supported_locale() -> None:
+    payload = UpdateCurrentUserRequest(locale="en-US")
+    assert payload.locale == "en-US"
+
+
+def test_update_current_user_request_should_reject_unsupported_locale() -> None:
+    with pytest.raises(ValidationError):
+        UpdateCurrentUserRequest(locale="ja-JP")
 
 
 def test_logout_response_should_default_success_true() -> None:

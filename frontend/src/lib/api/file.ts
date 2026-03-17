@@ -1,5 +1,14 @@
 import { ApiError, get, getApiBaseUrl, post, requestRaw } from "./fetch"
 import type { FileInfo, FileUploadParams } from "./types"
+import { translateRuntime } from "../i18n/runtime"
+
+type FileDownloadErrorPayload = {
+  msg?: string
+  message?: string
+  data?: unknown
+  error_key?: string | null
+  error_params?: Record<string, unknown> | null
+}
 
 /**
  * 文件模块 API
@@ -46,15 +55,14 @@ export const fileApi = {
     })
 
     if (!response.ok) {
-      let errorMessage = response.statusText || "下载失败"
+      let errorMessage = response.statusText || translateRuntime("fileApi.downloadFailed")
+      let errorData: FileDownloadErrorPayload | null = null
+
       try {
         const contentType = response.headers.get("content-type")
         if (contentType?.includes("application/json")) {
-          const errorData = (await response.json()) as {
-            msg?: string
-            message?: string
-          }
-          errorMessage = errorData.msg || errorData.message || errorMessage
+          errorData = (await response.json()) as FileDownloadErrorPayload
+          errorMessage = errorData?.msg || errorData?.message || errorMessage
         } else {
           const text = await response.text()
           errorMessage = text || errorMessage
@@ -62,7 +70,13 @@ export const fileApi = {
       } catch {
         // ignore parse error and fallback to statusText
       }
-      throw new ApiError(response.status, `下载失败: ${errorMessage}`)
+      throw new ApiError(
+        response.status,
+        errorMessage,
+        errorData?.data ?? null,
+        errorData?.error_key ?? null,
+        errorData?.error_params ?? null,
+      )
     }
 
     return response.blob()

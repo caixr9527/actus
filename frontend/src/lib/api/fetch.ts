@@ -1,4 +1,5 @@
 import type { ApiResponse } from "./types"
+import { translateRuntime } from "../i18n/runtime"
 
 /**
  * API 配置
@@ -44,7 +45,10 @@ function getCorsAllowedOriginsHint(requestUrl: string): string | null {
     const pageOrigin = window.location.origin
     const targetOrigin = new URL(requestUrl, pageOrigin).origin
     if (targetOrigin === pageOrigin) return null
-    return `检测到跨域请求（${pageOrigin} -> ${targetOrigin}），请将 ${pageOrigin} 加入后端 CORS_ALLOWED_ORIGINS`
+    return translateRuntime("api.corsAllowedOriginsHint", {
+      pageOrigin,
+      targetOrigin,
+    })
   } catch {
     return null
   }
@@ -53,9 +57,9 @@ function getCorsAllowedOriginsHint(requestUrl: string): string | null {
 function toNetworkApiError(requestUrl: string): ApiError {
   const corsHint = getCorsAllowedOriginsHint(requestUrl)
   if (corsHint) {
-    return new ApiError(500, `网络请求失败。${corsHint}`)
+    return new ApiError(500, translateRuntime("api.networkRequestFailedWithHint", { hint: corsHint }))
   }
-  return new ApiError(500, "网络连接失败，请检查网络设置")
+  return new ApiError(500, translateRuntime("api.networkConnectionFailed"))
 }
 
 /**
@@ -66,6 +70,8 @@ export class ApiError extends Error {
     public code: number,
     public msg: string,
     public data: unknown = null,
+    public errorKey: string | null = null,
+    public errorParams: Record<string, unknown> | null = null,
   ) {
     super(msg)
     this.name = "ApiError"
@@ -88,7 +94,24 @@ async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
     code: response.ok ? 0 : response.status,
     msg: response.ok ? "success" : text || response.statusText,
     data: text as unknown as T,
+    error_key: null,
+    error_params: null,
   }
+}
+
+function toApiError(errorData: ApiResponse): ApiError {
+  const fallbackMessage =
+    errorData.code === 408
+      ? translateRuntime("api.requestTimeout")
+      : translateRuntime("api.requestFailed")
+
+  return new ApiError(
+    errorData.code,
+    errorData.msg || fallbackMessage,
+    errorData.data,
+    errorData.error_key ?? null,
+    errorData.error_params ?? null,
+  )
 }
 
 /**
@@ -102,12 +125,14 @@ async function handleErrorResponse(response: Response): Promise<never> {
   } catch {
     errorData = {
       code: response.status,
-      msg: response.statusText || "请求失败",
+      msg: response.statusText || translateRuntime("api.requestFailed"),
       data: null,
+      error_key: null,
+      error_params: null,
     }
   }
 
-  throw new ApiError(errorData.code, errorData.msg, errorData.data)
+  throw toApiError(errorData)
 }
 
 /**
@@ -150,7 +175,7 @@ function fetchWithTimeout(
       .catch((error) => {
         if (error instanceof Error && error.name === "AbortError") {
           if (abortedByTimeout) {
-            reject(new ApiError(408, "请求超时"))
+            reject(new ApiError(408, translateRuntime("api.requestTimeout")))
           } else {
             reject(error)
           }
@@ -269,7 +294,13 @@ export async function requestRaw(
       throw toNetworkApiError(requestUrl)
     }
 
-    throw new ApiError(500, error instanceof Error ? error.message : "未知错误")
+    throw new ApiError(
+      500,
+      error instanceof Error ? error.message : translateRuntime("api.unknownError"),
+      null,
+      null,
+      null,
+    )
   }
 }
 
@@ -299,7 +330,7 @@ export async function request<T = unknown>(
     if (skipErrorHandler) {
       return result.data as T
     }
-    throw new ApiError(result.code, result.msg, result.data)
+    throw toApiError(result)
   }
 
   return result.data as T
@@ -388,7 +419,7 @@ export function createSSEConnection(
 
   // 对于 POST 请求，使用 fetch + ReadableStream 方式
   if (data !== undefined) {
-    throw new Error("带数据的 SSE 连接请使用 createSSEStream 函数")
+    throw new Error(translateRuntime("api.sseUseCreateStream"))
   }
 
   return new EventSource(url)
@@ -423,7 +454,7 @@ export async function createSSEStream(
   }
 
   if (!response.body) {
-    throw new ApiError(500, "响应体为空")
+    throw new ApiError(500, translateRuntime("api.emptyResponseBody"))
   }
 
   return response.body
@@ -476,7 +507,7 @@ export async function parseSSEStream(
       return
     }
     if (onError) {
-      onError(error instanceof Error ? error : new Error("读取流失败"))
+      onError(error instanceof Error ? error : new Error(translateRuntime("api.streamReadFailed")))
     }
   } finally {
     try {
@@ -532,7 +563,7 @@ function processSSEEvent(
         onError(
           error instanceof Error
             ? error
-            : new Error(`解析 SSE 数据失败: ${eventData}`),
+            : new Error(translateRuntime("api.parseSSEFailed", { data: eventData })),
         )
       }
     }

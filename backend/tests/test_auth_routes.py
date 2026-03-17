@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.application.errors import BadRequestError
+from app.application.errors import error_keys
 from app.domain.models import User, UserProfile
 from app.interfaces.dependencies.auth import AuthContext, get_current_auth_context
 from app.interfaces.endpoints.auth_routes import router as auth_router
@@ -75,16 +76,28 @@ class _FakeAuthService:
 
 class _ErrorAuthService:
     async def send_register_verification_code(self, email: str, client_ip=None):
-        raise BadRequestError("该邮箱已注册，请直接登录")
+        raise BadRequestError(
+            "该邮箱已注册，请直接登录",
+            error_key=error_keys.AUTH_EMAIL_ALREADY_REGISTERED,
+        )
 
     async def register(self, *, email: str, password: str, confirm_password: str, verification_code=None):
-        raise BadRequestError("该邮箱已注册，请直接登录")
+        raise BadRequestError(
+            "该邮箱已注册，请直接登录",
+            error_key=error_keys.AUTH_EMAIL_ALREADY_REGISTERED,
+        )
 
     async def login(self, *, email: str, password: str, client_ip=None):
-        raise BadRequestError("邮箱或密码错误")
+        raise BadRequestError(
+            "邮箱或密码错误",
+            error_key=error_keys.AUTH_LOGIN_INVALID_CREDENTIALS,
+        )
 
     async def refresh_tokens(self, *, refresh_token: str):
-        raise BadRequestError("Refresh Token 无效或已过期")
+        raise BadRequestError(
+            "Refresh Token 无效或已过期",
+            error_key=error_keys.AUTH_REFRESH_TOKEN_INVALID,
+        )
 
     async def logout(
             self,
@@ -93,7 +106,10 @@ class _ErrorAuthService:
             access_token: str,
             access_token_expires_in_seconds: int,
     ):
-        raise BadRequestError("Refresh Token 无效或已过期")
+        raise BadRequestError(
+            "Refresh Token 无效或已过期",
+            error_key=error_keys.AUTH_REFRESH_TOKEN_INVALID,
+        )
 
 
 def _build_auth_context() -> AuthContext:
@@ -148,6 +164,7 @@ def test_send_register_verification_code_route_should_map_bad_request_error() ->
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "该邮箱已注册，请直接登录"
+    assert payload["error_key"] == error_keys.AUTH_EMAIL_ALREADY_REGISTERED
 
 
 def test_register_route_should_return_success_response() -> None:
@@ -193,6 +210,7 @@ def test_register_route_should_map_bad_request_error() -> None:
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "该邮箱已注册，请直接登录"
+    assert payload["error_key"] == error_keys.AUTH_EMAIL_ALREADY_REGISTERED
 
 
 def test_login_route_should_return_success_response() -> None:
@@ -235,6 +253,7 @@ def test_login_route_should_map_bad_request_error() -> None:
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "邮箱或密码错误"
+    assert payload["error_key"] == error_keys.AUTH_LOGIN_INVALID_CREDENTIALS
 
 
 def test_login_route_should_reject_http_when_auth_require_https_enabled(monkeypatch) -> None:
@@ -257,6 +276,7 @@ def test_login_route_should_reject_http_when_auth_require_https_enabled(monkeypa
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "当前环境仅允许通过 HTTPS 访问该接口"
+    assert payload["error_key"] == error_keys.AUTH_HTTPS_REQUIRED
 
 
 def test_login_route_should_allow_x_forwarded_proto_https_when_required(monkeypatch) -> None:
@@ -322,6 +342,7 @@ def test_refresh_route_should_map_bad_request_error() -> None:
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "Refresh Token 无效或已过期"
+    assert payload["error_key"] == error_keys.AUTH_REFRESH_TOKEN_INVALID
 
 
 def test_refresh_route_should_return_bad_request_when_refresh_cookie_missing() -> None:
@@ -337,6 +358,7 @@ def test_refresh_route_should_return_bad_request_when_refresh_cookie_missing() -
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "登录状态缺失，请重新登录"
+    assert payload["error_key"] == error_keys.AUTH_REFRESH_SESSION_MISSING
 
 
 def test_logout_route_should_return_success_response() -> None:
@@ -379,6 +401,7 @@ def test_logout_route_should_map_bad_request_error() -> None:
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "Refresh Token 无效或已过期"
+    assert payload["error_key"] == error_keys.AUTH_REFRESH_TOKEN_INVALID
 
 
 def test_logout_route_should_return_bad_request_when_refresh_cookie_missing() -> None:
@@ -395,3 +418,4 @@ def test_logout_route_should_return_bad_request_when_refresh_cookie_missing() ->
     payload = response.json()
     assert payload["code"] == 400
     assert payload["msg"] == "登录状态缺失，请重新登录"
+    assert payload["error_key"] == error_keys.AUTH_REFRESH_SESSION_MISSING

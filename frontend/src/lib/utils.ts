@@ -1,11 +1,13 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
+import type { AppLocale } from "@/lib/i18n"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-const WEEK_DAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const
+const WEEK_DAYS_ZH = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const
+const WEEK_DAYS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const
 
 /**
  * 将日期字符串格式化为相对日期标签
@@ -14,10 +16,17 @@ const WEEK_DAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '
  * - 本周内 → "周一"..."周六"
  * - 更早 → "MM/DD"
  */
-export function formatRelativeDate(dateStr: string | null | undefined): string {
-  if (!dateStr) return '今天'
+export function formatRelativeDate(
+  dateStr: string | null | undefined,
+  locale: AppLocale = "zh-CN",
+): string {
+  const todayLabel = locale === "en-US" ? "Today" : "今天"
+  const yesterdayLabel = locale === "en-US" ? "Yesterday" : "昨天"
+  const weekDays = locale === "en-US" ? WEEK_DAYS_EN : WEEK_DAYS_ZH
+
+  if (!dateStr) return todayLabel
   const date = new Date(dateStr)
-  if (isNaN(date.getTime())) return '今天'
+  if (isNaN(date.getTime())) return todayLabel
   const now = new Date()
 
   // 归一化到当天 0:00
@@ -25,9 +34,9 @@ export function formatRelativeDate(dateStr: string | null | undefined): string {
   const target = new Date(date.getFullYear(), date.getMonth(), date.getDate())
   const diffDays = Math.floor((today.getTime() - target.getTime()) / (1000 * 60 * 60 * 24))
 
-  if (diffDays === 0) return '今天'
-  if (diffDays === 1) return '昨天'
-  if (diffDays < 7) return WEEK_DAYS[date.getDay()]
+  if (diffDays === 0) return todayLabel
+  if (diffDays === 1) return yesterdayLabel
+  if (diffDays < 7) return weekDays[date.getDay()]
 
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')

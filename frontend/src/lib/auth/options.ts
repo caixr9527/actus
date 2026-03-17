@@ -33,35 +33,35 @@ const COMMON_TIMEZONES = [
 
 const COMMON_LOCALES = [
   "zh-CN",
-  "zh-TW",
-  "zh-HK",
   "en-US",
-  "en-GB",
-  "en-AU",
-  "en-CA",
-  "ja-JP",
-  "ko-KR",
-  "fr-FR",
-  "de-DE",
-  "es-ES",
-  "es-MX",
-  "it-IT",
-  "nl-NL",
-  "sv-SE",
-  "pl-PL",
-  "ru-RU",
-  "tr-TR",
-  "pt-BR",
-  "pt-PT",
-  "ar-SA",
-  "hi-IN",
-  "th-TH",
-  "vi-VN",
-  "id-ID",
+  // "zh-TW",
+  // "zh-HK",
+  // "en-GB",
+  // "en-AU",
+  // "en-CA",
+  // "ja-JP",
+  // "ko-KR",
+  // "fr-FR",
+  // "de-DE",
+  // "es-ES",
+  // "es-MX",
+  // "it-IT",
+  // "nl-NL",
+  // "sv-SE",
+  // "pl-PL",
+  // "ru-RU",
+  // "tr-TR",
+  // "pt-BR",
+  // "pt-PT",
+  // "ar-SA",
+  // "hi-IN",
+  // "th-TH",
+  // "vi-VN",
+  // "id-ID",
 ] as const
 
 let timeZoneCache: SelectOption[] | null = null
-let localeCache: SelectOption[] | null = null
+const localeCacheByDisplayLocale = new Map<string, SelectOption[]>()
 
 export function getTimeZoneOptions(): SelectOption[] {
   if (timeZoneCache) {
@@ -92,22 +92,26 @@ function buildLocaleLabel(localeCode: string, displayLocale: string): string {
   const languageNames = new Intl.DisplayNames([displayLocale], { type: "language" })
   const regionNames = new Intl.DisplayNames([displayLocale], { type: "region" })
   const languageLabel = languageNames.of(language) ?? language
-  const regionLabel = region ? (regionNames.of(region) ?? region) : "未指定地区"
+  const fallbackRegionLabel = displayLocale.startsWith("en") ? "Unknown Region" : "未指定地区"
+  const regionLabel = region ? (regionNames.of(region) ?? region) : fallbackRegionLabel
   return `${languageLabel}（${regionLabel}） (${localeCode})`
 }
 
 export function getLocaleOptions(displayLocale = "zh-CN"): SelectOption[] {
-  if (localeCache) {
-    return localeCache
+  const cacheKey = normalizeLocaleCode(displayLocale)
+  const cached = localeCacheByDisplayLocale.get(cacheKey)
+  if (cached) {
+    return cached
   }
 
-  localeCache = COMMON_LOCALES.map((localeCode) => normalizeLocaleCode(localeCode)).map(
+  const options = COMMON_LOCALES.map((localeCode) => normalizeLocaleCode(localeCode)).map(
     (localeCode) => ({
       value: localeCode,
       label: buildLocaleLabel(localeCode, displayLocale),
     }),
   )
-  return localeCache
+  localeCacheByDisplayLocale.set(cacheKey, options)
+  return options
 }
 
 export function ensureOptionExists(

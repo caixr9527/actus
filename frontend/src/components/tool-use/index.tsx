@@ -2,6 +2,7 @@
 
 import type { ComponentType } from 'react'
 import type { ToolEvent } from '@/lib/api/types'
+import { useI18n } from '@/lib/i18n'
 import { getToolKind, getFriendlyToolLabel } from './utils'
 import type { ToolKind } from './utils'
 import { MessageTool } from './message-tool'
@@ -42,7 +43,8 @@ const TOOL_COMPONENTS: Record<ToolKind, ComponentType<{ label: string; onClick?:
 }
 
 export function ToolUse({ data, onClick }: ToolUseProps) {
-  const label = getFriendlyToolLabel(data)
+  const { locale } = useI18n()
+  const label = getFriendlyToolLabel(data, locale)
   const kind = getToolKind(data)
   const Component = TOOL_COMPONENTS[kind]
   return <Component label={label} onClick={onClick} />

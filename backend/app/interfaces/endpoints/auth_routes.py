@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Request, Response as FastAPIResponse
 
 from app.application.errors import BadRequestError
+from app.application.errors import error_keys
 from app.application.service import AuthService
 from app.interfaces.dependencies.auth import (
     AuthContext,
@@ -95,7 +96,10 @@ def _get_refresh_token_from_cookie(http_request: Request) -> str:
     settings = get_settings()
     refresh_token = (http_request.cookies.get(settings.auth_cookie_name) or "").strip()
     if not refresh_token:
-        raise BadRequestError(msg="登录状态缺失，请重新登录")
+        raise BadRequestError(
+            msg="登录状态缺失，请重新登录",
+            error_key=error_keys.AUTH_REFRESH_SESSION_MISSING,
+        )
     return refresh_token
 
 

@@ -9,10 +9,13 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from app.application.errors import BadRequestError, ServerError
+from app.application.errors import error_keys
 from app.application.utils import PasswordHasher
 from app.domain.external import RefreshTokenStore, AccessTokenBlacklistStore
 from app.domain.models import User, UserProfile
 from app.domain.repositories import IUnitOfWork
+
+SUPPORTED_LOCALES = {"zh-CN", "en-US"}
 
 
 class UserService:
@@ -26,7 +29,11 @@ class UserService:
         async with self._uow_factory() as uow:
             user = await uow.user.get_by_id(user_id)
             if user is None:
-                raise BadRequestError(msg="用户不存在，请重新登录")
+                raise BadRequestError(
+                    msg="用户不存在，请重新登录",
+                    error_key=error_keys.USER_NOT_FOUND,
+                    error_params={"user_id": user_id},
+                )
 
             profile = await uow.user.get_profile_by_user_id(user_id)
             if profile is None:
@@ -48,12 +55,27 @@ class UserService:
             if field in allowed_fields
         }
         if not normalized_updates:
-            raise BadRequestError(msg="至少需要更新一个字段")
+            raise BadRequestError(
+                msg="至少需要更新一个字段",
+                error_key=error_keys.USER_PROFILE_UPDATE_EMPTY,
+            )
+        if "locale" in normalized_updates:
+            locale_value = normalized_updates["locale"]
+            if locale_value not in SUPPORTED_LOCALES:
+                raise BadRequestError(
+                    msg="语言地区仅支持 zh-CN 或 en-US",
+                    error_key=error_keys.USER_LOCALE_UNSUPPORTED,
+                    error_params={"locale": locale_value},
+                )
 
         async with self._uow_factory() as uow:
             user = await uow.user.get_by_id(user_id)
             if user is None:
-                raise BadRequestError(msg="用户不存在，请重新登录")
+                raise BadRequestError(
+                    msg="用户不存在，请重新登录",
+                    error_key=error_keys.USER_NOT_FOUND,
+                    error_params={"user_id": user_id},
+                )
 
             profile = await uow.user.get_profile_by_user_id(user_id)
             if profile is None:
@@ -80,15 +102,25 @@ class UserService:
     ) -> None:
         """更新当前用户密码（校验旧密码 + 新密码确认）。"""
         if new_password != confirm_password:
-            raise BadRequestError(msg="两次输入的新密码不一致")
+            raise BadRequestError(
+                msg="两次输入的新密码不一致",
+                error_key=error_keys.USER_PASSWORD_MISMATCH,
+            )
 
         async with self._uow_factory() as uow:
             user = await uow.user.get_by_id(user_id)
             if user is None:
-                raise BadRequestError(msg="用户不存在，请重新登录")
+                raise BadRequestError(
+                    msg="用户不存在，请重新登录",
+                    error_key=error_keys.USER_NOT_FOUND,
+                    error_params={"user_id": user_id},
+                )
 
             if not PasswordHasher.verify_password(old_password, user.password):
-                raise BadRequestError(msg="旧密码错误")
+                raise BadRequestError(
+                    msg="旧密码错误",
+                    error_key=error_keys.USER_CURRENT_PASSWORD_INCORRECT,
+                )
 
             next_password = PasswordHasher.hash_password(new_password)
 
@@ -107,4 +139,8 @@ class UserService:
                     expires_in_seconds=max(1, access_token_expires_in_seconds or 1),
                 )
         except Exception as e:
-            raise ServerError(msg="密码已更新，但登录态清理失败，请重新登录") from e
+            raise ServerError(
+                msg="密码已更新，但登录态清理失败，请重新登录",
+                error_key=error_keys.USER_SESSION_CLEANUP_FAILED,
+                error_params={"user_id": user_id},
+            ) from e

@@ -5,6 +5,7 @@ import {useRouter} from 'next/navigation'
 import {SidebarTrigger, useSidebar} from '@/components/ui/sidebar'
 import {Button} from '@/components/ui/button'
 import {useAuth} from '@/hooks/use-auth'
+import {useI18n} from '@/lib/i18n'
 
 interface ChatHeaderProps {
   onLoginClick?: () => void
@@ -12,6 +13,7 @@ interface ChatHeaderProps {
 
 export function ChatHeader({onLoginClick}: ChatHeaderProps) {
   const router = useRouter()
+  const {t} = useI18n()
   const {isLoggedIn} = useAuth()
   const {open, isMobile} = useSidebar()
   const handleLoginClick = () => {
@@ -38,7 +40,7 @@ export function ChatHeader({onLoginClick}: ChatHeaderProps) {
           className="group cursor-pointer h-9 px-4 font-semibold rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] motion-safe:transition-all motion-safe:duration-200 motion-safe:hover:-translate-y-0.5 motion-safe:hover:shadow-[0_8px_20px_rgba(0,0,0,0.22)] motion-safe:active:translate-y-0"
           onClick={handleLoginClick}
         >
-          登录
+          {t('chatHeader.login')}
         </Button>
       ) : null}
     </header>

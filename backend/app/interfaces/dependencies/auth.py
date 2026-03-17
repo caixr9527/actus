@@ -15,6 +15,7 @@ from jwt import ExpiredSignatureError, InvalidTokenError
 from starlette.requests import HTTPConnection
 
 from app.application.errors import UnauthorizedError, ServerError
+from app.application.errors import error_keys
 from app.domain.models import User, UserStatus
 from app.interfaces.dependencies.services import get_access_token_blacklist_store
 from app.infrastructure.storage import get_uow
@@ -36,14 +37,23 @@ def _is_websocket_connection(connection: HTTPConnection) -> bool:
 
 def _extract_bearer_token(authorization: str | None) -> str:
     if authorization is None:
-        raise UnauthorizedError(msg="缺少认证信息，请先登录")
+        raise UnauthorizedError(
+            msg="缺少认证信息，请先登录",
+            error_key=error_keys.AUTH_MISSING_CREDENTIALS,
+        )
     auth_value = authorization.strip()
     prefix = "Bearer "
     if not auth_value.startswith(prefix):
-        raise UnauthorizedError(msg="认证格式错误，请使用 Bearer Token")
+        raise UnauthorizedError(
+            msg="认证格式错误，请使用 Bearer Token",
+            error_key=error_keys.AUTH_INVALID_AUTHORIZATION_HEADER,
+        )
     access_token = auth_value[len(prefix):].strip()
     if not access_token:
-        raise UnauthorizedError(msg="Access Token 不能为空")
+        raise UnauthorizedError(
+            msg="Access Token 不能为空",
+            error_key=error_keys.AUTH_ACCESS_TOKEN_REQUIRED,
+        )
     return access_token
 
 
@@ -56,15 +66,27 @@ def _decode_access_token(access_token: str) -> dict[str, Any]:
             algorithms=[settings.auth_jwt_algorithm],
         )
     except ExpiredSignatureError as e:
-        raise UnauthorizedError(msg="登录已过期，请重新登录") from e
+        raise UnauthorizedError(
+            msg="登录已过期，请重新登录",
+            error_key=error_keys.AUTH_ACCESS_TOKEN_EXPIRED,
+        ) from e
     except InvalidTokenError as e:
-        raise UnauthorizedError(msg="Access Token 无效，请重新登录") from e
+        raise UnauthorizedError(
+            msg="Access Token 无效，请重新登录",
+            error_key=error_keys.AUTH_ACCESS_TOKEN_INVALID,
+        ) from e
 
     if payload.get("type") != "access":
-        raise UnauthorizedError(msg="Token 类型错误，请重新登录")
+        raise UnauthorizedError(
+            msg="Token 类型错误，请重新登录",
+            error_key=error_keys.AUTH_TOKEN_TYPE_INVALID,
+        )
     user_id = payload.get("user_id")
     if not isinstance(user_id, str) or not user_id:
-        raise UnauthorizedError(msg="Token 用户信息缺失，请重新登录")
+        raise UnauthorizedError(
+            msg="Token 用户信息缺失，请重新登录",
+            error_key=error_keys.AUTH_TOKEN_USER_MISSING,
+        )
     return payload
 
 
@@ -84,11 +106,17 @@ async def get_current_auth_context(connection: HTTPConnection) -> AuthContext:
         blacklist_store = get_access_token_blacklist_store()
         try:
             if await blacklist_store.is_access_token_blacklisted(access_token):
-                raise UnauthorizedError(msg="登录状态已失效，请重新登录")
+                raise UnauthorizedError(
+                    msg="登录状态已失效，请重新登录",
+                    error_key=error_keys.AUTH_SESSION_INVALIDATED,
+                )
         except UnauthorizedError:
             raise
         except Exception as e:
-            raise ServerError(msg="认证服务异常，请稍后重试") from e
+            raise ServerError(
+                msg="认证服务异常，请稍后重试",
+                error_key=error_keys.AUTH_SERVICE_UNAVAILABLE,
+            ) from e
 
         token_payload = _decode_access_token(access_token)
         user_id = str(token_payload["user_id"])
@@ -96,9 +124,15 @@ async def get_current_auth_context(connection: HTTPConnection) -> AuthContext:
         async with get_uow() as uow:
             user = await uow.user.get_by_id(user_id)
         if user is None:
-            raise UnauthorizedError(msg="用户不存在，请重新登录")
+            raise UnauthorizedError(
+                msg="用户不存在，请重新登录",
+                error_key=error_keys.AUTH_USER_NOT_FOUND,
+            )
         if user.status != UserStatus.ACTIVE:
-            raise UnauthorizedError(msg="账号状态异常，暂不可访问")
+            raise UnauthorizedError(
+                msg="账号状态异常，暂不可访问",
+                error_key=error_keys.AUTH_USER_STATUS_INVALID,
+            )
 
         connection.state.current_user = user
         connection.state.current_access_token = access_token

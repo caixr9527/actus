@@ -10,6 +10,7 @@ import {
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '@/lib/session-detail-runtime'
 import type { SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
+import { useI18n } from '@/lib/i18n'
 
 export type UseSessionDetailResult = {
   session: SessionDetail | null
@@ -39,6 +40,7 @@ export function useSessionDetail(
   initialSkipEmptyStream?: boolean,
   enabled: boolean = true,
 ): UseSessionDetailResult {
+  const { t } = useI18n()
   const [session, setSession] = useState<SessionDetail | null>(null)
   const [files, setFiles] = useState<SessionFile[]>([])
   const [events, setEvents] = useState<SSEEventData[]>([])
@@ -170,7 +172,7 @@ export function useSessionDetail(
         const scheduleReconnect = () => {
           if (streamInstanceId !== emptyStreamInstanceIdRef.current) return
           if (!canRetry(emptyStreamRetryCountRef.current, EMPTY_STREAM_RETRY_POLICY)) {
-            setError(new Error('会话实时连接中断，请点击重试恢复'))
+            setError(new Error(t('sessionDetail.realtimeDisconnected')))
             return
           }
 
@@ -204,7 +206,7 @@ export function useSessionDetail(
         scheduleReconnect()
       }
     )
-  }, [appendEvent, clearEmptyStreamReconnectTimer, sessionId, stopEmptyStream])
+  }, [appendEvent, clearEmptyStreamReconnectTimer, sessionId, stopEmptyStream, t])
 
   const normalizeFileList = useCallback((raw: unknown): SessionFile[] => {
     if (Array.isArray(raw)) return raw as SessionFile[]
@@ -247,14 +249,14 @@ export function useSessionDetail(
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return null
       }
-      setError(e instanceof Error ? e : new Error('加载失败'))
+      setError(e instanceof Error ? e : new Error(t('sessionDetail.loadFailed')))
       return null
     } finally {
       if (targetEpoch === sessionEpochRef.current && targetSessionId === currentSessionIdRef.current) {
         setLoading(false)
       }
     }
-  }, [normalizeFileList])
+  }, [normalizeFileList, t])
 
   const refresh = useCallback(async () => {
     if (!sessionId || !enabled) return
@@ -409,7 +411,7 @@ export function useSessionDetail(
           }
           const closeReason = classifyMessageStreamCloseReason(err)
           if (closeReason === 'error') {
-            setError(err instanceof Error ? err : new Error('流式响应异常'))
+            setError(err instanceof Error ? err : new Error(t('sessionDetail.streamError')))
           }
           finalizeMessageStream()
           if (shouldReloadSnapshotAfterMessageStreamClose(closeReason)) {
@@ -426,7 +428,7 @@ export function useSessionDetail(
       // 将消息流的 cleanup 存到独立的 ref，不与 emptyStream 混淆
       messageStreamCleanupRef.current = messageStreamCleanup
     },
-    [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream]
+    [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream, t]
   )
 
   return {

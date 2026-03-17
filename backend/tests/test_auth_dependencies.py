@@ -8,6 +8,7 @@ import pytest
 from starlette.requests import HTTPConnection
 
 from app.application.errors import UnauthorizedError
+from app.application.errors import error_keys
 from app.domain.models import User, UserStatus
 from app.interfaces.dependencies import auth as auth_dependencies
 
@@ -123,6 +124,7 @@ def test_get_current_auth_context_should_reject_when_authorization_header_missin
     with pytest.raises(UnauthorizedError) as exc:
         asyncio.run(auth_dependencies.get_current_auth_context(connection))
     assert exc.value.code == 401
+    assert exc.value.error_key == error_keys.AUTH_MISSING_CREDENTIALS
 
 
 def test_get_current_auth_context_should_reject_blacklisted_access_token(monkeypatch) -> None:
@@ -138,6 +140,7 @@ def test_get_current_auth_context_should_reject_blacklisted_access_token(monkeyp
     with pytest.raises(UnauthorizedError) as exc:
         asyncio.run(auth_dependencies.get_current_auth_context(connection))
     assert exc.value.msg == "登录状态已失效，请重新登录"
+    assert exc.value.error_key == error_keys.AUTH_SESSION_INVALIDATED
 
 
 def test_get_current_auth_context_should_reject_invalid_signature_token(monkeypatch) -> None:
@@ -153,6 +156,7 @@ def test_get_current_auth_context_should_reject_invalid_signature_token(monkeypa
     with pytest.raises(UnauthorizedError) as exc:
         asyncio.run(auth_dependencies.get_current_auth_context(connection))
     assert exc.value.msg == "Access Token 无效，请重新登录"
+    assert exc.value.error_key == error_keys.AUTH_ACCESS_TOKEN_INVALID
 
 
 def test_get_current_auth_context_should_reject_disabled_user(monkeypatch) -> None:
@@ -169,6 +173,7 @@ def test_get_current_auth_context_should_reject_disabled_user(monkeypatch) -> No
     with pytest.raises(UnauthorizedError) as exc:
         asyncio.run(auth_dependencies.get_current_auth_context(connection))
     assert exc.value.msg == "账号状态异常，暂不可访问"
+    assert exc.value.error_key == error_keys.AUTH_USER_STATUS_INVALID
 
 
 def test_get_current_auth_context_should_reject_expired_token(monkeypatch) -> None:
@@ -187,6 +192,7 @@ def test_get_current_auth_context_should_reject_expired_token(monkeypatch) -> No
     with pytest.raises(UnauthorizedError) as exc:
         asyncio.run(auth_dependencies.get_current_auth_context(connection))
     assert exc.value.msg == "登录已过期，请重新登录"
+    assert exc.value.error_key == error_keys.AUTH_ACCESS_TOKEN_EXPIRED
 
 
 def test_get_current_auth_context_should_support_websocket_connection(monkeypatch) -> None:

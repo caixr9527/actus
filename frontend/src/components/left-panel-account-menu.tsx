@@ -4,6 +4,8 @@ import { useMemo, useState } from "react"
 import { ChevronsUpDown, LogOut, Settings, UserRound } from "lucide-react"
 import { toast } from "sonner"
 import { useAuth } from "@/hooks/use-auth"
+import { getApiErrorMessage } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 import { getUserDisplayName, maskEmail } from "@/lib/auth/display"
 import { useAvatarSrc } from "@/hooks/use-avatar-src"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -20,6 +22,7 @@ import { ProfileSettingsDialog } from "@/components/profile-settings-dialog"
 
 export function LeftPanelAccountMenu() {
   const { user, logout, isLoggedIn } = useAuth()
+  const { t } = useI18n()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
@@ -28,13 +31,16 @@ export function LeftPanelAccountMenu() {
 
   const displayName = useMemo(() => {
     if (!user && isLoggedIn) {
-      return "加载中..."
+      return t("accountMenu.loading")
     }
-    return getUserDisplayName(user)
-  }, [isLoggedIn, user])
+    return getUserDisplayName(user, {
+      guestLabel: t("accountMenu.guest"),
+      unknownUserLabel: t("accountMenu.unnamedUser"),
+    })
+  }, [isLoggedIn, t, user])
   const secondaryLabel = useMemo(() => {
     if (!user && isLoggedIn) {
-      return "正在加载资料..."
+      return t("accountMenu.loadingProfile")
     }
     if (!user) {
       return ""
@@ -43,7 +49,7 @@ export function LeftPanelAccountMenu() {
       return maskEmail(user.email)
     }
     return ""
-  }, [isLoggedIn, user])
+  }, [isLoggedIn, t, user])
 
   const openSettings = () => {
     setProfileOpen(false)
@@ -63,7 +69,7 @@ export function LeftPanelAccountMenu() {
     try {
       await logout()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "退出登录失败，请稍后重试")
+      toast.error(getApiErrorMessage(error, "accountMenu.logoutFailed", t))
     } finally {
       setLoggingOut(false)
     }
@@ -100,11 +106,11 @@ export function LeftPanelAccountMenu() {
         >
           <DropdownMenuItem className="cursor-pointer" onClick={openSettings}>
             <Settings />
-            系统设置
+            {t("accountMenu.settings")}
           </DropdownMenuItem>
           <DropdownMenuItem className="cursor-pointer" onClick={openProfile}>
             <UserRound />
-            个人中心
+            {t("accountMenu.profileCenter")}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
@@ -114,7 +120,7 @@ export function LeftPanelAccountMenu() {
             disabled={loggingOut}
           >
             <LogOut />
-            {loggingOut ? "退出中..." : "退出登录"}
+            {loggingOut ? t("accountMenu.loggingOut") : t("accountMenu.logout")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

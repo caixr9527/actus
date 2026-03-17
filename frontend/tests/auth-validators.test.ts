@@ -8,11 +8,11 @@ test("validatePasswordStrength should return null for strong password", () => {
 })
 
 test("validatePasswordStrength should return readable errors", () => {
-  assert.equal(validatePasswordStrength("short1!"), "密码长度不能少于8位")
-  assert.equal(validatePasswordStrength("12345678"), "密码必须包含字母")
-  assert.equal(validatePasswordStrength("Password"), "密码必须包含数字")
+  assert.equal(validatePasswordStrength("short1!"), "validation.passwordMinLength")
+  assert.equal(validatePasswordStrength("12345678"), "validation.passwordRequireLetter")
+  assert.equal(validatePasswordStrength("Password"), "validation.passwordRequireNumber")
   assert.equal(
     validatePasswordStrength("Password123~"),
-    "密码仅允许字母、数字和常见符号 !@#$%^&*._-",
+    "validation.passwordAllowedChars",
   )
 })

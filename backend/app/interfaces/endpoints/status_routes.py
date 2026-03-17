@@ -11,6 +11,7 @@ from typing import List
 from fastapi import APIRouter, Depends, Response as FastAPIResponse
 
 from app.application.service import StatusService
+from app.application.errors import error_keys
 from app.domain.models import HealthStatus
 from app.interfaces.schemas import Response
 from app.interfaces.dependencies.services import get_status_service
@@ -34,5 +35,10 @@ async def get_status(
     if any(item.status == 'ERROR' or item.status == 'error' for item in status):
         # 健康检查失败时同步返回真实HTTP状态码，避免网关/探针误判为200。
         http_response.status_code = 503
-        return Response.fail(503, "系统服务存在异常", status)
+        return Response.fail(
+            503,
+            "系统服务存在异常",
+            status,
+            error_key=error_keys.STATUS_UNHEALTHY,
+        )
     return Response.success(msg="系统服务正常", data=status)

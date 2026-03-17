@@ -9,6 +9,7 @@ import uuid
 from typing import List
 
 from app.application.errors import NotFoundError
+from app.application.errors import error_keys
 from app.domain.models import AppConfig, LLMConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig, A2AServerConfig
 from app.domain.repositories import AppConfigRepository
@@ -152,7 +153,11 @@ class AppConfigService:
         app_config = await self._load_app_config()
         # 检查要删除的MCP服务器是否存在
         if server_name not in app_config.mcp_config.mcpServers:
-            raise NotFoundError(f"MCP服务器 {server_name} 不存在")
+            raise NotFoundError(
+                msg=f"MCP服务器 {server_name} 不存在",
+                error_key=error_keys.APP_CONFIG_MCP_SERVER_NOT_FOUND,
+                error_params={"server_name": server_name},
+            )
 
         # 从配置中删除指定的MCP服务器
         del app_config.mcp_config.mcpServers[server_name]
@@ -166,7 +171,11 @@ class AppConfigService:
         app_config = await self._load_app_config()
         # 检查要删除的MCP服务器是否存在
         if server_name not in app_config.mcp_config.mcpServers:
-            raise NotFoundError(f"MCP服务器 {server_name} 不存在")
+            raise NotFoundError(
+                msg=f"MCP服务器 {server_name} 不存在",
+                error_key=error_keys.APP_CONFIG_MCP_SERVER_NOT_FOUND,
+                error_params={"server_name": server_name},
+            )
 
         # 设置指定MCP服务器的启用状态
         app_config.mcp_config.mcpServers[server_name].enabled = enabled
@@ -233,7 +242,11 @@ class AppConfigService:
 
         # 如果未找到对应的A2A服务器，抛出NotFoundError异常
         if idx is None:
-            raise NotFoundError(f"该A2A服务[{a2a_id}]不存在，请核实后重试")
+            raise NotFoundError(
+                msg=f"该A2A服务[{a2a_id}]不存在，请核实后重试",
+                error_key=error_keys.APP_CONFIG_A2A_SERVER_NOT_FOUND,
+                error_params={"a2a_id": a2a_id},
+            )
 
         # 更新A2A服务器的启用状态
         app_config.a2a_config.a2a_servers[idx].enabled = enabled
@@ -257,7 +270,11 @@ class AppConfigService:
 
         # 如果未找到对应的A2A服务器，抛出NotFoundError异常
         if idx is None:
-            raise NotFoundError(f"该A2A服务[{a2a_id}]不存在，请核实后重试")
+            raise NotFoundError(
+                msg=f"该A2A服务[{a2a_id}]不存在，请核实后重试",
+                error_key=error_keys.APP_CONFIG_A2A_SERVER_NOT_FOUND,
+                error_params={"a2a_id": a2a_id},
+            )
 
         # 根据索引删除A2A服务器配置
         del app_config.a2a_config.a2a_servers[idx]

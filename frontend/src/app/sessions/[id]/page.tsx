@@ -7,6 +7,7 @@ import {
   consumeInitialMessageDraft,
   parseLegacyInitQueryParam,
 } from '@/lib/initial-message-draft'
+import { useI18n } from '@/lib/i18n'
 
 interface PageProps {
   params: Promise<{ id: string }>
@@ -20,6 +21,7 @@ interface PageProps {
  * - 首页跳转优先使用 sessionStorage 传递初始消息（URL 仅作兼容回退）
  */
 export default function SessionDetailPage({ params }: PageProps) {
+  const { t } = useI18n()
   const searchParams = useSearchParams()
   const [sessionData, setSessionData] = useState<{
     id: string
@@ -70,7 +72,7 @@ export default function SessionDetailPage({ params }: PageProps) {
   }, [params, searchParams])
 
   if (!sessionData) {
-    return <div className="flex items-center justify-center h-full">加载中...</div>
+    return <div className="flex items-center justify-center h-full">{t('common.loading')}</div>
   }
 
   return (

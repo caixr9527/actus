@@ -42,8 +42,9 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { configApi } from "@/lib/api"
+import { configApi, getApiErrorMessage } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { useI18n } from "@/lib/i18n"
 import type {
   AgentConfig,
   LLMConfig,
@@ -59,6 +60,7 @@ type CommonSettingProps = {
 }
 
 function CommonSetting({ config, onChange }: CommonSettingProps) {
+  const { t } = useI18n()
   const handleChange = (field: keyof AgentConfig, value: string) => {
     const numValue = value === "" ? undefined : Number(value)
     onChange({ ...config, [field]: numValue })
@@ -69,45 +71,45 @@ function CommonSetting({ config, onChange }: CommonSettingProps) {
       <FieldGroup>
         <FieldSet>
           <FieldLegend className="text-lg font-bold text-gray-700">
-            通用配置
+            {t("manusSettings.common.title")}
           </FieldLegend>
           <FieldGroup>
             <Field>
-              <FieldLabel htmlFor="max_iterations">最大计划迭代次数</FieldLabel>
+              <FieldLabel htmlFor="max_iterations">{t("manusSettings.common.maxIterations.label")}</FieldLabel>
               <Input
                 id="max_iterations"
                 type="number"
-                placeholder="Agent最大迭代次数"
+                placeholder={t("manusSettings.common.maxIterations.placeholder")}
                 value={config.max_iterations ?? 100}
                 onChange={(e) => handleChange("max_iterations", e.target.value)}
                 min={0}
                 max={200}
               />
               <FieldDescription className="text-xs">
-                执行Agent最大能迭代循环调用工具的次数，默认为100
+                {t("manusSettings.common.maxIterations.description")}
               </FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="max_retries">最大重试次数</FieldLabel>
+              <FieldLabel htmlFor="max_retries">{t("manusSettings.common.maxRetries.label")}</FieldLabel>
               <Input
                 id="max_retries"
                 type="number"
-                placeholder="LLM/Tool最大重试次数"
+                placeholder={t("manusSettings.common.maxRetries.placeholder")}
                 value={config.max_retries ?? 3}
                 onChange={(e) => handleChange("max_retries", e.target.value)}
                 min={0}
                 max={10}
               />
               <FieldDescription className="text-xs">
-                默认情况下，最大重试次数为3
+                {t("manusSettings.common.maxRetries.description")}
               </FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="max_search_results">最大搜索结果</FieldLabel>
+              <FieldLabel htmlFor="max_search_results">{t("manusSettings.common.maxSearchResults.label")}</FieldLabel>
               <Input
                 id="max_search_results"
                 type="number"
-                placeholder="搜索工具返回的最大结果数"
+                placeholder={t("manusSettings.common.maxSearchResults.placeholder")}
                 value={config.max_search_results ?? 10}
                 onChange={(e) =>
                   handleChange("max_search_results", e.target.value)
@@ -116,7 +118,7 @@ function CommonSetting({ config, onChange }: CommonSettingProps) {
                 max={30}
               />
               <FieldDescription className="text-xs">
-                默认情况下，每个搜索步骤包含 10 个结果。
+                {t("manusSettings.common.maxSearchResults.description")}
               </FieldDescription>
             </Field>
           </FieldGroup>
@@ -134,6 +136,7 @@ type LLMSettingProps = {
 }
 
 function LLMSetting({ config, onChange }: LLMSettingProps) {
+  const { t } = useI18n()
   const handleChange = (field: keyof LLMConfig, value: string) => {
     onChange({ ...config, [field]: value })
   }
@@ -148,57 +151,56 @@ function LLMSetting({ config, onChange }: LLMSettingProps) {
       <FieldGroup>
         <FieldSet>
           <FieldLegend className="text-lg font-bold text-gray-700">
-            模型提供商
+            {t("manusSettings.llm.title")}
           </FieldLegend>
           <FieldGroup>
             <Field>
               <FieldLabel htmlFor="base_url">
-                提供商基础地址(base_url)
+                {t("manusSettings.llm.baseUrl.label")}
               </FieldLabel>
               <Input
                 id="base_url"
                 type="url"
-                placeholder="请填写LLM基础URL地址"
+                placeholder={t("manusSettings.llm.baseUrl.placeholder")}
                 value={config.base_url ?? ""}
                 onChange={(e) => handleChange("base_url", e.target.value)}
               />
               <FieldDescription className="text-xs">
-                请填写模型提供商的基础 url 地址，需兼容 OpenAI 格式。
+                {t("manusSettings.llm.baseUrl.description")}
               </FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="api_key">提供商密钥</FieldLabel>
+              <FieldLabel htmlFor="api_key">{t("manusSettings.llm.apiKey.label")}</FieldLabel>
               <Input
                 id="api_key"
                 type="password"
-                placeholder="请填写提供商API密钥"
+                placeholder={t("manusSettings.llm.apiKey.placeholder")}
                 value={config.api_key ?? ""}
                 onChange={(e) => handleChange("api_key", e.target.value)}
               />
               <FieldDescription className="text-xs">
-                请填写模型提供商密钥信息。
+                {t("manusSettings.llm.apiKey.description")}
               </FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="model_name">模型名</FieldLabel>
+              <FieldLabel htmlFor="model_name">{t("manusSettings.llm.modelName.label")}</FieldLabel>
               <Input
                 id="model_name"
                 type="text"
-                placeholder="请填写需要使用的模型名字"
+                placeholder={t("manusSettings.llm.modelName.placeholder")}
                 value={config.model_name ?? ""}
                 onChange={(e) => handleChange("model_name", e.target.value)}
               />
               <FieldDescription className="text-xs">
-                请填写 Actus
-                调用的模型名字，模型必须支持工具调用、图像识别等功能。
+                {t("manusSettings.llm.modelName.description")}
               </FieldDescription>
             </Field>
             <Field>
-              <FieldLabel htmlFor="temperature">温度(temperature)</FieldLabel>
+              <FieldLabel htmlFor="temperature">{t("manusSettings.llm.temperature.label")}</FieldLabel>
               <Input
                 id="temperature"
                 type="number"
-                placeholder="请填写模型温度"
+                placeholder={t("manusSettings.llm.temperature.placeholder")}
                 value={config.temperature ?? 0.7}
                 onChange={(e) =>
                   handleNumberChange("temperature", e.target.value)
@@ -208,18 +210,17 @@ function LLMSetting({ config, onChange }: LLMSettingProps) {
                 step={0.1}
               />
               <FieldDescription className="text-xs">
-                温度越低，模型输出越确定、越稳定；温度越高，输出越具创造性和随机性，默认为
-                0.7。
+                {t("manusSettings.llm.temperature.description")}
               </FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="max_tokens">
-                最大输出 Token 数(max_tokens)
+                {t("manusSettings.llm.maxTokens.label")}
               </FieldLabel>
               <Input
                 id="max_tokens"
                 type="number"
-                placeholder="请填写模型最大输出Token数"
+                placeholder={t("manusSettings.llm.maxTokens.placeholder")}
                 value={config.max_tokens ?? 8192}
                 onChange={(e) =>
                   handleNumberChange("max_tokens", e.target.value)
@@ -228,7 +229,7 @@ function LLMSetting({ config, onChange }: LLMSettingProps) {
                 max={128000}
               />
               <FieldDescription className="text-xs">
-                模型单次回复允许生成的最大 Token 数量，默认为 8192。
+                {t("manusSettings.llm.maxTokens.description")}
               </FieldDescription>
             </Field>
           </FieldGroup>
@@ -255,13 +256,14 @@ function A2ASetting({
   onDelete,
   onAdd,
 }: A2ASettingProps) {
+  const { t } = useI18n()
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [addUrl, setAddUrl] = useState("")
   const [adding, setAdding] = useState(false)
 
   const handleAdd = async () => {
     if (!addUrl.trim()) {
-      toast.error("请输入远程 Agent 地址")
+      toast.error(t("manusSettings.a2a.addAddressRequired"))
       return
     }
     setAdding(true)
@@ -281,22 +283,20 @@ function A2ASetting({
       <FieldGroup>
         <FieldSet>
           <FieldLegend className="w-full flex justify-between items-center text-lg font-bold text-gray-700">
-            A2A Agent 配置
+            {t("manusSettings.a2a.title")}
             <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
               <DialogTrigger asChild>
                 <Button type="button" size="xs" className="cursor-pointer">
-                  添加远程Agent
+                  {t("manusSettings.a2a.addAction")}
                 </Button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle className="text-gray-700">
-                    添加远程Agent
+                    {t("manusSettings.a2a.addDialogTitle")}
                   </DialogTitle>
                   <DialogDescription className="text-gray-500">
-                    Actus 使用标准的 A2A 协议来连接远程 Agent。
-                    <br />
-                    请将您的配置粘贴到下方，然后点击“添加”即可添加 Agent。
+                    {t("manusSettings.a2a.addDialogDescription")}
                   </DialogDescription>
                 </DialogHeader>
                 <form
@@ -312,7 +312,7 @@ function A2ASetting({
                         <Input
                           id="a2a_base_url"
                           type="url"
-                          placeholder="Example: https://actus.com/weather-agent"
+                          placeholder={t("manusSettings.a2a.addDialogPlaceholder")}
                           value={addUrl}
                           onChange={(e) => setAddUrl(e.target.value)}
                           disabled={adding}
@@ -328,7 +328,7 @@ function A2ASetting({
                       className="cursor-pointer"
                       disabled={adding}
                     >
-                      取消
+                      {t("common.cancel")}
                     </Button>
                   </DialogClose>
                   <Button
@@ -337,15 +337,14 @@ function A2ASetting({
                     disabled={adding}
                   >
                     {adding && <Loader2 className="animate-spin" />}
-                    添加
+                    {t("common.add")}
                   </Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
           </FieldLegend>
           <FieldDescription className="text-sm">
-            模型上下文协议 (MCP) 通过集成外部工具来增强 Actus
-            的性能，例如私有域搜索、网页浏览、订餐、PPT 生成等任务。
+            {t("manusSettings.a2a.description")}
           </FieldDescription>
 
           {/* 加载态 */}
@@ -358,7 +357,7 @@ function A2ASetting({
           {/* 空态 */}
           {!loading && servers.length === 0 && (
             <div className="py-8 text-center text-sm text-muted-foreground">
-              暂无 A2A Agent，请点击上方按钮添加
+              {t("manusSettings.a2a.empty")}
             </div>
           )}
 
@@ -371,7 +370,7 @@ function A2ASetting({
                     <ItemTitle className="w-full flex justify-between items-center text-md font-bold text-gray-700">
                       <div className="flex gap-2 items-center">
                         {server.name}
-                        {!server.enabled && <Badge>禁用</Badge>}
+                        {!server.enabled && <Badge>{t("common.disabled")}</Badge>}
                       </div>
                       <div className="flex items-center justify-center gap-2">
                         <Button
@@ -402,7 +401,7 @@ function A2ASetting({
                           variant="secondary"
                           className="text-gray-500"
                         >
-                          输入: {mode}
+                          {t("manusSettings.a2a.inputMode", { mode })}
                         </Badge>
                       ))}
                       {server.output_modes?.map((mode) => (
@@ -411,7 +410,7 @@ function A2ASetting({
                           variant="secondary"
                           className="text-gray-500"
                         >
-                          输出: {mode}
+                          {t("manusSettings.a2a.outputMode", { mode })}
                         </Badge>
                       ))}
                       <Badge
@@ -420,7 +419,9 @@ function A2ASetting({
                           server.streaming ? "text-gray-500" : "text-gray-400"
                         )}
                       >
-                        流式输出: {server.streaming ? "开启" : "关闭"}
+                        {t("manusSettings.a2a.streaming", {
+                          status: server.streaming ? t("common.enabled") : t("common.disabled"),
+                        })}
                       </Badge>
                       <Badge
                         variant={
@@ -432,7 +433,9 @@ function A2ASetting({
                             : "text-gray-400"
                         )}
                       >
-                        推送通知: {server.push_notifications ? "开启" : "关闭"}
+                        {t("manusSettings.a2a.pushNotifications", {
+                          status: server.push_notifications ? t("common.enabled") : t("common.disabled"),
+                        })}
                       </Badge>
                     </ItemDescription>
                   </ItemContent>
@@ -463,6 +466,7 @@ function MCPSetting({
   onDelete,
   onAdd,
 }: MCPSettingProps) {
+  const { t } = useI18n()
   const [addDialogOpen, setAddDialogOpen] = useState(false)
   const [addConfig, setAddConfig] = useState("")
   const [adding, setAdding] = useState(false)
@@ -484,7 +488,7 @@ function MCPSetting({
 
   const handleAdd = async () => {
     if (!addConfig.trim()) {
-      toast.error("请输入 MCP 服务器配置")
+      toast.error(t("manusSettings.mcp.addConfigRequired"))
       return
     }
     setAdding(true)
@@ -504,21 +508,20 @@ function MCPSetting({
       <FieldGroup>
         <FieldSet>
           <FieldLegend className="w-full flex justify-between items-center text-lg font-bold text-gray-700">
-            MCP 服务器
+            {t("manusSettings.mcp.title")}
             <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
               <DialogTrigger asChild>
                 <Button type="button" size="xs" className="cursor-pointer">
-                  添加服务器
+                  {t("manusSettings.mcp.addAction")}
                 </Button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle className="text-gray-700">
-                    添加新的 MCP 服务器
+                    {t("manusSettings.mcp.addDialogTitle")}
                   </DialogTitle>
                   <DialogDescription className="text-gray-500">
-                    Actus 使用标准的 JSON MCP 配置来创建新服务器。
-                    请将您的配置粘贴到下方，然后点击“添加”即可添加新服务器。
+                    {t("manusSettings.mcp.addDialogDescription")}
                   </DialogDescription>
                 </DialogHeader>
                 <form
@@ -550,7 +553,7 @@ function MCPSetting({
                       className="cursor-pointer"
                       disabled={adding}
                     >
-                      取消
+                      {t("common.cancel")}
                     </Button>
                   </DialogClose>
                   <Button
@@ -559,15 +562,14 @@ function MCPSetting({
                     disabled={adding}
                   >
                     {adding && <Loader2 className="animate-spin" />}
-                    添加
+                    {t("common.add")}
                   </Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
           </FieldLegend>
           <FieldDescription className="text-sm">
-            模型上下文协议 (MCP) 通过集成外部工具来增强 Actus
-            的性能，例如私有域搜索、网页浏览、订餐、PPT 生成等任务。
+            {t("manusSettings.mcp.description")}
           </FieldDescription>
 
           {/* 加载态 */}
@@ -580,7 +582,7 @@ function MCPSetting({
           {/* 空态 */}
           {!loading && servers.length === 0 && (
             <div className="py-8 text-center text-sm text-muted-foreground">
-              暂无 MCP 服务器，请点击上方按钮添加
+              {t("manusSettings.mcp.empty")}
             </div>
           )}
 
@@ -594,7 +596,7 @@ function MCPSetting({
                       <div className="flex gap-2 items-center">
                         {server.server_name}
                         <Badge>{server.transport}</Badge>
-                        {!server.enabled && <Badge>禁用</Badge>}
+                        {!server.enabled && <Badge>{t("common.disabled")}</Badge>}
                       </div>
                       <div className="flex items-center justify-center gap-2">
                         <Button
@@ -650,12 +652,12 @@ type SettingTab =
 const SETTING_MENUS: Array<{
   key: SettingTab
   icon: typeof Settings
-  title: string
+  titleKey: string
 }> = [
-  { key: "common-setting", icon: Settings, title: "通用配置" },
-  { key: "llm-setting", icon: Languages, title: "模型提供商" },
-  { key: "a2a-setting", icon: LayoutGrid, title: "A2A Agent 配置" },
-  { key: "mcp-setting", icon: Wrench, title: "MCP 服务器" },
+  { key: "common-setting", icon: Settings, titleKey: "manusSettings.menu.common" },
+  { key: "llm-setting", icon: Languages, titleKey: "manusSettings.menu.llm" },
+  { key: "a2a-setting", icon: LayoutGrid, titleKey: "manusSettings.menu.a2a" },
+  { key: "mcp-setting", icon: Wrench, titleKey: "manusSettings.menu.mcp" },
 ]
 
 type ManusSettingsProps = {
@@ -669,6 +671,7 @@ export function ManusSettings({
   onOpenChange,
   showTrigger = true,
 }: ManusSettingsProps = {}) {
+  const { t } = useI18n()
   // ---- 防止 SSR hydration 不匹配（Radix Dialog 在服务端/客户端生成不同的 aria-controls ID）----
   const [mounted, setMounted] = useState(false)
   useEffect(() => {
@@ -769,14 +772,13 @@ export function ManusSettings({
     try {
       if (activeSetting === "common-setting") {
         await configApi.updateAgentConfig(agentConfig)
-        toast.success("通用配置保存成功")
+        toast.success(t("manusSettings.toast.commonSaved"))
       } else if (activeSetting === "llm-setting") {
         await configApi.updateLLMConfig(llmConfig)
-        toast.success("模型提供商配置保存成功")
+        toast.success(t("manusSettings.toast.llmSaved"))
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "保存失败"
-      toast.error(msg)
+      toast.error(getApiErrorMessage(err, "manusSettings.toast.saveFailed", t))
     } finally {
       setSaving(false)
     }
@@ -791,7 +793,12 @@ export function ManusSettings({
       )
       try {
         await configApi.updateMCPServerEnabled(serverName, enabled)
-        toast.success(`${serverName} 已${enabled ? "启用" : "禁用"}`)
+        toast.success(
+          t("manusSettings.toast.toggleServerSuccess", {
+            name: serverName,
+            status: enabled ? t("common.enabled") : t("common.disabled"),
+          }),
+        )
       } catch {
         // 回滚
         setMcpServers((prev) =>
@@ -799,10 +806,10 @@ export function ManusSettings({
             s.server_name === serverName ? { ...s, enabled: !enabled } : s,
           ),
         )
-        toast.error(`操作失败，请重试`)
+        toast.error(t("manusSettings.toast.operationFailed"))
       }
     },
-    [],
+    [t],
   )
 
   const handleMCPDelete = useCallback(
@@ -812,13 +819,13 @@ export function ManusSettings({
       setMcpServers((list) => list.filter((s) => s.server_name !== serverName))
       try {
         await configApi.deleteMCPServer(serverName)
-        toast.success(`已删除 MCP 服务器「${serverName}」`)
+        toast.success(t("manusSettings.toast.mcpDeleted", { name: serverName }))
       } catch {
         setMcpServers(prev)
-        toast.error(`删除失败，请重试`)
+        toast.error(t("manusSettings.toast.deleteFailed"))
       }
     },
-    [mcpServers],
+    [mcpServers, t],
   )
 
   const handleMCPAdd = useCallback(
@@ -826,7 +833,7 @@ export function ManusSettings({
       try {
         const parsed = JSON.parse(configText)
         await configApi.addMCPServer(parsed)
-        toast.success("MCP 服务器添加成功")
+        toast.success(t("manusSettings.toast.mcpAdded"))
         // 重新拉取列表
         try {
           const data = await configApi.getMCPServers()
@@ -837,14 +844,14 @@ export function ManusSettings({
         return true
       } catch (err) {
         if (err instanceof SyntaxError) {
-          toast.error("JSON 格式错误，请检查配置")
+          toast.error(t("manusSettings.toast.invalidJson"))
         } else {
-          toast.error(err instanceof Error ? err.message : "添加失败")
+          toast.error(getApiErrorMessage(err, "manusSettings.toast.addFailed", t))
         }
         return false
       }
     },
-    [],
+    [t],
   )
 
   // ---- A2A 操作 ----
@@ -857,16 +864,19 @@ export function ManusSettings({
         await configApi.updateA2AServerEnabled(id, enabled)
         const server = a2aServers.find((s) => s.id === id)
         toast.success(
-          `${server?.name ?? "Agent"} 已${enabled ? "启用" : "禁用"}`,
+          t("manusSettings.toast.toggleServerSuccess", {
+            name: server?.name ?? t("manusSettings.a2a.defaultAgentName"),
+            status: enabled ? t("common.enabled") : t("common.disabled"),
+          }),
         )
       } catch {
         setA2aServers((prev) =>
           prev.map((s) => (s.id === id ? { ...s, enabled: !enabled } : s)),
         )
-        toast.error(`操作失败，请重试`)
+        toast.error(t("manusSettings.toast.operationFailed"))
       }
     },
-    [a2aServers],
+    [a2aServers, t],
   )
 
   const handleA2ADelete = useCallback(
@@ -876,20 +886,24 @@ export function ManusSettings({
       setA2aServers((list) => list.filter((s) => s.id !== id))
       try {
         await configApi.deleteA2AServer(id)
-        toast.success(`已删除 A2A Agent「${target?.name ?? id}」`)
+        toast.success(
+          t("manusSettings.toast.a2aDeleted", {
+            name: target?.name ?? id,
+          }),
+        )
       } catch {
         setA2aServers(prev)
-        toast.error(`删除失败，请重试`)
+        toast.error(t("manusSettings.toast.deleteFailed"))
       }
     },
-    [a2aServers],
+    [a2aServers, t],
   )
 
   const handleA2AAdd = useCallback(
     async (baseUrl: string): Promise<boolean> => {
       try {
         await configApi.addA2AServer({ base_url: baseUrl })
-        toast.success("远程 Agent 添加成功")
+        toast.success(t("manusSettings.toast.a2aAdded"))
         // 重新拉取列表
         try {
           const data = await configApi.getA2AServers()
@@ -899,11 +913,11 @@ export function ManusSettings({
         }
         return true
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "添加失败")
+        toast.error(getApiErrorMessage(err, "manusSettings.toast.addFailed", t))
         return false
       }
     },
-    [],
+    [t],
   )
 
   // 客户端挂载前，仅渲染普通按钮占位，避免 Radix Dialog SSR hydration 不匹配
@@ -932,9 +946,9 @@ export function ManusSettings({
       <DialogContent className="!max-w-[850px]">
         {/* 头部 */}
         <DialogHeader className="border-b pb-4">
-          <DialogTitle className="text-gray-700">Actus 设置</DialogTitle>
+          <DialogTitle className="text-gray-700">{t("manusSettings.dialogTitle")}</DialogTitle>
           <DialogDescription className="text-gray-500">
-            在此管理您的 Actus 设置。
+            {t("manusSettings.dialogDescription")}
           </DialogDescription>
         </DialogHeader>
 
@@ -951,7 +965,7 @@ export function ManusSettings({
                   onClick={() => setActiveSetting(menu.key)}
                 >
                   <menu.icon />
-                  {menu.title}
+                  {t(menu.titleKey)}
                 </Button>
               ))}
             </div>
@@ -1006,7 +1020,7 @@ export function ManusSettings({
         <DialogFooter className="border-t pt-4">
           <DialogClose asChild>
             <Button variant="outline" className="cursor-pointer">
-              取消
+              {t("common.cancel")}
             </Button>
           </DialogClose>
           <Button
@@ -1015,7 +1029,7 @@ export function ManusSettings({
             onClick={handleSave}
           >
             {saving && <Loader2 className="animate-spin" />}
-            保存
+            {t("common.save")}
           </Button>
         </DialogFooter>
       </DialogContent>

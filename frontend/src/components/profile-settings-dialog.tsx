@@ -3,7 +3,7 @@
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ImagePlus, Loader2, LockKeyhole, UserRound } from "lucide-react"
 import { toast } from "sonner"
-import { ApiError } from "@/lib/api"
+import { getApiErrorMessage, isApiErrorKey } from "@/lib/api"
 import { fileApi } from "@/lib/api/file"
 import {
   authApi,
@@ -16,6 +16,7 @@ import {
   getLocaleOptions,
   getTimeZoneOptions,
 } from "@/lib/auth/options"
+import { useI18n } from "@/lib/i18n"
 import type { AuthUser } from "@/lib/auth"
 import { validatePasswordStrength } from "@/lib/auth/validators"
 import { useAvatarSrc } from "@/hooks/use-avatar-src"
@@ -87,6 +88,7 @@ export function ProfileSettingsDialog({
   open,
   onOpenChange,
 }: ProfileSettingsDialogProps) {
+  const { locale, t } = useI18n()
   const [activeTab, setActiveTab] = useState<ProfileTab>("profile")
 
   const [loadingProfile, setLoadingProfile] = useState(false)
@@ -116,8 +118,8 @@ export function ProfileSettingsDialog({
     [profileForm.timezone],
   )
   const localeOptions = useMemo(
-    () => ensureOptionExists(getLocaleOptions(), profileForm.locale),
-    [profileForm.locale],
+    () => ensureOptionExists(getLocaleOptions(locale), profileForm.locale),
+    [locale, profileForm.locale],
   )
 
   const resetPasswordForm = useCallback(() => {
@@ -143,14 +145,13 @@ export function ProfileSettingsDialog({
       setCurrentUser(user)
       syncProfileFromUser(user)
     } catch (error) {
-      const message =
-        error instanceof ApiError ? error.msg : "获取个人资料失败，请稍后重试"
+      const message = getApiErrorMessage(error, "profile.loadFailed", t)
       setProfileError(message)
       toast.error(message)
     } finally {
       setLoadingProfile(false)
     }
-  }, [syncProfileFromUser])
+  }, [syncProfileFromUser, t])
 
   useEffect(() => {
     if (!open) {
@@ -199,11 +200,11 @@ export function ProfileSettingsDialog({
       return
     }
     if (!file.type.startsWith("image/")) {
-      toast.error("头像仅支持图片格式")
+      toast.error(t("profile.avatarImageOnly"))
       return
     }
     if (file.size > 5 * 1024 * 1024) {
-      toast.error("头像大小不能超过 5MB")
+      toast.error(t("profile.avatarTooLarge"))
       return
     }
 
@@ -214,9 +215,9 @@ export function ProfileSettingsDialog({
         ...prev,
         avatar_url: toAvatarFileRef(uploaded.id),
       }))
-      toast.success("头像上传成功")
+      toast.success(t("profile.avatarUploadSuccess"))
     } catch (error) {
-      const message = error instanceof ApiError ? error.msg : "头像上传失败，请稍后重试"
+      const message = getApiErrorMessage(error, "profile.avatarUploadFailed", t)
       toast.error(message)
     } finally {
       setUploadingAvatar(false)
@@ -233,11 +234,11 @@ export function ProfileSettingsDialog({
 
     let hasError = false
     if (!timezone) {
-      setTimezoneError("请选择时区")
+      setTimezoneError(t("profile.timezoneRequired"))
       hasError = true
     }
     if (!locale) {
-      setLocaleError("请选择语言")
+      setLocaleError(t("profile.localeRequired"))
       hasError = true
     }
     if (hasError) {
@@ -271,7 +272,7 @@ export function ProfileSettingsDialog({
     }
 
     if (Object.keys(payload).length === 0) {
-      toast.info("当前没有可保存的变更")
+      toast.info(t("profile.noChanges"))
       return
     }
 
@@ -280,9 +281,9 @@ export function ProfileSettingsDialog({
       const result = await authApi.updateCurrentUser(payload)
       setCurrentUser(result.user)
       syncProfileFromUser(result.user)
-      toast.success("资料更新成功")
+      toast.success(t("profile.updateSuccess"))
     } catch (error) {
-      const message = error instanceof ApiError ? error.msg : "资料更新失败，请稍后重试"
+      const message = getApiErrorMessage(error, "profile.updateFailed", t)
       setProfileError(message)
       toast.error(message)
     } finally {
@@ -297,21 +298,21 @@ export function ProfileSettingsDialog({
 
     let hasError = false
     if (!oldPassword) {
-      setOldPasswordError("请输入当前密码")
+      setOldPasswordError(t("profile.oldPasswordRequired"))
       hasError = true
     }
 
     const nextPasswordError = validatePasswordStrength(newPassword)
     if (nextPasswordError) {
-      setNewPasswordError(nextPasswordError)
+      setNewPasswordError(t(nextPasswordError))
       hasError = true
     }
 
     if (!confirmPassword) {
-      setConfirmPasswordError("请再次输入新密码")
+      setConfirmPasswordError(t("profile.confirmNewPasswordRequired"))
       hasError = true
     } else if (confirmPassword !== newPassword) {
-      setConfirmPasswordError("两次输入的新密码不一致")
+      setConfirmPasswordError(t("profile.newPasswordMismatch"))
       hasError = true
     }
 
@@ -327,16 +328,16 @@ export function ProfileSettingsDialog({
         confirm_password: confirmPassword,
       })
       resetPasswordForm()
-      toast.success("密码更新成功，请重新登录")
+      toast.success(t("profile.passwordUpdateSuccess"))
       onOpenChange(false)
       clearAuthenticatedSession()
       window.location.assign("/?auth=login")
     } catch (error) {
-      const message = error instanceof ApiError ? error.msg : "密码更新失败，请稍后重试"
-      if (message.includes("旧密码")) {
-        setOldPasswordError("当前密码错误")
-      } else if (message.includes("密码不一致")) {
-        setConfirmPasswordError("两次输入的新密码不一致")
+      const message = getApiErrorMessage(error, "profile.passwordUpdateFailed", t)
+      if (isApiErrorKey(error, "error.user.current_password_incorrect")) {
+        setOldPasswordError(getApiErrorMessage(error, "profile.currentPasswordWrong", t))
+      } else if (isApiErrorKey(error, "error.user.new_password_mismatch")) {
+        setConfirmPasswordError(getApiErrorMessage(error, "profile.newPasswordMismatch", t))
       } else {
         setConfirmPasswordError(message)
       }
@@ -352,14 +353,14 @@ export function ProfileSettingsDialog({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <Avatar className="size-14">
-              <AvatarImage src={avatarSrc} alt="头像" />
+              <AvatarImage src={avatarSrc} alt={t("profile.avatarAlt")} />
               <AvatarFallback className="text-base">
                 {getUserInitial(profileForm)}
               </AvatarFallback>
             </Avatar>
             <div className="space-y-1">
-              <p className="text-sm font-medium text-gray-700">头像</p>
-              <p className="text-xs text-gray-500">支持 JPG/PNG/WebP，大小不超过 5MB</p>
+              <p className="text-sm font-medium text-gray-700">{t("profile.avatarLabel")}</p>
+              <p className="text-xs text-gray-500">{t("profile.avatarHint")}</p>
             </div>
           </div>
           <div className="flex gap-2">
@@ -371,7 +372,7 @@ export function ProfileSettingsDialog({
               disabled={uploadingAvatar}
             >
               {uploadingAvatar ? <Loader2 className="animate-spin" /> : <ImagePlus />}
-              上传头像
+              {t("profile.uploadAvatar")}
             </Button>
             <input
               ref={avatarFileInputRef}
@@ -386,26 +387,26 @@ export function ProfileSettingsDialog({
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="space-y-2 sm:col-span-2">
-          <Label htmlFor="profile-email">邮箱</Label>
+          <Label htmlFor="profile-email">{t("profile.emailLabel")}</Label>
           <Input id="profile-email" value={profileForm.email} disabled />
         </div>
         <div className="space-y-2 sm:col-span-2">
-          <Label htmlFor="profile-nickname">昵称</Label>
+          <Label htmlFor="profile-nickname">{t("profile.nicknameLabel")}</Label>
           <Input
             id="profile-nickname"
-            placeholder="请输入昵称"
+            placeholder={t("profile.nicknamePlaceholder")}
             value={profileForm.nickname}
             onChange={(event) => handleProfileInputChange("nickname", event.target.value)}
           />
         </div>
         <div className="space-y-2">
-          <Label>时区</Label>
+          <Label>{t("profile.timezoneLabel")}</Label>
           <SearchableSelect
             value={profileForm.timezone}
             options={timeZoneOptions}
-            placeholder="请选择时区"
-            searchPlaceholder="搜索时区，例如 Shanghai / Tokyo / UTC"
-            emptyText="无匹配时区"
+            placeholder={t("profile.timezonePlaceholder")}
+            searchPlaceholder={t("profile.timezoneSearchPlaceholder")}
+            emptyText={t("profile.timezoneEmpty")}
             onValueChange={(value) => {
               handleProfileInputChange("timezone", value)
               if (timezoneError) {
@@ -416,13 +417,13 @@ export function ProfileSettingsDialog({
           {timezoneError ? <p className="text-xs text-red-500">{timezoneError}</p> : null}
         </div>
         <div className="space-y-2">
-          <Label>语言地区</Label>
+          <Label>{t("profile.localeLabel")}</Label>
           <SearchableSelect
             value={profileForm.locale}
             options={localeOptions}
-            placeholder="请选择语言地区"
-            searchPlaceholder="搜索语言或地区，例如 中文 / English / 日本语"
-            emptyText="无匹配语言地区"
+            placeholder={t("profile.localePlaceholder")}
+            searchPlaceholder={t("profile.localeSearchPlaceholder")}
+            emptyText={t("profile.localeEmpty")}
             onValueChange={(value) => {
               handleProfileInputChange("locale", value)
               if (localeError) {
@@ -443,7 +444,7 @@ export function ProfileSettingsDialog({
           className="cursor-pointer"
         >
           {savingProfile ? <Loader2 className="animate-spin" /> : null}
-          保存资料
+          {t("profile.saveProfile")}
         </Button>
       </div>
     </div>
@@ -452,33 +453,33 @@ export function ProfileSettingsDialog({
   const renderPasswordContent = () => (
     <div className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor="profile-old-password">当前密码</Label>
+        <Label htmlFor="profile-old-password">{t("profile.oldPasswordLabel")}</Label>
         <Input
           id="profile-old-password"
           type="password"
-          placeholder="请输入当前密码"
+          placeholder={t("profile.oldPasswordPlaceholder")}
           value={oldPassword}
           onChange={(event) => setOldPassword(event.target.value)}
         />
         {oldPasswordError ? <p className="text-xs text-red-500">{oldPasswordError}</p> : null}
       </div>
       <div className="space-y-2">
-        <Label htmlFor="profile-new-password">新密码</Label>
+        <Label htmlFor="profile-new-password">{t("profile.newPasswordLabel")}</Label>
         <Input
           id="profile-new-password"
           type="password"
-          placeholder="请输入新密码"
+          placeholder={t("profile.newPasswordPlaceholder")}
           value={newPassword}
           onChange={(event) => setNewPassword(event.target.value)}
         />
         {newPasswordError ? <p className="text-xs text-red-500">{newPasswordError}</p> : null}
       </div>
       <div className="space-y-2">
-        <Label htmlFor="profile-confirm-password">确认新密码</Label>
+        <Label htmlFor="profile-confirm-password">{t("profile.confirmPasswordLabel")}</Label>
         <Input
           id="profile-confirm-password"
           type="password"
-          placeholder="请再次输入新密码"
+          placeholder={t("profile.confirmPasswordPlaceholder")}
           value={confirmPassword}
           onChange={(event) => setConfirmPassword(event.target.value)}
         />
@@ -494,7 +495,7 @@ export function ProfileSettingsDialog({
           className="cursor-pointer"
         >
           {savingPassword ? <Loader2 className="animate-spin" /> : null}
-          更新密码
+          {t("profile.updatePassword")}
         </Button>
       </div>
     </div>
@@ -504,16 +505,16 @@ export function ProfileSettingsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="!max-w-[850px]">
         <DialogHeader className="border-b pb-4">
-          <DialogTitle className="text-gray-700">个人中心</DialogTitle>
+          <DialogTitle className="text-gray-700">{t("profile.dialogTitle")}</DialogTitle>
           <DialogDescription className="text-gray-500">
-            管理个人资料与密码安全设置
+            {t("profile.dialogDescription")}
           </DialogDescription>
         </DialogHeader>
 
         {loadingProfile ? (
           <div className="flex min-h-[360px] items-center justify-center text-gray-500">
             <Loader2 className="size-5 animate-spin" />
-            <span className="ml-2 text-sm">正在加载个人资料...</span>
+            <span className="ml-2 text-sm">{t("profile.loading")}</span>
           </div>
         ) : (
           <div className="flex flex-row gap-4">
@@ -525,7 +526,7 @@ export function ProfileSettingsDialog({
                   onClick={() => setActiveTab("profile")}
                 >
                   <UserRound />
-                  基本资料
+                  {t("profile.tabProfile")}
                 </Button>
                 <Button
                   variant={activeTab === "password" ? "default" : "ghost"}
@@ -533,7 +534,7 @@ export function ProfileSettingsDialog({
                   onClick={() => setActiveTab("password")}
                 >
                   <LockKeyhole />
-                  修改密码
+                  {t("profile.tabPassword")}
                 </Button>
               </div>
             </div>

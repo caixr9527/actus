@@ -5,6 +5,7 @@ from typing import Optional
 import pytest
 
 from app.application.errors import BadRequestError
+from app.application.errors import error_keys
 from app.application.service.user_service import UserService
 from app.application.utils import PasswordHasher
 from app.domain.models import User, UserProfile
@@ -129,6 +130,25 @@ def test_update_current_user_profile_should_raise_when_updates_empty() -> None:
         asyncio.run(service.update_current_user_profile(user_id=user.id, updates={}))
 
     assert exc.value.msg == "至少需要更新一个字段"
+    assert exc.value.error_key == error_keys.USER_PROFILE_UPDATE_EMPTY
+
+
+def test_update_current_user_profile_should_raise_when_locale_not_supported() -> None:
+    user_repo = _FakeUserRepository()
+    user = _build_user()
+    user_repo.users_by_id[user.id] = user
+    service = _build_service(user_repo)
+
+    with pytest.raises(BadRequestError) as exc:
+        asyncio.run(
+            service.update_current_user_profile(
+                user_id=user.id,
+                updates={"locale": "ja-JP"},
+            )
+        )
+
+    assert exc.value.msg == "语言地区仅支持 zh-CN 或 en-US"
+    assert exc.value.error_key == error_keys.USER_LOCALE_UNSUPPORTED
 
 
 def test_update_current_user_password_should_raise_when_confirm_password_not_match() -> None:
@@ -148,6 +168,7 @@ def test_update_current_user_password_should_raise_when_confirm_password_not_mat
         )
 
     assert exc.value.msg == "两次输入的新密码不一致"
+    assert exc.value.error_key == error_keys.USER_PASSWORD_MISMATCH
 
 
 def test_update_current_user_password_should_raise_when_old_password_is_wrong() -> None:
@@ -167,6 +188,7 @@ def test_update_current_user_password_should_raise_when_old_password_is_wrong() 
         )
 
     assert exc.value.msg == "旧密码错误"
+    assert exc.value.error_key == error_keys.USER_CURRENT_PASSWORD_INCORRECT
 
 
 def test_update_current_user_password_should_update_hash() -> None:

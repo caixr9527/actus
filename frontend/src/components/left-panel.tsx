@@ -15,6 +15,7 @@ import {Plus} from 'lucide-react'
 import {Kbd, KbdGroup} from '@/components/ui/kbd'
 import {SessionList} from '@/components/session-list'
 import {LeftPanelAccountMenu} from '@/components/left-panel-account-menu'
+import { useI18n } from '@/lib/i18n'
 
 const NEW_TASK_SHORTCUT_KEY = 'k'
 
@@ -30,6 +31,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 
 export function LeftPanel() {
   const router = useRouter()
+  const { t } = useI18n()
   const handleCreateTask = useCallback(() => {
     router.push('/')
   }, [router])
@@ -69,7 +71,7 @@ export function LeftPanel() {
           onClick={handleCreateTask}
         >
           <Plus/>
-          新建任务
+          {t('session.newTask')}
           <KbdGroup>
             <Kbd>⌘/Ctrl</Kbd>
             <Kbd>K</Kbd>

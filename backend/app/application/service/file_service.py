@@ -10,6 +10,7 @@ from typing import Tuple, BinaryIO, Callable
 from fastapi import UploadFile
 
 from app.application.errors import NotFoundError
+from app.application.errors import error_keys
 from app.domain.external import FileStorage
 from app.domain.models import File
 from app.domain.repositories import IUnitOfWork
@@ -37,7 +38,11 @@ class FileService:
         async with self._uow_factory() as uow:
             file = await uow.file.get_by_id(file_id)
         if not file:
-            raise NotFoundError(f"该文件[{file_id}]不存在")
+            raise NotFoundError(
+                msg=f"该文件[{file_id}]不存在",
+                error_key=error_keys.FILE_NOT_FOUND,
+                error_params={"file_id": file_id},
+            )
         return file
 
     async def download_file(self, file_id: str) -> Tuple[BinaryIO, File]:

@@ -3,8 +3,10 @@
  */
 export type ApiResponse<T = unknown> = {
   code: number;
-  msg: string;
+  msg?: string | null;
   data: T | null;
+  error_key?: string | null;
+  error_params?: Record<string, unknown> | null;
 };
 
 /**
@@ -268,7 +270,14 @@ export type SSEEventData =
   | { type: "tool"; data: ToolEvent }
   | { type: "wait"; data: Record<string, unknown> }
   | { type: "done"; data: Record<string, unknown> }
-  | { type: "error"; data: { error: string } };
+  | {
+      type: "error";
+      data: {
+        error: string;
+        error_key?: string | null;
+        error_params?: Record<string, unknown> | null;
+      };
+    };
 
 /**
  * SSE 事件处理器
@@ -304,4 +313,3 @@ export type ViewShellParams = {
   shell_session_id: string;
   [key: string]: unknown;
 };
-

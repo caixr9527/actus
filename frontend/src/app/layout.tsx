@@ -2,6 +2,8 @@ import React from "react"
 import type { Metadata } from "next"
 import { AuthProvider } from "@/providers/auth-provider"
 import { AppShell } from "@/providers/app-shell"
+import { DEFAULT_APP_LOCALE } from "@/lib/i18n/constants"
+import { I18nProvider } from "@/lib/i18n/provider"
 import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
 
@@ -20,11 +22,13 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning>
+    <html lang={DEFAULT_APP_LOCALE} suppressHydrationWarning>
       <body className="h-screen overflow-hidden">
-        <AuthProvider>
-          <AppShell>{children}</AppShell>
-        </AuthProvider>
+        <I18nProvider>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
+        </I18nProvider>
         <Toaster position="top-center" richColors />
       </body>
     </html>

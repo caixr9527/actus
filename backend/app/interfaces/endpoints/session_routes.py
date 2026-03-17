@@ -18,6 +18,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets import ConnectionClosed
 
 from app.application.errors import NotFoundError
+from app.application.errors import error_keys
 from app.application.service import SessionService, AgentService
 from app.infrastructure.storage import get_redis_client
 from app.interfaces.schemas import (
@@ -200,7 +201,11 @@ async def chat(
     """根据传递的会话id+chat请求数据向指定会话发起聊天请求"""
     session = await session_service.get_session(session_id=session_id)
     if not session:
-        raise NotFoundError("该会话不存在，请核实后重试")
+        raise NotFoundError(
+            msg="该会话不存在，请核实后重试",
+            error_key=error_keys.SESSION_NOT_FOUND,
+            error_params={"session_id": session_id},
+        )
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""
@@ -236,7 +241,11 @@ async def get_session(
     """传递指定会话id获取该会话的对话详情"""
     session = await session_service.get_session(session_id=session_id)
     if not session:
-        raise NotFoundError("该会话不存在，请核实后重试")
+        raise NotFoundError(
+            msg="该会话不存在，请核实后重试",
+            error_key=error_keys.SESSION_NOT_FOUND,
+            error_params={"session_id": session_id},
+        )
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(

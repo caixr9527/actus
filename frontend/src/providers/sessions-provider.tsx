@@ -1,9 +1,10 @@
 'use client'
 
 import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react'
-import {sessionApi} from '@/lib/api'
+import {getApiErrorMessage, sessionApi} from '@/lib/api'
 import type {Session} from '@/lib/api'
 import {canRetry, computeRetryDelayMs, type RetryPolicy} from '@/lib/session-stream-policy'
+import { useI18n } from '@/lib/i18n'
 
 /** 重连配置 */
 const RETRY_POLICY: RetryPolicy = {
@@ -61,6 +62,7 @@ const SessionsContext = createContext<SessionsContextValue | null>(null)
  *  4. refresh() 可手动通过 REST 拉取
  */
 export function SessionsProvider({children}: { children: React.ReactNode }) {
+  const { t } = useI18n()
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -126,11 +128,11 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
     retryCountRef.current = 0
     setReconnectCount(0)
     setRealtimeStatus('reconnecting')
-    setRealtimeAlert('正在恢复实时连接...')
+    setRealtimeAlert(t('sessionsProvider.resumingRealtime'))
     clearRetryTimer()
     clearFallbackPollTimer()
     connectRef.current?.()
-  }, [clearFallbackPollTimer, clearRetryTimer])
+  }, [clearFallbackPollTimer, clearRetryTimer, t])
 
   // ---------- 手动刷新 ----------
   const refresh = useCallback(async () => {
@@ -144,11 +146,11 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
       }
     } catch (err) {
       console.error('[Sessions] REST 获取失败:', err)
-      setError(err instanceof Error ? err.message : '获取会话列表失败')
+      setError(getApiErrorMessage(err, 'sessionsProvider.fetchFailed', t))
     } finally {
       setLoading(false)
     }
-  }, [fetchSessionsSnapshot, realtimeStatus, resumeRealtime])
+  }, [fetchSessionsSnapshot, realtimeStatus, resumeRealtime, t])
 
   // ---------- 初始 REST 请求（仅一次） ----------
   useEffect(() => {
@@ -166,10 +168,10 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
       })
       .catch((err) => {
         console.error('[Sessions] 初始获取失败:', err)
-        setError(err instanceof Error ? err.message : '获取会话列表失败')
+        setError(getApiErrorMessage(err, 'sessionsProvider.fetchFailed', t))
         setLoading(false)
       })
-  }, [fetchSessionsSnapshot])
+  }, [fetchSessionsSnapshot, t])
 
   // ---------- SSE 实时订阅 ----------
   useEffect(() => {
@@ -204,7 +206,7 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
 
           if (!canRetry(retryCountRef.current, RETRY_POLICY)) {
             setRealtimeStatus('degraded')
-            setRealtimeAlert('实时连接已中断，已切换为降级同步。点击“重试”恢复实时连接。')
+            setRealtimeAlert(t('sessionsProvider.realtimeDisconnectedFallback'))
             startFallbackPolling()
             console.error('[Sessions] 超过最大重试次数，已切换为降级同步')
             return
@@ -214,7 +216,12 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
           retryCountRef.current += 1
           setReconnectCount(retryCountRef.current)
           setRealtimeStatus('reconnecting')
-          setRealtimeAlert(`实时连接中断，${Math.ceil(delay / 1000)} 秒后进行第 ${retryCountRef.current} 次重连`)
+          setRealtimeAlert(
+            t('sessionsProvider.reconnectingInSeconds', {
+              seconds: Math.ceil(delay / 1000),
+              count: retryCountRef.current,
+            }),
+          )
           console.log(`[Sessions] ${delay}ms 后尝试重连（第 ${retryCountRef.current} 次）`)
           retryTimerRef.current = setTimeout(connect, delay)
         },
@@ -237,7 +244,7 @@ export function SessionsProvider({children}: { children: React.ReactNode }) {
       clearRetryTimer()
       clearFallbackPollTimer()
     }
-  }, [clearFallbackPollTimer, clearRetryTimer, markRealtimeConnected, startFallbackPolling])
+  }, [clearFallbackPollTimer, clearRetryTimer, markRealtimeConnected, startFallbackPolling, t])
 
   // ---------- 删除会话 ----------
   const deleteSession = useCallback(async (sessionId: string): Promise<boolean> => {

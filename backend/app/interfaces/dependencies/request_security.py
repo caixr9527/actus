@@ -8,6 +8,7 @@
 from fastapi import Request, Response
 
 from app.application.errors import BadRequestError
+from app.application.errors import error_keys
 from core.config import get_settings
 
 _AUTH_SECURITY_HEADERS = {
@@ -38,7 +39,10 @@ def require_https_request(request: Request) -> None:
     if _resolve_request_scheme(request) == "https":
         return
 
-    raise BadRequestError(msg="当前环境仅允许通过 HTTPS 访问该接口")
+    raise BadRequestError(
+        msg="当前环境仅允许通过 HTTPS 访问该接口",
+        error_key=error_keys.AUTH_HTTPS_REQUIRED,
+    )
 
 
 def apply_auth_security_headers(request: Request, response: Response) -> None:

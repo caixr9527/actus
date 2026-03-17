@@ -12,7 +12,8 @@ from typing import AsyncGenerator, Optional, List, Type, Callable
 
 from pydantic import TypeAdapter
 
-from app.application.errors import NotFoundError
+from app.application.errors import AppException, NotFoundError
+from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage
 from app.domain.models import (
     BaseEvent,
@@ -190,7 +191,11 @@ class AgentService:
                 session = await uow.session.get_by_id(session_id=session_id)
             if not session:
                 logger.error(f"会话{session_id}不存在")
-                raise NotFoundError(msg=f"会话{session_id}不存在")
+                raise NotFoundError(
+                    msg=f"会话{session_id}不存在",
+                    error_key=error_keys.SESSION_NOT_FOUND,
+                    error_params={"session_id": session_id},
+                )
 
             # 获取当前会话的任务实例
             task = await self._get_task(session)
@@ -285,7 +290,11 @@ class AgentService:
         except Exception as e:
             # 处理异常情况，记录错误日志并返回错误事件
             logger.error(f"会话{session_id}的聊天请求失败: {e}")
-            event = ErrorEvent(error=str(e))
+            event = ErrorEvent(
+                error=str(e),
+                error_key=e.error_key if isinstance(e, AppException) else None,
+                error_params=e.error_params if isinstance(e, AppException) else None,
+            )
             try:
                 async with self._uow_factory() as uow:
                     await uow.session.add_event(session_id, event)
@@ -314,7 +323,11 @@ class AgentService:
         # 如果会话不存在，记录错误日志并抛出异常
         if not session:
             logger.error(f"会话{session_id}不存在")
-            raise NotFoundError(msg=f"会话{session_id}不存在")
+            raise NotFoundError(
+                msg=f"会话{session_id}不存在",
+                error_key=error_keys.SESSION_NOT_FOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 获取与会话关联的任务实例
         task = await self._get_task(session)

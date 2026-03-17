@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import Image from 'next/image'
-import { fileApi } from '@/lib/api'
+import { fileApi, getApiErrorMessage } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Download, FileText, X } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { formatFileSize } from '@/lib/utils'
 import { toast } from 'sonner'
 import type { AttachmentFile } from '@/lib/session-events'
+import { useI18n } from '@/lib/i18n'
 
 export interface FilePreviewPanelProps {
   /** 要预览的文件信息 */
@@ -50,6 +51,7 @@ function isSupportedFileType(extension: string): { type: 'text' | 'image' | 'uns
 }
 
 export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
+  const { t } = useI18n()
   const [content, setContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -102,7 +104,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
       }
     } catch (err) {
       if (controller.signal.aborted || requestId !== previewRequestIdRef.current) return
-      const msg = err instanceof Error ? err.message : '加载文件内容失败'
+      const msg = getApiErrorMessage(err, 'filePreview.loadContentFailed', t)
       setError(msg)
       toast.error(msg)
     } finally {
@@ -110,7 +112,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
         setLoading(false)
       }
     }
-  }, [cleanupPreviewObjectUrl])
+  }, [cleanupPreviewObjectUrl, t])
 
   // 下载文件
   const handleDownload = useCallback(async () => {
@@ -126,12 +128,12 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      toast.success(`已下载「${file.filename}」`)
+      toast.success(t('filePreview.downloadSuccess', { filename: file.filename }))
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '下载失败'
-      toast.error(`下载失败: ${msg}`)
+      const msg = getApiErrorMessage(err, 'filePreview.downloadFailedDefault', t)
+      toast.error(t('filePreview.downloadFailed', { error: msg }))
     }
-  }, [file])
+  }, [file, t])
 
   // 当文件改变时加载内容
   useEffect(() => {
@@ -174,7 +176,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
             variant="ghost"
             size="icon-sm"
             onClick={handleDownload}
-            aria-label="下载文件"
+            aria-label={t('filePreview.downloadAria')}
             className="cursor-pointer"
           >
             <Download size={16} />
@@ -183,7 +185,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
             variant="ghost"
             size="icon-sm"
             onClick={onClose}
-            aria-label="关闭"
+            aria-label={t('filePreview.closeAria')}
             className="cursor-pointer"
           >
             <X size={16} />
@@ -195,7 +197,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
       <div className="flex-1 overflow-hidden">
         {loading && (
           <div className="flex items-center justify-center h-full">
-            <p className="text-sm text-gray-500">加载中...</p>
+            <p className="text-sm text-gray-500">{t('common.loading')}</p>
           </div>
         )}
 
@@ -211,8 +213,8 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
               <FileText size={32} />
             </div>
             <div className="text-center">
-              <p className="text-sm text-gray-700 font-medium">暂不支持预览此文件类型</p>
-              <p className="text-xs text-gray-500 mt-1">您可以下载文件后查看</p>
+              <p className="text-sm text-gray-700 font-medium">{t('filePreview.unsupportedTitle')}</p>
+              <p className="text-xs text-gray-500 mt-1">{t('filePreview.unsupportedHint')}</p>
             </div>
             <Button
               variant="outline"
@@ -221,7 +223,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
               className="gap-2"
             >
               <Download size={16} />
-              下载文件
+              {t('filePreview.downloadAction')}
             </Button>
           </div>
         )}

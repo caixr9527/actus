@@ -13,8 +13,9 @@ import {
 } from '@/components/ui/dialog'
 import {useAuth} from '@/hooks/use-auth'
 import {authApi} from '@/lib/auth'
+import {useI18n} from '@/lib/i18n'
 import {validatePasswordStrength} from '@/lib/auth/validators'
-import {ApiError} from '@/lib/api'
+import {getApiErrorMessage, isApiErrorKey} from '@/lib/api'
 import {toast} from 'sonner'
 
 const EMAIL_REGEX = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
@@ -39,6 +40,7 @@ export function AuthLoginDialog({
   onSuccess,
 }: AuthLoginDialogProps) {
   const {login, register} = useAuth()
+  const {t} = useI18n()
 
   const [mode, setMode] = useState<AuthDialogMode>(initialMode)
   const [email, setEmail] = useState('')
@@ -147,10 +149,10 @@ export function AuthLoginDialog({
   const validateEmail = (): string | null => {
     const normalizedEmail = email.trim()
     if (!normalizedEmail) {
-      return '请输入邮箱地址'
+      return t('authDialog.emailRequired')
     }
     if (!EMAIL_REGEX.test(normalizedEmail)) {
-      return '请输入有效邮箱地址'
+      return t('authDialog.emailInvalid')
     }
     return null
   }
@@ -167,7 +169,7 @@ export function AuthLoginDialog({
     }
 
     if (!loginPassword) {
-      setPasswordError('请输入密码')
+      setPasswordError(t('authDialog.passwordRequired'))
       hasError = true
     } else {
       setPasswordError(null)
@@ -189,24 +191,24 @@ export function AuthLoginDialog({
 
     const nextPasswordError = validatePasswordStrength(registerPassword)
     if (nextPasswordError) {
-      setPasswordError(nextPasswordError)
+      setPasswordError(t(nextPasswordError))
       hasError = true
     } else {
       setPasswordError(null)
     }
 
     if (!confirmPassword) {
-      setConfirmPasswordError('请再次输入密码')
+      setConfirmPasswordError(t('authDialog.confirmPasswordRequired'))
       hasError = true
     } else if (confirmPassword !== registerPassword) {
-      setConfirmPasswordError('两次输入的密码不一致')
+      setConfirmPasswordError(t('authDialog.confirmPasswordMismatch'))
       hasError = true
     } else {
       setConfirmPasswordError(null)
     }
 
     if (verificationRequired && verificationCode.trim().length === 0) {
-      setVerificationCodeError('请输入验证码')
+      setVerificationCodeError(t('authDialog.verificationCodeRequired'))
       hasError = true
     } else {
       setVerificationCodeError(null)
@@ -238,18 +240,12 @@ export function AuthLoginDialog({
       setVerificationRequired(result.verification_required)
       if (result.verification_required) {
         setVerificationCooldown(60)
-        toast.success('验证码已发送，请查收邮箱')
+        toast.success(t('authDialog.sendCodeSuccess'))
       } else {
-        toast.info('当前环境无需验证码校验')
+        toast.info(t('authDialog.sendCodeNotRequired'))
       }
     } catch (error) {
-      if (error instanceof ApiError) {
-        setSubmitError(error.msg || '验证码发送失败，请稍后重试')
-      } else if (error instanceof Error) {
-        setSubmitError(error.message)
-      } else {
-        setSubmitError('验证码发送失败，请稍后重试')
-      }
+      setSubmitError(getApiErrorMessage(error, 'authDialog.sendCodeFailed', t))
     } finally {
       setSendingCode(false)
     }
@@ -272,13 +268,7 @@ export function AuthLoginDialog({
       onOpenChange(false)
       onSuccess?.()
     } catch (error) {
-      if (error instanceof ApiError) {
-        setSubmitError(error.msg || '邮箱或密码错误')
-      } else if (error instanceof Error) {
-        setSubmitError(error.message)
-      } else {
-        setSubmitError('登录失败，请稍后重试')
-      }
+      setSubmitError(getApiErrorMessage(error, 'authDialog.loginFailed', t))
       setLoginPassword('')
     } finally {
       setSubmitting(false)
@@ -302,7 +292,7 @@ export function AuthLoginDialog({
         verification_code: verificationCode.trim() || undefined,
       })
 
-      toast.success('注册成功，请登录继续')
+      toast.success(t('authDialog.registerSuccess'))
       setLoginPassword('')
       setRegisterPassword('')
       setConfirmPassword('')
@@ -311,38 +301,31 @@ export function AuthLoginDialog({
       setVerificationCooldown(0)
       switchMode('login')
     } catch (error) {
-      if (error instanceof ApiError) {
-        if (error.msg.includes('该邮箱已注册')) {
-          setEmailError(error.msg)
-        } else if (error.msg.includes('两次输入的密码不一致')) {
-          setConfirmPasswordError('两次输入的密码不一致')
-        } else if (error.msg.includes('请输入邮箱验证码')) {
-          setVerificationRequired(true)
-          setVerificationCodeError('请输入验证码')
-        } else if (
-          error.msg.includes('验证码错误') ||
-          error.msg.includes('已过期')
-        ) {
-          setVerificationRequired(true)
-          setVerificationCodeError('验证码错误或已过期，请重新获取')
-        } else {
-          setSubmitError(error.msg || '注册失败，请稍后重试')
-        }
-      } else if (error instanceof Error) {
-        setSubmitError(error.message)
+      if (isApiErrorKey(error, 'error.auth.email_already_registered')) {
+        setEmailError(getApiErrorMessage(error, 'authDialog.registerFailed', t))
+      } else if (isApiErrorKey(error, 'error.auth.password_mismatch')) {
+        setConfirmPasswordError(getApiErrorMessage(error, 'authDialog.confirmPasswordMismatch', t))
+      } else if (isApiErrorKey(error, 'error.auth.register_verification_code_required')) {
+        setVerificationRequired(true)
+        setVerificationCodeError(getApiErrorMessage(error, 'authDialog.verificationCodeRequired', t))
+      } else if (isApiErrorKey(error, 'error.auth.register_verification_code_invalid')) {
+        setVerificationRequired(true)
+        setVerificationCodeError(
+          getApiErrorMessage(error, 'authDialog.verificationCodeInvalidOrExpired', t),
+        )
       } else {
-        setSubmitError('注册失败，请稍后重试')
+        setSubmitError(getApiErrorMessage(error, 'authDialog.registerFailed', t))
       }
     } finally {
       setSubmitting(false)
     }
   }
 
-  const title = mode === 'login' ? '登录后继续' : '创建账号'
+  const title = mode === 'login' ? t('authDialog.login.title') : t('authDialog.register.title')
   const description =
     mode === 'login'
-      ? '登录后可创建会话并保存你的任务历史'
-      : '注册后可保存会话、文件与任务历史'
+      ? t('authDialog.login.description')
+      : t('authDialog.register.description')
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -355,12 +338,12 @@ export function AuthLoginDialog({
         {mode === 'login' ? (
           <form className="space-y-4" onSubmit={handleLoginSubmit}>
             <div className="space-y-2">
-              <Label htmlFor="login-email">邮箱</Label>
+              <Label htmlFor="login-email">{t('authDialog.emailLabel')}</Label>
               <Input
                 id="login-email"
                 type="email"
                 autoComplete="email"
-                placeholder="you@example.com"
+                placeholder={t('authDialog.placeholder.email')}
                 value={email}
                 onChange={(event) => {
                   setEmail(event.target.value)
@@ -375,12 +358,12 @@ export function AuthLoginDialog({
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="login-password">密码</Label>
+              <Label htmlFor="login-password">{t('authDialog.passwordLabel')}</Label>
               <Input
                 id="login-password"
                 type="password"
                 autoComplete="current-password"
-                placeholder="请输入密码"
+                placeholder={t('authDialog.placeholder.password')}
                 value={loginPassword}
                 onChange={(event) => {
                   setLoginPassword(event.target.value)
@@ -397,29 +380,29 @@ export function AuthLoginDialog({
             {submitError && <p className="text-sm text-destructive">{submitError}</p>}
 
             <Button type="submit" className="w-full" disabled={!canLoginSubmit}>
-              {submitting ? '登录中...' : '登录'}
+              {submitting ? t('authDialog.loginSubmitting') : t('authDialog.loginAction')}
             </Button>
 
             <p className="text-sm text-muted-foreground text-center">
-              没有账号？
+              {t('authDialog.noAccount')}
               <button
                 type="button"
                 className="ml-1 text-foreground underline-offset-4 hover:underline"
                 onClick={() => switchMode('register')}
               >
-                去注册
+                {t('authDialog.goRegister')}
               </button>
             </p>
           </form>
         ) : (
           <form className="space-y-4" onSubmit={handleRegisterSubmit}>
             <div className="space-y-2">
-              <Label htmlFor="register-email">邮箱</Label>
+              <Label htmlFor="register-email">{t('authDialog.emailLabel')}</Label>
               <Input
                 id="register-email"
                 type="email"
                 autoComplete="email"
-                placeholder="you@example.com"
+                placeholder={t('authDialog.placeholder.email')}
                 value={email}
                 onChange={(event) => {
                   setEmail(event.target.value)
@@ -446,22 +429,22 @@ export function AuthLoginDialog({
                 disabled={submitting || sendingCode || verificationCooldown > 0}
               >
                 {sendingCode
-                  ? '发送中...'
+                  ? t('authDialog.sendCodeSending')
                   : verificationCooldown > 0
-                    ? `${verificationCooldown}s 后可重发`
-                    : '发送验证码'}
+                    ? t('authDialog.sendCodeResendAfter', {seconds: verificationCooldown})
+                    : t('authDialog.sendCodeAction')}
               </Button>
             </div>
 
             {verificationRequired && (
               <div className="space-y-2">
-                <Label htmlFor="register-verification-code">验证码</Label>
+                <Label htmlFor="register-verification-code">{t('authDialog.verificationCodeLabel')}</Label>
                 <Input
                   id="register-verification-code"
                   type="text"
                   inputMode="numeric"
                   autoComplete="one-time-code"
-                  placeholder="请输入邮箱验证码"
+                  placeholder={t('authDialog.placeholder.verificationCode')}
                   value={verificationCode}
                   onChange={(event) => {
                     setVerificationCode(event.target.value)
@@ -479,12 +462,12 @@ export function AuthLoginDialog({
             )}
 
             <div className="space-y-2">
-              <Label htmlFor="register-password">密码</Label>
+              <Label htmlFor="register-password">{t('authDialog.passwordLabel')}</Label>
               <Input
                 id="register-password"
                 type="password"
                 autoComplete="new-password"
-                placeholder="请输入密码"
+                placeholder={t('authDialog.placeholder.password')}
                 value={registerPassword}
                 onChange={(event) => {
                   setRegisterPassword(event.target.value)
@@ -499,18 +482,18 @@ export function AuthLoginDialog({
                 <p className="text-sm text-destructive">{passwordError}</p>
               ) : (
                 <p className="text-xs text-muted-foreground">
-                  至少 8 位，包含字母和数字，可使用 !@#$%^&*._- 符号。
+                  {t('authDialog.passwordHint')}
                 </p>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="register-confirm-password">确认密码</Label>
+              <Label htmlFor="register-confirm-password">{t('authDialog.confirmPasswordLabel')}</Label>
               <Input
                 id="register-confirm-password"
                 type="password"
                 autoComplete="new-password"
-                placeholder="请再次输入密码"
+                placeholder={t('authDialog.confirmPasswordRequired')}
                 value={confirmPassword}
                 onChange={(event) => {
                   setConfirmPassword(event.target.value)
@@ -529,17 +512,17 @@ export function AuthLoginDialog({
             {submitError && <p className="text-sm text-destructive">{submitError}</p>}
 
             <Button type="submit" className="w-full" disabled={!canRegisterSubmit}>
-              {submitting ? '注册中...' : '注册'}
+              {submitting ? t('authDialog.registerSubmitting') : t('authDialog.registerAction')}
             </Button>
 
             <p className="text-sm text-muted-foreground text-center">
-              已有账号？
+              {t('authDialog.hasAccount')}
               <button
                 type="button"
                 className="ml-1 text-foreground underline-offset-4 hover:underline"
                 onClick={() => switchMode('login')}
               >
-                去登录
+                {t('authDialog.goLogin')}
               </button>
             </p>
           </form>

@@ -57,5 +57,11 @@ export type {
 
 // 模块 API
 export { configApi } from "./config";
+export {
+  getApiErrorMessage,
+  getApiErrorMessageFromPayload,
+  getApiErrorMessageKey,
+  isApiErrorKey,
+} from "./error-i18n";
 export { fileApi } from "./file";
 export { sessionApi } from "./session";

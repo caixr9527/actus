@@ -160,3 +160,73 @@ test("request should invoke onAuthFailure when retry after refresh is still 401"
     globalThis.fetch = originalFetch
   }
 })
+
+test("request should preserve backend error_key and error_params on ApiError", async () => {
+  const originalFetch = globalThis.fetch
+
+  globalThis.fetch = (async () => {
+    return jsonResponse(400, {
+      code: 400,
+      msg: "邮箱或密码错误",
+      error_key: "error.auth.invalid_credentials",
+      error_params: {
+        attempt: 3,
+      },
+      data: null,
+    })
+  }) as typeof fetch
+
+  try {
+    await assert.rejects(
+      async () => {
+        await request("/auth/login", {
+          method: "POST",
+          body: JSON.stringify({ email: "user@example.com", password: "wrong" }),
+          skipAuth: true,
+        })
+      },
+      (error: unknown) => {
+        assert.ok(error instanceof ApiError)
+        assert.equal(error.code, 400)
+        assert.equal(error.errorKey, "error.auth.invalid_credentials")
+        assert.deepEqual(error.errorParams, { attempt: 3 })
+        return true
+      },
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("request should fallback to generic message when backend msg is omitted", async () => {
+  const originalFetch = globalThis.fetch
+
+  globalThis.fetch = (async () => {
+    return jsonResponse(400, {
+      code: 400,
+      data: null,
+      error_key: "error.auth.invalid_credentials",
+    })
+  }) as typeof fetch
+
+  try {
+    await assert.rejects(
+      async () => {
+        await request("/auth/login", {
+          method: "POST",
+          body: JSON.stringify({ email: "user@example.com", password: "wrong" }),
+          skipAuth: true,
+        })
+      },
+      (error: unknown) => {
+        assert.ok(error instanceof ApiError)
+        assert.equal(error.code, 400)
+        assert.equal(error.msg, "请求失败")
+        assert.equal(error.errorKey, "error.auth.invalid_credentials")
+        return true
+      },
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

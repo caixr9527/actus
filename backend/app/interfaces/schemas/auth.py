@@ -17,6 +17,7 @@ from core.config import get_settings
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 PASSWORD_ALLOWED_REGEX = re.compile(r"^[A-Za-z0-9!@#$%^&*._\-]+$")
 VERIFICATION_CODE_DIGITS_REGEX = re.compile(r"^[0-9]+$")
+SupportedLocale = Literal["zh-CN", "en-US"]
 
 
 def validate_password_strength(value: str) -> str:
@@ -122,7 +123,7 @@ class CurrentUserResponse(BaseModel):
     nickname: Optional[str] = None
     avatar_url: Optional[str] = None
     timezone: str = "Asia/Shanghai"
-    locale: str = "zh-CN"
+    locale: SupportedLocale = "zh-CN"
     auth_provider: str = "email"
     status: UserStatus = UserStatus.ACTIVE
     created_at: datetime
@@ -152,7 +153,7 @@ class UpdateCurrentUserRequest(BaseModel):
     nickname: Optional[str] = None
     avatar_url: Optional[str] = None
     timezone: Optional[str] = None
-    locale: Optional[str] = None
+    locale: Optional[SupportedLocale] = None
 
 
 class UpdateCurrentUserResponse(BaseModel):

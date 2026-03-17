@@ -9,6 +9,7 @@ import logging
 from typing import List, Callable, Type
 
 from app.application.errors import NotFoundError, ServerError
+from app.application.errors import error_keys
 from app.domain.external import Sandbox
 from app.domain.models import Session, File
 from app.domain.repositories import IUnitOfWork
@@ -50,7 +51,11 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
             if not session:
                 logger.error(f"任务会话不存在: {session_id}")
-                raise NotFoundError(msg=f"任务会话不存在: {session_id}")
+                raise NotFoundError(
+                    msg=f"任务会话不存在: {session_id}",
+                    error_key=error_keys.SESSION_NOT_FOUND,
+                    error_params={"session_id": session_id},
+                )
             await uow.session.delete_by_id(session_id=session_id)
         logger.info(f"删除任务会话成功: {session_id}")
 
@@ -64,7 +69,11 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
+            raise NotFoundError(
+                msg=f"任务会话不存在: {session_id}",
+                error_key=error_keys.SESSION_NOT_FOUND,
+                error_params={"session_id": session_id},
+            )
         return session.files
 
     async def read_file(self, session_id: str, filepath: str) -> FileReadResponse:
@@ -74,16 +83,28 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
+            raise NotFoundError(
+                msg=f"任务会话不存在: {session_id}",
+                error_key=error_keys.SESSION_NOT_FOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 检查会话是否关联了沙盒
         if not session.sandbox_id:
-            raise NotFoundError(msg="任务会话未关联沙盒")
+            raise NotFoundError(
+                msg="任务会话未关联沙盒",
+                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 根据沙盒ID获取沙盒实例
         sandbox = await self._sandbox_cls.get(id=session.sandbox_id)
         if not sandbox:
-            raise NotFoundError(msg="任务会话未关联沙盒或已销毁")
+            raise NotFoundError(
+                msg="任务会话未关联沙盒或已销毁",
+                error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
+                error_params={"session_id": session_id, "sandbox_id": session.sandbox_id},
+            )
 
         # 调用沙盒读取文件方法
         result = await sandbox.read_file(file_path=filepath)
@@ -92,7 +113,11 @@ class SessionService:
             return FileReadResponse(**result.data)
 
         # 文件读取失败，抛出服务器错误
-        raise ServerError(msg=result.message)
+        raise ServerError(
+            msg=result.message,
+            error_key=error_keys.SESSION_FILE_READ_FAILED,
+            error_params={"session_id": session_id, "filepath": filepath},
+        )
 
     async def read_shell_output(self, session_id: str, shell_session_id: str) -> ShellReadResponse:
         logger.info(f"获取会话：{session_id} 中Shell会话ID：{shell_session_id} 的输出")
@@ -101,21 +126,37 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
+            raise NotFoundError(
+                msg=f"任务会话不存在: {session_id}",
+                error_key=error_keys.SESSION_NOT_FOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 检查会话是否关联了沙盒
         if not session.sandbox_id:
-            raise NotFoundError(msg="任务会话未关联沙盒")
+            raise NotFoundError(
+                msg="任务会话未关联沙盒",
+                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 根据沙盒ID获取沙盒实例
         sandbox = await self._sandbox_cls.get(id=session.sandbox_id)
         if not sandbox:
-            raise NotFoundError(msg="任务会话未关联沙盒或已销毁")
+            raise NotFoundError(
+                msg="任务会话未关联沙盒或已销毁",
+                error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
+                error_params={"session_id": session_id, "sandbox_id": session.sandbox_id},
+            )
         result = await sandbox.read_shell_output(session_id=shell_session_id, console=True)
         if result.success:
             # 读取成功，返回结果
             return ShellReadResponse(**result.data)
-        raise ServerError(msg=result.message)
+        raise ServerError(
+            msg=result.message,
+            error_key=error_keys.SESSION_SHELL_READ_FAILED,
+            error_params={"session_id": session_id, "shell_session_id": shell_session_id},
+        )
 
     async def get_vnc_url(self, session_id: str) -> str:
         logger.info(f"获取会话：{session_id} 的VNC地址")
@@ -124,15 +165,27 @@ class SessionService:
             session = await uow.session.get_by_id(session_id=session_id)
         if not session:
             logger.error(f"任务会话不存在: {session_id}")
-            raise NotFoundError(msg=f"任务会话不存在: {session_id}")
+            raise NotFoundError(
+                msg=f"任务会话不存在: {session_id}",
+                error_key=error_keys.SESSION_NOT_FOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 检查会话是否关联了沙盒
         if not session.sandbox_id:
-            raise NotFoundError(msg="任务会话未关联沙盒")
+            raise NotFoundError(
+                msg="任务会话未关联沙盒",
+                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 根据沙盒ID获取沙盒实例
         sandbox = await self._sandbox_cls.get(id=session.sandbox_id)
         if not sandbox:
-            raise NotFoundError(msg="任务会话未关联沙盒或已销毁")
+            raise NotFoundError(
+                msg="任务会话未关联沙盒或已销毁",
+                error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
+                error_params={"session_id": session_id, "sandbox_id": session.sandbox_id},
+            )
 
         return sandbox.vnc_url

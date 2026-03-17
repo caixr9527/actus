@@ -20,11 +20,29 @@ test("getTimeZoneOptions should return non-empty options", () => {
 
 test("getLocaleOptions should return non-empty options", () => {
   const options = getLocaleOptions()
-  assert.equal(options.length > 0, true)
-  assert.equal(options.length <= 40, true)
+  assert.equal(options.length, 2)
   assert.equal(typeof options[0]?.label, "string")
   assert.equal(options.some((item) => item.value === "zh-CN"), true)
   assert.equal(options.some((item) => item.value === "en-US"), true)
+  assert.equal(
+    options.every((item) => item.value === "zh-CN" || item.value === "en-US"),
+    true,
+  )
+})
+
+test("getLocaleOptions should cache by display locale", () => {
+  const zhOptions = getLocaleOptions("zh-CN")
+  const zhOptionsCached = getLocaleOptions("zh-CN")
+  const enOptions = getLocaleOptions("en-US")
+
+  assert.equal(zhOptions, zhOptionsCached)
+  assert.notEqual(zhOptions, enOptions)
+
+  const zhLabel = zhOptions.find((item) => item.value === "zh-CN")?.label
+  const enLabel = enOptions.find((item) => item.value === "zh-CN")?.label
+  assert.equal(typeof zhLabel, "string")
+  assert.equal(typeof enLabel, "string")
+  assert.notEqual(zhLabel, enLabel)
 })
 
 test("ensureOptionExists should prepend custom option when missing", () => {

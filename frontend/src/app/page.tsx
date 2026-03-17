@@ -21,6 +21,8 @@ import {
   type GuestPendingActionType,
 } from "@/lib/guest-auth-draft"
 import { normalizeAuthRedirectTarget } from "@/lib/auth"
+import { getApiErrorMessage } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 import { useAuth } from "@/hooks/use-auth"
 import type { FileInfo } from "@/lib/api/types"
 import { toast } from "sonner"
@@ -28,6 +30,7 @@ import { toast } from "sonner"
 export default function Page() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const { t } = useI18n()
   const { isLoggedIn } = useAuth()
   const chatInputRef = useRef<ChatInputRef>(null)
   const [sending, setSending] = useState(false)
@@ -68,12 +71,12 @@ export default function Page() {
     }
 
     if (pendingAction === "upload") {
-      toast.info("请重新选择需要上传的附件")
+      toast.info(t("home.pendingUploadInfo"))
     }
 
     clearGuestPendingMessage()
     clearGuestPendingAction()
-  }, [isLoggedIn])
+  }, [isLoggedIn, t])
 
   const handleQuestionClick = (question: string) => {
     chatInputRef.current?.setInputText(question)
@@ -158,9 +161,7 @@ export default function Page() {
         router.push(`/sessions/${sessionId}?init=${encoded}`)
       }
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "创建会话失败"
-      toast.error(errorMessage)
+      toast.error(getApiErrorMessage(error, "home.createSessionFailed", t))
       setSending(false)
       throw error
     }
@@ -175,8 +176,8 @@ export default function Page() {
         <div className="w-full max-w-full sm:max-w-[768px] sm:min-w-[390px] mx-auto">
           {/* 对话提示内容 */}
           <div className="text-[24px] sm:text-[32px] font-bold mb-4 sm:mb-6 text-center sm:text-left">
-            <div className="text-gray-700">您好！</div>
-            <div className="text-gray-500">我能为您做什么?</div>
+            <div className="text-gray-700">{t("home.greeting.hello")}</div>
+            <div className="text-gray-500">{t("home.greeting.prompt")}</div>
           </div>
           {/* 对话框 */}
           <ChatInput

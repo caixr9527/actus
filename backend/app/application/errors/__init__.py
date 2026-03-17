@@ -6,6 +6,7 @@
 @File   : __init__.py.py
 """
 from .exceptions import (
+    AppException,
     BadRequestError,
     UnauthorizedError,
     NotFoundError,
@@ -15,6 +16,7 @@ from .exceptions import (
 )
 
 __all__ = [
+    "AppException",
     "BadRequestError",
     "UnauthorizedError",
     "NotFoundError",

@@ -13,6 +13,7 @@ import yaml
 from filelock import FileLock
 
 from app.application.errors.exceptions import ServerError
+from app.application.errors import error_keys
 from app.domain.models import AppConfig, LLMConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig
 from app.domain.repositories import AppConfigRepository
@@ -52,7 +53,11 @@ class FileAppConfigRepository(AppConfigRepository):
                 return AppConfig.model_validate(data) if data else None
         except Exception as e:
             logger.error(f"读取应用配置文件失败: {e}")
-            raise ServerError("读取应用配置文件失败，请稍后尝试")
+            raise ServerError(
+                "读取应用配置文件失败，请稍后尝试",
+                error_key=error_keys.APP_CONFIG_LOAD_FAILED,
+                error_params={"config_path": str(self._config_path)},
+            )
 
     def save(self, app_config: AppConfig) -> None:
         """保存应用配置"""
@@ -65,4 +70,8 @@ class FileAppConfigRepository(AppConfigRepository):
                     yaml.dump(data_to_dum, f, allow_unicode=True, sort_keys=False)
         except TimeoutError:
             logger.error("获取应用配置文件锁失败")
-            raise ServerError("保存应用配置文件失败，请稍后尝试")
+            raise ServerError(
+                "保存应用配置文件失败，请稍后尝试",
+                error_key=error_keys.APP_CONFIG_SAVE_FAILED,
+                error_params={"config_path": str(self._config_path)},
+            )

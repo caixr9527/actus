@@ -5,6 +5,7 @@ from typing import Optional
 import pytest
 
 from app.application.errors import BadRequestError, TooManyRequestsError
+from app.application.errors import error_keys
 from app.application.service.auth_service import AuthService
 from app.application.utils import PasswordHasher
 from app.domain.external import RefreshTokenConsumeResult, RefreshTokenConsumeStatus
@@ -258,6 +259,7 @@ def test_register_should_raise_bad_request_when_email_exists() -> None:
             )
         )
     assert "该邮箱已注册" in exc.value.msg
+    assert exc.value.error_key == error_keys.AUTH_EMAIL_ALREADY_REGISTERED
 
 
 def test_send_register_verification_code_should_store_and_send_when_enabled() -> None:
@@ -300,6 +302,7 @@ def test_register_should_require_verification_code_when_enabled() -> None:
             )
         )
     assert "请输入邮箱验证码" in exc.value.msg
+    assert exc.value.error_key == error_keys.AUTH_REGISTER_CODE_REQUIRED
 
 
 def test_register_should_raise_bad_request_when_verification_code_invalid() -> None:
@@ -324,6 +327,7 @@ def test_register_should_raise_bad_request_when_verification_code_invalid() -> N
             )
         )
     assert "邮箱验证码错误或已过期" in exc.value.msg
+    assert exc.value.error_key == error_keys.AUTH_REGISTER_CODE_INVALID
 
 
 def test_register_should_pass_with_verification_code_when_enabled() -> None:
@@ -405,6 +409,7 @@ def test_login_should_raise_bad_request_when_password_is_wrong() -> None:
             )
         )
     assert exc.value.msg == "邮箱或密码错误"
+    assert exc.value.error_key == error_keys.AUTH_LOGIN_INVALID_CREDENTIALS
 
 
 def test_login_should_raise_too_many_requests_when_ip_or_email_is_rate_limited() -> None:
@@ -423,6 +428,7 @@ def test_login_should_raise_too_many_requests_when_ip_or_email_is_rate_limited()
         )
 
     assert exc.value.msg == "登录尝试过于频繁，请稍后重试"
+    assert exc.value.error_key == error_keys.AUTH_LOGIN_RATE_LIMITED
 
 
 def test_login_should_record_failed_attempt_count_when_password_is_wrong() -> None:
@@ -502,6 +508,7 @@ def test_login_should_raise_bad_request_when_user_status_is_disabled() -> None:
             )
         )
     assert exc.value.msg == "账号状态异常，暂不可登录"
+    assert exc.value.error_key == error_keys.AUTH_USER_STATUS_INVALID
 
 
 def test_send_register_verification_code_should_raise_too_many_requests_when_ip_limited() -> None:
@@ -519,6 +526,7 @@ def test_send_register_verification_code_should_raise_too_many_requests_when_ip_
         )
 
     assert exc.value.msg == "验证码发送过于频繁，请稍后重试"
+    assert exc.value.error_key == error_keys.AUTH_SEND_CODE_RATE_LIMITED
 
 
 def test_refresh_tokens_should_issue_new_token_pair_when_refresh_token_valid() -> None:
@@ -559,6 +567,7 @@ def test_refresh_tokens_should_raise_bad_request_when_refresh_token_missing() ->
         asyncio.run(service.refresh_tokens("rt-not-found"))
 
     assert exc.value.msg == "Refresh Token 无效或已过期"
+    assert exc.value.error_key == error_keys.AUTH_REFRESH_TOKEN_INVALID
 
 
 def test_refresh_tokens_should_revoke_user_tokens_when_refresh_token_replayed() -> None:
@@ -576,6 +585,7 @@ def test_refresh_tokens_should_revoke_user_tokens_when_refresh_token_replayed() 
         asyncio.run(service.refresh_tokens("rt-replayed"))
 
     assert exc.value.msg == "检测到登录状态异常，请重新登录"
+    assert exc.value.error_key == error_keys.AUTH_REFRESH_REPLAYED
     assert refresh_token_store.revoked_user_ids == [compromised_user_id]
 
 
@@ -601,6 +611,7 @@ def test_refresh_tokens_should_revoke_user_tokens_when_user_status_is_disabled()
         asyncio.run(service.refresh_tokens("rt-valid"))
 
     assert exc.value.msg == "账号状态异常，暂不可登录"
+    assert exc.value.error_key == error_keys.AUTH_USER_STATUS_INVALID
     assert refresh_token_store.revoked_user_ids == [existing.id]
 
 

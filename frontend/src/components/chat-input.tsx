@@ -7,9 +7,11 @@ import {Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle} f
 import {Avatar, AvatarGroupCount} from '@/components/ui/avatar'
 import {ArrowUp, FileText, Paperclip, XCircle, Loader2, Pause} from 'lucide-react'
 import {Button} from '@/components/ui/button'
+import { getApiErrorMessage } from '@/lib/api'
 import {fileApi} from '@/lib/api/file'
 import type {FileInfo} from '@/lib/api/types'
 import {toast} from 'sonner'
+import { useI18n } from '@/lib/i18n'
 
 interface ChatInputProps {
   className?: string
@@ -33,6 +35,7 @@ export interface ChatInputRef {
 
 export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
   ({ className, onInputValueChange, onSend, onRequireAuth, disabled = false, sessionId, isRunning = false, onStop }, ref) => {
+    const { t } = useI18n()
     const [files, setFiles] = useState<FileInfo[]>([])
     const [uploading, setUploading] = useState(false)
     const [sending, setSending] = useState(false)
@@ -74,8 +77,13 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
             })
             return fileInfo
           } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : '上传失败'
-            toast.error(`文件「${file.name}」上传失败: ${errorMessage}`)
+            const errorMessage = getApiErrorMessage(error, 'chatInput.uploadFailed', t)
+            toast.error(
+              t('chatInput.uploadSingleFailed', {
+                name: file.name,
+                error: errorMessage,
+              }),
+            )
             return null
           }
         })
@@ -86,10 +94,10 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
 
         if (uploadedFiles.length > 0) {
           setFiles((prev) => [...prev, ...uploadedFiles])
-          toast.success(`成功上传 ${uploadedFiles.length} 个文件`)
+          toast.success(t('chatInput.uploadSuccess', { count: uploadedFiles.length }))
         }
       } catch {
-        toast.error('文件上传过程中发生错误')
+        toast.error(t('chatInput.uploadProcessError'))
       } finally {
         setUploading(false)
         // 重置input，以便可以重复选择同一文件
@@ -127,7 +135,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
       
       // 验证消息不为空
       if (!trimmedMessage) {
-        toast.error('请输入消息内容')
+        toast.error(t('chatInput.messageRequired'))
         textareaRef.current?.focus()
         return
       }
@@ -217,7 +225,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
           value={inputValue}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
-          placeholder="分配一个任务或提问任何问题..."
+          placeholder={t('chatInput.placeholder')}
           className="scrollbar-hide outline-none w-full text-sm resize-none h-[46px] min-h-[40px]"
           disabled={sending || disabled}
         />

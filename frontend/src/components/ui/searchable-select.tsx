@@ -27,9 +27,9 @@ type SearchableSelectProps = {
 export function SearchableSelect({
   value,
   options,
-  placeholder = "请选择",
-  searchPlaceholder = "请输入关键词搜索",
-  emptyText = "无匹配项",
+  placeholder = "Select",
+  searchPlaceholder = "Search...",
+  emptyText = "No matches",
   disabled = false,
   className,
   onValueChange,
