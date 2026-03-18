@@ -16,7 +16,9 @@ from app.interfaces.dependencies.services import get_app_config_service, get_mod
 from app.interfaces.schemas import (
     Response,
     ListMCPServerResponse,
+    ListMCPServerItem,
     ListA2AServerResponse,
+    ListA2AServerItem,
     ListModelResponse,
     ListModelItem,
     PublicModelConfig,
@@ -105,7 +107,17 @@ async def get_mcp_servers(
     mcp_servers = await app_config_service.get_mcp_servers()
     return Response.success(
         msg="获取MCP服务器配置信息成功",
-        data=ListMCPServerResponse(mcp_servers=mcp_servers)
+        data=ListMCPServerResponse(
+            mcp_servers=[
+                ListMCPServerItem(
+                    server_name=item.server_name,
+                    enabled=item.enabled,
+                    transport=item.transport,
+                    tools=item.tools,
+                )
+                for item in mcp_servers
+            ]
+        )
     )
 
 
@@ -176,7 +188,21 @@ async def get_a2a_servers(
     a2a_servers = await app_config_service.get_a2a_servers()
     return Response.success(
         msg="获取A2A服务器配置信息成功",
-        data=ListA2AServerResponse(a2a_servers=a2a_servers)
+        data=ListA2AServerResponse(
+            a2a_servers=[
+                ListA2AServerItem(
+                    id=item.id,
+                    name=item.name,
+                    description=item.description,
+                    input_modes=item.input_modes,
+                    output_modes=item.output_modes,
+                    streaming=item.streaming,
+                    push_notifications=item.push_notifications,
+                    enabled=item.enabled,
+                )
+                for item in a2a_servers
+            ]
+        )
     )
 
 

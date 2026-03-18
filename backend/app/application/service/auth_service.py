@@ -9,6 +9,11 @@ import logging
 from datetime import datetime
 from typing import Callable, Optional
 
+from app.application.contracts import (
+    LoginResult,
+    RegisterVerificationCodeResult,
+    RefreshResult,
+)
 from app.application.errors import BadRequestError, ServerError, TooManyRequestsError
 from app.application.errors import error_keys
 from app.application.utils import PasswordHasher, AuthTokenManager, VerificationCodeManager
@@ -22,11 +27,6 @@ from app.domain.external import (
 )
 from app.domain.models import User, UserProfile, UserStatus
 from app.domain.repositories import IUnitOfWork
-from app.interfaces.schemas.auth import (
-    LoginResult,
-    RegisterVerificationCodeResult,
-    RefreshResult,
-)
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)

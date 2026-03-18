@@ -4,14 +4,14 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.application.contracts import RegisterVerificationCodeResult, LoginResult, RefreshResult
 from app.application.errors import BadRequestError
 from app.application.errors import error_keys
 from app.domain.models import User, UserProfile
 from app.interfaces.dependencies.auth import AuthContext, get_current_auth_context
+from app.interfaces.dependencies.services import get_auth_service
 from app.interfaces.endpoints.auth_routes import router as auth_router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
-from app.interfaces.schemas.auth import RegisterVerificationCodeResult, LoginResult, RefreshResult
-from app.interfaces.dependencies.services import get_auth_service
 
 
 def _assert_auth_security_headers(response) -> None:

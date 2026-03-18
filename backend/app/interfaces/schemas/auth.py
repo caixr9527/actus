@@ -11,7 +11,7 @@ from typing import Optional, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.domain.models import UserStatus, User, UserProfile
+from app.domain.models import UserStatus
 from core.config import get_settings
 
 EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
@@ -177,29 +177,3 @@ class UpdatePasswordRequest(BaseModel):
 class UpdatePasswordResponse(BaseModel):
     """更新密码响应结构"""
     success: bool = True
-
-
-class LoginResult(BaseModel):
-    """登录结果数据"""
-    user: User
-    profile: UserProfile
-    access_token: str
-    refresh_token: str
-    access_token_expires_in: int
-    refresh_token_expires_in: int
-
-
-class RegisterVerificationCodeResult(BaseModel):
-    """发送注册验证码结果"""
-
-    verification_required: bool
-    expires_in_seconds: int
-
-
-class RefreshResult(BaseModel):
-    """刷新 Token 结果数据"""
-
-    access_token: str
-    refresh_token: str
-    access_token_expires_in: int
-    refresh_token_expires_in: int

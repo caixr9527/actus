@@ -34,6 +34,7 @@ from app.interfaces.schemas import (
     GetSessionFilesResponse,
     FileReadResponse,
     FileReadRequest,
+    ConsoleRecord,
     ShellReadResponse,
     ShellReadRequest
 )
@@ -352,7 +353,10 @@ async def read_file(
     )
     return Response.success(
         msg="获取会话文件内容成功",
-        data=result
+        data=FileReadResponse(
+            filepath=result.filepath,
+            content=result.content,
+        )
     )
 
 
@@ -376,7 +380,18 @@ async def read_shell_output(
     )
     return Response.success(
         msg="获取Shell内容输出结果成功",
-        data=result,
+        data=ShellReadResponse(
+            session_id=result.session_id,
+            output=result.output,
+            console_records=[
+                ConsoleRecord(
+                    ps1=item.ps1,
+                    command=item.command,
+                    output=item.output,
+                )
+                for item in result.console_records
+            ],
+        ),
     )
 
 

@@ -1,14 +1,14 @@
+import pytest
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
-import pytest
 from starlette.websockets import WebSocketDisconnect
 
+from app.application.contracts import RefreshResult
 from app.domain.models import HealthStatus
-from app.interfaces.endpoints.routes import router as api_router
 from app.interfaces.dependencies.auth_guard import validate_api_auth_coverage
-from app.interfaces.errors.exception_handlers import register_exception_handlers
-from app.interfaces.schemas.auth import RefreshResult
 from app.interfaces.dependencies.services import get_status_service, get_auth_service
+from app.interfaces.endpoints.routes import router as api_router
+from app.interfaces.errors.exception_handlers import register_exception_handlers
 
 
 class _FakeStatusService:

@@ -8,6 +8,7 @@
 import uuid
 from typing import List
 
+from app.application.contracts import MCPServerItemResult, A2AServerItemResult
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
 from app.domain.models import AppConfig, AgentConfig, MCPConfig
@@ -15,7 +16,6 @@ from app.domain.models.app_config import A2AConfig, A2AServerConfig
 from app.domain.repositories import AppConfigRepository
 from app.domain.services.tools import MCPClientManager
 from app.domain.services.tools.a2a import A2AClientManager
-from app.interfaces.schemas import ListMCPServerItem, ListA2AServerItem
 
 
 class AppConfigService:
@@ -58,7 +58,7 @@ class AppConfigService:
         self.app_config_repository.save(app_config)
         return app_config.agent_config
 
-    async def get_mcp_servers(self) -> List[ListMCPServerItem]:
+    async def get_mcp_servers(self) -> List[MCPServerItemResult]:
         """
         获取MCP服务器配置
 
@@ -78,7 +78,7 @@ class AppConfigService:
             # 遍历所有MCP服务器配置
             for server_name, server_config in app_config.mcp_config.mcpServers.items():
                 # 构造每个服务器的响应数据，包括服务器名称、启用状态、传输方式和工具列表
-                mcp_servers.append(ListMCPServerItem(
+                mcp_servers.append(MCPServerItemResult(
                     server_name=server_name,
                     enabled=server_config.enabled,
                     transport=server_config.transport,
@@ -168,7 +168,7 @@ class AppConfigService:
         self.app_config_repository.save(app_config)
         return app_config.a2a_config
 
-    async def get_a2a_servers(self) -> List[ListA2AServerItem]:
+    async def get_a2a_servers(self) -> List[A2AServerItemResult]:
         """获取A2A服务列表"""
         app_config = await self._load_app_config()
 
@@ -181,7 +181,7 @@ class AppConfigService:
             agent_cards = a2a_client_manager.agent_cards
 
             for id, agent_card in agent_cards.items():
-                a2a_servers.append(ListA2AServerItem(
+                a2a_servers.append(A2AServerItemResult(
                     id=id,
                     name=agent_card.get("name", ""),
                     description=agent_card.get("description", ""),

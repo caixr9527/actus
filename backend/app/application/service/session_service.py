@@ -8,13 +8,13 @@
 import logging
 from typing import List, Callable, Type
 
+from app.application.contracts import FileReadResult, ShellReadResult
 from app.application.errors import NotFoundError, ServerError, ValidationError
 from app.application.errors import error_keys
 from app.application.service.model_config_service import ModelConfigService
 from app.domain.external import Sandbox
 from app.domain.models import Session, File
 from app.domain.repositories import IUnitOfWork
-from app.interfaces.schemas import FileReadResponse, ShellReadResponse
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class SessionService:
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
         return session.files
 
-    async def read_file(self, user_id: str, session_id: str, filepath: str) -> FileReadResponse:
+    async def read_file(self, user_id: str, session_id: str, filepath: str) -> FileReadResult:
         logger.info(f"获取会话：{session_id} 中文件路径：{filepath} 的内容")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
 
@@ -129,7 +129,7 @@ class SessionService:
         result = await sandbox.read_file(file_path=filepath)
         if result.success:
             # 返回文件读取结果
-            return FileReadResponse(**result.data)
+            return FileReadResult(**result.data)
 
         # 文件读取失败，抛出服务器错误
         raise ServerError(
@@ -138,7 +138,7 @@ class SessionService:
             error_params={"session_id": session_id, "filepath": filepath},
         )
 
-    async def read_shell_output(self, user_id: str, session_id: str, shell_session_id: str) -> ShellReadResponse:
+    async def read_shell_output(self, user_id: str, session_id: str, shell_session_id: str) -> ShellReadResult:
         logger.info(f"获取会话：{session_id} 中Shell会话ID：{shell_session_id} 的输出")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
 
@@ -161,7 +161,7 @@ class SessionService:
         result = await sandbox.read_shell_output(session_id=shell_session_id, console=True)
         if result.success:
             # 读取成功，返回结果
-            return ShellReadResponse(**result.data)
+            return ShellReadResult(**result.data)
         raise ServerError(
             msg=result.message,
             error_key=error_keys.SESSION_SHELL_READ_FAILED,
