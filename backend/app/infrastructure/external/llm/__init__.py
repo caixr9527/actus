@@ -5,6 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : __init__.py.py
 """
+from .factory import OpenAILLMFactory
 from .openai_llm import OpenAILLM
 
-__all__ = ["OpenAILLM"]
+__all__ = ["OpenAILLM", "OpenAILLMFactory"]

@@ -55,6 +55,10 @@ class SessionRepository(Protocol):
         """根据传递的会话id更新会话状态"""
         ...
 
+    async def update_current_model_id(self, session_id: str, current_model_id: Optional[str]) -> None:
+        """根据传递的会话id更新当前模型id"""
+        ...
+
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
         ...

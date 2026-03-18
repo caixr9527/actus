@@ -9,6 +9,8 @@ from .agent_service import AgentService
 from .auth_service import AuthService
 from .app_config_service import AppConfigService
 from .file_service import FileService
+from .model_config_service import ModelConfigService
+from .model_runtime_resolver import ModelRuntimeResolver
 from .session_service import SessionService
 from .status_service import StatusService
 from .user_service import UserService
@@ -18,6 +20,8 @@ __all__ = [
     "AppConfigService",
     "StatusService",
     "FileService",
+    "ModelConfigService",
+    "ModelRuntimeResolver",
     "SessionService",
     "AgentService",
     "UserService",

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.application.errors import ServerError, error_keys
-from app.infrastructure.repositories import file_app_config_repository
+import app.infrastructure.repositories.file_app_config_repository as file_app_config_repository
 from app.infrastructure.repositories.file_app_config_repository import FileAppConfigRepository
 
 
@@ -25,6 +25,32 @@ def test_load_should_raise_server_error_with_error_key_when_open_failed(monkeypa
     assert exc.value.error_params == {"config_path": str(repo._config_path)}
 
 
+def test_load_should_drop_legacy_llm_config_field(tmp_path: Path) -> None:
+    repo = FileAppConfigRepository("tmp-config.yaml")
+    repo._config_path = tmp_path / "app-config.yaml"
+    repo._lock_file = repo._config_path.with_suffix(".lock")
+    repo._config_path.write_text(
+        """
+llm_config:
+  base_url: https://api.deepseek.com
+  api_key: secret
+  model_name: deepseek-reasoner
+agent_config:
+  max_iterations: 120
+mcp_config:
+  mcpServers: {}
+a2a_config:
+  a2a_servers: []
+""".strip(),
+        encoding="utf-8",
+    )
+
+    app_config = repo.load()
+
+    assert app_config.agent_config.max_iterations == 120
+    assert "llm_config" not in app_config.model_dump()
+
+
 def test_save_should_raise_server_error_with_error_key_when_lock_timeout(monkeypatch, tmp_path: Path) -> None:
     repo = FileAppConfigRepository("tmp-config.yaml")
     repo._config_path = tmp_path / "app-config.yaml"
@@ -44,7 +70,6 @@ def test_save_should_raise_server_error_with_error_key_when_lock_timeout(monkeyp
 
     with pytest.raises(ServerError) as exc:
         repo.save(file_app_config_repository.AppConfig(
-            llm_config=file_app_config_repository.LLMConfig(),
             agent_config=file_app_config_repository.AgentConfig(),
             mcp_config=file_app_config_repository.MCPConfig(),
             a2a_config=file_app_config_repository.A2AConfig(),

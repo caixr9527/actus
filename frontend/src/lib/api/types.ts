@@ -31,16 +31,26 @@ export type MCPTransport = "stdio" | "sse" | "streamable_http";
 
 // ==================== 配置模块类型 ====================
 
-/**
- * LLM 配置
- */
-export type LLMConfig = {
-  base_url?: string;
-  api_key?: string;
-  model_name?: string;
+export type PublicModelConfig = {
   temperature?: number;
   max_tokens?: number;
+  description?: string;
+  badge?: string;
   [key: string]: unknown;
+};
+
+export type ListModelItem = {
+  id: string;
+  display_name: string;
+  provider: string;
+  enabled: boolean;
+  sort_order: number;
+  config?: PublicModelConfig;
+};
+
+export type ModelsData = {
+  default_model_id: string;
+  models: ListModelItem[];
 };
 
 /**
@@ -157,6 +167,7 @@ export type Session = {
   latest_message_at: string;
   status: SessionStatus;
   unread_message_count: number;
+  current_model_id?: string | null;
   [key: string]: unknown;
 };
 
@@ -196,6 +207,7 @@ export type ChatMessage = {
 export type ChatParams = {
   message?: string;
   attachments?: string[];
+  event_id?: string;
   [key: string]: unknown;
 };
 
@@ -204,6 +216,15 @@ export type ChatParams = {
  */
 export type SessionDetail = Session & {
   events?: SSEEventData[];
+};
+
+export type UpdateSessionModelParams = {
+  model_id: string;
+};
+
+export type UpdateSessionModelResponse = {
+  session_id: string;
+  current_model_id: string;
 };
 
 /**

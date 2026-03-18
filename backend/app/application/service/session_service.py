@@ -8,8 +8,9 @@
 import logging
 from typing import List, Callable, Type
 
-from app.application.errors import NotFoundError, ServerError
+from app.application.errors import NotFoundError, ServerError, ValidationError
 from app.application.errors import error_keys
+from app.application.service.model_config_service import ModelConfigService
 from app.domain.external import Sandbox
 from app.domain.models import Session, File
 from app.domain.repositories import IUnitOfWork
@@ -21,9 +22,15 @@ logger = logging.getLogger(__name__)
 class SessionService:
     """会话服务"""
 
-    def __init__(self, uow_factory: Callable[[], IUnitOfWork], sandbox_cls: Type[Sandbox]) -> None:
+    def __init__(
+            self,
+            uow_factory: Callable[[], IUnitOfWork],
+            sandbox_cls: Type[Sandbox],
+            model_config_service: ModelConfigService | None = None,
+    ) -> None:
         self._uow_factory = uow_factory
         self._sandbox_cls = sandbox_cls
+        self._model_config_service = model_config_service
 
     async def _get_owned_session_or_raise(self, user_id: str, session_id: str) -> Session:
         async with self._uow_factory() as uow:
@@ -67,6 +74,30 @@ class SessionService:
     async def get_session(self, user_id: str, session_id: str) -> Session | None:
         async with self._uow_factory() as uow:
             return await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+
+    async def set_current_model(self, user_id: str, session_id: str, model_id: str) -> Session:
+        logger.info(f"更新会话当前模型: session_id={session_id}, model_id={model_id}")
+        session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
+
+        if model_id != "auto":
+            if self._model_config_service is None:
+                raise RuntimeError("ModelConfigService 未注入，无法校验模型 ID")
+            model = await self._model_config_service.get_enabled_model_by_id(model_id=model_id)
+            if model is None:
+                raise ValidationError(
+                    msg=f"模型[{model_id}]不存在或未启用",
+                    error_key=error_keys.SESSION_MODEL_ID_INVALID,
+                    error_params={"model_id": model_id},
+                )
+
+        async with self._uow_factory() as uow:
+            await uow.session.update_current_model_id(
+                session_id=session_id,
+                current_model_id=model_id,
+            )
+
+        session.current_model_id = model_id
+        return session
 
     async def get_session_files(self, user_id: str, session_id: str) -> List[File]:
         logger.info(f"获取任务会话文件列表: {session_id}")

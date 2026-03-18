@@ -139,6 +139,19 @@ class DBSessionRepository(SessionRepository):
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
         self._register_session_list_changed(session_id)
 
+    async def update_current_model_id(self, session_id: str, current_model_id: Optional[str]) -> None:
+        """更新会话当前模型 ID"""
+        stmt = (
+            update(SessionModel)
+            .where(SessionModel.id == session_id)
+            .values(current_model_id=current_model_id)
+        )
+        result = await self.db_session.execute(stmt)
+
+        if result.rowcount == 0:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
+
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
         # 将事件对象转换为JSON格式的数据

@@ -79,11 +79,16 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const {
     session,
     files,
+    availableModels,
+    defaultModelId,
     events,
     loading,
+    modelsLoading,
+    modelUpdating,
     error,
     refresh,
     refreshFiles,
+    updateSessionModel,
     sendMessage,
     streaming,
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
@@ -188,6 +193,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
       }
     },
     [sendMessage, t]
+  )
+
+  const handleModelChange = useCallback(
+    async (modelId: string) => {
+      await updateSessionModel(modelId)
+    },
+    [updateSessionModel],
   )
 
   const handleViewAllFiles = useCallback(() => {
@@ -455,6 +467,12 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                 sessionId={sessionId}
                 isRunning={session?.status === 'running'}
                 onStop={handleStop}
+                modelOptions={availableModels}
+                currentModelId={session.current_model_id}
+                defaultModelId={defaultModelId}
+                modelsLoading={modelsLoading}
+                modelUpdating={modelUpdating}
+                onModelChange={handleModelChange}
               />
             </div>
           </div>

@@ -34,7 +34,7 @@ def test_protected_http_routes_should_require_authorization_header() -> None:
     with TestClient(app) as client:
         sessions_response = client.get("/api/sessions")
         files_response = client.get("/api/files/file-1")
-        app_config_response = client.get("/api/app-config/llm")
+        app_config_response = client.get("/api/app-config/agent")
         users_response = client.get("/api/users/me")
 
     assert sessions_response.status_code == 401

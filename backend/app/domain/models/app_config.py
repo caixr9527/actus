@@ -9,16 +9,7 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, Optional, List
 
-from pydantic import BaseModel, ConfigDict, HttpUrl, Field, model_validator
-
-
-class LLMConfig(BaseModel):
-    """语言模型配置"""
-    base_url: HttpUrl = "https://api.deepseek.com"
-    api_key: str = ""
-    model_name: str = "deepseek-reasoner"
-    temperature: float = Field(default=0.7)
-    max_tokens: int = Field(default=8192, ge=0)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AgentConfig(BaseModel):
@@ -81,8 +72,7 @@ class A2AConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    """应用配置信息,包含Agent配置,LLM提供商,A2A网络,MCP服务器配置"""
-    llm_config: LLMConfig
+    """应用配置信息，包含 Agent、A2A 网络与 MCP 服务器配置"""
     agent_config: AgentConfig
     mcp_config: MCPConfig
     a2a_config: A2AConfig

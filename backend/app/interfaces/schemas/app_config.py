@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : app_config.py
 """
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -38,3 +38,27 @@ class ListA2AServerItem(BaseModel):
 class ListA2AServerResponse(BaseModel):
     """获取A2A服务列表响应结构"""
     a2a_servers: List[ListA2AServerItem] = Field(default_factory=list)  # A2A服务列表
+
+
+class PublicModelConfig(BaseModel):
+    """模型公开配置字段"""
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    description: Optional[str] = None
+    badge: Optional[str] = None
+
+
+class ListModelItem(BaseModel):
+    """模型列表条目"""
+    id: str
+    display_name: str
+    provider: str
+    enabled: bool
+    sort_order: int
+    config: PublicModelConfig = Field(default_factory=PublicModelConfig)
+
+
+class ListModelResponse(BaseModel):
+    """模型列表响应结构"""
+    default_model_id: str
+    models: List[ListModelItem] = Field(default_factory=list)

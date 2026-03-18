@@ -9,6 +9,7 @@ import {
 import { ChatHeader } from "@/components/chat-header"
 import { ChatInput, type ChatInputRef } from "@/components/chat-input"
 import { SuggestedQuestions } from "@/components/suggested-questions"
+import { configApi } from "@/lib/api/config"
 import { sessionApi } from "@/lib/api/session"
 import { saveInitialMessageDraft } from "@/lib/initial-message-draft"
 import {
@@ -22,9 +23,10 @@ import {
 } from "@/lib/guest-auth-draft"
 import { normalizeAuthRedirectTarget } from "@/lib/auth"
 import { getApiErrorMessage } from "@/lib/api"
+import { buildInitialSessionModelParams } from "@/lib/session-model-selection"
 import { useI18n } from "@/lib/i18n"
 import { useAuth } from "@/hooks/use-auth"
-import type { FileInfo } from "@/lib/api/types"
+import type { FileInfo, ListModelItem } from "@/lib/api/types"
 import { toast } from "sonner"
 
 export default function Page() {
@@ -34,6 +36,10 @@ export default function Page() {
   const { isLoggedIn } = useAuth()
   const chatInputRef = useRef<ChatInputRef>(null)
   const [sending, setSending] = useState(false)
+  const [modelUpdating, setModelUpdating] = useState(false)
+  const [availableModels, setAvailableModels] = useState<ListModelItem[]>([])
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null)
+  const [selectedModelId, setSelectedModelId] = useState<string>("auto")
   const [authDialogOpen, setAuthDialogOpen] = useState(false)
   const [authDialogMode, setAuthDialogMode] = useState<AuthDialogMode>("login")
   const [loginDialogInitialEmail, setLoginDialogInitialEmail] = useState("")
@@ -77,6 +83,35 @@ export default function Page() {
     clearGuestPendingMessage()
     clearGuestPendingAction()
   }, [isLoggedIn, t])
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      return
+    }
+
+    let cancelled = false
+    configApi
+      .getModels()
+      .then((data) => {
+        if (cancelled) {
+          return
+        }
+        setAvailableModels(data.models)
+        setDefaultModelId(data.default_model_id)
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return
+        }
+        console.error("[Home] 获取模型列表失败:", error)
+        setAvailableModels([])
+        setDefaultModelId(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [isLoggedIn])
 
   const handleQuestionClick = (question: string) => {
     chatInputRef.current?.setInputText(question)
@@ -142,11 +177,17 @@ export default function Page() {
     if (sending) return
 
     setSending(true)
+    setModelUpdating(true)
 
     try {
       // 1. 创建新会话
       const session = await sessionApi.createSession()
       const sessionId = session.session_id
+
+      const modelParams = buildInitialSessionModelParams(selectedModelId)
+      if (modelParams) {
+        await sessionApi.updateSessionModel(sessionId, modelParams)
+      }
 
       // 2. 优先写入 sessionStorage，避免 URL 长度与可见性问题
       const attachments = files.map((file) => file.id)
@@ -163,6 +204,7 @@ export default function Page() {
     } catch (error) {
       toast.error(getApiErrorMessage(error, "home.createSessionFailed", t))
       setSending(false)
+      setModelUpdating(false)
       throw error
     }
   }
@@ -186,6 +228,18 @@ export default function Page() {
             onSend={handleSend}
             onRequireAuth={handleRequireAuth}
             disabled={sending}
+            {...(isLoggedIn
+              ? {
+                  modelOptions: availableModels,
+                  currentModelId: selectedModelId,
+                  defaultModelId,
+                  modelsLoading: false,
+                  modelUpdating,
+                  onModelChange: async (modelId: string) => {
+                    setSelectedModelId(modelId)
+                  },
+                }
+              : {})}
           />
           {/* 推荐对话内容 */}
           <SuggestedQuestions onQuestionClick={handleQuestionClick} />

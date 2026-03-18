@@ -48,6 +48,7 @@ USER_SESSION_CLEANUP_FAILED = "error.user.session_cleanup_failed"
 
 # 会话链路
 SESSION_NOT_FOUND = "error.session.not_found"
+SESSION_MODEL_ID_INVALID = "error.session.model_id_invalid"
 SESSION_SANDBOX_NOT_BOUND = "error.session.sandbox_not_bound"
 SESSION_SANDBOX_UNAVAILABLE = "error.session.sandbox_unavailable"
 SESSION_FILE_READ_FAILED = "error.session.file_read_failed"
@@ -59,6 +60,9 @@ FILE_NOT_FOUND = "error.file.not_found"
 # 应用配置链路
 APP_CONFIG_LOAD_FAILED = "error.app_config.load_failed"
 APP_CONFIG_SAVE_FAILED = "error.app_config.save_failed"
+APP_CONFIG_MODEL_NOT_FOUND = "error.app_config.model_not_found"
+APP_CONFIG_MODEL_INVALID = "error.app_config.model_invalid"
+APP_CONFIG_DEFAULT_MODEL_UNAVAILABLE = "error.app_config.default_model_unavailable"
 APP_CONFIG_MCP_SERVER_NOT_FOUND = "error.app_config.mcp_server_not_found"
 APP_CONFIG_A2A_SERVER_NOT_FOUND = "error.app_config.a2a_server_not_found"
 

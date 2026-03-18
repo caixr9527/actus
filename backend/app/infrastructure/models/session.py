@@ -43,6 +43,10 @@ class SessionModel(Base):
         String(255),
         nullable=True,
     )  # 关联用户id，兼容历史未认领会话（逻辑关联，不使用数据库外键）
+    current_model_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 当前会话显式选择的模型id，NULL表示走默认模型
     sandbox_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 沙箱id
     task_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 任务id
     title: Mapped[str] = mapped_column(

@@ -4,7 +4,7 @@ import pytest
 
 from app.application.errors import NotFoundError, error_keys
 from app.application.service.app_config_service import AppConfigService
-from app.domain.models import AppConfig, LLMConfig, AgentConfig, MCPConfig
+from app.domain.models import AppConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig
 
 
@@ -23,7 +23,6 @@ def _build_service() -> AppConfigService:
     return AppConfigService(
         app_config_repository=_FakeAppConfigRepository(
             AppConfig(
-                llm_config=LLMConfig(),
                 agent_config=AgentConfig(),
                 mcp_config=MCPConfig(),
                 a2a_config=A2AConfig(),

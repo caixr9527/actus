@@ -29,6 +29,8 @@ from app.interfaces.schemas import (
     ChatRequest,
     EventMapper,
     GetSessionResponse,
+    UpdateSessionModelRequest,
+    UpdateSessionModelResponse,
     GetSessionFilesResponse,
     FileReadResponse,
     FileReadRequest,
@@ -262,8 +264,36 @@ async def get_session(
             session_id=session.id,
             title=session.title,
             status=session.status,
+            current_model_id=session.current_model_id,
             events=EventMapper.events_to_sse_events(session.events),
         )
+    )
+
+
+@router.post(
+    path="/{session_id}/model",
+    response_model=Response[UpdateSessionModelResponse],
+    summary="切换当前会话模型",
+    description="根据传递的会话id更新当前会话模型",
+)
+async def update_session_model(
+        session_id: str,
+        request: UpdateSessionModelRequest,
+        current_user: User = Depends(get_current_user),
+        session_service: SessionService = Depends(get_session_service),
+) -> Response[UpdateSessionModelResponse]:
+    """切换当前会话模型"""
+    session = await session_service.set_current_model(
+        user_id=current_user.id,
+        session_id=session_id,
+        model_id=request.model_id,
+    )
+    return Response.success(
+        msg="更新会话模型成功",
+        data=UpdateSessionModelResponse(
+            session_id=session.id,
+            current_model_id=session.current_model_id or request.model_id,
+        ),
     )
 
 

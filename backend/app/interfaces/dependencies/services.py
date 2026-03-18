@@ -16,20 +16,23 @@ from starlette.datastructures import State
 from app.application.service import (
     AppConfigService,
     FileService,
+    ModelConfigService,
+    ModelRuntimeResolver,
     StatusService,
     AgentService,
     AuthService,
     UserService,
 )
 from app.application.service.session_service import SessionService
+from app.infrastructure.external.cache import ModelConfigCache
 from app.infrastructure.external.email_sender import SMTPEmailSender
 from app.infrastructure.external.file_storage import CosFileStorage
 from app.infrastructure.external.health_checker import PostgresHealthChecker, RedisHealthChecker
 from app.infrastructure.external.json_parser import RepairJsonParser
-from app.infrastructure.external.llm import OpenAILLM
+from app.infrastructure.external.llm import OpenAILLMFactory
+from app.infrastructure.external.rate_limit_store import RedisAuthRateLimitStore
 from app.infrastructure.external.search import BingSearchEngine
 from app.infrastructure.external.task import RedisStreamTask
-from app.infrastructure.external.rate_limit_store import RedisAuthRateLimitStore
 from app.infrastructure.external.token_store import (
     RedisRefreshTokenStore,
     RedisAccessTokenBlacklistStore,
@@ -93,7 +96,42 @@ def get_file_service(
 def get_session_service() -> SessionService:
     """获取会话服务"""
     logger.info("加载获取SessionService")
-    return SessionService(uow_factory=get_uow, sandbox_cls=DockerSandbox)
+    return SessionService(
+        uow_factory=get_uow,
+        sandbox_cls=DockerSandbox,
+        model_config_service=get_model_config_service(),
+    )
+
+
+@lru_cache()
+def get_model_config_cache() -> ModelConfigCache:
+    """获取模型配置缓存组件"""
+    logger.info("加载获取ModelConfigCache")
+    return ModelConfigCache(redis_client=get_redis_client())
+
+
+@lru_cache()
+def get_model_config_service() -> ModelConfigService:
+    """获取模型配置服务"""
+    logger.info("加载获取ModelConfigService")
+    return ModelConfigService(
+        uow_factory=get_uow,
+        model_config_cache_store=get_model_config_cache(),
+    )
+
+
+@lru_cache()
+def get_model_runtime_resolver() -> ModelRuntimeResolver:
+    """获取运行时模型解析器"""
+    logger.info("加载获取ModelRuntimeResolver")
+    return ModelRuntimeResolver(model_config_service=get_model_config_service())
+
+
+@lru_cache()
+def get_openai_llm_factory() -> OpenAILLMFactory:
+    """获取 OpenAI Compatible LLM 工厂"""
+    logger.info("加载获取OpenAILLMFactory")
+    return OpenAILLMFactory()
 
 
 def get_auth_service() -> AuthService:
@@ -137,8 +175,6 @@ def build_agent_service(cos: Cos) -> AgentService:
     """纯构造函数：根据显式传入依赖构建 AgentService。"""
     app_config_repository = FileAppConfigRepository(config_path=settings.app_config_filepath)
     app_config = app_config_repository.load()
-
-    llm = OpenAILLM(app_config.llm_config)
     file_storage = CosFileStorage(
         bucket=settings.cos_bucket,
         cos=cos,
@@ -146,7 +182,6 @@ def build_agent_service(cos: Cos) -> AgentService:
     )
 
     return AgentService(
-        llm=llm,
         agent_config=app_config.agent_config,
         mcp_config=app_config.mcp_config,
         a2a_config=app_config.a2a_config,
@@ -156,6 +191,8 @@ def build_agent_service(cos: Cos) -> AgentService:
         search_engine=BingSearchEngine(),
         file_storage=file_storage,
         uow_factory=get_uow,
+        model_runtime_resolver=get_model_runtime_resolver(),
+        llm_factory=get_openai_llm_factory(),
     )
 
 

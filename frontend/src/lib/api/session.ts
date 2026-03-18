@@ -11,6 +11,8 @@ import type {
   ViewShellParams,
   SSEEventData,
   SSEEventHandler,
+  UpdateSessionModelParams,
+  UpdateSessionModelResponse,
 } from "./types";
 
 /**
@@ -124,6 +126,16 @@ export const sessionApi = {
    */
   getSessionDetail: (sessionId: string): Promise<SessionDetail> => {
     return get<SessionDetail>(`/sessions/${sessionId}`);
+  },
+
+  /**
+   * 更新当前会话模型
+   */
+  updateSessionModel: (
+    sessionId: string,
+    params: UpdateSessionModelParams,
+  ): Promise<UpdateSessionModelResponse> => {
+    return post<UpdateSessionModelResponse>(`/sessions/${sessionId}/model`, params);
   },
 
   /**

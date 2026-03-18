@@ -14,6 +14,7 @@ from .health_checker import HealthChecker
 from .json_parser import JSONParser
 from .llm import LLM
 from .message_queue import MessageQueue
+from .model_config_cache_store import ModelConfigCacheStore
 from .register_verification_code_store import RegisterVerificationCodeStore
 from .refresh_token_store import (
     RefreshTokenStore,
@@ -32,6 +33,7 @@ __all__ = [
     "Task",
     "TaskRunner",
     "MessageQueue",
+    "ModelConfigCacheStore",
     "JSONParser",
     "EmailSender",
     "SearchEngine",

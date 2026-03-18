@@ -41,7 +41,6 @@ class AgentService:
 
     def __init__(
             self,
-            llm: LLM,
             agent_config: AgentConfig,
             mcp_config: MCPConfig,
             a2a_config: A2AConfig,
@@ -50,7 +49,9 @@ class AgentService:
             json_parser: JSONParser,
             search_engine: SearchEngine,
             file_storage: FileStorage,
-            uow_factory: Callable[[], IUnitOfWork]
+            uow_factory: Callable[[], IUnitOfWork],
+            model_runtime_resolver=None,
+            llm_factory=None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -59,7 +60,8 @@ class AgentService:
         self._file_storage = file_storage
         self._uow_factory = uow_factory
         self._mcp_config = mcp_config
-        self._llm = llm
+        self._model_runtime_resolver = model_runtime_resolver
+        self._llm_factory = llm_factory
         self._agent_config = agent_config
         self._a2a_config = a2a_config
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
@@ -70,6 +72,18 @@ class AgentService:
             return None
 
         return self._task_cls.get(task_id=task_id)
+
+    async def _resolve_runtime_llm(self, session: Session) -> LLM:
+        """根据会话当前模型解析运行时 LLM。"""
+        model_runtime_resolver = getattr(self, "_model_runtime_resolver", None)
+        llm_factory = getattr(self, "_llm_factory", None)
+        if model_runtime_resolver is not None and llm_factory is not None:
+            resolved_model_id, llm_config = await model_runtime_resolver.resolve(session)
+            logger.info(
+                f"会话{session.id}运行时模型解析完成: requested={session.current_model_id}, resolved={resolved_model_id}")
+            return llm_factory.create(llm_config)
+
+        raise RuntimeError("未配置运行时LLM解析能力")
 
     async def _create_task(self, session: Session) -> Task:
         # 获取沙箱实例。
@@ -93,9 +107,11 @@ class AgentService:
             logger.error(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
             raise RuntimeError(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
 
+        llm = await self._resolve_runtime_llm(session)
+
         # 创建任务运行器
         task_runner = AgentTaskRunner(
-            llm=self._llm,
+            llm=llm,
             agent_config=self._agent_config,
             mcp_config=self._mcp_config,
             a2a_config=self._a2a_config,
@@ -222,6 +238,12 @@ class AgentService:
                         attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
                         if attachment is not None:
                             db_attachments.append(attachment)
+                        else:
+                            raise NotFoundError(
+                                msg=f"该文件[{file_id}]不存在",
+                                error_key=error_keys.FILE_NOT_FOUND,
+                                error_params={"file_id": file_id},
+                            )
 
                 # 创建用户消息事件
                 message_event = MessageEvent(

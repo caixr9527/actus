@@ -6,7 +6,6 @@ import {
   LayoutGrid,
   LayoutList,
   Loader2,
-  Languages,
   Settings,
   Trash,
   Wrench,
@@ -47,7 +46,6 @@ import { cn } from "@/lib/utils"
 import { useI18n } from "@/lib/i18n"
 import type {
   AgentConfig,
-  LLMConfig,
   ListMCPServerItem,
   ListA2AServerItem,
 } from "@/lib/api"
@@ -119,117 +117,6 @@ function CommonSetting({ config, onChange }: CommonSettingProps) {
               />
               <FieldDescription className="text-xs">
                 {t("manusSettings.common.maxSearchResults.description")}
-              </FieldDescription>
-            </Field>
-          </FieldGroup>
-        </FieldSet>
-      </FieldGroup>
-    </form>
-  )
-}
-
-// ==================== 模型提供商 ====================
-
-type LLMSettingProps = {
-  config: LLMConfig
-  onChange: (config: LLMConfig) => void
-}
-
-function LLMSetting({ config, onChange }: LLMSettingProps) {
-  const { t } = useI18n()
-  const handleChange = (field: keyof LLMConfig, value: string) => {
-    onChange({ ...config, [field]: value })
-  }
-
-  const handleNumberChange = (field: keyof LLMConfig, value: string) => {
-    const numValue = value === "" ? undefined : Number(value)
-    onChange({ ...config, [field]: numValue })
-  }
-
-  return (
-    <form className="w-full px-1" onSubmit={(e) => e.preventDefault()}>
-      <FieldGroup>
-        <FieldSet>
-          <FieldLegend className="text-lg font-bold text-gray-700">
-            {t("manusSettings.llm.title")}
-          </FieldLegend>
-          <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor="base_url">
-                {t("manusSettings.llm.baseUrl.label")}
-              </FieldLabel>
-              <Input
-                id="base_url"
-                type="url"
-                placeholder={t("manusSettings.llm.baseUrl.placeholder")}
-                value={config.base_url ?? ""}
-                onChange={(e) => handleChange("base_url", e.target.value)}
-              />
-              <FieldDescription className="text-xs">
-                {t("manusSettings.llm.baseUrl.description")}
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="api_key">{t("manusSettings.llm.apiKey.label")}</FieldLabel>
-              <Input
-                id="api_key"
-                type="password"
-                placeholder={t("manusSettings.llm.apiKey.placeholder")}
-                value={config.api_key ?? ""}
-                onChange={(e) => handleChange("api_key", e.target.value)}
-              />
-              <FieldDescription className="text-xs">
-                {t("manusSettings.llm.apiKey.description")}
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="model_name">{t("manusSettings.llm.modelName.label")}</FieldLabel>
-              <Input
-                id="model_name"
-                type="text"
-                placeholder={t("manusSettings.llm.modelName.placeholder")}
-                value={config.model_name ?? ""}
-                onChange={(e) => handleChange("model_name", e.target.value)}
-              />
-              <FieldDescription className="text-xs">
-                {t("manusSettings.llm.modelName.description")}
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="temperature">{t("manusSettings.llm.temperature.label")}</FieldLabel>
-              <Input
-                id="temperature"
-                type="number"
-                placeholder={t("manusSettings.llm.temperature.placeholder")}
-                value={config.temperature ?? 0.7}
-                onChange={(e) =>
-                  handleNumberChange("temperature", e.target.value)
-                }
-                min={0}
-                max={2}
-                step={0.1}
-              />
-              <FieldDescription className="text-xs">
-                {t("manusSettings.llm.temperature.description")}
-              </FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="max_tokens">
-                {t("manusSettings.llm.maxTokens.label")}
-              </FieldLabel>
-              <Input
-                id="max_tokens"
-                type="number"
-                placeholder={t("manusSettings.llm.maxTokens.placeholder")}
-                value={config.max_tokens ?? 8192}
-                onChange={(e) =>
-                  handleNumberChange("max_tokens", e.target.value)
-                }
-                min={1}
-                max={128000}
-              />
-              <FieldDescription className="text-xs">
-                {t("manusSettings.llm.maxTokens.description")}
               </FieldDescription>
             </Field>
           </FieldGroup>
@@ -645,7 +532,6 @@ function MCPSetting({
 
 type SettingTab =
   | "common-setting"
-  | "llm-setting"
   | "a2a-setting"
   | "mcp-setting"
 
@@ -655,7 +541,6 @@ const SETTING_MENUS: Array<{
   titleKey: string
 }> = [
   { key: "common-setting", icon: Settings, titleKey: "manusSettings.menu.common" },
-  { key: "llm-setting", icon: Languages, titleKey: "manusSettings.menu.llm" },
   { key: "a2a-setting", icon: LayoutGrid, titleKey: "manusSettings.menu.a2a" },
   { key: "mcp-setting", icon: Wrench, titleKey: "manusSettings.menu.mcp" },
 ]
@@ -695,7 +580,6 @@ export function ManusSettings({
 
   // ---- 数据 ----
   const [agentConfig, setAgentConfig] = useState<AgentConfig>({})
-  const [llmConfig, setLlmConfig] = useState<LLMConfig>({})
   const [mcpServers, setMcpServers] = useState<ListMCPServerItem[]>([])
   const [a2aServers, setA2aServers] = useState<ListA2AServerItem[]>([])
 
@@ -713,12 +597,12 @@ export function ManusSettings({
     if (fetchingRef.current) return
     fetchingRef.current = true
 
-    // 1. Agent + LLM 配置（通常很快）
+    // 1. Agent 配置（通常很快）
     setLoadingConfig(true)
-    Promise.all([configApi.getAgentConfig(), configApi.getLLMConfig()])
-      .then(([agent, llm]) => {
+    configApi
+      .getAgentConfig()
+      .then((agent) => {
         setAgentConfig(agent)
-        setLlmConfig(llm)
       })
       .catch((err) => {
         console.error("[Settings] 获取基础配置失败:", err)
@@ -766,16 +650,13 @@ export function ManusSettings({
     }
   }, [open, fetchAllConfigs])
 
-  // ---- 保存 (通用配置 / LLM) ----
+  // ---- 保存（通用配置） ----
   const handleSave = async () => {
     setSaving(true)
     try {
       if (activeSetting === "common-setting") {
         await configApi.updateAgentConfig(agentConfig)
         toast.success(t("manusSettings.toast.commonSaved"))
-      } else if (activeSetting === "llm-setting") {
-        await configApi.updateLLMConfig(llmConfig)
-        toast.success(t("manusSettings.toast.llmSaved"))
       }
     } catch (err) {
       toast.error(getApiErrorMessage(err, "manusSettings.toast.saveFailed", t))
@@ -976,9 +857,7 @@ export function ManusSettings({
 
           {/* 右侧内容 */}
           <div className="flex-1 h-[500px] scrollbar-hide overflow-y-auto">
-            {loadingConfig &&
-            (activeSetting === "common-setting" ||
-              activeSetting === "llm-setting") ? (
+            {loadingConfig && activeSetting === "common-setting" ? (
               <div className="flex justify-center items-center h-full">
                 <Loader2 className="size-6 animate-spin text-muted-foreground" />
               </div>
@@ -989,9 +868,6 @@ export function ManusSettings({
                     config={agentConfig}
                     onChange={setAgentConfig}
                   />
-                )}
-                {activeSetting === "llm-setting" && (
-                  <LLMSetting config={llmConfig} onChange={setLlmConfig} />
                 )}
               </>
             )}
@@ -1023,14 +899,16 @@ export function ManusSettings({
               {t("common.cancel")}
             </Button>
           </DialogClose>
-          <Button
-            className="cursor-pointer"
-            disabled={saving}
-            onClick={handleSave}
-          >
-            {saving && <Loader2 className="animate-spin" />}
-            {t("common.save")}
-          </Button>
+          {activeSetting === "common-setting" ? (
+            <Button
+              className="cursor-pointer"
+              disabled={saving}
+              onClick={handleSave}
+            >
+              {saving && <Loader2 className="animate-spin" />}
+              {t("common.save")}
+            </Button>
+          ) : null}
         </DialogFooter>
       </DialogContent>
     </Dialog>

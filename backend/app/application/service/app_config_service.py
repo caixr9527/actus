@@ -10,7 +10,7 @@ from typing import List
 
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
-from app.domain.models import AppConfig, LLMConfig, AgentConfig, MCPConfig
+from app.domain.models import AppConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig, A2AServerConfig
 from app.domain.repositories import AppConfigRepository
 from app.domain.services.tools import MCPClientManager
@@ -32,37 +32,6 @@ class AppConfigService:
             AppConfig: 应用配置对象
         """
         return self.app_config_repository.load()
-
-    async def get_llm_config(self) -> LLMConfig:
-        """
-        获取LLM配置
-        
-        Returns:
-            LLMConfig: LLM配置对象
-        """
-        app_config = await self._load_app_config()
-        return app_config.llm_config
-
-    async def update_llm_config(self, llm_config: LLMConfig) -> LLMConfig:
-        """
-        更新LLM配置
-        
-        Args:
-            llm_config (LLMConfig): 新的LLM配置对象
-            
-        Returns:
-            LLMConfig: 更新后的LLM配置对象
-        """
-        app_config = await self._load_app_config()
-
-        # 如果新的api_key为空，则保留原有的api_key
-        if not llm_config.api_key.strip():
-            llm_config.api_key = app_config.llm_config.api_key
-        app_config.llm_config = llm_config
-
-        self.app_config_repository.save(app_config)
-
-        return app_config.llm_config
 
     async def get_agent_config(self) -> AgentConfig:
         """

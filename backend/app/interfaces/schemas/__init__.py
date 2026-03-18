@@ -5,7 +5,15 @@
 @Author : caixiaorong01@outlook.com
 @File   : __init__.py.py
 """
-from .app_config import ListMCPServerResponse, ListMCPServerItem, ListA2AServerItem, ListA2AServerResponse
+from .app_config import (
+    ListMCPServerResponse,
+    ListMCPServerItem,
+    ListA2AServerItem,
+    ListA2AServerResponse,
+    PublicModelConfig,
+    ListModelItem,
+    ListModelResponse,
+)
 from .auth import (
     SendRegisterCodeRequest,
     SendRegisterCodeResponse,
@@ -46,6 +54,8 @@ from .session import (
     ListSessionItem,
     ChatRequest,
     GetSessionResponse,
+    UpdateSessionModelRequest,
+    UpdateSessionModelResponse,
     GetSessionFilesResponse,
     FileReadRequest,
     FileReadResponse,
@@ -60,6 +70,9 @@ __all__ = [
     "ListMCPServerItem",
     "ListA2AServerItem",
     "ListA2AServerResponse",
+    "PublicModelConfig",
+    "ListModelItem",
+    "ListModelResponse",
     "SendRegisterCodeRequest",
     "SendRegisterCodeResponse",
     "RegisterRequest",
@@ -93,6 +106,8 @@ __all__ = [
     "EventMapping",
     "EventMapper",
     "GetSessionResponse",
+    "UpdateSessionModelRequest",
+    "UpdateSessionModelResponse",
     "GetSessionFilesResponse",
     "FileReadRequest",
     "FileReadResponse",

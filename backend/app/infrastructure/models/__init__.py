@@ -7,8 +7,9 @@
 """
 from .base import Base
 from .file import FileModel
+from .llm_model_config import LLMModelConfigModel
 from .session import SessionModel
 from .user import UserModel
 from .user_profile import UserProfileModel
 
-__all__ = ["Base", "SessionModel", "FileModel", "UserModel", "UserProfileModel"]
+__all__ = ["Base", "SessionModel", "FileModel", "UserModel", "UserProfileModel", "LLMModelConfigModel"]

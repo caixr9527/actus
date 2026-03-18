@@ -52,3 +52,27 @@ test("getApiErrorMessageFromPayload should fallback to provided key when error_k
     "资料更新失败，请稍后重试",
   )
 })
+
+test("getApiErrorMessage should map new model-related error_key values", () => {
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.session.model_id_invalid",
+      },
+      "chatInput.modelUpdateFailed",
+      translate("zh-CN"),
+    ),
+    "所选模型不存在或未启用",
+  )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.app_config.default_model_unavailable",
+      },
+      "chatInput.modelUpdateFailed",
+      translate("en-US"),
+    ),
+    "The default model is temporarily unavailable. Please try again later.",
+  )
+})
