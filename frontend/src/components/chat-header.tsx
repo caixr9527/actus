@@ -37,7 +37,7 @@ export function ChatHeader({onLoginClick}: ChatHeaderProps) {
       {!isLoggedIn ? (
         <Button
           size="default"
-          className="group cursor-pointer h-9 px-4 font-semibold rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] motion-safe:transition-all motion-safe:duration-200 motion-safe:hover:-translate-y-0.5 motion-safe:hover:shadow-[0_8px_20px_rgba(0,0,0,0.22)] motion-safe:active:translate-y-0"
+          className="cursor-pointer h-9 px-4 font-semibold rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] transition-none hover:bg-primary active:bg-primary hover:shadow-[0_4px_12px_rgba(0,0,0,0.15)] active:shadow-[0_4px_12px_rgba(0,0,0,0.15)]"
           onClick={handleLoginClick}
         >
           {t('chatHeader.login')}
