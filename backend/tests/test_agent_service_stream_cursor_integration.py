@@ -9,6 +9,7 @@ from app.domain.models import DoneEvent, MessageEvent, SessionStatus
 class _Session:
     def __init__(self) -> None:
         self.id = "session-1"
+        self.user_id = "user-1"
         self.task_id = "task-1"
         self.status = SessionStatus.RUNNING
 
@@ -18,7 +19,7 @@ class _SessionRepo:
         self._session = session
         self.events_saved = []
 
-    async def get_by_id(self, session_id: str):
+    async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
 
     async def add_event_if_absent(self, session_id: str, event) -> bool:
@@ -99,7 +100,7 @@ def test_chat_stream_cursor_progression_matches_redis_semantics() -> None:
 
     async def _consume():
         events = []
-        async for event in service.chat(session_id=session.id):
+        async for event in service.chat(session_id=session.id, user_id=session.user_id):
             events.append(event)
         return events
 

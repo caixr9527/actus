@@ -29,6 +29,7 @@ class SessionStatus(str, Enum):
 class Session(BaseModel):
     """会话领域模型"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # 会话id
+    user_id: Optional[str] = None  # 所属用户id，历史未认领会话允许为空
     sandbox_id: Optional[str] = None  # 沙箱id
     task_id: Optional[str] = None  # 任务id
     title: str = ""  # 标题

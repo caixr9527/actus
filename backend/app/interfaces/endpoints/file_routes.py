@@ -12,7 +12,9 @@ from fastapi import APIRouter, UploadFile, File, Depends
 from starlette.responses import StreamingResponse
 
 from app.application.service.file_service import FileService
+from app.domain.models import User
 from app.domain.models.file import File as FileInfo
+from app.interfaces.dependencies.auth import get_current_user
 from app.interfaces.schemas import Response
 from app.interfaces.dependencies.services import get_file_service
 
@@ -28,10 +30,11 @@ router = APIRouter(prefix="/files", tags=["文件模块"])
 )
 async def upload_file(
         file: UploadFile = File(...),
+        current_user: User = Depends(get_current_user),
         file_service: FileService = Depends(get_file_service),
 ) -> Response[FileInfo]:
     """文件上传接口，传递文件返回文件的File信息"""
-    fileinfo = await file_service.upload_file(upload_file=file)
+    fileinfo = await file_service.upload_file(user_id=current_user.id, upload_file=file)
     return Response.success(
         msg="上传文件成功",
         data=fileinfo,
@@ -46,10 +49,11 @@ async def upload_file(
 )
 async def get_file_info(
         file_id: str,
+        current_user: User = Depends(get_current_user),
         file_service: FileService = Depends(get_file_service),
 ) -> Response[FileInfo]:
     """获取指定会话中对应文件的基础信息"""
-    fileinfo = await file_service.get_file_info(file_id)
+    fileinfo = await file_service.get_file_info(user_id=current_user.id, file_id=file_id)
     return Response.success(
         msg="获取文件信息成功",
         data=fileinfo,
@@ -63,11 +67,12 @@ async def get_file_info(
 )
 async def download_file(
         file_id: str,
+        current_user: User = Depends(get_current_user),
         file_service: FileService = Depends(get_file_service),
 ) -> StreamingResponse:
     """下载指定会话中的指定文件"""
     # 调用服务获取文件源数据
-    file_data, fileinfo = await file_service.download_file(file_id)
+    file_data, fileinfo = await file_service.download_file(user_id=current_user.id, file_id=file_id)
 
     # 对文件中的中文名字进行url编码
     encoded_filename = urllib.parse.quote(fileinfo.filename)

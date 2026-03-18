@@ -100,6 +100,7 @@ class AgentService:
             mcp_config=self._mcp_config,
             a2a_config=self._a2a_config,
             session_id=session.id,
+            user_id=session.user_id,
             uow_factory=self._uow_factory,
             file_storage=self._file_storage,
             json_parser=self._json_parser,
@@ -180,6 +181,7 @@ class AgentService:
     async def chat(
             self,
             session_id: str,
+            user_id: str,
             message: Optional[str] = None,
             attachments: Optional[List[str]] = None,
             latest_event_id: Optional[str] = None,
@@ -188,7 +190,7 @@ class AgentService:
         try:
             # 获取会话信息
             async with self._uow_factory() as uow:
-                session = await uow.session.get_by_id(session_id=session_id)
+                session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
             if not session:
                 logger.error(f"会话{session_id}不存在")
                 raise NotFoundError(
@@ -215,7 +217,11 @@ class AgentService:
                 # 先查询附件元数据，构建完整消息事件。
                 # 该步骤为只读，不涉及会话投影写入，因此不会产生“先写latest_message”的窗口。
                 async with self._uow_factory() as uow:
-                    db_attachments = [await uow.file.get_by_id(file_id) for file_id in attachments]
+                    db_attachments = []
+                    for file_id in attachments:
+                        attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
+                        if attachment is not None:
+                            db_attachments.append(attachment)
 
                 # 创建用户消息事件
                 message_event = MessageEvent(
@@ -316,10 +322,10 @@ class AgentService:
                 # 事件循环已关闭（如应用正在关闭），无法创建后台任务
                 logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
 
-    async def stop_session(self, session_id: str) -> None:
+    async def stop_session(self, session_id: str, user_id: str) -> None:
         # 获取指定会话的信息
         async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=session_id)
+            session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
         # 如果会话不存在，记录错误日志并抛出异常
         if not session:
             logger.error(f"会话{session_id}不存在")

@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
-from app.domain.models import ErrorEvent
+from app.domain.models import ErrorEvent, User
+from app.interfaces.dependencies.auth import get_current_user
 from app.interfaces.endpoints.session_routes import router as session_router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
 from app.interfaces.dependencies.services import get_agent_service, get_session_service
@@ -15,7 +16,7 @@ from app.application.service.session_service import SessionService
 
 
 class _MissingSessionRepo:
-    async def get_by_id(self, session_id: str):
+    async def get_by_id(self, session_id: str, user_id: str | None = None):
         return None
 
 
@@ -47,11 +48,19 @@ def _build_session_service() -> SessionService:
     )
 
 
+def _build_current_user() -> User:
+    return User(
+        id="user-1",
+        email="tester@example.com",
+        password="hashed-password",
+    )
+
+
 def test_session_service_get_session_files_missing_session_raises_not_found() -> None:
     service = _build_session_service()
 
     with pytest.raises(NotFoundError) as exc:
-        asyncio.run(service.get_session_files("session-1"))
+        asyncio.run(service.get_session_files("user-1", "session-1"))
     assert "任务会话不存在" in exc.value.msg
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
@@ -60,7 +69,7 @@ def test_session_service_read_file_missing_session_raises_not_found() -> None:
     service = _build_session_service()
 
     with pytest.raises(NotFoundError) as exc:
-        asyncio.run(service.read_file("session-1", "/tmp/a.txt"))
+        asyncio.run(service.read_file("user-1", "session-1", "/tmp/a.txt"))
     assert "任务会话不存在" in exc.value.msg
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
@@ -69,7 +78,7 @@ def test_session_service_read_shell_output_missing_session_raises_not_found() ->
     service = _build_session_service()
 
     with pytest.raises(NotFoundError) as exc:
-        asyncio.run(service.read_shell_output("session-1", "shell-1"))
+        asyncio.run(service.read_shell_output("user-1", "session-1", "shell-1"))
     assert "任务会话不存在" in exc.value.msg
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
@@ -78,7 +87,7 @@ def test_session_service_get_vnc_url_missing_session_raises_not_found() -> None:
     service = _build_session_service()
 
     with pytest.raises(NotFoundError) as exc:
-        asyncio.run(service.get_vnc_url("session-1"))
+        asyncio.run(service.get_vnc_url("user-1", "session-1"))
     assert "任务会话不存在" in exc.value.msg
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
@@ -88,7 +97,7 @@ def test_agent_service_stop_session_missing_session_raises_not_found() -> None:
     service._uow_factory = _missing_session_uow_factory
 
     with pytest.raises(NotFoundError) as exc:
-        asyncio.run(service.stop_session("session-1"))
+        asyncio.run(service.stop_session("session-1", "user-1"))
     assert exc.value.msg == "会话session-1不存在"
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
@@ -98,7 +107,7 @@ def test_agent_service_chat_missing_session_should_yield_error_event_with_error_
     service._uow_factory = _missing_session_uow_factory
 
     async def _collect_first_event():
-        async for event in service.chat("session-1", message="hello"):
+        async for event in service.chat("session-1", "user-1", message="hello"):
             return event
         return None
 
@@ -110,7 +119,7 @@ def test_agent_service_chat_missing_session_should_yield_error_event_with_error_
 
 
 class _RouteMissingSessionService:
-    async def get_session(self, session_id: str):
+    async def get_session(self, user_id: str, session_id: str):
         return None
 
 
@@ -125,6 +134,7 @@ def test_session_chat_route_returns_404_when_session_not_found() -> None:
     app.include_router(session_router, prefix="/api")
     app.dependency_overrides[get_session_service] = lambda: _RouteMissingSessionService()
     app.dependency_overrides[get_agent_service] = lambda: _RouteAgentService()
+    app.dependency_overrides[get_current_user] = _build_current_user
 
     with TestClient(app) as client:
         response = client.post("/api/sessions/session-1/chat", json={})

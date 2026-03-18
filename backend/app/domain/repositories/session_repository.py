@@ -19,11 +19,11 @@ class SessionRepository(Protocol):
         """存储或更新传递进来的会话"""
         ...
 
-    async def get_all(self) -> List[Session]:
+    async def get_all(self, user_id: Optional[str] = None) -> List[Session]:
         """获取所有会话列表信息"""
         ...
 
-    async def get_by_id(self, session_id: str) -> Optional[Session]:
+    async def get_by_id(self, session_id: str, user_id: Optional[str] = None) -> Optional[Session]:
         """根据传递的会话id查询会话"""
         ...
 

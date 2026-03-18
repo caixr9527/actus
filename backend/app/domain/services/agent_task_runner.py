@@ -70,6 +70,7 @@ class AgentTaskRunner(TaskRunner):
             mcp_config: MCPConfig,
             a2a_config: A2AConfig,
             session_id: str,
+            user_id: Optional[str],
             file_storage: FileStorage,
             uow_factory: Callable[[], IUnitOfWork],
             json_parser: JSONParser,
@@ -78,6 +79,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox: Sandbox,
     ) -> None:
         self._session_id = session_id
+        self._user_id = user_id
         self._sandbox = sandbox
         self._mcp_config = mcp_config
         self._mcp_tool = MCPTool()
@@ -241,7 +243,7 @@ class AgentTaskRunner(TaskRunner):
             )
 
             # 上传并接收新文件对象，后续会话映射以该对象为准
-            new_file = await self._file_storage.upload_file(upload_file=upload_file)
+            new_file = await self._file_storage.upload_file(upload_file=upload_file, user_id=self._user_id)
             new_file.filepath = filepath
 
             # 原子更新会话文件索引：删除旧引用（若存在）并新增新引用
@@ -282,7 +284,8 @@ class AgentTaskRunner(TaskRunner):
                 file=io.BytesIO(screenshot),
                 filename=f"{str(uuid.uuid4())}.png",
                 size=self._get_stream_size(io.BytesIO(screenshot))
-            )
+            ),
+            user_id=self._user_id,
         )
         settings = get_settings()
         # todo 修改为配置
