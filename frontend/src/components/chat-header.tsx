@@ -1,5 +1,6 @@
 'use client'
 
+import Image from 'next/image'
 import Link from 'next/link'
 import {useRouter} from 'next/navigation'
 import {SidebarTrigger, useSidebar} from '@/components/ui/sidebar'
@@ -30,8 +31,12 @@ export function ChatHeader({onLoginClick}: ChatHeaderProps) {
       <div className="flex items-center gap-2">
         {/* 面板操作按钮: 关闭面板&移动端下会显示 */}
         {isLoggedIn && (!open || isMobile) && <SidebarTrigger className="cursor-pointer"/>}
-        {/* Logo占位符 */}
-        <Link href="/" className="block bg-white w-[80px] h-9 rounded-md"/>
+        <Link href="/" className="flex items-center gap-2 rounded-md px-1 py-1">
+          <div className="relative size-8">
+            <Image src="/logo.svg" alt="Actus" fill sizes="32px" className="object-contain" />
+          </div>
+          <span className="text-sm font-semibold tracking-[0.08em] text-foreground">Actus</span>
+        </Link>
       </div>
       {/* 右侧：未登录显示登录按钮 */}
       {!isLoggedIn ? (
