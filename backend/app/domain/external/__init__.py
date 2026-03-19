@@ -9,7 +9,7 @@ from .browser import Browser
 from .access_token_blacklist_store import AccessTokenBlacklistStore
 from .auth_rate_limit_store import AuthRateLimitStore
 from .email_sender import EmailSender
-from .file_storage import FileStorage
+from .file_storage import FileStorage, FileUploadPayload
 from .health_checker import HealthChecker
 from .json_parser import JSONParser
 from .llm import LLM
@@ -40,6 +40,7 @@ __all__ = [
     "Browser",
     "Sandbox",
     "FileStorage",
+    "FileUploadPayload",
     "RegisterVerificationCodeStore",
     "RefreshTokenStore",
     "RefreshTokenConsumeResult",

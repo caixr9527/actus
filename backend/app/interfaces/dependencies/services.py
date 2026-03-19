@@ -81,6 +81,7 @@ def get_file_service(
     # 初始化文件仓库和文件存储桶
     file_storage = CosFileStorage(
         bucket=settings.cos_bucket,
+        public_base_url=f"{settings.cos_scheme}://{settings.cos_bucket}.cos.{settings.cos_region}.myqcloud.com",
         cos=cos,
         uow_factory=get_uow,
     )
@@ -177,6 +178,7 @@ def build_agent_service(cos: Cos) -> AgentService:
     app_config = app_config_repository.load()
     file_storage = CosFileStorage(
         bucket=settings.cos_bucket,
+        public_base_url=f"{settings.cos_scheme}://{settings.cos_bucket}.cos.{settings.cos_region}.myqcloud.com",
         cos=cos,
         uow_factory=get_uow,
     )

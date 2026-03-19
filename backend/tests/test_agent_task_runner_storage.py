@@ -151,3 +151,38 @@ def test_invoke_skips_empty_input_stream_event() -> None:
     asyncio.run(runner.invoke(_InvokeTask()))
 
     assert session_repo.updated_status == SessionStatus.COMPLETED
+
+
+class _BrowserScreenshot:
+    async def screenshot(self) -> bytes:
+        return b"fake-image-bytes"
+
+
+class _ScreenshotFileStorage:
+    def __init__(self) -> None:
+        self.upload_user_ids: list[str | None] = []
+        self.upload_payloads: list[object] = []
+
+    async def upload_file(self, upload_file, user_id=None):
+        self.upload_user_ids.append(user_id)
+        self.upload_payloads.append(upload_file)
+        return File(id="file-screenshot", key="2026/03/19/s.png")
+
+    def get_file_url(self, file: File) -> str:
+        return f"https://cdn.example.com/{file.key}"
+
+
+def test_get_browser_screenshot_should_use_storage_url_provider() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    runner._browser = _BrowserScreenshot()
+    runner._user_id = "user-1"
+    runner._file_storage = _ScreenshotFileStorage()
+
+    screenshot_url = asyncio.run(runner._get_browser_screenshot())
+
+    assert screenshot_url == "https://cdn.example.com/2026/03/19/s.png"
+    assert runner._file_storage.upload_user_ids == ["user-1"]
+    payload = runner._file_storage.upload_payloads[0]
+    assert getattr(payload, "filename").endswith(".png")
+    assert getattr(payload, "size") == len(b"fake-image-bytes")
+    assert getattr(payload, "file").read() == b"fake-image-bytes"
