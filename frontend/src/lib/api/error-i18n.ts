@@ -52,6 +52,8 @@ const API_ERROR_MESSAGE_KEY_BY_ERROR_KEY: Record<string, string> = {
   "error.app_config.default_model_unavailable": "apiErrors.appConfig.defaultModelUnavailable",
   "error.app_config.mcp_server_not_found": "apiErrors.appConfig.mcpServerNotFound",
   "error.app_config.a2a_server_not_found": "apiErrors.appConfig.a2aServerNotFound",
+  "error.app_config.mcp_servers_load_failed": "apiErrors.appConfig.mcpServersLoadFailed",
+  "error.app_config.a2a_servers_load_failed": "apiErrors.appConfig.a2aServersLoadFailed",
   "error.status.unhealthy": "apiErrors.status.unhealthy",
 }
 

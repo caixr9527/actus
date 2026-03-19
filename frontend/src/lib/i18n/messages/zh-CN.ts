@@ -255,6 +255,8 @@ export const zhCNMessages: MessageDictionary = {
   "apiErrors.appConfig.defaultModelUnavailable": "默认模型暂不可用，请稍后重试",
   "apiErrors.appConfig.mcpServerNotFound": "未找到对应的 MCP 服务器",
   "apiErrors.appConfig.a2aServerNotFound": "未找到对应的 A2A Agent",
+  "apiErrors.appConfig.mcpServersLoadFailed": "加载 MCP 服务器列表失败，请稍后重试",
+  "apiErrors.appConfig.a2aServersLoadFailed": "加载 A2A 服务列表失败，请稍后重试",
   "apiErrors.status.unhealthy": "服务当前不可用，请稍后重试",
   "api.corsAllowedOriginsHint": "检测到跨域请求（{pageOrigin} -> {targetOrigin}），请将 {pageOrigin} 加入后端 CORS_ALLOWED_ORIGINS",
   "api.networkRequestFailedWithHint": "网络请求失败。{hint}",

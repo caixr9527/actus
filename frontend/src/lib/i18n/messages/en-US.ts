@@ -255,6 +255,8 @@ export const enUSMessages: MessageDictionary = {
   "apiErrors.appConfig.defaultModelUnavailable": "The default model is temporarily unavailable. Please try again later.",
   "apiErrors.appConfig.mcpServerNotFound": "The specified MCP server was not found",
   "apiErrors.appConfig.a2aServerNotFound": "The specified A2A agent was not found",
+  "apiErrors.appConfig.mcpServersLoadFailed": "Failed to load MCP servers. Please try again later.",
+  "apiErrors.appConfig.a2aServersLoadFailed": "Failed to load A2A agents. Please try again later.",
   "apiErrors.status.unhealthy": "The service is currently unavailable. Please try again later.",
   "api.corsAllowedOriginsHint": "Cross-origin request detected ({pageOrigin} -> {targetOrigin}). Add {pageOrigin} to backend CORS_ALLOWED_ORIGINS.",
   "api.networkRequestFailedWithHint": "Network request failed. {hint}",

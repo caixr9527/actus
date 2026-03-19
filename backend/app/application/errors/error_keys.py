@@ -65,6 +65,8 @@ APP_CONFIG_MODEL_INVALID = "error.app_config.model_invalid"
 APP_CONFIG_DEFAULT_MODEL_UNAVAILABLE = "error.app_config.default_model_unavailable"
 APP_CONFIG_MCP_SERVER_NOT_FOUND = "error.app_config.mcp_server_not_found"
 APP_CONFIG_A2A_SERVER_NOT_FOUND = "error.app_config.a2a_server_not_found"
+APP_CONFIG_MCP_SERVERS_LOAD_FAILED = "error.app_config.mcp_servers_load_failed"
+APP_CONFIG_A2A_SERVERS_LOAD_FAILED = "error.app_config.a2a_servers_load_failed"
 
 # 其他接口链路
 STATUS_UNHEALTHY = "error.status.unhealthy"

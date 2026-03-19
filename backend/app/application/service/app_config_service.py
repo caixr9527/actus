@@ -9,7 +9,7 @@ import uuid
 from typing import List
 
 from app.application.contracts import MCPServerItemResult, A2AServerItemResult
-from app.application.errors import NotFoundError
+from app.application.errors import NotFoundError, ServerError
 from app.application.errors import error_keys
 from app.domain.models import AppConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig, A2AServerConfig
@@ -84,6 +84,13 @@ class AppConfigService:
                     transport=server_config.transport,
                     tools=[tool.name for tool in tools.get(server_name, [])]
                 ))
+        except Exception as e:
+            # domain层异常在application层完成语义映射，避免异常语义向内层泄漏。
+            raise ServerError(
+                msg="加载MCP服务器配置失败，请稍后重试",
+                error_key=error_keys.APP_CONFIG_MCP_SERVERS_LOAD_FAILED,
+                error_params={"reason": str(e)},
+            ) from e
         finally:
             # 清理MCP客户端管理器资源
             await mcp_client_manager.cleanup()
@@ -191,6 +198,13 @@ class AppConfigService:
                     push_notifications=agent_card.get("capabilities", {}).get("push_notifications", False),
                     enabled=agent_card.get("enabled", False),
                 ))
+        except Exception as e:
+            # domain层异常在application层完成语义映射，避免异常语义向内层泄漏。
+            raise ServerError(
+                msg="加载A2A服务列表失败，请稍后重试",
+                error_key=error_keys.APP_CONFIG_A2A_SERVERS_LOAD_FAILED,
+                error_params={"reason": str(e)},
+            ) from e
         finally:
             await a2a_client_manager.cleanup()
 

@@ -75,4 +75,26 @@ test("getApiErrorMessage should map new model-related error_key values", () => {
     ),
     "The default model is temporarily unavailable. Please try again later.",
   )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.app_config.mcp_servers_load_failed",
+      },
+      "api.requestFailed",
+      translate("zh-CN"),
+    ),
+    "加载 MCP 服务器列表失败，请稍后重试",
+  )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.app_config.a2a_servers_load_failed",
+      },
+      "api.requestFailed",
+      translate("en-US"),
+    ),
+    "Failed to load A2A agents. Please try again later.",
+  )
 })
