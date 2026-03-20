@@ -30,6 +30,7 @@ from app.domain.models import (
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
+from app.domain.services.runtime import RunEngine
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class AgentService:
             uow_factory: Callable[[], IUnitOfWork],
             model_runtime_resolver=None,
             llm_factory=None,
+            run_engine_factory: Optional[Callable[..., RunEngine]] = None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -64,6 +66,7 @@ class AgentService:
         self._llm_factory = llm_factory
         self._agent_config = agent_config
         self._a2a_config = a2a_config
+        self._run_engine_factory = run_engine_factory
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
 
     async def _get_task(self, session) -> Optional[Task]:
@@ -108,7 +111,6 @@ class AgentService:
             raise RuntimeError(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
 
         llm = await self._resolve_runtime_llm(session)
-
         # 创建任务运行器
         task_runner = AgentTaskRunner(
             llm=llm,
@@ -123,6 +125,7 @@ class AgentService:
             browser=browser,
             search_engine=self._search_engine,
             sandbox=sandbox,
+            run_engine_factory=self._run_engine_factory,
         )
 
         # 创建任务并关联到会话

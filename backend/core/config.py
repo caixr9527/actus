@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     sandbox_https_proxy: Optional[str] = None
     sandbox_http_proxy: Optional[str] = None
     sandbox_no_proxy: Optional[str] = None
+    agent_runtime_engine: str = "legacy"
 
     model_config = SettingsConfigDict(
         env_file=".env",

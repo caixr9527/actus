@@ -51,7 +51,7 @@ from app.domain.models import (
     A2AToolContent,
 )
 from app.domain.repositories import IUnitOfWork
-from app.domain.services.flows import PlannerReActFlow
+from app.domain.services.runtime import RunEngine, LegacyPlannerReActRunEngine
 from app.domain.services.tools import MCPTool, A2ATool
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,8 @@ class AgentTaskRunner(TaskRunner):
             browser: Browser,
             search_engine: SearchEngine,
             sandbox: Sandbox,
+            run_engine: Optional[RunEngine] = None,
+            run_engine_factory: Optional[Callable[..., RunEngine]] = None,
     ) -> None:
         self._session_id = session_id
         self._user_id = user_id
@@ -87,11 +89,49 @@ class AgentTaskRunner(TaskRunner):
         self._file_storage = file_storage
         self._browser = browser
         self._uow_factory = uow_factory
-        self._flow = PlannerReActFlow(
+        self._run_engine = run_engine or self._build_run_engine(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
-            uow_factory=self._uow_factory,
+            uow_factory=uow_factory,
+            json_parser=json_parser,
+            browser=browser,
+            sandbox=sandbox,
+            search_engine=search_engine,
+            run_engine_factory=run_engine_factory,
+        )
+
+    def _build_run_engine(
+            self,
+            llm: LLM,
+            agent_config: AgentConfig,
+            session_id: str,
+            uow_factory: Callable[[], IUnitOfWork],
+            json_parser: JSONParser,
+            browser: Browser,
+            sandbox: Sandbox,
+            search_engine: SearchEngine,
+            run_engine_factory: Optional[Callable[..., RunEngine]],
+    ) -> RunEngine:
+        if run_engine_factory is not None:
+            return run_engine_factory(
+                llm=llm,
+                agent_config=agent_config,
+                session_id=session_id,
+                uow_factory=uow_factory,
+                json_parser=json_parser,
+                browser=browser,
+                sandbox=sandbox,
+                search_engine=search_engine,
+                mcp_tool=self._mcp_tool,
+                a2a_tool=self._a2a_tool,
+            )
+
+        return LegacyPlannerReActRunEngine(
+            llm=llm,
+            agent_config=agent_config,
+            session_id=session_id,
+            uow_factory=uow_factory,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
@@ -376,7 +416,7 @@ class AgentTaskRunner(TaskRunner):
             return
 
         # 遍历流程执行过程中产生的事件
-        async for event in self._flow.invoke(message):
+        async for event in self._run_engine.invoke(message):
             # 处理工具事件，根据工具类型进行相应的内容填充
             if isinstance(event, ToolEvent):
                 await self._handle_tool_event(event)

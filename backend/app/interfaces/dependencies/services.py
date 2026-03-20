@@ -23,6 +23,7 @@ from app.application.service import (
     AuthService,
     UserService,
 )
+from app.application.service.run_engine_selector import build_run_engine
 from app.application.service.session_service import SessionService
 from app.infrastructure.external.cache import ModelConfigCache
 from app.infrastructure.external.email_sender import SMTPEmailSender
@@ -195,6 +196,7 @@ def build_agent_service(cos: Cos) -> AgentService:
         uow_factory=get_uow,
         model_runtime_resolver=get_model_runtime_resolver(),
         llm_factory=get_openai_llm_factory(),
+        run_engine_factory=build_run_engine,
     )
 
 
