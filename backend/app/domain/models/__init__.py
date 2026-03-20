@@ -7,7 +7,6 @@
 """
 from .app_config import (
     AppConfig,
-    LLMConfig,
     AgentConfig,
     MCPConfig,
     MCPTransport,
@@ -36,24 +35,28 @@ from .event import (
 )
 from .file import File
 from .health_status import HealthStatus
+from .llm_model_config import LLMModelConfig
 from .memory import Memory
 from .message import Message
 from .plan import Plan, Step, ExecutionStatus
+from .runtime_llm_config import RuntimeLLMConfig
 from .search import SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
+from .user import User, UserProfile, UserStatus
 
 __all__ = [
     "AppConfig",
-    "LLMConfig",
     "AgentConfig",
     "MCPConfig",
     "MCPTransport",
     "MCPServerConfig",
     "HealthStatus",
+    "LLMModelConfig",
     "Memory",
     "Plan",
     "Step",
+    "RuntimeLLMConfig",
     "ExecutionStatus",
     "BaseEvent",
     "PlanEvent",
@@ -81,4 +84,7 @@ __all__ = [
     "FileToolContent",
     "MCPToolContent",
     "A2AToolContent",
+    "User",
+    "UserProfile",
+    "UserStatus",
 ]

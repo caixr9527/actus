@@ -1,24 +1,21 @@
 import React from "react"
 import type { Metadata } from "next"
-import { SidebarProvider } from "@/components/ui/sidebar"
-import { SessionsProvider } from "@/providers/sessions-provider"
+import { AuthProvider } from "@/providers/auth-provider"
+import { AppShell } from "@/providers/app-shell"
+import { DEFAULT_APP_LOCALE } from "@/lib/i18n/constants"
+import { I18nProvider } from "@/lib/i18n/provider"
 import { Toaster } from "@/components/ui/sonner"
 import "./globals.css"
-import { LeftPanel } from "@/components/left-panel"
 
 export const metadata: Metadata = {
   title: "Actus",
   description:
     "Actus 是一个行动引擎，它超越了答案的范畴，可以执行任务、自动化工作流程，并扩展您的能力。",
   icons: {
-    icon: "/icon.png",
+    icon: "/logo.svg",
+    shortcut: "/logo.svg",
   },
 }
-
-const sidebarLayoutStyle = {
-  "--sidebar-width": "300px",
-  "--sidebar-width-icon": "300px",
-} as React.CSSProperties
 
 export default function RootLayout({
   children,
@@ -26,20 +23,13 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning>
+    <html lang={DEFAULT_APP_LOCALE} suppressHydrationWarning>
       <body className="h-screen overflow-hidden">
-        <SessionsProvider>
-          <SidebarProvider
-            style={sidebarLayoutStyle}
-          >
-            {/* 左侧的面板 */}
-            <LeftPanel />
-            {/* 右侧的内容 */}
-            <div className="flex-1 bg-[#f8f8f7] h-screen overflow-hidden">
-              {children}
-            </div>
-          </SidebarProvider>
-        </SessionsProvider>
+        <I18nProvider>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
+        </I18nProvider>
         <Toaster position="top-center" richColors />
       </body>
     </html>

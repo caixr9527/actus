@@ -9,7 +9,9 @@ from abc import ABC, abstractmethod
 from typing import TypeVar
 
 from .file_repository import FileRepository
+from .llm_model_config_repository import LLMModelConfigRepository
 from .session_repository import SessionRepository
+from .user_repository import UserRepository
 
 T = TypeVar("T", bound="IUnitOfWork")
 
@@ -18,6 +20,8 @@ class IUnitOfWork(ABC):
     """Uow模式协议接口"""
     file: FileRepository
     session: SessionRepository
+    user: UserRepository
+    llm_model_config: LLMModelConfigRepository
 
     @abstractmethod
     async def commit(self):

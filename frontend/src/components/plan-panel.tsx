@@ -5,6 +5,7 @@ import { useState } from 'react'
 import { Check, ChevronDown, ChevronUp, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { PlanStep } from '@/lib/api/types'
+import { useI18n } from '@/lib/i18n'
 
 export interface PlanPanelProps {
   className?: string
@@ -13,6 +14,7 @@ export interface PlanPanelProps {
 }
 
 export function PlanPanel({ className, steps: stepsProp = [] }: PlanPanelProps) {
+  const { t } = useI18n()
   const [isExpanded, setIsExpanded] = useState(false)
   const togglePanel = () => setIsExpanded(!isExpanded)
   const steps = stepsProp
@@ -36,7 +38,7 @@ export function PlanPanel({ className, steps: stepsProp = [] }: PlanPanelProps) 
               <Clock size={16} />
               <div className="flex flex-col w-full gap-0.5 truncate">
                 <div className="text-sm truncate">
-                  {steps[0]?.description ?? '暂无步骤'}
+                  {steps[0]?.description ?? t('planPanel.noSteps')}
                 </div>
               </div>
             </div>
@@ -70,7 +72,7 @@ export function PlanPanel({ className, steps: stepsProp = [] }: PlanPanelProps) 
           <div className="px-4">
             <div className="bg-gray-50 rounded-lg px-2 py-3">
               <div className="flex justify-between w-full px-4">
-                <span className="text-gray-700 font-bold">任务进度</span>
+                <span className="text-gray-700 font-bold">{t('planPanel.progressTitle')}</span>
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-gray-500">
                     {completedCount} / {totalCount}

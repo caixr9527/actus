@@ -11,6 +11,7 @@ import {
 import type { ToolKind } from "@/components/tool-use/utils"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
+import { useI18n, type Translate } from "@/lib/i18n"
 import {
   Maximize2,
   Monitor,
@@ -50,16 +51,16 @@ function getToolContent(tool: ToolEvent): Record<string, unknown> | null {
   return null
 }
 
-function getToolDescription(kind: ToolKind): string {
+function getToolDescription(kind: ToolKind, t: Translate): string {
   const map: Record<ToolKind, string> = {
-    bash: "终端",
-    browser: "浏览器",
-    search: "搜索",
-    file: "文件",
-    mcp: "MCP 服务",
-    a2a: "A2A 智能体",
-    message: "消息",
-    default: "工具",
+    bash: t("toolPreview.kind.bash"),
+    browser: t("toolPreview.kind.browser"),
+    search: t("toolPreview.kind.search"),
+    file: t("toolPreview.kind.file"),
+    mcp: t("toolPreview.kind.mcp"),
+    a2a: t("toolPreview.kind.a2a"),
+    message: t("toolPreview.kind.message"),
+    default: t("toolPreview.kind.default"),
   }
   return map[kind]
 }
@@ -90,7 +91,13 @@ function renderToolIcon(kind: ToolKind) {
 /*  Jump-to-latest overlay button                                      */
 /* ------------------------------------------------------------------ */
 
-function JumpToLatestButton({ onClick }: { onClick: () => void }) {
+function JumpToLatestButton({
+  onClick,
+  label,
+}: {
+  onClick: () => void
+  label: string
+}) {
   return (
     <button
       type="button"
@@ -98,7 +105,7 @@ function JumpToLatestButton({ onClick }: { onClick: () => void }) {
       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/90 backdrop-blur text-sm text-gray-700 hover:bg-white shadow-md border border-gray-200 transition-colors cursor-pointer"
     >
       <Play size={12} className="fill-current" />
-      <span>跳转实时</span>
+      <span>{label}</span>
     </button>
   )
 }
@@ -107,7 +114,7 @@ function JumpToLatestButton({ onClick }: { onClick: () => void }) {
 /*  Sub-previews                                                       */
 /* ------------------------------------------------------------------ */
 
-function ShellPreview({ tool }: { tool: ToolEvent }) {
+function ShellPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
   const consoleData = content?.console
   const sessionId = getArg(tool.args, "session_id")
@@ -121,7 +128,7 @@ function ShellPreview({ tool }: { tool: ToolEvent }) {
     <div className="flex flex-col gap-3 p-4 h-full">
       <div className="flex-1 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col min-h-0">
         <div className="text-center text-xs text-gray-400 py-1.5 bg-[#2d2d2d] border-b border-gray-700 flex-shrink-0">
-          {sessionId || "shell"}
+          {sessionId || t("toolPreview.shellSessionDefault")}
         </div>
         <ScrollArea className="flex-1">
           <div className="p-4 font-mono text-sm leading-relaxed">
@@ -140,7 +147,7 @@ function ShellPreview({ tool }: { tool: ToolEvent }) {
                 </div>
               ))
             ) : (
-              <span className="text-gray-500">等待命令输出...</span>
+              <span className="text-gray-500">{t("toolPreview.shellWaitingOutput")}</span>
             )}
           </div>
         </ScrollArea>
@@ -152,9 +159,11 @@ function ShellPreview({ tool }: { tool: ToolEvent }) {
 function BrowserPreview({
   tool,
   onOpenVNC,
+  t,
 }: {
   tool: ToolEvent
   onOpenVNC?: () => void
+  t: Translate
 }) {
   const content = getToolContent(tool)
   const screenshot =
@@ -174,7 +183,7 @@ function BrowserPreview({
           <ScrollArea className="h-full">
             <Image
               src={screenshot}
-              alt="浏览器截图"
+              alt={t("toolPreview.browserScreenshotAlt")}
               width={1280}
               height={720}
               unoptimized
@@ -183,7 +192,7 @@ function BrowserPreview({
           </ScrollArea>
         ) : (
           <div className="flex items-center justify-center h-full text-sm text-gray-500">
-            等待页面截图...
+            {t("toolPreview.browserWaitingScreenshot")}
           </div>
         )}
         {onOpenVNC && (
@@ -191,7 +200,7 @@ function BrowserPreview({
             type="button"
             onClick={onOpenVNC}
             className="absolute bottom-3 right-3 w-9 h-9 rounded-full bg-gray-800/80 text-white flex items-center justify-center shadow-lg hover:bg-gray-700 transition-colors cursor-pointer z-10"
-            aria-label="打开远程桌面"
+            aria-label={t("toolPreview.openRemoteDesktopAria")}
           >
             <Sparkles size={16} />
           </button>
@@ -201,7 +210,7 @@ function BrowserPreview({
   )
 }
 
-function SearchPreview({ tool }: { tool: ToolEvent }) {
+function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
   const rawResults = content?.results
 
@@ -217,7 +226,7 @@ function SearchPreview({ tool }: { tool: ToolEvent }) {
       <div className="flex flex-col gap-1 p-4">
         {query && (
           <div className="text-sm text-gray-500 mb-3">
-            搜索&ldquo;{query}&rdquo;的结果 · 共 {results.length} 条
+            {t("toolPreview.searchSummary", { query, count: results.length })}
           </div>
         )}
         {results.length > 0 ? (
@@ -244,7 +253,7 @@ function SearchPreview({ tool }: { tool: ToolEvent }) {
           ))
         ) : (
           <div className="text-sm text-gray-500 text-center py-8">
-            暂无搜索结果
+            {t("toolPreview.searchNoResults")}
           </div>
         )}
       </div>
@@ -252,7 +261,7 @@ function SearchPreview({ tool }: { tool: ToolEvent }) {
   )
 }
 
-function FileToolPreview({ tool }: { tool: ToolEvent }) {
+function FileToolPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
   const fileContent =
     typeof content?.content === "string" ? content.content : null
@@ -268,7 +277,7 @@ function FileToolPreview({ tool }: { tool: ToolEvent }) {
         )}
         <ScrollArea className="flex-1">
           <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
-            {fileContent ?? "等待文件内容..."}
+            {fileContent ?? t("toolPreview.fileWaitingContent")}
           </pre>
         </ScrollArea>
       </div>
@@ -276,7 +285,7 @@ function FileToolPreview({ tool }: { tool: ToolEvent }) {
   )
 }
 
-function MCPPreview({ tool }: { tool: ToolEvent }) {
+function MCPPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
   const result = content?.result
 
@@ -285,20 +294,20 @@ function MCPPreview({ tool }: { tool: ToolEvent }) {
       <div className="flex flex-col gap-4 p-4">
         <div className="flex flex-col gap-1">
           <div className="text-xs text-gray-500 uppercase tracking-wide">
-            工具信息
+            {t("toolPreview.section.toolInfo")}
           </div>
           <div className="rounded-lg border bg-gray-50 p-3 text-sm">
             <div>
-              <span className="text-gray-500">名称：</span>
+              <span className="text-gray-500">{t("toolPreview.label.name")}</span>
               <span className="text-gray-800">{tool.name}</span>
             </div>
             <div>
-              <span className="text-gray-500">函数：</span>
+              <span className="text-gray-500">{t("toolPreview.label.function")}</span>
               <span className="text-gray-800">{tool.function}</span>
             </div>
             {Object.keys(tool.args).length > 0 && (
               <div className="mt-1">
-                <span className="text-gray-500">参数：</span>
+                <span className="text-gray-500">{t("toolPreview.label.args")}</span>
                 <pre className="text-xs text-gray-700 mt-1 whitespace-pre-wrap break-words">
                   {JSON.stringify(tool.args, null, 2)}
                 </pre>
@@ -308,7 +317,7 @@ function MCPPreview({ tool }: { tool: ToolEvent }) {
         </div>
         <div className="flex flex-col gap-1">
           <div className="text-xs text-gray-500 uppercase tracking-wide">
-            执行结果
+            {t("toolPreview.section.executionResult")}
           </div>
           <div className="rounded-lg border border-gray-700 bg-[#1e1e1e] p-4">
             <pre className="font-mono text-sm text-gray-300 whitespace-pre-wrap break-words">
@@ -316,7 +325,7 @@ function MCPPreview({ tool }: { tool: ToolEvent }) {
                 ? typeof result === "string"
                   ? result
                   : JSON.stringify(result, null, 2)
-                : "等待执行结果..."}
+                : t("toolPreview.waitingExecutionResult")}
             </pre>
           </div>
         </div>
@@ -325,7 +334,7 @@ function MCPPreview({ tool }: { tool: ToolEvent }) {
   )
 }
 
-function A2APreview({ tool }: { tool: ToolEvent }) {
+function A2APreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
   const result = content?.a2a_result
 
@@ -336,20 +345,20 @@ function A2APreview({ tool }: { tool: ToolEvent }) {
       <div className="flex flex-col gap-4 p-4">
         <div className="flex flex-col gap-1">
           <div className="text-xs text-gray-500 uppercase tracking-wide">
-            Agent 调用信息
+            {t("toolPreview.section.agentCallInfo")}
           </div>
           <div className="rounded-lg border bg-gray-50 p-3 text-sm">
             <div>
-              <span className="text-gray-500">工具：</span>
+              <span className="text-gray-500">{t("toolPreview.label.tool")}</span>
               <span className="text-gray-800">{tool.name}</span>
             </div>
             <div>
-              <span className="text-gray-500">函数：</span>
+              <span className="text-gray-500">{t("toolPreview.label.function")}</span>
               <span className="text-gray-800">{tool.function}</span>
             </div>
             {query && (
               <div>
-                <span className="text-gray-500">指令：</span>
+                <span className="text-gray-500">{t("toolPreview.label.command")}</span>
                 <span className="text-gray-800">{query}</span>
               </div>
             )}
@@ -357,7 +366,7 @@ function A2APreview({ tool }: { tool: ToolEvent }) {
         </div>
         <div className="flex flex-col gap-1">
           <div className="text-xs text-gray-500 uppercase tracking-wide">
-            执行结果
+            {t("toolPreview.section.executionResult")}
           </div>
           <div className="rounded-lg border border-gray-700 bg-[#1e1e1e] p-4">
             <pre className="font-mono text-sm text-gray-300 whitespace-pre-wrap break-words">
@@ -365,7 +374,7 @@ function A2APreview({ tool }: { tool: ToolEvent }) {
                 ? typeof result === "string"
                   ? result
                   : JSON.stringify(result, null, 2)
-                : "等待执行结果..."}
+                : t("toolPreview.waitingExecutionResult")}
             </pre>
           </div>
         </div>
@@ -374,17 +383,17 @@ function A2APreview({ tool }: { tool: ToolEvent }) {
   )
 }
 
-function DefaultPreview({ tool }: { tool: ToolEvent }) {
+function DefaultPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   return (
     <ScrollArea className="h-full">
       <div className="flex flex-col gap-4 p-4">
         <div className="rounded-lg border bg-gray-50 p-3 text-sm">
           <div>
-            <span className="text-gray-500">名称：</span>
+            <span className="text-gray-500">{t("toolPreview.label.name")}</span>
             <span className="text-gray-800">{tool.name}</span>
           </div>
           <div>
-            <span className="text-gray-500">函数：</span>
+            <span className="text-gray-500">{t("toolPreview.label.function")}</span>
             <span className="text-gray-800">{tool.function}</span>
           </div>
         </div>
@@ -412,9 +421,10 @@ export function ToolPreviewPanel({
   onJumpToLatest,
   onOpenVNC,
 }: ToolPreviewPanelProps) {
+  const { locale, t } = useI18n()
   const kind = getToolKind(tool)
-  const label = getFriendlyToolLabel(tool)
-  const toolDesc = getToolDescription(kind)
+  const label = getFriendlyToolLabel(tool, locale)
+  const toolDesc = getToolDescription(kind, t)
 
   return (
     <div className="flex flex-col h-full rounded-xl bg-white shadow-xl overflow-hidden">
@@ -422,13 +432,13 @@ export function ToolPreviewPanel({
       <div className="flex flex-col gap-2 px-4 py-3 border-b border-gray-200 bg-gray-50 flex-shrink-0">
         <div className="flex items-center justify-between">
           <h2 className="text-base font-semibold text-gray-900">
-            Actus 的电脑
+            {t("toolPreview.title")}
           </h2>
           <Button
             variant="ghost"
             size="icon-sm"
             onClick={onClose}
-            aria-label="关闭预览"
+            aria-label={t("toolPreview.closePreviewAria")}
             className="cursor-pointer"
           >
             <Maximize2 size={16} />
@@ -436,7 +446,7 @@ export function ToolPreviewPanel({
         </div>
         <div className="flex items-center gap-2 text-sm text-gray-600">
           <Monitor size={14} className="text-gray-500 flex-shrink-0" />
-          <span>Actus 正在使用</span>
+          <span>{t("toolPreview.usingToolPrefix")}</span>
           <span className="font-medium text-gray-800">{toolDesc}</span>
         </div>
         <div className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 border border-gray-200 bg-gray-100 text-gray-700 text-xs w-fit max-w-full">
@@ -447,22 +457,22 @@ export function ToolPreviewPanel({
 
       {/* Content with overlaid jump button */}
       <div className="flex-1 overflow-hidden relative">
-        {kind === "bash" && <ShellPreview tool={tool} />}
+        {kind === "bash" && <ShellPreview tool={tool} t={t} />}
         {kind === "browser" && (
-          <BrowserPreview tool={tool} onOpenVNC={onOpenVNC} />
+          <BrowserPreview tool={tool} onOpenVNC={onOpenVNC} t={t} />
         )}
-        {kind === "search" && <SearchPreview tool={tool} />}
-        {kind === "file" && <FileToolPreview tool={tool} />}
-        {kind === "mcp" && <MCPPreview tool={tool} />}
-        {kind === "a2a" && <A2APreview tool={tool} />}
+        {kind === "search" && <SearchPreview tool={tool} t={t} />}
+        {kind === "file" && <FileToolPreview tool={tool} t={t} />}
+        {kind === "mcp" && <MCPPreview tool={tool} t={t} />}
+        {kind === "a2a" && <A2APreview tool={tool} t={t} />}
         {(kind === "default" || kind === "message") && (
-          <DefaultPreview tool={tool} />
+          <DefaultPreview tool={tool} t={t} />
         )}
 
         {/* "跳转实时" overlaid at bottom-center */}
         {onJumpToLatest && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10">
-            <JumpToLatestButton onClick={onJumpToLatest} />
+            <JumpToLatestButton onClick={onJumpToLatest} label={t("toolPreview.jumpToLatest")} />
           </div>
         )}
       </div>

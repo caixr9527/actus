@@ -1,7 +1,7 @@
 import asyncio
 
 # 先初始化依赖模块，避免触发 app.application.service 的历史循环导入路径。
-from app.interfaces.service_dependencies import get_agent_service  # noqa: F401
+from app.interfaces.dependencies.services import get_agent_service  # noqa: F401
 from app.application.service.agent_service import AgentService, OUTPUT_STREAM_BLOCK_MS
 from app.domain.models import SessionStatus, MessageEvent, DoneEvent
 
@@ -9,6 +9,7 @@ from app.domain.models import SessionStatus, MessageEvent, DoneEvent
 class _Session:
     def __init__(self) -> None:
         self.id = "session-1"
+        self.user_id = "user-1"
         self.task_id = "task-1"
         self.status = SessionStatus.RUNNING
 
@@ -18,7 +19,7 @@ class _SessionRepo:
         self._session = session
         self.unread_count_updated = False
 
-    async def get_by_id(self, session_id: str):
+    async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
 
     async def update_unread_message_count(self, session_id: str, count: int) -> None:
@@ -74,7 +75,7 @@ def test_chat_uses_blocking_output_stream_polling() -> None:
     service._task_cls = _TaskFactory
 
     async def _consume() -> None:
-        async for _ in service.chat(session_id=session.id):
+        async for _ in service.chat(session_id=session.id, user_id=session.user_id):
             pass
 
     asyncio.run(_consume())
@@ -138,7 +139,7 @@ def test_chat_does_not_reset_cursor_after_empty_poll() -> None:
 
     async def _consume():
         events = []
-        async for event in service.chat(session_id=session.id):
+        async for event in service.chat(session_id=session.id, user_id=session.user_id):
             events.append(event)
         return events
 

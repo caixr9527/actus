@@ -7,6 +7,8 @@ import { ManusIcon } from '@/components/manus-icon'
 import { ToolUse } from '@/components/tool-use'
 import { AttachmentsMessage } from '@/components/attachments-message'
 import { MarkdownContent } from '@/components/markdown-content'
+import { useI18n } from '@/lib/i18n'
+import type { AppLocale } from '@/lib/i18n'
 import type { ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
 
@@ -21,10 +23,12 @@ export interface ChatMessageProps {
 function ToolRow({
   className,
   timeLabel,
+  fallbackTimeLabel,
   children,
 }: {
   className?: string
   timeLabel?: string
+  fallbackTimeLabel: string
   children: React.ReactNode
 }) {
   const [hovered, setHovered] = useState(false)
@@ -44,7 +48,7 @@ function ToolRow({
           hovered ? 'opacity-100' : 'opacity-0'
         )}
       >
-        {timeLabel ?? '刚刚'}
+        {timeLabel ?? fallbackTimeLabel}
       </span>
     </div>
   )
@@ -57,6 +61,7 @@ export function ChatMessage({
   onFileClick,
   onToolClick,
 }: ChatMessageProps) {
+  const { locale, t } = useI18n()
   if (item.kind === 'user') {
     return (
       <div
@@ -97,6 +102,7 @@ export function ChatMessage({
       <ToolRow
         className={className}
         timeLabel={item.timeLabel}
+        fallbackTimeLabel={t('common.justNow')}
       >
         <ToolUse data={item.data} onClick={onToolClick ? () => onToolClick(item.data) : undefined} />
       </ToolRow>
@@ -105,7 +111,12 @@ export function ChatMessage({
 
   if (item.kind === 'step') {
     return (
-      <StepBlock stepItem={item} className={className} onToolClick={onToolClick} />
+      <StepBlock
+        stepItem={item}
+        className={className}
+        onToolClick={onToolClick}
+        locale={locale}
+      />
     )
   }
 
@@ -147,12 +158,15 @@ function StepBlock({
   stepItem,
   className,
   onToolClick,
+  locale,
 }: {
   stepItem: Extract<TimelineItem, { kind: 'step' }>
   className?: string
   onToolClick?: (tool: ToolEvent) => void
+  locale: AppLocale
 }) {
   const [expanded, setExpanded] = useState(true)
+  const { t } = useI18n()
   const { data, tools } = stepItem
 
   return (
@@ -192,7 +206,11 @@ function StepBlock({
           </div>
           <div className="flex flex-col gap-3 flex-1 min-w-0 overflow-hidden pt-2 transition-[max-height,opacity] duration-150 ease-in-out">
             {tools.map((tool, idx) => (
-              <ToolRow key={`${data.id}-tool-${idx}`} timeLabel={getToolTimeLabel(tool)}>
+              <ToolRow
+                key={`${data.id}-tool-${idx}`}
+                timeLabel={getToolTimeLabel(tool, locale)}
+                fallbackTimeLabel={t('common.justNow')}
+              >
                 <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
               </ToolRow>
             ))}

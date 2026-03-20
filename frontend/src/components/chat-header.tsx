@@ -1,23 +1,53 @@
 'use client'
 
+import Image from 'next/image'
 import Link from 'next/link'
+import {useRouter} from 'next/navigation'
 import {SidebarTrigger, useSidebar} from '@/components/ui/sidebar'
-import {ManusSettings} from '@/components/manus-settings'
+import {Button} from '@/components/ui/button'
+import {useAuth} from '@/hooks/use-auth'
+import {useI18n} from '@/lib/i18n'
 
-export function ChatHeader() {
+interface ChatHeaderProps {
+  onLoginClick?: () => void
+}
+
+export function ChatHeader({onLoginClick}: ChatHeaderProps) {
+  const router = useRouter()
+  const {t} = useI18n()
+  const {isLoggedIn} = useAuth()
   const {open, isMobile} = useSidebar()
+  const handleLoginClick = () => {
+    if (onLoginClick) {
+      onLoginClick()
+      return
+    }
+    router.push('/?auth=login')
+  }
 
   return (
     <header className="flex justify-between items-center w-full py-2 px-4 z-50">
       {/* 左侧操作&logo */}
       <div className="flex items-center gap-2">
         {/* 面板操作按钮: 关闭面板&移动端下会显示 */}
-        {(!open || isMobile) && <SidebarTrigger className="cursor-pointer"/>}
-        {/* Logo占位符 */}
-        <Link href="/" className="block bg-white w-[80px] h-9 rounded-md"/>
+        {isLoggedIn && (!open || isMobile) && <SidebarTrigger className="cursor-pointer"/>}
+        <Link href="/" className="flex items-center gap-2 rounded-md px-1 py-1">
+          <div className="relative size-8">
+            <Image src="/logo.svg" alt="Actus" fill sizes="32px" className="object-contain" />
+          </div>
+          <span className="text-sm font-semibold tracking-[0.08em] text-foreground">Actus</span>
+        </Link>
       </div>
-      {/* 右侧设置模态窗 */}
-      <ManusSettings/>
+      {/* 右侧：未登录显示登录按钮 */}
+      {!isLoggedIn ? (
+        <Button
+          size="default"
+          className="cursor-pointer h-9 px-4 font-semibold rounded-full shadow-[0_4px_12px_rgba(0,0,0,0.15)] transition-none hover:bg-primary active:bg-primary hover:shadow-[0_4px_12px_rgba(0,0,0,0.15)] active:shadow-[0_4px_12px_rgba(0,0,0,0.15)]"
+          onClick={handleLoginClick}
+        >
+          {t('chatHeader.login')}
+        </Button>
+      ) : null}
     </header>
   )
 }

@@ -1,11 +1,11 @@
 import { get, post } from "./fetch";
 import type {
-  LLMConfig,
   AgentConfig,
   MCPConfig,
   MCPServersData,
   A2AServersData,
   CreateA2AServerParams,
+  ModelsData,
 } from "./types";
 
 /**
@@ -13,17 +13,10 @@ import type {
  */
 export const configApi = {
   /**
-   * 获取 LLM 配置
+   * 获取模型列表
    */
-  getLLMConfig: (): Promise<LLMConfig> => {
-    return get<LLMConfig>("/app-config/llm");
-  },
-
-  /**
-   * 更新 LLM 配置
-   */
-  updateLLMConfig: (config: LLMConfig): Promise<LLMConfig> => {
-    return post<LLMConfig>("/app-config/llm", config);
+  getModels: (): Promise<ModelsData> => {
+    return get<ModelsData>("/app-config/models");
   },
 
   /**
@@ -110,4 +103,3 @@ export const configApi = {
     );
   },
 };
-

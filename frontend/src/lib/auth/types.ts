@@ -1,0 +1,88 @@
+export type AuthTokenType = "Bearer"
+
+export type AuthTokenPair = {
+  access_token: string
+  token_type: AuthTokenType
+  access_token_expires_in: number
+}
+
+export type AuthUser = {
+  user_id: string
+  email: string
+  nickname: string | null
+  avatar_url: string | null
+  timezone: string
+  locale: string
+  auth_provider: string
+  status: string
+  created_at: string
+  updated_at: string
+  last_login_at: string | null
+  last_login_ip: string | null
+}
+
+export type LoginRequestPayload = {
+  email: string
+  password: string
+}
+
+export type LoginResponseData = {
+  tokens: AuthTokenPair
+  user: AuthUser
+}
+
+export type RegisterRequestPayload = {
+  email: string
+  password: string
+  confirm_password: string
+  verification_code?: string
+}
+
+export type RegisterResponseData = {
+  user_id: string
+  email: string
+  auth_provider: string
+  status: string
+  created_at: string
+}
+
+export type SendRegisterCodeRequestPayload = {
+  email: string
+}
+
+export type SendRegisterCodeResponseData = {
+  email: string
+  verification_required: boolean
+  expires_in_seconds: number
+}
+
+export type RefreshTokenResponseData = {
+  tokens: AuthTokenPair
+}
+
+export type LogoutResponseData = {
+  success: boolean
+}
+
+export type GetCurrentUserResponseData = AuthUser
+
+export type UpdateCurrentUserPayload = {
+  nickname?: string | null
+  avatar_url?: string | null
+  timezone?: string
+  locale?: string
+}
+
+export type UpdateCurrentUserResponseData = {
+  user: AuthUser
+}
+
+export type UpdatePasswordPayload = {
+  old_password: string
+  new_password: string
+  confirm_password: string
+}
+
+export type UpdatePasswordResponseData = {
+  success: boolean
+}

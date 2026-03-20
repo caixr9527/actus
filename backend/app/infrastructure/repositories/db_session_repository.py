@@ -65,10 +65,13 @@ class DBSessionRepository(SessionRepository):
 
         self._register_session_list_changed(session.id)
 
-    async def get_all(self) -> List[Session]:
+    async def get_all(self, user_id: Optional[str] = None) -> List[Session]:
         """获取所有会话列表"""
         # 构建查询语句，按最新消息时间降序排列
-        stmt = select(SessionModel).order_by(SessionModel.latest_message_at.desc())
+        stmt = select(SessionModel)
+        if user_id is not None:
+            stmt = stmt.where(SessionModel.user_id == user_id)
+        stmt = stmt.order_by(SessionModel.latest_message_at.desc())
         # 执行查询
         result = await self.db_session.execute(stmt)
         # 获取所有结果记录
@@ -77,10 +80,12 @@ class DBSessionRepository(SessionRepository):
         # 将数据库模型转换为领域模型并返回
         return [record.to_domain() for record in records]
 
-    async def get_by_id(self, session_id: str) -> Optional[Session]:
+    async def get_by_id(self, session_id: str, user_id: Optional[str] = None) -> Optional[Session]:
         """根据id查询会话"""
         # 构建查询语句，根据session_id查找对应的会话记录
         stmt = select(SessionModel).where(SessionModel.id == session_id)
+        if user_id is not None:
+            stmt = stmt.where(SessionModel.user_id == user_id)
         # 执行查询
         result = await self.db_session.execute(stmt)
         # 获取查询结果，如果不存在则返回None
@@ -130,6 +135,19 @@ class DBSessionRepository(SessionRepository):
         result = await self.db_session.execute(stmt)
 
         # 检查是否有行被更新，如果没有则抛出异常
+        if result.rowcount == 0:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
+
+    async def update_current_model_id(self, session_id: str, current_model_id: Optional[str]) -> None:
+        """更新会话当前模型 ID"""
+        stmt = (
+            update(SessionModel)
+            .where(SessionModel.id == session_id)
+            .values(current_model_id=current_model_id)
+        )
+        result = await self.db_session.execute(stmt)
+
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
         self._register_session_list_changed(session_id)

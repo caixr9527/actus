@@ -7,12 +7,16 @@
 """
 from .app_config_repository import AppConfigRepository
 from .file_repository import FileRepository
+from .llm_model_config_repository import LLMModelConfigRepository
 from .session_repository import SessionRepository
 from .uow import IUnitOfWork
+from .user_repository import UserRepository
 
 __all__ = [
     "AppConfigRepository",
     "SessionRepository",
     "FileRepository",
+    "LLMModelConfigRepository",
+    "UserRepository",
     "IUnitOfWork",
 ]

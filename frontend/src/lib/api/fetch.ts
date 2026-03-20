@@ -1,4 +1,5 @@
 import type { ApiResponse } from "./types"
+import { translateRuntime } from "../i18n/runtime"
 
 /**
  * API 配置
@@ -8,10 +9,33 @@ const API_CONFIG = {
   timeout: 30000, // 30秒
 } as const
 
+export type AuthHooks = {
+  getAccessToken: () => string | null
+  refreshAccessToken: () => Promise<string | null>
+  onAuthFailure: () => void
+}
+
+let authHooks: AuthHooks | null = null
+
+export function registerAuthHooks(hooks: AuthHooks | null): void {
+  authHooks = hooks
+}
+
+export type RequestOptions = RequestInit & {
+  timeout?: number
+  skipErrorHandler?: boolean
+  skipAuth?: boolean
+  skipAuthRefresh?: boolean
+}
+
 function resolveRequestUrl(endpoint: string): string {
   return endpoint.startsWith("http")
     ? endpoint
     : `${API_CONFIG.baseURL}${endpoint}`
+}
+
+export function getApiBaseUrl(): string {
+  return API_CONFIG.baseURL
 }
 
 function getCorsAllowedOriginsHint(requestUrl: string): string | null {
@@ -21,7 +45,10 @@ function getCorsAllowedOriginsHint(requestUrl: string): string | null {
     const pageOrigin = window.location.origin
     const targetOrigin = new URL(requestUrl, pageOrigin).origin
     if (targetOrigin === pageOrigin) return null
-    return `检测到跨域请求（${pageOrigin} -> ${targetOrigin}），请将 ${pageOrigin} 加入后端 CORS_ALLOWED_ORIGINS`
+    return translateRuntime("api.corsAllowedOriginsHint", {
+      pageOrigin,
+      targetOrigin,
+    })
   } catch {
     return null
   }
@@ -30,9 +57,9 @@ function getCorsAllowedOriginsHint(requestUrl: string): string | null {
 function toNetworkApiError(requestUrl: string): ApiError {
   const corsHint = getCorsAllowedOriginsHint(requestUrl)
   if (corsHint) {
-    return new ApiError(500, `网络请求失败。${corsHint}`)
+    return new ApiError(500, translateRuntime("api.networkRequestFailedWithHint", { hint: corsHint }))
   }
-  return new ApiError(500, "网络连接失败，请检查网络设置")
+  return new ApiError(500, translateRuntime("api.networkConnectionFailed"))
 }
 
 /**
@@ -43,18 +70,12 @@ export class ApiError extends Error {
     public code: number,
     public msg: string,
     public data: unknown = null,
+    public errorKey: string | null = null,
+    public errorParams: Record<string, unknown> | null = null,
   ) {
     super(msg)
     this.name = "ApiError"
   }
-}
-
-/**
- * 请求选项
- */
-type RequestOptions = RequestInit & {
-  timeout?: number
-  skipErrorHandler?: boolean
 }
 
 /**
@@ -73,7 +94,24 @@ async function parseResponse<T>(response: Response): Promise<ApiResponse<T>> {
     code: response.ok ? 0 : response.status,
     msg: response.ok ? "success" : text || response.statusText,
     data: text as unknown as T,
+    error_key: null,
+    error_params: null,
   }
+}
+
+function toApiError(errorData: ApiResponse): ApiError {
+  const fallbackMessage =
+    errorData.code === 408
+      ? translateRuntime("api.requestTimeout")
+      : translateRuntime("api.requestFailed")
+
+  return new ApiError(
+    errorData.code,
+    errorData.msg || fallbackMessage,
+    errorData.data,
+    errorData.error_key ?? null,
+    errorData.error_params ?? null,
+  )
 }
 
 /**
@@ -87,12 +125,14 @@ async function handleErrorResponse(response: Response): Promise<never> {
   } catch {
     errorData = {
       code: response.status,
-      msg: response.statusText || "请求失败",
+      msg: response.statusText || translateRuntime("api.requestFailed"),
       data: null,
+      error_key: null,
+      error_params: null,
     }
   }
 
-  throw new ApiError(errorData.code, errorData.msg, errorData.data)
+  throw toApiError(errorData)
 }
 
 /**
@@ -100,14 +140,29 @@ async function handleErrorResponse(response: Response): Promise<never> {
  */
 function fetchWithTimeout(
   url: string,
-  options: RequestOptions = {},
+  options: RequestInit = {},
   timeout: number = API_CONFIG.timeout,
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => {
+    const externalSignal = options.signal
+    let abortedByTimeout = false
+
+    const onExternalAbort = () => {
       controller.abort()
-      reject(new ApiError(408, "请求超时"))
+    }
+
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort()
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true })
+      }
+    }
+
+    const timeoutId = setTimeout(() => {
+      abortedByTimeout = true
+      controller.abort()
     }, timeout)
 
     fetch(url, {
@@ -115,76 +170,117 @@ function fetchWithTimeout(
       signal: controller.signal,
     })
       .then((response) => {
-        clearTimeout(timeoutId)
         resolve(response)
       })
       .catch((error) => {
+        if (error instanceof Error && error.name === "AbortError") {
+          if (abortedByTimeout) {
+            reject(new ApiError(408, translateRuntime("api.requestTimeout")))
+          } else {
+            reject(error)
+          }
+          return
+        }
+        reject(error)
+      })
+      .finally(() => {
         clearTimeout(timeoutId)
-        if (error.name === "AbortError") {
-          reject(new ApiError(408, "请求超时"))
-        } else {
-          reject(error)
+        if (externalSignal) {
+          externalSignal.removeEventListener("abort", onExternalAbort)
         }
       })
   })
 }
 
-/**
- * 核心请求函数
- */
-export async function request<T = unknown>(
-  endpoint: string,
-  options: RequestOptions = {},
-): Promise<T> {
-  const url = resolveRequestUrl(endpoint)
+function normalizeHeaders(
+  headers: HeadersInit | undefined,
+  body: BodyInit | null | undefined,
+  accessToken: string | null,
+  skipAuth: boolean,
+): Headers {
+  const normalized = new Headers(headers)
 
+  if (
+    body !== undefined &&
+    body !== null &&
+    !(body instanceof FormData) &&
+    !normalized.has("Content-Type")
+  ) {
+    normalized.set("Content-Type", "application/json")
+  }
+
+  if (!skipAuth && accessToken && !normalized.has("Authorization")) {
+    normalized.set("Authorization", `Bearer ${accessToken}`)
+  }
+
+  return normalized
+}
+
+async function fetchWithAuthRetry(
+  requestUrl: string,
+  options: RequestOptions = {},
+): Promise<Response> {
   const {
     timeout = API_CONFIG.timeout,
-    skipErrorHandler = false,
-    headers = {},
+    headers,
+    skipAuth = false,
+    skipAuthRefresh = false,
+    skipErrorHandler,
     ...fetchOptions
   } = options
+  void skipErrorHandler
 
-  // 合并请求头
-  const mergedHeaders: HeadersInit = {
-    "Content-Type": "application/json",
-    ...headers,
-  }
+  const execute = async (accessToken: string | null): Promise<Response> => {
+    const normalizedHeaders = normalizeHeaders(
+      headers,
+      fetchOptions.body,
+      accessToken,
+      skipAuth,
+    )
+    const credentials = fetchOptions.credentials ?? "include"
 
-  // 如果是 FormData，删除 Content-Type 让浏览器自动设置
-  if (fetchOptions.body instanceof FormData) {
-    delete (mergedHeaders as Record<string, string>)["Content-Type"]
-  }
-
-  try {
-    const response = await fetchWithTimeout(
-      url,
+    return fetchWithTimeout(
+      requestUrl,
       {
         ...fetchOptions,
-        headers: mergedHeaders,
+        credentials,
+        headers: normalizedHeaders,
       },
       timeout,
     )
+  }
 
-    // 处理 HTTP 错误状态码
-    if (!response.ok) {
-      if (skipErrorHandler) {
-        return parseResponse<T>(response) as Promise<T>
-      }
-      await handleErrorResponse(response)
-    }
+  const initialAccessToken = authHooks?.getAccessToken() ?? null
+  let response = await execute(initialAccessToken)
 
-    const result = await parseResponse<T>(response)
+  if (response.status !== 401 || skipAuthRefresh || authHooks === null) {
+    return response
+  }
 
-    // 处理业务错误（code 不在成功范围内）
-    if (result.code !== 0 && result.code !== 200) {
-      if (skipErrorHandler) {
-        return result.data as T
-      }
-      throw new ApiError(result.code, result.msg, result.data)
-    }
+  const refreshedAccessToken = await authHooks.refreshAccessToken()
+  if (!refreshedAccessToken) {
+    authHooks.onAuthFailure()
+    return response
+  }
 
-    return result.data as T
+  response = await execute(refreshedAccessToken)
+  if (response.status === 401) {
+    authHooks.onAuthFailure()
+  }
+  return response
+}
+
+/**
+ * 发起原始 HTTP 请求（返回原始 Response）
+ */
+export async function requestRaw(
+  endpoint: string,
+  options: RequestOptions = {},
+): Promise<Response> {
+  const requestUrl = resolveRequestUrl(endpoint)
+
+  try {
+    return await fetchWithAuthRetry(requestUrl, options)
   } catch (error) {
     if (error instanceof ApiError) {
       throw error
@@ -195,11 +291,49 @@ export async function request<T = unknown>(
       error instanceof TypeError &&
       /failed to fetch|load failed/i.test(error.message)
     ) {
-      throw toNetworkApiError(url)
+      throw toNetworkApiError(requestUrl)
     }
 
-    throw new ApiError(500, error instanceof Error ? error.message : "未知错误")
+    throw new ApiError(
+      500,
+      error instanceof Error ? error.message : translateRuntime("api.unknownError"),
+      null,
+      null,
+      null,
+    )
   }
+}
+
+/**
+ * 核心请求函数
+ */
+export async function request<T = unknown>(
+  endpoint: string,
+  options: RequestOptions = {},
+): Promise<T> {
+  const { skipErrorHandler = false, ...rawOptions } = options
+
+  const response = await requestRaw(endpoint, rawOptions)
+
+  // 处理 HTTP 错误状态码
+  if (!response.ok) {
+    if (skipErrorHandler) {
+      return parseResponse<T>(response) as Promise<T>
+    }
+    await handleErrorResponse(response)
+  }
+
+  const result = await parseResponse<T>(response)
+
+  // 处理业务错误（code 不在成功范围内）
+  if (result.code !== 0 && result.code !== 200) {
+    if (skipErrorHandler) {
+      return result.data as T
+    }
+    throw toApiError(result)
+  }
+
+  return result.data as T
 }
 
 /**
@@ -285,7 +419,7 @@ export function createSSEConnection(
 
   // 对于 POST 请求，使用 fetch + ReadableStream 方式
   if (data !== undefined) {
-    throw new Error("带数据的 SSE 连接请使用 createSSEStream 函数")
+    throw new Error(translateRuntime("api.sseUseCreateStream"))
   }
 
   return new EventSource(url)
@@ -303,83 +437,27 @@ export async function createSSEStream(
   data?: unknown,
   options?: RequestOptions,
 ): Promise<ReadableStream<Uint8Array>> {
-  const url = resolveRequestUrl(endpoint)
+  const { headers = {}, ...fetchOptions } = options || {}
 
-  const {
-    timeout = API_CONFIG.timeout,
-    headers = {},
-    signal: externalSignal,
-    ...fetchOptions
-  } = options || {}
+  const response = await requestRaw(endpoint, {
+    ...fetchOptions,
+    method: "POST",
+    headers: {
+      Accept: "text/event-stream",
+      ...headers,
+    },
+    body: JSON.stringify(data),
+  })
 
-  const mergedHeaders: HeadersInit = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-    ...headers,
+  if (!response.ok) {
+    await handleErrorResponse(response)
   }
 
-  const controller = new AbortController()
-  // 只对初始连接设置超时，连接建立后会清除
-  const timeoutId = setTimeout(() => {
-    controller.abort()
-  }, timeout)
-
-  // 将外部 AbortSignal 关联到内部 controller，
-  // 这样调用方 abort 时会同时中止底层 fetch 连接
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      clearTimeout(timeoutId)
-      controller.abort()
-    } else {
-      externalSignal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timeoutId)
-          controller.abort()
-        },
-        { once: true },
-      )
-    }
+  if (!response.body) {
+    throw new ApiError(500, translateRuntime("api.emptyResponseBody"))
   }
 
-  try {
-    const response = await fetch(url, {
-      ...fetchOptions,
-      method: "POST",
-      headers: mergedHeaders,
-      body: JSON.stringify(data),
-      signal: controller.signal,
-    })
-
-    // 连接已建立，清除初始连接的超时
-    clearTimeout(timeoutId)
-
-    if (!response.ok) {
-      await handleErrorResponse(response)
-    }
-
-    if (!response.body) {
-      throw new ApiError(500, "响应体为空")
-    }
-
-    return response.body
-  } catch (error) {
-    clearTimeout(timeoutId)
-    // 忽略 AbortError，这是正常的连接中止
-    if (error instanceof Error && error.name === "AbortError") {
-      throw error // 重新抛出，让调用方处理
-    }
-    if (error instanceof ApiError) {
-      throw error
-    }
-    if (
-      error instanceof TypeError &&
-      /failed to fetch|load failed/i.test(error.message)
-    ) {
-      throw toNetworkApiError(url)
-    }
-    throw new ApiError(500, error instanceof Error ? error.message : "未知错误")
-  }
+  return response.body
 }
 
 /**
@@ -429,7 +507,7 @@ export async function parseSSEStream(
       return
     }
     if (onError) {
-      onError(error instanceof Error ? error : new Error("读取流失败"))
+      onError(error instanceof Error ? error : new Error(translateRuntime("api.streamReadFailed")))
     }
   } finally {
     try {
@@ -485,7 +563,7 @@ function processSSEEvent(
         onError(
           error instanceof Error
             ? error
-            : new Error(`解析 SSE 数据失败: ${eventData}`),
+            : new Error(translateRuntime("api.parseSSEFailed", { data: eventData })),
         )
       }
     }

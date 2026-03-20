@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.domain.repositories import IUnitOfWork
-from app.infrastructure.repositories import DBUnitOfWork
+from app.infrastructure.repositories.db_uow import DBUnitOfWork
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)

@@ -1,5 +1,14 @@
-import { get, post } from "./fetch"
+import { ApiError, get, getApiBaseUrl, post, requestRaw } from "./fetch"
 import type { FileInfo, FileUploadParams } from "./types"
+import { translateRuntime } from "../i18n/runtime"
+
+type FileDownloadErrorPayload = {
+  msg?: string
+  message?: string
+  data?: unknown
+  error_key?: string | null
+  error_params?: Record<string, unknown> | null
+}
 
 /**
  * 文件模块 API
@@ -40,13 +49,34 @@ export const fileApi = {
     fileId: string,
     options?: { signal?: AbortSignal },
   ): Promise<Blob> => {
-    const response = await fetch(
-      `${process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:23140/api"}/files/${fileId}/download`,
-      { signal: options?.signal },
-    )
+    const response = await requestRaw(`/files/${fileId}/download`, {
+      method: "GET",
+      signal: options?.signal,
+    })
 
     if (!response.ok) {
-      throw new Error(`下载失败: ${response.statusText}`)
+      let errorMessage = response.statusText || translateRuntime("fileApi.downloadFailed")
+      let errorData: FileDownloadErrorPayload | null = null
+
+      try {
+        const contentType = response.headers.get("content-type")
+        if (contentType?.includes("application/json")) {
+          errorData = (await response.json()) as FileDownloadErrorPayload
+          errorMessage = errorData?.msg || errorData?.message || errorMessage
+        } else {
+          const text = await response.text()
+          errorMessage = text || errorMessage
+        }
+      } catch {
+        // ignore parse error and fallback to statusText
+      }
+      throw new ApiError(
+        response.status,
+        errorMessage,
+        errorData?.data ?? null,
+        errorData?.error_key ?? null,
+        errorData?.error_params ?? null,
+      )
     }
 
     return response.blob()
@@ -58,8 +88,6 @@ export const fileApi = {
    * @returns 文件下载 URL
    */
   getFileDownloadUrl: (fileId: string): string => {
-    const baseURL =
-      process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:23140/api"
-    return `${baseURL}/files/${fileId}/download`
+    return `${getApiBaseUrl()}/files/${fileId}/download`
   },
 }

@@ -2,11 +2,20 @@
 
 import {useCallback, useEffect} from 'react'
 import {useRouter} from 'next/navigation'
-import {Sidebar, SidebarContent, SidebarHeader, SidebarTrigger} from '@/components/ui/sidebar'
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarSeparator,
+  SidebarTrigger,
+} from '@/components/ui/sidebar'
 import {Button} from '@/components/ui/button'
 import {Plus} from 'lucide-react'
 import {Kbd, KbdGroup} from '@/components/ui/kbd'
 import {SessionList} from '@/components/session-list'
+import {LeftPanelAccountMenu} from '@/components/left-panel-account-menu'
+import { useI18n } from '@/lib/i18n'
 
 const NEW_TASK_SHORTCUT_KEY = 'k'
 
@@ -22,6 +31,7 @@ function isEditableElement(target: EventTarget | null): boolean {
 
 export function LeftPanel() {
   const router = useRouter()
+  const { t } = useI18n()
   const handleCreateTask = useCallback(() => {
     router.push('/')
   }, [router])
@@ -61,7 +71,7 @@ export function LeftPanel() {
           onClick={handleCreateTask}
         >
           <Plus/>
-          新建任务
+          {t('session.newTask')}
           <KbdGroup>
             <Kbd>⌘/Ctrl</Kbd>
             <Kbd>K</Kbd>
@@ -70,6 +80,10 @@ export function LeftPanel() {
         {/* 会话列表 */}
         <SessionList/>
       </SidebarContent>
+      <SidebarSeparator />
+      <SidebarFooter className="p-2 pt-1">
+        <LeftPanelAccountMenu />
+      </SidebarFooter>
     </Sidebar>
   )
 }

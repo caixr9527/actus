@@ -12,7 +12,6 @@ import uuid
 from datetime import datetime
 from typing import List, AsyncGenerator, Callable, BinaryIO, Optional
 
-from fastapi import UploadFile
 from pydantic import TypeAdapter
 
 from app.domain.external import (
@@ -23,7 +22,8 @@ from app.domain.external import (
     JSONParser,
     Browser,
     SearchEngine,
-    Sandbox
+    Sandbox,
+    FileUploadPayload,
 )
 from app.domain.models import (
     AgentConfig,
@@ -53,7 +53,6 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.flows import PlannerReActFlow
 from app.domain.services.tools import MCPTool, A2ATool
-from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +69,7 @@ class AgentTaskRunner(TaskRunner):
             mcp_config: MCPConfig,
             a2a_config: A2AConfig,
             session_id: str,
+            user_id: Optional[str],
             file_storage: FileStorage,
             uow_factory: Callable[[], IUnitOfWork],
             json_parser: JSONParser,
@@ -78,6 +78,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox: Sandbox,
     ) -> None:
         self._session_id = session_id
+        self._user_id = user_id
         self._sandbox = sandbox
         self._mcp_config = mcp_config
         self._mcp_tool = MCPTool()
@@ -234,14 +235,14 @@ class AgentTaskRunner(TaskRunner):
             filename = filepath.split("/")[-1]
 
             # 创建 UploadFile 对象用于上传
-            upload_file = UploadFile(
+            upload_file = FileUploadPayload(
                 file=file_data,
                 filename=filename,
                 size=self._get_stream_size(file_data),
             )
 
             # 上传并接收新文件对象，后续会话映射以该对象为准
-            new_file = await self._file_storage.upload_file(upload_file=upload_file)
+            new_file = await self._file_storage.upload_file(upload_file=upload_file, user_id=self._user_id)
             new_file.filepath = filepath
 
             # 原子更新会话文件索引：删除旧引用（若存在）并新增新引用
@@ -277,16 +278,16 @@ class AgentTaskRunner(TaskRunner):
     async def _get_browser_screenshot(self) -> str:
         # 获取浏览器截图
         screenshot = await self._browser.screenshot()
+        screenshot_stream = io.BytesIO(screenshot)
         file = await self._file_storage.upload_file(
-            upload_file=UploadFile(
-                file=io.BytesIO(screenshot),
+            upload_file=FileUploadPayload(
+                file=screenshot_stream,
                 filename=f"{str(uuid.uuid4())}.png",
-                size=self._get_stream_size(io.BytesIO(screenshot))
-            )
+                size=self._get_stream_size(screenshot_stream),
+            ),
+            user_id=self._user_id,
         )
-        settings = get_settings()
-        # todo 修改为配置
-        return f"https://{settings.cos_bucket}.cos.{settings.cos_region}.myqcloud.com/{file.key}"
+        return self._file_storage.get_file_url(file)
 
     async def _handle_tool_event(self, event: ToolEvent) -> None:
         try:

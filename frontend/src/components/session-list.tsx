@@ -8,6 +8,7 @@ import {SessionItem} from '@/components/session-item'
 import {DeleteSessionDialog} from '@/components/delete-session-dialog'
 import {useSessions} from '@/hooks/use-sessions'
 import type {Session} from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
 
 /**
  * 会话列表组件
@@ -16,6 +17,7 @@ import type {Session} from '@/lib/api'
 export function SessionList() {
   const router = useRouter()
   const params = useParams()
+  const { t } = useI18n()
   const {sessions, loading, error, realtimeStatus, reconnectCount, realtimeAlert, refresh, resumeRealtime, deleteSession} = useSessions()
 
   // 待删除的会话
@@ -32,21 +34,21 @@ export function SessionList() {
   const handleDeleteConfirm = useCallback(async () => {
     if (!pendingDeleteSession) return
 
-    const sessionTitle = pendingDeleteSession.title || '新任务'
+    const sessionTitle = pendingDeleteSession.title || t('session.newTask')
     const success = await deleteSession(pendingDeleteSession.session_id)
 
     if (success) {
-      toast.success(`已删除任务「${sessionTitle}」`)
+      toast.success(t('sessionList.deleteSuccess', { title: sessionTitle }))
       // 如果删除的是当前正在查看的会话，跳转到首页
       if (params?.id === pendingDeleteSession.session_id) {
         router.push('/')
       }
     } else {
-      toast.error(`删除任务「${sessionTitle}」失败，请重试`)
+      toast.error(t('sessionList.deleteFailed', { title: sessionTitle }))
     }
 
     setPendingDeleteSession(null)
-  }, [pendingDeleteSession, deleteSession, params?.id, router])
+  }, [pendingDeleteSession, deleteSession, params?.id, router, t])
 
   const handleDialogOpenChange = useCallback((open: boolean) => {
     if (!open) {
@@ -83,12 +85,12 @@ export function SessionList() {
   if (error) {
     return (
       <div className="flex flex-col items-center gap-2 py-8 text-sm text-muted-foreground">
-        <p>加载失败</p>
+        <p>{t('sessionList.loadFailed')}</p>
         <button
           className="text-primary underline underline-offset-4 cursor-pointer"
           onClick={refresh}
         >
-          重试
+          {t('common.retry')}
         </button>
       </div>
     )
@@ -107,13 +109,13 @@ export function SessionList() {
                 className="text-amber-900 underline underline-offset-2 cursor-pointer"
                 onClick={handleRealtimeRetry}
               >
-                重试
+                {t('common.retry')}
               </button>
             </div>
           </div>
         )}
         <div className="py-8 text-center text-sm text-muted-foreground">
-          暂无任务
+          {t('sessionList.empty')}
         </div>
       </div>
     )
@@ -126,14 +128,16 @@ export function SessionList() {
           <div className="flex items-center justify-between gap-2">
             <span>
               {realtimeAlert}
-              {realtimeStatus === 'reconnecting' ? `（第 ${reconnectCount} 次）` : ''}
+              {realtimeStatus === 'reconnecting'
+                ? t('sessionList.reconnectingCount', { count: reconnectCount })
+                : ''}
             </span>
             <button
               type="button"
               className="text-amber-900 underline underline-offset-2 cursor-pointer"
               onClick={handleRealtimeRetry}
             >
-              重试
+              {t('common.retry')}
             </button>
           </div>
         </div>

@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { configApi } from '@/lib/api/config'
 import { sessionApi } from '@/lib/api/session'
 import { normalizeEvent, normalizeEvents } from '@/lib/session-events'
 import { canRetry, computeRetryDelayMs, shouldStartEmptySessionStream, type RetryPolicy } from '@/lib/session-stream-policy'
@@ -9,16 +10,22 @@ import {
   reduceSessionRuntimeStateOnEvent,
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '@/lib/session-detail-runtime'
-import type { SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
+import type { ListModelItem, SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
+import { useI18n } from '@/lib/i18n'
 
 export type UseSessionDetailResult = {
   session: SessionDetail | null
   files: SessionFile[]
+  availableModels: ListModelItem[]
+  defaultModelId: string | null
   events: SSEEventData[]
   loading: boolean
+  modelsLoading: boolean
+  modelUpdating: boolean
   error: Error | null
   refresh: () => Promise<void>
   refreshFiles: () => Promise<void>
+  updateSessionModel: (modelId: string) => Promise<void>
   sendMessage: (message: string, attachmentIds: string[]) => Promise<void>
   streaming: boolean
 }
@@ -36,12 +43,18 @@ const EMPTY_STREAM_RETRY_POLICY: RetryPolicy = {
  */
 export function useSessionDetail(
   sessionId: string | null,
-  initialSkipEmptyStream?: boolean
+  initialSkipEmptyStream?: boolean,
+  enabled: boolean = true,
 ): UseSessionDetailResult {
+  const { t } = useI18n()
   const [session, setSession] = useState<SessionDetail | null>(null)
   const [files, setFiles] = useState<SessionFile[]>([])
+  const [availableModels, setAvailableModels] = useState<ListModelItem[]>([])
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null)
   const [events, setEvents] = useState<SSEEventData[]>([])
   const [loading, setLoading] = useState(true)
+  const [modelsLoading, setModelsLoading] = useState(true)
+  const [modelUpdating, setModelUpdating] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [streaming, setStreaming] = useState(false)
   const [skipEmptyStream, setSkipEmptyStream] = useState(initialSkipEmptyStream || false)
@@ -169,7 +182,7 @@ export function useSessionDetail(
         const scheduleReconnect = () => {
           if (streamInstanceId !== emptyStreamInstanceIdRef.current) return
           if (!canRetry(emptyStreamRetryCountRef.current, EMPTY_STREAM_RETRY_POLICY)) {
-            setError(new Error('会话实时连接中断，请点击重试恢复'))
+            setError(new Error(t('sessionDetail.realtimeDisconnected')))
             return
           }
 
@@ -203,7 +216,7 @@ export function useSessionDetail(
         scheduleReconnect()
       }
     )
-  }, [appendEvent, clearEmptyStreamReconnectTimer, sessionId, stopEmptyStream])
+  }, [appendEvent, clearEmptyStreamReconnectTimer, sessionId, stopEmptyStream, t])
 
   const normalizeFileList = useCallback((raw: unknown): SessionFile[] => {
     if (Array.isArray(raw)) return raw as SessionFile[]
@@ -246,17 +259,17 @@ export function useSessionDetail(
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return null
       }
-      setError(e instanceof Error ? e : new Error('加载失败'))
+      setError(e instanceof Error ? e : new Error(t('sessionDetail.loadFailed')))
       return null
     } finally {
       if (targetEpoch === sessionEpochRef.current && targetSessionId === currentSessionIdRef.current) {
         setLoading(false)
       }
     }
-  }, [normalizeFileList])
+  }, [normalizeFileList, t])
 
   const refresh = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId || !enabled) return
     const targetEpoch = sessionEpochRef.current
     setLoading(true)
     setError(null)
@@ -269,10 +282,10 @@ export function useSessionDetail(
     ) {
       startEmptyStream(targetEpoch)
     }
-  }, [loadSessionSnapshot, sessionId, skipEmptyStream, startEmptyStream])
+  }, [enabled, loadSessionSnapshot, sessionId, skipEmptyStream, startEmptyStream])
 
   const refreshFiles = useCallback(async () => {
-    if (!sessionId) return
+    if (!sessionId || !enabled) return
     const targetEpoch = sessionEpochRef.current
     const targetSessionId = sessionId
     try {
@@ -284,7 +297,29 @@ export function useSessionDetail(
     } catch (e) {
       console.error('刷新文件列表失败:', e)
     }
-  }, [sessionId, normalizeFileList])
+  }, [enabled, sessionId, normalizeFileList])
+
+  const loadModels = useCallback(async (targetSessionId: string, targetEpoch: number) => {
+    try {
+      const data = await configApi.getModels()
+      if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
+        return
+      }
+      setAvailableModels(data.models)
+      setDefaultModelId(data.default_model_id)
+    } catch (e) {
+      if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
+        return
+      }
+      console.error('加载模型列表失败:', e)
+      setAvailableModels([])
+      setDefaultModelId(null)
+    } finally {
+      if (targetEpoch === sessionEpochRef.current && targetSessionId === currentSessionIdRef.current) {
+        setModelsLoading(false)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     sessionEpochRef.current += 1
@@ -300,22 +335,42 @@ export function useSessionDetail(
 
     if (!sessionId) {
       setLoading(false)
+      setModelsLoading(false)
       setSession(null)
       sessionStatusRef.current = null
       setFiles([])
+      setAvailableModels([])
+      setDefaultModelId(null)
+      setEvents([])
+      setError(null)
+      return
+    }
+
+    if (!enabled) {
+      setLoading(false)
+      setModelsLoading(false)
+      setSession(null)
+      sessionStatusRef.current = null
+      setFiles([])
+      setAvailableModels([])
+      setDefaultModelId(null)
       setEvents([])
       setError(null)
       return
     }
 
     setLoading(true)
+    setModelsLoading(true)
     setSession(null)
     sessionStatusRef.current = null
     setFiles([])
+    setAvailableModels([])
+    setDefaultModelId(null)
     setEvents([])
     setError(null)
 
     void loadSessionSnapshot(sessionId, currentEpoch)
+    void loadModels(sessionId, currentEpoch)
 
     return () => {
       if (sessionEpochRef.current !== currentEpoch) return
@@ -323,11 +378,11 @@ export function useSessionDetail(
       stopEmptyStream()
       isSendMessageRef.current = false
     }
-  }, [initialSkipEmptyStream, loadSessionSnapshot, sessionId, setStreamingState, stopEmptyStream, stopMessageStream])
+  }, [enabled, initialSkipEmptyStream, loadModels, loadSessionSnapshot, sessionId, setStreamingState, stopEmptyStream, stopMessageStream])
 
   useEffect(() => {
     const status = session?.status
-    if (!sessionId) return
+    if (!sessionId || !enabled) return
     const currentEpoch = sessionEpochRef.current
     if (shouldStartEmptySessionStream(status, isSendMessageRef.current, skipEmptyStream)) {
       startEmptyStream(currentEpoch)
@@ -336,7 +391,7 @@ export function useSessionDetail(
       if (sessionEpochRef.current !== currentEpoch) return
       stopEmptyStream()
     }
-  }, [sessionId, session?.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
+  }, [enabled, sessionId, session?.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
 
   // 组件卸载时清理所有流，避免连接泄漏
   useEffect(() => {
@@ -350,7 +405,7 @@ export function useSessionDetail(
 
   const sendMessage = useCallback(
     async (message: string, attachmentIds: string[]) => {
-      if (!sessionId) return
+      if (!sessionId || !enabled) return
 
       const streamEpoch = sessionEpochRef.current
       const streamSessionId = sessionId
@@ -398,7 +453,7 @@ export function useSessionDetail(
           }
           const closeReason = classifyMessageStreamCloseReason(err)
           if (closeReason === 'error') {
-            setError(err instanceof Error ? err : new Error('流式响应异常'))
+            setError(err instanceof Error ? err : new Error(t('sessionDetail.streamError')))
           }
           finalizeMessageStream()
           if (shouldReloadSnapshotAfterMessageStreamClose(closeReason)) {
@@ -415,17 +470,43 @@ export function useSessionDetail(
       // 将消息流的 cleanup 存到独立的 ref，不与 emptyStream 混淆
       messageStreamCleanupRef.current = messageStreamCleanup
     },
-    [sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream]
+    [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream, t]
+  )
+
+  const updateSessionModel = useCallback(
+    async (modelId: string) => {
+      if (!sessionId || !enabled) return
+
+      setModelUpdating(true)
+      try {
+        const response = await sessionApi.updateSessionModel(sessionId, { model_id: modelId })
+        setSession((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            current_model_id: response.current_model_id,
+          }
+        })
+      } finally {
+        setModelUpdating(false)
+      }
+    },
+    [enabled, sessionId],
   )
 
   return {
     session,
     files,
+    availableModels,
+    defaultModelId,
     events,
     loading,
+    modelsLoading,
+    modelUpdating,
     error,
     refresh,
     refreshFiles,
+    updateSessionModel,
     sendMessage,
     streaming,
   }

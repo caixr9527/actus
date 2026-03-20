@@ -208,6 +208,8 @@ class WaitSSEEvent(BaseSSEEvent):
 class ErrorEventData(BaseEventData):
     """错误事件数据"""
     error: str
+    error_key: Optional[str] = None
+    error_params: Optional[Dict[str, Any]] = None
 
 
 class ErrorSSEEvent(BaseSSEEvent):

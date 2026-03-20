@@ -7,11 +7,13 @@
 """
 import uuid
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy import (
     String,
     Integer,
     DateTime,
+    Index,
     text,
     PrimaryKeyConstraint,
 )
@@ -26,6 +28,7 @@ class FileModel(Base):
     __tablename__ = "files"
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_files_id"),
+        Index("ix_files_user_id", "user_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -34,6 +37,10 @@ class FileModel(Base):
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
     )  # 文件id
+    user_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 关联用户id，兼容历史未认领文件（逻辑关联，不使用数据库外键）
     filename: Mapped[str] = mapped_column(
         String(255),
         nullable=False,

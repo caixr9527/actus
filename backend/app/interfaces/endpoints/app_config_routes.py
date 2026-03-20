@@ -10,10 +10,19 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, Body
 
-from app.application.service import AppConfigService
-from app.domain.models import LLMConfig, AgentConfig, MCPConfig
-from app.interfaces.service_dependencies import get_app_config_service
-from app.interfaces.schemas import Response, ListMCPServerResponse, ListA2AServerResponse
+from app.application.service import AppConfigService, ModelConfigService
+from app.domain.models import AgentConfig, MCPConfig
+from app.interfaces.dependencies.services import get_app_config_service, get_model_config_service
+from app.interfaces.schemas import (
+    Response,
+    ListMCPServerResponse,
+    ListMCPServerItem,
+    ListA2AServerResponse,
+    ListA2AServerItem,
+    ListModelResponse,
+    ListModelItem,
+    PublicModelConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,41 +30,32 @@ router = APIRouter(prefix="/app-config", tags=["设置模块"])
 
 
 @router.get(
-    path="/llm",
-    response_model=Response[LLMConfig],
-    summary="获取LLM配置信息",
-    description="包含LLM提供商的base_url、temperature"
+    path="/models",
+    response_model=Response[ListModelResponse],
+    summary="获取可选模型列表",
+    description="返回当前启用的模型列表与默认模型 ID",
 )
-async def get_llm_config(
-        app_config_service: AppConfigService = Depends(get_app_config_service)
-) -> Response[LLMConfig]:
-    """
-    获取LLM配置信息
-    """
-    llm_config = await app_config_service.get_llm_config()
-    return Response.success(data=llm_config.model_dump(exclude={"api_key"}))
-
-
-@router.post(
-    path="/llm",
-    response_model=Response[LLMConfig],
-    summary="更新LLM配置信息",
-    description="更新LLM配置信息,当api_key为空,不更新该字段"
-)
-async def update_llm_config(
-        new_llm_config: LLMConfig,
-        app_config_service: AppConfigService = Depends(get_app_config_service)
-) -> Response[LLMConfig]:
-    """
-    更新LLM配置信息
-    """
-    updated_llm_config = await app_config_service.update_llm_config(new_llm_config)
+async def get_models(
+        model_config_service: ModelConfigService = Depends(get_model_config_service)
+) -> Response[ListModelResponse]:
+    """获取供前端展示的模型列表"""
+    default_model_id, models = await model_config_service.get_public_models()
     return Response.success(
-        msg="更新LLM配置信息成功",
-        data=updated_llm_config.model_dump(exclude={"api_key"})
+        data=ListModelResponse(
+            default_model_id=default_model_id,
+            models=[
+                ListModelItem(
+                    id=model.id,
+                    display_name=model.display_name,
+                    provider=model.provider,
+                    enabled=model.enabled,
+                    sort_order=model.sort_order,
+                    config=PublicModelConfig.model_validate(model.config),
+                )
+                for model in models
+            ],
+        )
     )
-
-
 @router.get(
     path="/agent",
     response_model=Response[AgentConfig],
@@ -107,7 +107,17 @@ async def get_mcp_servers(
     mcp_servers = await app_config_service.get_mcp_servers()
     return Response.success(
         msg="获取MCP服务器配置信息成功",
-        data=ListMCPServerResponse(mcp_servers=mcp_servers)
+        data=ListMCPServerResponse(
+            mcp_servers=[
+                ListMCPServerItem(
+                    server_name=item.server_name,
+                    enabled=item.enabled,
+                    transport=item.transport,
+                    tools=item.tools,
+                )
+                for item in mcp_servers
+            ]
+        )
     )
 
 
@@ -178,7 +188,21 @@ async def get_a2a_servers(
     a2a_servers = await app_config_service.get_a2a_servers()
     return Response.success(
         msg="获取A2A服务器配置信息成功",
-        data=ListA2AServerResponse(a2a_servers=a2a_servers)
+        data=ListA2AServerResponse(
+            a2a_servers=[
+                ListA2AServerItem(
+                    id=item.id,
+                    name=item.name,
+                    description=item.description,
+                    input_modes=item.input_modes,
+                    output_modes=item.output_modes,
+                    streaming=item.streaming,
+                    push_notifications=item.push_notifications,
+                    enabled=item.enabled,
+                )
+                for item in a2a_servers
+            ]
+        )
     )
 
 

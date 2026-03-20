@@ -1,8 +1,10 @@
 'use client'
 
+import { useMemo } from 'react'
 import {cn} from '@/lib/utils'
 import {Button} from '@/components/ui/button'
-import {suggestedQuestions} from '@/config/app.config'
+import {getSuggestedQuestions} from '@/config/app.config'
+import { useI18n } from '@/lib/i18n'
 
 interface SuggestedQuestionsProps {
   className?: string
@@ -10,6 +12,9 @@ interface SuggestedQuestionsProps {
 }
 
 export function SuggestedQuestions({className, onQuestionClick}: SuggestedQuestionsProps) {
+  const { locale } = useI18n()
+  const suggestedQuestions = useMemo(() => getSuggestedQuestions(locale), [locale])
+
   const handleClick = (question: string) => {
     onQuestionClick?.(question)
   }

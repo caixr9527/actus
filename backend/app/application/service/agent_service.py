@@ -12,7 +12,8 @@ from typing import AsyncGenerator, Optional, List, Type, Callable
 
 from pydantic import TypeAdapter
 
-from app.application.errors import NotFoundError
+from app.application.errors import AppException, NotFoundError
+from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage
 from app.domain.models import (
     BaseEvent,
@@ -40,7 +41,6 @@ class AgentService:
 
     def __init__(
             self,
-            llm: LLM,
             agent_config: AgentConfig,
             mcp_config: MCPConfig,
             a2a_config: A2AConfig,
@@ -49,7 +49,9 @@ class AgentService:
             json_parser: JSONParser,
             search_engine: SearchEngine,
             file_storage: FileStorage,
-            uow_factory: Callable[[], IUnitOfWork]
+            uow_factory: Callable[[], IUnitOfWork],
+            model_runtime_resolver=None,
+            llm_factory=None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -58,7 +60,8 @@ class AgentService:
         self._file_storage = file_storage
         self._uow_factory = uow_factory
         self._mcp_config = mcp_config
-        self._llm = llm
+        self._model_runtime_resolver = model_runtime_resolver
+        self._llm_factory = llm_factory
         self._agent_config = agent_config
         self._a2a_config = a2a_config
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
@@ -69,6 +72,18 @@ class AgentService:
             return None
 
         return self._task_cls.get(task_id=task_id)
+
+    async def _resolve_runtime_llm(self, session: Session) -> LLM:
+        """根据会话当前模型解析运行时 LLM。"""
+        model_runtime_resolver = getattr(self, "_model_runtime_resolver", None)
+        llm_factory = getattr(self, "_llm_factory", None)
+        if model_runtime_resolver is not None and llm_factory is not None:
+            resolved_model_id, llm_config = await model_runtime_resolver.resolve(session)
+            logger.info(
+                f"会话{session.id}运行时模型解析完成: requested={session.current_model_id}, resolved={resolved_model_id}")
+            return llm_factory.create(llm_config)
+
+        raise RuntimeError("未配置运行时LLM解析能力")
 
     async def _create_task(self, session: Session) -> Task:
         # 获取沙箱实例。
@@ -92,13 +107,16 @@ class AgentService:
             logger.error(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
             raise RuntimeError(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
 
+        llm = await self._resolve_runtime_llm(session)
+
         # 创建任务运行器
         task_runner = AgentTaskRunner(
-            llm=self._llm,
+            llm=llm,
             agent_config=self._agent_config,
             mcp_config=self._mcp_config,
             a2a_config=self._a2a_config,
             session_id=session.id,
+            user_id=session.user_id,
             uow_factory=self._uow_factory,
             file_storage=self._file_storage,
             json_parser=self._json_parser,
@@ -179,6 +197,7 @@ class AgentService:
     async def chat(
             self,
             session_id: str,
+            user_id: str,
             message: Optional[str] = None,
             attachments: Optional[List[str]] = None,
             latest_event_id: Optional[str] = None,
@@ -187,10 +206,14 @@ class AgentService:
         try:
             # 获取会话信息
             async with self._uow_factory() as uow:
-                session = await uow.session.get_by_id(session_id=session_id)
+                session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
             if not session:
                 logger.error(f"会话{session_id}不存在")
-                raise NotFoundError(msg=f"会话{session_id}不存在")
+                raise NotFoundError(
+                    msg=f"会话{session_id}不存在",
+                    error_key=error_keys.SESSION_NOT_FOUND,
+                    error_params={"session_id": session_id},
+                )
 
             # 获取当前会话的任务实例
             task = await self._get_task(session)
@@ -210,7 +233,17 @@ class AgentService:
                 # 先查询附件元数据，构建完整消息事件。
                 # 该步骤为只读，不涉及会话投影写入，因此不会产生“先写latest_message”的窗口。
                 async with self._uow_factory() as uow:
-                    db_attachments = [await uow.file.get_by_id(file_id) for file_id in attachments]
+                    db_attachments = []
+                    for file_id in attachments:
+                        attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
+                        if attachment is not None:
+                            db_attachments.append(attachment)
+                        else:
+                            raise NotFoundError(
+                                msg=f"该文件[{file_id}]不存在",
+                                error_key=error_keys.FILE_NOT_FOUND,
+                                error_params={"file_id": file_id},
+                            )
 
                 # 创建用户消息事件
                 message_event = MessageEvent(
@@ -285,7 +318,11 @@ class AgentService:
         except Exception as e:
             # 处理异常情况，记录错误日志并返回错误事件
             logger.error(f"会话{session_id}的聊天请求失败: {e}")
-            event = ErrorEvent(error=str(e))
+            event = ErrorEvent(
+                error=str(e),
+                error_key=e.error_key if isinstance(e, AppException) else None,
+                error_params=e.error_params if isinstance(e, AppException) else None,
+            )
             try:
                 async with self._uow_factory() as uow:
                     await uow.session.add_event(session_id, event)
@@ -307,14 +344,18 @@ class AgentService:
                 # 事件循环已关闭（如应用正在关闭），无法创建后台任务
                 logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
 
-    async def stop_session(self, session_id: str) -> None:
+    async def stop_session(self, session_id: str, user_id: str) -> None:
         # 获取指定会话的信息
         async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=session_id)
+            session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
         # 如果会话不存在，记录错误日志并抛出异常
         if not session:
             logger.error(f"会话{session_id}不存在")
-            raise NotFoundError(msg=f"会话{session_id}不存在")
+            raise NotFoundError(
+                msg=f"会话{session_id}不存在",
+                error_key=error_keys.SESSION_NOT_FOUND,
+                error_params={"session_id": session_id},
+            )
 
         # 获取与会话关联的任务实例
         task = await self._get_task(session)

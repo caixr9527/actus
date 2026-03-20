@@ -8,13 +8,14 @@
 import uuid
 from typing import List
 
-from app.application.errors import NotFoundError
-from app.domain.models import AppConfig, LLMConfig, AgentConfig, MCPConfig
+from app.application.contracts import MCPServerItemResult, A2AServerItemResult
+from app.application.errors import NotFoundError, ServerError
+from app.application.errors import error_keys
+from app.domain.models import AppConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig, A2AServerConfig
 from app.domain.repositories import AppConfigRepository
 from app.domain.services.tools import MCPClientManager
 from app.domain.services.tools.a2a import A2AClientManager
-from app.interfaces.schemas import ListMCPServerItem, ListA2AServerItem
 
 
 class AppConfigService:
@@ -31,37 +32,6 @@ class AppConfigService:
             AppConfig: 应用配置对象
         """
         return self.app_config_repository.load()
-
-    async def get_llm_config(self) -> LLMConfig:
-        """
-        获取LLM配置
-        
-        Returns:
-            LLMConfig: LLM配置对象
-        """
-        app_config = await self._load_app_config()
-        return app_config.llm_config
-
-    async def update_llm_config(self, llm_config: LLMConfig) -> LLMConfig:
-        """
-        更新LLM配置
-        
-        Args:
-            llm_config (LLMConfig): 新的LLM配置对象
-            
-        Returns:
-            LLMConfig: 更新后的LLM配置对象
-        """
-        app_config = await self._load_app_config()
-
-        # 如果新的api_key为空，则保留原有的api_key
-        if not llm_config.api_key.strip():
-            llm_config.api_key = app_config.llm_config.api_key
-        app_config.llm_config = llm_config
-
-        self.app_config_repository.save(app_config)
-
-        return app_config.llm_config
 
     async def get_agent_config(self) -> AgentConfig:
         """
@@ -88,7 +58,7 @@ class AppConfigService:
         self.app_config_repository.save(app_config)
         return app_config.agent_config
 
-    async def get_mcp_servers(self) -> List[ListMCPServerItem]:
+    async def get_mcp_servers(self) -> List[MCPServerItemResult]:
         """
         获取MCP服务器配置
 
@@ -108,12 +78,19 @@ class AppConfigService:
             # 遍历所有MCP服务器配置
             for server_name, server_config in app_config.mcp_config.mcpServers.items():
                 # 构造每个服务器的响应数据，包括服务器名称、启用状态、传输方式和工具列表
-                mcp_servers.append(ListMCPServerItem(
+                mcp_servers.append(MCPServerItemResult(
                     server_name=server_name,
                     enabled=server_config.enabled,
                     transport=server_config.transport,
                     tools=[tool.name for tool in tools.get(server_name, [])]
                 ))
+        except Exception as e:
+            # domain层异常在application层完成语义映射，避免异常语义向内层泄漏。
+            raise ServerError(
+                msg="加载MCP服务器配置失败，请稍后重试",
+                error_key=error_keys.APP_CONFIG_MCP_SERVERS_LOAD_FAILED,
+                error_params={"reason": str(e)},
+            ) from e
         finally:
             # 清理MCP客户端管理器资源
             await mcp_client_manager.cleanup()
@@ -152,7 +129,11 @@ class AppConfigService:
         app_config = await self._load_app_config()
         # 检查要删除的MCP服务器是否存在
         if server_name not in app_config.mcp_config.mcpServers:
-            raise NotFoundError(f"MCP服务器 {server_name} 不存在")
+            raise NotFoundError(
+                msg=f"MCP服务器 {server_name} 不存在",
+                error_key=error_keys.APP_CONFIG_MCP_SERVER_NOT_FOUND,
+                error_params={"server_name": server_name},
+            )
 
         # 从配置中删除指定的MCP服务器
         del app_config.mcp_config.mcpServers[server_name]
@@ -166,7 +147,11 @@ class AppConfigService:
         app_config = await self._load_app_config()
         # 检查要删除的MCP服务器是否存在
         if server_name not in app_config.mcp_config.mcpServers:
-            raise NotFoundError(f"MCP服务器 {server_name} 不存在")
+            raise NotFoundError(
+                msg=f"MCP服务器 {server_name} 不存在",
+                error_key=error_keys.APP_CONFIG_MCP_SERVER_NOT_FOUND,
+                error_params={"server_name": server_name},
+            )
 
         # 设置指定MCP服务器的启用状态
         app_config.mcp_config.mcpServers[server_name].enabled = enabled
@@ -190,7 +175,7 @@ class AppConfigService:
         self.app_config_repository.save(app_config)
         return app_config.a2a_config
 
-    async def get_a2a_servers(self) -> List[ListA2AServerItem]:
+    async def get_a2a_servers(self) -> List[A2AServerItemResult]:
         """获取A2A服务列表"""
         app_config = await self._load_app_config()
 
@@ -203,7 +188,7 @@ class AppConfigService:
             agent_cards = a2a_client_manager.agent_cards
 
             for id, agent_card in agent_cards.items():
-                a2a_servers.append(ListA2AServerItem(
+                a2a_servers.append(A2AServerItemResult(
                     id=id,
                     name=agent_card.get("name", ""),
                     description=agent_card.get("description", ""),
@@ -213,6 +198,13 @@ class AppConfigService:
                     push_notifications=agent_card.get("capabilities", {}).get("push_notifications", False),
                     enabled=agent_card.get("enabled", False),
                 ))
+        except Exception as e:
+            # domain层异常在application层完成语义映射，避免异常语义向内层泄漏。
+            raise ServerError(
+                msg="加载A2A服务列表失败，请稍后重试",
+                error_key=error_keys.APP_CONFIG_A2A_SERVERS_LOAD_FAILED,
+                error_params={"reason": str(e)},
+            ) from e
         finally:
             await a2a_client_manager.cleanup()
 
@@ -233,7 +225,11 @@ class AppConfigService:
 
         # 如果未找到对应的A2A服务器，抛出NotFoundError异常
         if idx is None:
-            raise NotFoundError(f"该A2A服务[{a2a_id}]不存在，请核实后重试")
+            raise NotFoundError(
+                msg=f"该A2A服务[{a2a_id}]不存在，请核实后重试",
+                error_key=error_keys.APP_CONFIG_A2A_SERVER_NOT_FOUND,
+                error_params={"a2a_id": a2a_id},
+            )
 
         # 更新A2A服务器的启用状态
         app_config.a2a_config.a2a_servers[idx].enabled = enabled
@@ -257,7 +253,11 @@ class AppConfigService:
 
         # 如果未找到对应的A2A服务器，抛出NotFoundError异常
         if idx is None:
-            raise NotFoundError(f"该A2A服务[{a2a_id}]不存在，请核实后重试")
+            raise NotFoundError(
+                msg=f"该A2A服务[{a2a_id}]不存在，请核实后重试",
+                error_key=error_keys.APP_CONFIG_A2A_SERVER_NOT_FOUND,
+                error_params={"a2a_id": a2a_id},
+            )
 
         # 根据索引删除A2A服务器配置
         del app_config.a2a_config.a2a_servers[idx]

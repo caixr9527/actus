@@ -47,7 +47,19 @@ class GetSessionResponse(BaseModel):
     session_id: str
     title: Optional[str] = None
     status: SessionStatus
+    current_model_id: Optional[str] = None
     events: List[AgentSSEEvent] = Field(default_factory=list)
+
+
+class UpdateSessionModelRequest(BaseModel):
+    """更新会话模型请求结构"""
+    model_id: str
+
+
+class UpdateSessionModelResponse(BaseModel):
+    """更新会话模型响应结构"""
+    session_id: str
+    current_model_id: str
 
 
 class GetSessionFilesResponse(BaseModel):

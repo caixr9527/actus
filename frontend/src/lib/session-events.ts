@@ -16,6 +16,9 @@ import type {
   ToolEvent,
   SessionFile,
 } from "./api/types";
+import { getApiErrorMessageFromPayload } from "./api/error-i18n";
+import { translateRuntime } from "./i18n/runtime";
+import type { AppLocale } from "./i18n";
 
 /** 后端返回的原始事件（可能用 event 或 type 表示类型） */
 type RawEvent = { event?: string; type?: string; data?: unknown };
@@ -115,7 +118,10 @@ export function createTimelineBuildContext(): TimelineBuildContext {
 }
 
 /** 将时间戳格式化为相对时间，如 2天前、刚刚 */
-function formatTimeLabel(ts: number | string | undefined): string | undefined {
+function formatTimeLabel(
+  ts: number | string | undefined,
+  locale: AppLocale = "zh-CN",
+): string | undefined {
   if (ts === undefined || ts === null) return undefined;
   let t = typeof ts === "string" ? parseInt(ts, 10) : ts;
   if (Number.isNaN(t)) return undefined;
@@ -127,21 +133,37 @@ function formatTimeLabel(ts: number | string | undefined): string | undefined {
   
   const now = Date.now();
   const diff = now - t;
-  if (diff < 0) return "刚刚";
-  if (diff < 60 * 1000) return "刚刚";
-  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / (60 * 1000))}分钟前`;
-  if (diff < 24 * 60 * 60 * 1000) return `${Math.floor(diff / (60 * 60 * 1000))}小时前`;
-  if (diff < 2 * 24 * 60 * 60 * 1000) return "昨天";
-  if (diff < 7 * 24 * 60 * 60 * 1000) return `${Math.floor(diff / (24 * 60 * 60 * 1000))}天前`;
-  if (diff < 30 * 24 * 60 * 60 * 1000) return `${Math.floor(diff / (7 * 24 * 60 * 60 * 1000))}周前`;
+  const justNow = locale === "en-US" ? "Just now" : "刚刚";
+  if (diff < 0) return justNow;
+  if (diff < 60 * 1000) return justNow;
+  if (diff < 60 * 60 * 1000) {
+    const minutes = Math.floor(diff / (60 * 1000));
+    return locale === "en-US" ? `${minutes}m ago` : `${minutes}分钟前`;
+  }
+  if (diff < 24 * 60 * 60 * 1000) {
+    const hours = Math.floor(diff / (60 * 60 * 1000));
+    return locale === "en-US" ? `${hours}h ago` : `${hours}小时前`;
+  }
+  if (diff < 2 * 24 * 60 * 60 * 1000) return locale === "en-US" ? "Yesterday" : "昨天";
+  if (diff < 7 * 24 * 60 * 60 * 1000) {
+    const days = Math.floor(diff / (24 * 60 * 60 * 1000));
+    return locale === "en-US" ? `${days}d ago` : `${days}天前`;
+  }
+  if (diff < 30 * 24 * 60 * 60 * 1000) {
+    const weeks = Math.floor(diff / (7 * 24 * 60 * 60 * 1000));
+    return locale === "en-US" ? `${weeks}w ago` : `${weeks}周前`;
+  }
   return undefined;
 }
 
-export function getToolTimeLabel(tool: ToolEvent): string | undefined {
+export function getToolTimeLabel(
+  tool: ToolEvent,
+  locale: AppLocale = "zh-CN",
+): string | undefined {
   const ts = (tool as { timestamp?: number; created_at?: number; ts?: number }).timestamp
     ?? (tool as { created_at?: number }).created_at
     ?? (tool as { ts?: number }).ts;
-  return formatTimeLabel(ts);
+  return formatTimeLabel(ts, locale);
 }
 
 function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): void {
@@ -227,7 +249,11 @@ function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
   }
 }
 
-function appendToolEvent(context: TimelineBuildContext, tool: ToolEvent): void {
+function appendToolEvent(
+  context: TimelineBuildContext,
+  tool: ToolEvent,
+  locale: AppLocale,
+): void {
   const toolCallId = (tool as { tool_call_id?: string }).tool_call_id;
   const activeStepId = context.lastStepId;
 
@@ -278,20 +304,37 @@ function appendToolEvent(context: TimelineBuildContext, tool: ToolEvent): void {
     kind: "tool",
     id: stableId("tool", context.toolIndex++, (tool.name || "") + (tool.function || "")),
     data: tool,
-    timeLabel: getToolTimeLabel(tool),
+    timeLabel: getToolTimeLabel(tool, locale),
   });
   if (toolCallId != null) {
     context.standaloneToolIndexByCallId.set(toolCallId, nextIdx);
   }
 }
 
-function appendErrorEvent(context: TimelineBuildContext, data: unknown): void {
-  const errorData = data as { error?: string; created_at?: number; event_id?: string; [key: string]: unknown };
-  if (!errorData.error) return;
+function appendErrorEvent(
+  context: TimelineBuildContext,
+  data: unknown,
+  locale: AppLocale,
+): void {
+  const errorData = data as {
+    error?: string;
+    error_key?: string | null;
+    error_params?: Record<string, unknown> | null;
+    created_at?: number;
+    event_id?: string;
+    [key: string]: unknown;
+  };
+  if (!errorData.error && !errorData.error_key) return;
   context.list.push({
     kind: "error",
     id: stableId("error", context.errorIndex++, String(context.list.length)),
-    error: errorData.error,
+    error: errorData.error_key
+      ? getApiErrorMessageFromPayload(
+          errorData,
+          "sessionDetail.streamError",
+          (key, params) => translateRuntime(key, params, locale),
+        )
+      : translateRuntime("sessionDetail.streamError", undefined, locale),
     timestamp: errorData.created_at,
   });
 }
@@ -300,7 +343,11 @@ function appendErrorEvent(context: TimelineBuildContext, data: unknown): void {
  * 将单条 SSE 事件增量归并到时间线 context。
  * 适用于 append-only 的事件流场景，可避免每次全量重算。
  */
-export function appendTimelineEvent(context: TimelineBuildContext, ev: SSEEventData): void {
+export function appendTimelineEvent(
+  context: TimelineBuildContext,
+  ev: SSEEventData,
+  locale: AppLocale = "zh-CN",
+): void {
   switch (ev.type) {
     case "message":
       appendMessageEvent(context, ev.data as ChatMessage);
@@ -309,10 +356,10 @@ export function appendTimelineEvent(context: TimelineBuildContext, ev: SSEEventD
       appendStepEvent(context, ev.data as StepEvent);
       break;
     case "tool":
-      appendToolEvent(context, ev.data as ToolEvent);
+      appendToolEvent(context, ev.data as ToolEvent, locale);
       break;
     case "error":
-      appendErrorEvent(context, ev.data);
+      appendErrorEvent(context, ev.data, locale);
       break;
     case "title":
     case "plan":
@@ -342,17 +389,22 @@ function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildC
 
 let timelineCacheEvents: SSEEventData[] | null = null;
 let timelineCacheContext: TimelineBuildContext | null = null;
+let timelineCacheLocale: AppLocale = "zh-CN";
 
 /**
  * 将 SSE 事件列表归并为时间线展示项（顺序与设计一致）
  */
-export function eventsToTimeline(events: SSEEventData[]): TimelineItem[] {
+export function eventsToTimeline(
+  events: SSEEventData[],
+  locale: AppLocale = "zh-CN",
+): TimelineItem[] {
   const cachedEvents = timelineCacheEvents;
   const cachedContext = timelineCacheContext;
 
   const isAppendOnly =
     cachedEvents !== null &&
     cachedContext !== null &&
+    timelineCacheLocale === locale &&
     events.length > cachedEvents.length &&
     (cachedEvents.length === 0 ||
       (
@@ -367,11 +419,12 @@ export function eventsToTimeline(events: SSEEventData[]): TimelineItem[] {
   const startIndex = isAppendOnly && cachedEvents ? cachedEvents.length : 0;
   for (let i = startIndex; i < events.length; i++) {
     const ev = events[i];
-    appendTimelineEvent(context, ev);
+    appendTimelineEvent(context, ev, locale);
   }
 
   timelineCacheEvents = events;
   timelineCacheContext = context;
+  timelineCacheLocale = locale;
   return context.list;
 }
 

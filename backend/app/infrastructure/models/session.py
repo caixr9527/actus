@@ -7,13 +7,14 @@
 """
 import uuid
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from sqlalchemy import (
     String,
     Integer,
     DateTime,
     Text,
+    Index,
     text,
     PrimaryKeyConstraint,
 )
@@ -29,6 +30,7 @@ class SessionModel(Base):
     __tablename__ = "sessions"
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_sessions_id"),
+        Index("ix_sessions_user_id", "user_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -37,6 +39,14 @@ class SessionModel(Base):
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
     )  # 会话id
+    user_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 关联用户id，兼容历史未认领会话（逻辑关联，不使用数据库外键）
+    current_model_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 当前会话显式选择的模型id，NULL表示走默认模型
     sandbox_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 沙箱id
     task_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 任务id
     title: Mapped[str] = mapped_column(

@@ -12,7 +12,6 @@ from typing import Optional, Any, Dict
 
 import httpx
 
-from app.application.errors import BadRequestError
 from app.domain.models import ToolResult
 from app.domain.models.app_config import A2AConfig
 from .base import BaseTool, tool
@@ -48,7 +47,7 @@ class A2AClientManager:
             logger.info(f"A2A客户端初始化成功")
         except Exception as e:
             logger.error(f"A2A客户端初始化失败: {e}")
-            raise BadRequestError("A2A客户端初始化失败")
+            raise
 
     async def _get_a2a_agent_cards(self) -> None:
         for a2a_server_config in self._a2a_config.a2a_servers:

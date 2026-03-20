@@ -38,10 +38,13 @@ test('eventsToTimeline should merge tool updates and reset step context across u
     eventOf('step', { id: 'step-1', status: 'completed', description: 'phase 1' }),
     eventOf('message', { role: 'user', message: 'second question' }),
     eventOf('step', { id: 'step-1', status: 'running', description: 'phase 2' }),
-    eventOf('error', { error: 'broken' }),
+    eventOf('error', {
+      error: 'broken',
+      error_key: 'error.session.not_found',
+    }),
   ]
 
-  const timeline = eventsToTimeline(events)
+  const timeline = eventsToTimeline(events, 'en-US')
 
   const stepItems = timeline.filter((item) => item.kind === 'step')
   assert.equal(stepItems.length, 2)
@@ -67,7 +70,7 @@ test('eventsToTimeline should merge tool updates and reset step context across u
   const errorItems = timeline.filter((item) => item.kind === 'error')
   assert.equal(errorItems.length, 1)
   if (errorItems[0]?.kind === 'error') {
-    assert.equal(errorItems[0].error, 'broken')
+    assert.equal(errorItems[0].error, 'This task session does not exist or has been deleted')
   }
 })
 
@@ -94,7 +97,7 @@ test('appendTimelineEvent should match full timeline build in append-only stream
     eventOf('message', { role: 'assistant', message: 'answer' }),
     eventOf('message', { role: 'user', message: 'q2' }),
     eventOf('step', { id: 's-1', status: 'running', description: 'step 2 running' }),
-    eventOf('error', { error: 'boom' }),
+    eventOf('error', { error: 'boom', error_key: 'error.session.sandbox_unavailable' }),
   ]
 
   const context = createTimelineBuildContext()

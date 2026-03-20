@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { PlanPanel } from '@/components/plan-panel'
@@ -18,11 +18,14 @@ import {
 } from '@/lib/session-events'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
+import { useAuth } from '@/hooks/use-auth'
+import { getApiErrorMessage, isApiErrorKey } from '@/lib/api'
 import type { ToolEvent, FileInfo } from '@/lib/api/types'
 import type { AttachmentFile, TimelineItem } from '@/lib/session-events'
 import { sessionApi } from '@/lib/api/session'
 import { toast } from 'sonner'
 import { Loader2 } from 'lucide-react'
+import { useI18n } from '@/lib/i18n'
 
 export interface SessionDetailViewProps {
   sessionId: string
@@ -64,20 +67,33 @@ const TIMELINE_WINDOW_SIZE = 120
 
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const { locale, t } = useI18n()
+  const { isHydrated, isLoggedIn } = useAuth()
   const isMobile = useIsMobile()
+  const currentPath = useMemo(() => {
+    const query = searchParams.toString()
+    return query ? `${pathname}?${query}` : pathname
+  }, [pathname, searchParams])
   const {
     session,
     files,
+    availableModels,
+    defaultModelId,
     events,
     loading,
+    modelsLoading,
+    modelUpdating,
     error,
     refresh,
     refreshFiles,
+    updateSessionModel,
     sendMessage,
     streaming,
-  } = useSessionDetail(sessionId, hasInitialMessage)
+  } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
-  const timeline = useMemo(() => eventsToTimeline(events), [events])
+  const timeline = useMemo(() => eventsToTimeline(events, locale), [events, locale])
   const planSteps = useMemo(() => getLatestPlanFromEvents(events), [events])
 
   const [fileListOpen, setFileListOpen] = useState(false)
@@ -88,6 +104,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const initialMessageSentRef = useRef(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevToolCountRef = useRef(0)
+
+  useEffect(() => {
+    if (!isHydrated || isLoggedIn) {
+      return
+    }
+    router.replace(`/?auth=login&redirect=${encodeURIComponent(currentPath)}`)
+  }, [currentPath, isHydrated, isLoggedIn, router])
 
   const hasPreview = previewFile !== null || previewTool !== null
   const showFullTimeline = expandedTimelineSessionId === sessionId
@@ -155,9 +178,9 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
         removeInitQueryParamFromUrl()
       })
       .catch((e) => {
-        toast.error(e instanceof Error ? e.message : '发送消息失败')
+        toast.error(getApiErrorMessage(e, 'sessionDetail.sendInitialFailed', t))
       })
-  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage])
+  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage, t])
 
   const handleSend = useCallback(
     async (message: string, uploadedFiles: FileInfo[]) => {
@@ -165,11 +188,18 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
         const attachmentIds = uploadedFiles.map((f) => f.id)
         await sendMessage(message, attachmentIds)
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : '发送失败，请重试')
+        toast.error(getApiErrorMessage(e, 'sessionDetail.sendFailed', t))
         throw e
       }
     },
-    [sendMessage]
+    [sendMessage, t]
+  )
+
+  const handleModelChange = useCallback(
+    async (modelId: string) => {
+      await updateSessionModel(modelId)
+    },
+    [updateSessionModel],
   )
 
   const handleViewAllFiles = useCallback(() => {
@@ -224,12 +254,12 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     if (!session) return
     try {
       await sessionApi.stopSession(sessionId)
-      toast.success('任务已停止')
+      toast.success(t('sessionDetail.stopSuccess'))
       refresh()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '停止任务失败')
+      toast.error(getApiErrorMessage(error, 'sessionDetail.stopFailed', t))
     }
-  }, [session, sessionId, refresh])
+  }, [session, sessionId, refresh, t])
 
   const handleRealtimeRecover = useCallback(() => {
     void refresh()
@@ -238,13 +268,36 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const isSessionNotFoundError = Boolean(
     error &&
     (
-      (error as { code?: number }).code === 404 ||
-      /\b404\b|not found|不存在|未找到/i.test(error.message)
+      isApiErrorKey(error, 'error.session.not_found') ||
+      (error as { code?: number }).code === 404
     )
   )
+  const errorMessage = error ? getApiErrorMessage(error, 'sessionDetail.loadFailed', t) : null
 
   const shouldShowThinking =
     streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
+
+  if (!isHydrated) {
+    return (
+      <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
+        <p className="text-sm text-gray-500">{t('common.loading')}</p>
+      </div>
+    )
+  }
+
+  if (!isLoggedIn) {
+    return (
+      <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center">
+        <div className="w-full max-w-[420px] rounded-2xl border bg-white px-6 py-7 text-center shadow-sm">
+          <p className="text-base font-medium text-gray-700">{t('sessionDetail.loginRequired')}</p>
+          <div className="mt-3 inline-flex items-center gap-2 text-sm text-gray-500">
+            <Loader2 className="size-4 animate-spin" />
+            <span>{t('sessionDetail.openingLogin')}</span>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   if (loading && !session) {
     return (
@@ -252,10 +305,10 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
         {hasInitialMessage ? (
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <Loader2 className="size-4 animate-spin" />
-            <span>正在思考中...</span>
+            <span>{t('sessionDetail.thinking')}</span>
           </div>
         ) : (
-          <p className="text-sm text-gray-500">加载中...</p>
+          <p className="text-sm text-gray-500">{t('common.loading')}</p>
         )}
       </div>
     )
@@ -265,9 +318,9 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     if (isSessionNotFoundError) {
       return (
         <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center gap-3">
-          <p className="text-base text-gray-700">任务会话不存在或已被删除</p>
+          <p className="text-base text-gray-700">{t('sessionDetail.sessionNotFoundTitle')}</p>
           <p className="text-sm text-gray-500 text-center">
-            你可以返回首页发起新任务，或稍后重试。
+            {t('sessionDetail.sessionNotFoundDescription')}
           </p>
           <div className="flex items-center gap-2">
             <Button
@@ -277,7 +330,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
               className="cursor-pointer"
               onClick={() => refresh()}
             >
-              重试
+              {t('common.retry')}
             </Button>
             <Button
               type="button"
@@ -285,7 +338,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
               className="cursor-pointer"
               onClick={() => router.push('/')}
             >
-              返回首页
+              {t('sessionDetail.backHome')}
             </Button>
           </div>
         </div>
@@ -294,13 +347,17 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
     return (
       <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center gap-2">
-        <p className="text-sm text-red-600">加载任务失败：{error.message}</p>
+        <p className="text-sm text-red-600">
+          {t('sessionDetail.loadSessionFailed', {
+            message: errorMessage ?? t('sessionDetail.loadFailed'),
+          })}
+        </p>
         <button
           type="button"
           onClick={() => refresh()}
           className="text-sm text-primary underline"
         >
-          重试
+          {t('common.retry')}
         </button>
       </div>
     )
@@ -309,13 +366,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   if (!session) {
     return (
       <div className="relative flex flex-col h-full flex-1 min-w-0 px-4 items-center justify-center gap-3">
-        <p className="text-sm text-gray-500">未找到该任务</p>
+        <p className="text-sm text-gray-500">{t('sessionDetail.notFound')}</p>
         <button
           type="button"
           className="text-sm text-primary underline underline-offset-2 cursor-pointer"
           onClick={() => router.push('/')}
         >
-          返回首页
+          {t('sessionDetail.backHome')}
         </button>
       </div>
     )
@@ -341,13 +398,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
             {error && (
               <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                 <div className="flex items-center justify-between gap-2">
-                  <span>{error.message}</span>
+                  <span>{errorMessage}</span>
                   <button
                     type="button"
                     className="text-amber-900 underline underline-offset-2 cursor-pointer"
                     onClick={handleRealtimeRecover}
                   >
-                    重试
+                    {t('common.retry')}
                   </button>
                 </div>
               </div>
@@ -362,7 +419,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                       className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
                       onClick={() => setExpandedTimelineSessionId(sessionId)}
                     >
-                      显示更早的 {hiddenTimelineCount} 条记录
+                      {t('sessionDetail.showEarlierRecords', { count: hiddenTimelineCount })}
                     </button>
                   </div>
                 )}
@@ -373,13 +430,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                       className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
                       onClick={() => setExpandedTimelineSessionId(null)}
                     >
-                      仅显示最近 {TIMELINE_WINDOW_SIZE} 条
+                      {t('sessionDetail.showRecentRecords', { count: TIMELINE_WINDOW_SIZE })}
                     </button>
                   </div>
                 )}
                 {timeline.length === 0 && !streaming && !hasInitialMessage && (
                   <div className="flex items-center justify-center py-8 text-sm text-gray-500">
-                    暂无对话记录，在下方输入任务或提问
+                    {t('sessionDetail.emptyTimeline')}
                   </div>
                 )}
                 {visibleTimeline.map((item) => (
@@ -395,7 +452,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                 {shouldShowThinking && (
                   <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
                     <Loader2 className="size-4 animate-spin" />
-                    <span>正在思考中...</span>
+                    <span>{t('sessionDetail.thinking')}</span>
                   </div>
                 )}
 
@@ -410,6 +467,12 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                 sessionId={sessionId}
                 isRunning={session?.status === 'running'}
                 onStop={handleStop}
+                modelOptions={availableModels}
+                currentModelId={session.current_model_id}
+                defaultModelId={defaultModelId}
+                modelsLoading={modelsLoading}
+                modelUpdating={modelUpdating}
+                onModelChange={handleModelChange}
               />
             </div>
           </div>

@@ -13,6 +13,7 @@ import {Item, ItemActions, ItemContent, ItemDescription, ItemMedia} from '@/comp
 import {Avatar, AvatarGroupCount} from '@/components/ui/avatar'
 import {cn, formatRelativeDate} from '@/lib/utils'
 import type {Session} from '@/lib/api'
+import { useI18n } from '@/lib/i18n'
 
 type SessionItemProps = {
   session: Session
@@ -26,6 +27,7 @@ type SessionItemProps = {
  * 展示会话标题、描述、时间及操作菜单
  */
 export function SessionItem({session, isActive, onClick, onDelete}: SessionItemProps) {
+  const { locale, t } = useI18n()
   const handleClick = useCallback(() => {
     onClick(session.session_id)
   }, [onClick, session.session_id])
@@ -35,8 +37,8 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
     onDelete(session)
   }, [onDelete, session])
 
-  const description = session.latest_message || '暂无消息'
-  const dateLabel = formatRelativeDate(session.latest_message_at)
+  const description = session.latest_message || t('sessionItem.noMessage')
+  const dateLabel = formatRelativeDate(session.latest_message_at, locale)
   const isRunning = session.status === 'running' || session.status === 'waiting'
 
   return (
@@ -58,7 +60,7 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
       {/* 中间内容 */}
       <ItemContent className="gap-0 min-w-0">
         <p className="text-sm font-medium truncate">
-          {session.title || '新任务'}
+          {session.title || t('session.newTask')}
         </p>
         <p className="text-xs text-muted-foreground truncate">
           {description}
@@ -85,7 +87,7 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
               onClick={handleDelete}
             >
               <Trash/>
-              删除
+              {t('session.delete')}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

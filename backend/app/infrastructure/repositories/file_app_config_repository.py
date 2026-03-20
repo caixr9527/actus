@@ -13,7 +13,8 @@ import yaml
 from filelock import FileLock
 
 from app.application.errors.exceptions import ServerError
-from app.domain.models import AppConfig, LLMConfig, AgentConfig, MCPConfig
+from app.application.errors import error_keys
+from app.domain.models import AppConfig, AgentConfig, MCPConfig
 from app.domain.models.app_config import A2AConfig
 from app.domain.repositories import AppConfigRepository
 
@@ -35,7 +36,6 @@ class FileAppConfigRepository(AppConfigRepository):
         """创建文件"""
         if not self._config_path.exists():
             default_app_config = AppConfig(
-                llm_config=LLMConfig(),
                 agent_config=AgentConfig(),
                 mcp_config=MCPConfig(),
                 a2a_config=A2AConfig(),
@@ -49,10 +49,16 @@ class FileAppConfigRepository(AppConfigRepository):
         try:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    data.pop("llm_config", None)
                 return AppConfig.model_validate(data) if data else None
         except Exception as e:
             logger.error(f"读取应用配置文件失败: {e}")
-            raise ServerError("读取应用配置文件失败，请稍后尝试")
+            raise ServerError(
+                "读取应用配置文件失败，请稍后尝试",
+                error_key=error_keys.APP_CONFIG_LOAD_FAILED,
+                error_params={"config_path": str(self._config_path)},
+            )
 
     def save(self, app_config: AppConfig) -> None:
         """保存应用配置"""
@@ -65,4 +71,8 @@ class FileAppConfigRepository(AppConfigRepository):
                     yaml.dump(data_to_dum, f, allow_unicode=True, sort_keys=False)
         except TimeoutError:
             logger.error("获取应用配置文件锁失败")
-            raise ServerError("保存应用配置文件失败，请稍后尝试")
+            raise ServerError(
+                "保存应用配置文件失败，请稍后尝试",
+                error_key=error_keys.APP_CONFIG_SAVE_FAILED,
+                error_params={"config_path": str(self._config_path)},
+            )

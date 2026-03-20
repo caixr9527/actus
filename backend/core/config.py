@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     auto_run_db_migrations: bool = True
     db_migration_log_interval_seconds: float = 3.0
     cors_allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
-    cors_allow_credentials: bool = False
+    cors_allow_credentials: bool = True
 
     sqlalchemy_database_uri: str = "postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/actus"
 
@@ -32,6 +32,33 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_db: int = 0
     redis_password: str | None = None
+
+    auth_jwt_secret: str = "change-this-to-a-secure-random-secret"
+    auth_jwt_algorithm: str = "HS256"
+    auth_access_token_expires_in: int = 30 * 60
+    auth_refresh_token_expires_in: int = 7 * 24 * 60 * 60
+    auth_register_code_expires_in: int = 5 * 60
+    auth_register_code_length: int = 6
+    auth_login_rate_limit_max_attempts: int = 10
+    auth_login_rate_limit_window_seconds: int = 5 * 60
+    auth_send_code_rate_limit_max_attempts: int = 10
+    auth_send_code_rate_limit_window_seconds: int = 5 * 60
+    # 是否强制认证相关接口必须通过 HTTPS 访问。
+    # 本地开发（纯 HTTP）可关闭，测试/生产环境建议开启。
+    auth_require_https: bool = False
+    # 刷新令牌 Cookie 配置
+    auth_cookie_name: str = "actus_refresh_token"
+    auth_cookie_domain: Optional[str] = None
+    auth_cookie_path: str = "/api/auth"
+    auth_cookie_secure: bool = False
+    auth_cookie_http_only: bool = True
+    auth_cookie_samesite: str = "lax"
+
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
 
     cos_region: str = "ap-guangzhou"
     cos_secret_id: str = ""
@@ -60,6 +87,16 @@ class Settings(BaseSettings):
     def is_log_output_all(self) -> bool:
         """判断是否为 all 模式"""
         return self.log_output_mode.strip().lower() == "all"
+
+    @property
+    def is_production_env(self) -> bool:
+        """判断是否为生产环境"""
+        return self.env.strip().lower() in {"production", "prod"}
+
+    @property
+    def auth_register_verification_enabled(self) -> bool:
+        """注册是否强制邮箱验证码（仅生产环境开启）"""
+        return self.is_production_env
 
     @property
     def log_output_allowed_logger_prefixes(self) -> tuple[str, ...]:

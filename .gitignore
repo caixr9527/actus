@@ -206,3 +206,14 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .DS_Store
+.agentdocs/
+AGENTS.md
+# keep project lib directories tracked
+!frontend/src/lib/
+!frontend/src/lib/**
+!backend/app/lib/
+!backend/app/lib/**
+
+# local backend runtime config
+backend/config.lock
+backend/config.yaml

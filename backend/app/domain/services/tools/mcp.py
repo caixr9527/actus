@@ -14,7 +14,6 @@ from mcp import ClientSession, Tool, StdioServerParameters, stdio_client
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 
-from app.application.errors import NotFoundError
 from app.domain.models import MCPConfig, MCPServerConfig, MCPTransport, ToolResult
 from .base import BaseTool
 
@@ -290,7 +289,7 @@ class MCPClientManager:
 
             # 如果无法解析出服务器名或工具名，则抛出异常
             if not original_tool_name or not original_server_name:
-                raise NotFoundError(f"无法解析工具名称 {tool_name}")
+                return ToolResult(success=False, message=f"无法解析工具名称 {tool_name}")
 
             # 获取对应服务器的客户端会话
             session = self._clients.get(original_server_name)

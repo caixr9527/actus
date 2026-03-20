@@ -22,11 +22,12 @@ import {
 } from '@/components/ui/item'
 import { Avatar, AvatarGroupCount } from '@/components/ui/avatar'
 import { formatFileSize } from '@/lib/utils'
-import { fileApi } from '@/lib/api'
+import { fileApi, getApiErrorMessage } from '@/lib/api'
 import { toast } from 'sonner'
 import type { SessionFile } from '@/lib/api/types'
 import { sessionFileToAttachment } from '@/lib/session-events'
 import type { AttachmentFile } from '@/lib/session-events'
+import { useI18n } from '@/lib/i18n'
 
 export interface SessionHeaderProps {
   /** 任务/会话标题 */
@@ -51,6 +52,7 @@ export function SessionHeader({
   onFetchFiles,
   onFileClick,
 }: SessionHeaderProps) {
+  const { t } = useI18n()
   const { open, isMobile } = useSidebar()
   const [mounted, setMounted] = useState(false)
   const [internalOpen, setInternalOpen] = useState(false)
@@ -103,14 +105,14 @@ export function SessionHeader({
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      toast.success(`已下载「${file.filename}」`)
+      toast.success(t('sessionHeader.downloadSuccess', { filename: file.filename }))
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '下载失败'
-      toast.error(`下载「${file.filename}」失败: ${msg}`)
+      const msg = getApiErrorMessage(err, 'sessionHeader.downloadFailedDefault', t)
+      toast.error(t('sessionHeader.downloadFailed', { filename: file.filename, error: msg }))
     } finally {
       setDownloadingId(null)
     }
-  }, [downloadingId])
+  }, [downloadingId, t])
 
   const handleFileItemClick = useCallback((file: SessionFile) => {
     if (onFileClick) {
@@ -127,7 +129,7 @@ export function SessionHeader({
     <header className="bg-[#f8f8f7] flex flex-row items-center justify-between pt-3 pb-2 gap-2 sticky top-0 z-10 flex-shrink-0">
       {(!open || isMobile) && <SidebarTrigger className="cursor-pointer flex-shrink-0" />}
       <div className="text-gray-700 text-lg whitespace-nowrap text-ellipsis overflow-hidden flex-1 min-w-0">
-        {title || '未命名任务'}
+        {title || t('session.untitledTask')}
       </div>
       {mounted ? (
         <Dialog open={openState} onOpenChange={setOpenState}>
@@ -138,12 +140,12 @@ export function SessionHeader({
           </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>此任务中的所有文件</DialogTitle>
+                <DialogTitle>{t('sessionHeader.filesDialogTitle')}</DialogTitle>
               </DialogHeader>
               <ScrollArea className="h-[500px]">
                 <div className="flex flex-col gap-1">
                   {uniqueFileList.length === 0 ? (
-                    <p className="text-sm text-gray-500 py-4">暂无文件</p>
+                    <p className="text-sm text-gray-500 py-4">{t('sessionHeader.noFiles')}</p>
                   ) : (
                     uniqueFileList.map((file) => (
                       <Item
@@ -174,7 +176,7 @@ export function SessionHeader({
                             className="cursor-pointer"
                             onClick={(e) => handleDownload(file, e)}
                             disabled={downloadingId === file.id}
-                            aria-label={`下载 ${file.filename}`}
+                            aria-label={t('sessionHeader.downloadAria', { filename: file.filename })}
                           >
                             <Download />
                           </Button>

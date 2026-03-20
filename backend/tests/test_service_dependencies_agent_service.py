@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from app.interfaces import service_dependencies
+from app.interfaces.dependencies import services as service_dependencies
 
 
 def test_get_agent_service_prefers_app_state_instance() -> None:

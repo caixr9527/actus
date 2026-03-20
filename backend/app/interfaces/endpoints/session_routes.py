@@ -18,7 +18,9 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets import ConnectionClosed
 
 from app.application.errors import NotFoundError
+from app.application.errors import error_keys
 from app.application.service import SessionService, AgentService
+from app.domain.models import User
 from app.infrastructure.storage import get_redis_client
 from app.interfaces.schemas import (
     CreateSessionResponse,
@@ -27,22 +29,26 @@ from app.interfaces.schemas import (
     ChatRequest,
     EventMapper,
     GetSessionResponse,
+    UpdateSessionModelRequest,
+    UpdateSessionModelResponse,
     GetSessionFilesResponse,
     FileReadResponse,
     FileReadRequest,
+    ConsoleRecord,
     ShellReadResponse,
     ShellReadRequest
 )
 from app.interfaces.schemas import Response
-from app.interfaces.service_dependencies import get_session_service, get_agent_service
+from app.interfaces.dependencies.auth import get_current_user
+from app.interfaces.dependencies.services import get_session_service, get_agent_service
 from core.realtime import SESSION_LIST_CHANGE_CHANNEL, SESSION_LIST_FALLBACK_REFRESH_SECONDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["会话模块"])
 
 
-async def _build_session_list_payload(session_service: SessionService) -> str:
-    sessions = await session_service.get_all_sessions()
+async def _build_session_list_payload(session_service: SessionService, user_id: str) -> str:
+    sessions = await session_service.get_all_sessions(user_id=user_id)
     session_items = [
         ListSessionItem(
             session_id=session.id,
@@ -64,10 +70,11 @@ async def _build_session_list_payload(session_service: SessionService) -> str:
     description="创建一个空白的新任务会话",
 )
 async def create_session(
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[CreateSessionResponse]:
     """创建一个空白的新任务会话"""
-    session = await session_service.create_session()
+    session = await session_service.create_session(user_id=current_user.id)
     return Response.success(
         msg="创建任务会话成功",
         data=CreateSessionResponse(session_id=session.id)
@@ -80,6 +87,7 @@ async def create_session(
     description="基于 Redis Pub/Sub 增量推送会话列表，并定期兜底校准",
 )
 async def stream_sessions(
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> EventSourceResponse:
     """基于事件驱动流式获取会话列表，减少固定轮询带来的数据库压力"""
@@ -89,7 +97,7 @@ async def stream_sessions(
         pubsub = None
 
         # 连接建立后先返回一次完整快照，避免客户端首屏等待。
-        initial_payload = await _build_session_list_payload(session_service)
+        initial_payload = await _build_session_list_payload(session_service, user_id=current_user.id)
         previous_payload = initial_payload
         yield ServerSentEvent(event="sessions", data=initial_payload)
 
@@ -112,7 +120,7 @@ async def stream_sessions(
                 else:
                     await asyncio.sleep(SESSION_LIST_FALLBACK_REFRESH_SECONDS)
 
-                payload = await _build_session_list_payload(session_service)
+                payload = await _build_session_list_payload(session_service, user_id=current_user.id)
                 if payload == previous_payload:
                     continue
                 previous_payload = payload
@@ -135,10 +143,11 @@ async def stream_sessions(
     description="获取所有任务会话基础信息列表",
 )
 async def get_all_sessions(
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[ListSessionResponse]:
     """获取所有任务会话基础信息列表"""
-    sessions = await session_service.get_all_sessions()
+    sessions = await session_service.get_all_sessions(user_id=current_user.id)
     session_items = [
         ListSessionItem(
             session_id=session.id,
@@ -164,10 +173,11 @@ async def get_all_sessions(
 )
 async def clear_unread_message_count(
         session_id: str,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[Optional[Dict]]:
     """根据传递的会话id清空未读消息数"""
-    await session_service.clear_unread_message_count(session_id)
+    await session_service.clear_unread_message_count(user_id=current_user.id, session_id=session_id)
     return Response.success(msg="清除未读消息数成功")
 
 
@@ -179,10 +189,11 @@ async def clear_unread_message_count(
 )
 async def delete_session(
         session_id: str,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[Optional[Dict]]:
     """根据传递的会话id删除指定任务会话"""
-    await session_service.delete_session(session_id)
+    await session_service.delete_session(user_id=current_user.id, session_id=session_id)
     return Response.success(msg="删除任务会话成功")
 
 
@@ -194,19 +205,25 @@ async def delete_session(
 async def chat(
         session_id: str,
         request: ChatRequest,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
         agent_service: AgentService = Depends(get_agent_service),
 ) -> EventSourceResponse:
     """根据传递的会话id+chat请求数据向指定会话发起聊天请求"""
-    session = await session_service.get_session(session_id=session_id)
+    session = await session_service.get_session(user_id=current_user.id, session_id=session_id)
     if not session:
-        raise NotFoundError("该会话不存在，请核实后重试")
+        raise NotFoundError(
+            msg="该会话不存在，请核实后重试",
+            error_key=error_keys.SESSION_NOT_FOUND,
+            error_params={"session_id": session_id},
+        )
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""
         # 调用Agent服务发起聊天
         async for event in agent_service.chat(
                 session_id=session_id,
+                user_id=current_user.id,
                 message=request.message,
                 attachments=request.attachments,
                 latest_event_id=request.event_id,
@@ -231,20 +248,53 @@ async def chat(
 )
 async def get_session(
         session_id: str,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[GetSessionResponse]:
     """传递指定会话id获取该会话的对话详情"""
-    session = await session_service.get_session(session_id=session_id)
+    session = await session_service.get_session(user_id=current_user.id, session_id=session_id)
     if not session:
-        raise NotFoundError("该会话不存在，请核实后重试")
+        raise NotFoundError(
+            msg="该会话不存在，请核实后重试",
+            error_key=error_keys.SESSION_NOT_FOUND,
+            error_params={"session_id": session_id},
+        )
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(
             session_id=session.id,
             title=session.title,
             status=session.status,
+            current_model_id=session.current_model_id,
             events=EventMapper.events_to_sse_events(session.events),
         )
+    )
+
+
+@router.post(
+    path="/{session_id}/model",
+    response_model=Response[UpdateSessionModelResponse],
+    summary="切换当前会话模型",
+    description="根据传递的会话id更新当前会话模型",
+)
+async def update_session_model(
+        session_id: str,
+        request: UpdateSessionModelRequest,
+        current_user: User = Depends(get_current_user),
+        session_service: SessionService = Depends(get_session_service),
+) -> Response[UpdateSessionModelResponse]:
+    """切换当前会话模型"""
+    session = await session_service.set_current_model(
+        user_id=current_user.id,
+        session_id=session_id,
+        model_id=request.model_id,
+    )
+    return Response.success(
+        msg="更新会话模型成功",
+        data=UpdateSessionModelResponse(
+            session_id=session.id,
+            current_model_id=session.current_model_id or request.model_id,
+        ),
     )
 
 
@@ -256,10 +306,11 @@ async def get_session(
 )
 async def stop_session(
         session_id: str,
+        current_user: User = Depends(get_current_user),
         agent_service: AgentService = Depends(get_agent_service),
 ) -> Response[Optional[Dict]]:
     """根据传递的指定会话id停止对应任务会话"""
-    await agent_service.stop_session(session_id=session_id)
+    await agent_service.stop_session(session_id=session_id, user_id=current_user.id)
     return Response.success(msg="停止任务会话成功")
 
 
@@ -271,10 +322,11 @@ async def stop_session(
 )
 async def get_session_files(
         session_id: str,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[GetSessionFilesResponse]:
     """获取指定任务会话文件列表信息"""
-    files = await session_service.get_session_files(session_id=session_id)
+    files = await session_service.get_session_files(user_id=current_user.id, session_id=session_id)
     return Response.success(
         msg="获取会话文件列表成功",
         data=GetSessionFilesResponse(files=files)
@@ -290,13 +342,21 @@ async def get_session_files(
 async def read_file(
         session_id: str,
         request: FileReadRequest,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[FileReadResponse]:
     """根据传递的会话id+文件路径查看沙箱中文件的内容信息"""
-    result = await session_service.read_file(session_id=session_id, filepath=request.filepath)
+    result = await session_service.read_file(
+        user_id=current_user.id,
+        session_id=session_id,
+        filepath=request.filepath,
+    )
     return Response.success(
         msg="获取会话文件内容成功",
-        data=result
+        data=FileReadResponse(
+            filepath=result.filepath,
+            content=result.content,
+        )
     )
 
 
@@ -309,13 +369,29 @@ async def read_file(
 async def read_shell_output(
         session_id: str,
         request: ShellReadRequest,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[ShellReadResponse]:
     """查看会话的shell内容输出"""
-    result = await session_service.read_shell_output(session_id=session_id, shell_session_id=request.session_id)
+    result = await session_service.read_shell_output(
+        user_id=current_user.id,
+        session_id=session_id,
+        shell_session_id=request.session_id,
+    )
     return Response.success(
         msg="获取Shell内容输出结果成功",
-        data=result,
+        data=ShellReadResponse(
+            session_id=result.session_id,
+            output=result.output,
+            console_records=[
+                ConsoleRecord(
+                    ps1=item.ps1,
+                    command=item.command,
+                    output=item.output,
+                )
+                for item in result.console_records
+            ],
+        ),
     )
 
 
@@ -325,6 +401,7 @@ async def read_shell_output(
 async def vnc_websocket(
         websocket: WebSocket,
         session_id: str,
+        current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> None:
     """VNC Websocket端点，用于建立与沙箱环境的vnc连接，并双向转发数据"""
@@ -345,7 +422,7 @@ async def vnc_websocket(
 
     try:
         # 获取沙箱环境的VNC URL并建立连接
-        sandbox_vnc_url = await session_service.get_vnc_url(session_id=session_id)
+        sandbox_vnc_url = await session_service.get_vnc_url(user_id=current_user.id, session_id=session_id)
         logger.info(f"连接WebSocket VNC： {sandbox_vnc_url}")
 
         # 建立到沙箱VNC服务器的WebSocket连接

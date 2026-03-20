@@ -1,16 +1,18 @@
 import asyncio
 import json
 
-from app.domain.models import Session
+from app.domain.models import Session, User
 from app.interfaces.endpoints import session_routes
 
 
 class _FakeSessionService:
     def __init__(self) -> None:
         self.calls = 0
+        self.user_ids: list[str] = []
 
-    async def get_all_sessions(self):
+    async def get_all_sessions(self, user_id: str):
         self.calls += 1
+        self.user_ids.append(user_id)
         if self.calls <= 2:
             return [Session(id="session-1", title="会话1")]
         return [
@@ -27,11 +29,12 @@ class _BrokenRedisClient:
 
 def test_stream_sessions_fallback_only_pushes_when_snapshot_changes(monkeypatch) -> None:
     service = _FakeSessionService()
+    current_user = User(id="user-1", email="tester@example.com", password="hashed-password")
     monkeypatch.setattr(session_routes, "SESSION_LIST_FALLBACK_REFRESH_SECONDS", 0.001)
     monkeypatch.setattr(session_routes, "get_redis_client", lambda: _BrokenRedisClient())
 
     async def _collect_two_events():
-        response = await session_routes.stream_sessions(session_service=service)
+        response = await session_routes.stream_sessions(current_user=current_user, session_service=service)
         iterator = response.body_iterator
         first_event = await anext(iterator)
         second_event = await anext(iterator)
@@ -44,5 +47,6 @@ def test_stream_sessions_fallback_only_pushes_when_snapshot_changes(monkeypatch)
 
     assert len(first_payload["sessions"]) == 1
     assert len(second_payload["sessions"]) == 2
+    assert service.user_ids[:2] == ["user-1", "user-1"]
     # 第2次拉取与首帧相同且被跳过，第3次变化后才发送下一帧
     assert service.calls >= 3

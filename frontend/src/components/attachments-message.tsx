@@ -3,6 +3,7 @@
 import { cn, formatFileSize } from '@/lib/utils'
 import { FileSearch, FileText } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { useI18n } from '@/lib/i18n'
 import type { AttachmentFile } from '@/lib/session-events'
 
 export interface AttachmentsMessageProps {
@@ -66,6 +67,7 @@ export function AttachmentsMessage({
   onViewAllFiles,
   onFileClick,
 }: AttachmentsMessageProps) {
+  const { t } = useI18n()
   const sizeLabel = (f: AttachmentFile) =>
     f.sizeLabel ?? formatFileSize(f.size)
 
@@ -116,7 +118,7 @@ export function AttachmentsMessage({
           >
             <FileSearch size={18} className="shrink-0" />
             <span className="text-sm whitespace-nowrap">
-              查看此任务中所有的文件
+              {t('attachments.viewAllFiles')}
             </span>
           </Button>
         )}

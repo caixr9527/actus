@@ -5,16 +5,21 @@ import {cn, formatFileSize} from '@/lib/utils'
 import {ScrollArea, ScrollBar} from '@/components/ui/scroll-area'
 import {Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle} from '@/components/ui/item'
 import {Avatar, AvatarGroupCount} from '@/components/ui/avatar'
-import {ArrowUp, FileText, Paperclip, XCircle, Loader2, Pause} from 'lucide-react'
+import {ArrowUp, Check, ChevronsUpDown, FileText, Paperclip, XCircle, Loader2, Pause, Sparkles} from 'lucide-react'
 import {Button} from '@/components/ui/button'
+import {DropdownMenu, DropdownMenuContent, DropdownMenuTrigger} from '@/components/ui/dropdown-menu'
+import { getApiErrorMessage } from '@/lib/api'
 import {fileApi} from '@/lib/api/file'
-import type {FileInfo} from '@/lib/api/types'
+import type {FileInfo, ListModelItem} from '@/lib/api/types'
+import { performModelSelection, resolveModelSelectorState } from '@/lib/chat-model-selector'
 import {toast} from 'sonner'
+import { useI18n } from '@/lib/i18n'
 
 interface ChatInputProps {
   className?: string
   onInputValueChange?: (value: string) => void
   onSend?: (message: string, files: FileInfo[]) => Promise<void>
+  onRequireAuth?: (action: 'send' | 'upload', message: string) => boolean | Promise<boolean>
   disabled?: boolean
   /** 当前会话 ID，上传附件时会关联到该会话 */
   sessionId?: string | null
@@ -22,6 +27,12 @@ interface ChatInputProps {
   isRunning?: boolean
   /** 点击暂停按钮的回调 */
   onStop?: () => void
+  modelOptions?: ListModelItem[]
+  currentModelId?: string | null
+  defaultModelId?: string | null
+  modelsLoading?: boolean
+  modelUpdating?: boolean
+  onModelChange?: (modelId: string) => Promise<void>
 }
 
 export interface ChatInputRef {
@@ -31,13 +42,38 @@ export interface ChatInputRef {
 }
 
 export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
-  ({ className, onInputValueChange, onSend, disabled = false, sessionId, isRunning = false, onStop }, ref) => {
+  ({
+    className,
+    onInputValueChange,
+    onSend,
+    onRequireAuth,
+    disabled = false,
+    sessionId,
+    isRunning = false,
+    onStop,
+    modelOptions = [],
+    currentModelId,
+    defaultModelId,
+    modelsLoading = false,
+    modelUpdating = false,
+    onModelChange,
+  }, ref) => {
+    const { t } = useI18n()
     const [files, setFiles] = useState<FileInfo[]>([])
     const [uploading, setUploading] = useState(false)
     const [sending, setSending] = useState(false)
+    const [modelMenuOpen, setModelMenuOpen] = useState(false)
     const [inputValue, setInputValue] = useState('')
     const fileInputRef = useRef<HTMLInputElement>(null)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
+    const { selectedModelId, selectedModel, defaultModel: effectiveDefaultModel } = resolveModelSelectorState(
+      modelOptions,
+      currentModelId,
+      defaultModelId,
+    )
+    const showModelSelector = onModelChange !== undefined
+    const modelButtonLabel = selectedModel?.display_name ?? t('chatInput.modelAuto')
+    const modelButtonBadge = selectedModel?.config?.badge ?? (selectedModelId === 'auto' ? t('chatInput.modelAutoBadge') : null)
 
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value
@@ -73,8 +109,13 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
             })
             return fileInfo
           } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : '上传失败'
-            toast.error(`文件「${file.name}」上传失败: ${errorMessage}`)
+            const errorMessage = getApiErrorMessage(error, 'chatInput.uploadFailed', t)
+            toast.error(
+              t('chatInput.uploadSingleFailed', {
+                name: file.name,
+                error: errorMessage,
+              }),
+            )
             return null
           }
         })
@@ -85,10 +126,10 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
 
         if (uploadedFiles.length > 0) {
           setFiles((prev) => [...prev, ...uploadedFiles])
-          toast.success(`成功上传 ${uploadedFiles.length} 个文件`)
+          toast.success(t('chatInput.uploadSuccess', { count: uploadedFiles.length }))
         }
       } catch {
-        toast.error('文件上传过程中发生错误')
+        toast.error(t('chatInput.uploadProcessError'))
       } finally {
         setUploading(false)
         // 重置input，以便可以重复选择同一文件
@@ -98,7 +139,22 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
       }
     }
 
-    const handleUploadClick = () => {
+    const checkAuthGate = async (action: 'send' | 'upload', message: string): Promise<boolean> => {
+      if (!onRequireAuth) {
+        return true
+      }
+      try {
+        return await onRequireAuth(action, message)
+      } catch {
+        return false
+      }
+    }
+
+    const handleUploadClick = async () => {
+      const allowed = await checkAuthGate('upload', inputValue)
+      if (!allowed) {
+        return
+      }
       fileInputRef.current?.click()
     }
 
@@ -106,13 +162,33 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
       setFiles((prev) => prev.filter((file) => file.id !== fileId))
     }
 
+    const handleModelSelect = async (modelId: string) => {
+      try {
+        await performModelSelection({
+          nextModelId: modelId,
+          selectedModelId,
+          modelsLoading,
+          modelUpdating,
+          onModelChange,
+          closeMenu: () => setModelMenuOpen(false),
+        })
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, 'chatInput.modelUpdateFailed', t))
+      }
+    }
+
     const handleSend = async () => {
       const trimmedMessage = inputValue.trim()
       
       // 验证消息不为空
       if (!trimmedMessage) {
-        toast.error('请输入消息内容')
+        toast.error(t('chatInput.messageRequired'))
         textareaRef.current?.focus()
+        return
+      }
+
+      const allowed = await checkAuthGate('send', inputValue)
+      if (!allowed) {
         return
       }
 
@@ -196,7 +272,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
           value={inputValue}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
-          placeholder="分配一个任务或提问任何问题..."
+          placeholder={t('chatInput.placeholder')}
           className="scrollbar-hide outline-none w-full text-sm resize-none h-[46px] min-h-[40px]"
           disabled={sending || disabled}
         />
@@ -216,7 +292,9 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
           <Button
             variant="outline"
             className="rounded-full w-8 h-8 cursor-pointer"
-            onClick={handleUploadClick}
+            onClick={() => {
+              void handleUploadClick()
+            }}
             disabled={uploading}
           >
             {uploading ? (
@@ -225,6 +303,100 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
               <Paperclip/>
             )}
           </Button>
+          {showModelSelector ? (
+            <DropdownMenu open={modelMenuOpen} onOpenChange={setModelMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-8 max-w-[220px] rounded-full px-3 text-xs font-medium text-gray-700 shadow-none"
+                  disabled={modelsLoading || modelUpdating || disabled || isRunning}
+                >
+                  <span className="inline-flex min-w-0 items-center gap-2">
+                    <Sparkles className="size-3.5 text-gray-500" />
+                    <span className="truncate">
+                      {modelsLoading ? t('chatInput.modelLoading') : modelButtonLabel}
+                    </span>
+                    {modelButtonBadge ? (
+                      <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-500">
+                        {modelButtonBadge}
+                      </span>
+                    ) : null}
+                  </span>
+                  <ChevronsUpDown className="size-3.5 shrink-0 text-gray-400" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[320px] p-2">
+                <div className="mb-2 px-2 pt-1">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-gray-400">
+                    {t('chatInput.modelSelectTitle')}
+                  </p>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    className={cn(
+                      'flex w-full cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors',
+                      selectedModelId === 'auto'
+                        ? 'border-gray-300 bg-gray-50'
+                        : 'border-transparent hover:border-gray-200 hover:bg-gray-50',
+                    )}
+                    onClick={() => {
+                      void handleModelSelect('auto')
+                    }}
+                  >
+                    <Check className={cn('mt-0.5 size-4 shrink-0', selectedModelId === 'auto' ? 'opacity-100 text-gray-700' : 'opacity-0')} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate text-sm font-medium text-gray-800">{t('chatInput.modelAuto')}</span>
+                        <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-500">
+                          {t('chatInput.modelAutoBadge')}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-gray-500">
+                        {effectiveDefaultModel
+                          ? t('chatInput.modelAutoDescriptionWithDefault', { model: effectiveDefaultModel.display_name })
+                          : t('chatInput.modelAutoDescription')}
+                      </p>
+                    </div>
+                  </button>
+                  {modelOptions.map((model) => {
+                    const isSelected = model.id === selectedModelId
+                    return (
+                      <button
+                        key={model.id}
+                        type="button"
+                        className={cn(
+                          'flex w-full cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors',
+                          isSelected
+                            ? 'border-gray-300 bg-gray-50'
+                            : 'border-transparent hover:border-gray-200 hover:bg-gray-50',
+                        )}
+                        onClick={() => {
+                          void handleModelSelect(model.id)
+                        }}
+                      >
+                        <Check className={cn('mt-0.5 size-4 shrink-0', isSelected ? 'opacity-100 text-gray-700' : 'opacity-0')} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-sm font-medium text-gray-800">{model.display_name}</span>
+                            {model.config?.badge ? (
+                              <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-gray-500">
+                                {model.config.badge}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-1 text-xs leading-5 text-gray-500">
+                            {model.config?.description || model.provider}
+                          </p>
+                        </div>
+                      </button>
+                    )
+                  })}
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
         </div>
         {/* 发送/暂停按钮 */}
         <div className="flex gap-2">

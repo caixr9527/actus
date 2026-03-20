@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import RFB from '@novnc/novnc/lib/rfb'
+import { useI18n } from '@/lib/i18n'
 
 export type VNCStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 
@@ -12,6 +13,7 @@ interface VNCViewerProps {
 }
 
 export function VNCViewer({ url, viewOnly, onStatusChange }: VNCViewerProps) {
+  const { t } = useI18n()
   const displayRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -32,22 +34,22 @@ export function VNCViewer({ url, viewOnly, onStatusChange }: VNCViewerProps) {
       rfb.addEventListener('connect', () => onStatusChange?.('connected'))
       rfb.addEventListener('disconnect', (e: CustomEvent) => {
         if (e.detail?.clean) {
-          onStatusChange?.('disconnected', '连接已断开')
+          onStatusChange?.('disconnected', t('vncViewer.disconnected'))
         } else {
-          onStatusChange?.('error', '沙箱环境可能已关闭或连接异常断开')
+          onStatusChange?.('error', t('vncViewer.abnormalDisconnect'))
         }
       })
       rfb.addEventListener('securityfailure', () => {
-        onStatusChange?.('error', '认证失败，无法连接到沙箱')
+        onStatusChange?.('error', t('vncViewer.authFailed'))
       })
     } catch {
-      onStatusChange?.('error', '无法建立连接，沙箱环境可能未启动')
+      onStatusChange?.('error', t('vncViewer.connectFailed'))
     }
 
     return () => {
       try { rfb?.disconnect() } catch { /* noop */ }
     }
-  }, [url, viewOnly, onStatusChange])
+  }, [onStatusChange, t, url, viewOnly])
 
   return (
     <div

@@ -1,4 +1,5 @@
 import { get, post, createSSEStream, parseSSEStream } from "./fetch";
+import { translateRuntime } from "../i18n/runtime";
 import type {
   Session,
   SessionDetail,
@@ -10,6 +11,8 @@ import type {
   ViewShellParams,
   SSEEventData,
   SSEEventHandler,
+  UpdateSessionModelParams,
+  UpdateSessionModelResponse,
 } from "./types";
 
 /**
@@ -89,12 +92,14 @@ export const sessionApi = {
 
         // 流正常结束（服务端关闭连接），通知上层以便重连
         if (!controller.signal.aborted && onError) {
-          onError(new Error("SSE 流已结束"));
+          onError(new Error("SSE_STREAM_END"));
         }
       } catch (error) {
         if (!controller.signal.aborted && onError) {
           onError(
-            error instanceof Error ? error : new Error("SSE 连接失败")
+            error instanceof Error
+              ? error
+              : new Error(translateRuntime("sessionApi.sseConnectionFailed"))
           );
         }
       }
@@ -121,6 +126,16 @@ export const sessionApi = {
    */
   getSessionDetail: (sessionId: string): Promise<SessionDetail> => {
     return get<SessionDetail>(`/sessions/${sessionId}`);
+  },
+
+  /**
+   * 更新当前会话模型
+   */
+  updateSessionModel: (
+    sessionId: string,
+    params: UpdateSessionModelParams,
+  ): Promise<UpdateSessionModelResponse> => {
+    return post<UpdateSessionModelResponse>(`/sessions/${sessionId}/model`, params);
   },
 
   /**
@@ -188,7 +203,9 @@ export const sessionApi = {
         }
         if (!controller.signal.aborted && onError) {
           onError(
-            error instanceof Error ? error : new Error("启动聊天流失败")
+            error instanceof Error
+              ? error
+              : new Error(translateRuntime("sessionApi.startChatStreamFailed"))
           );
         }
       }

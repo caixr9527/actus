@@ -3,8 +3,10 @@
  */
 export type ApiResponse<T = unknown> = {
   code: number;
-  msg: string;
+  msg?: string | null;
   data: T | null;
+  error_key?: string | null;
+  error_params?: Record<string, unknown> | null;
 };
 
 /**
@@ -29,16 +31,26 @@ export type MCPTransport = "stdio" | "sse" | "streamable_http";
 
 // ==================== 配置模块类型 ====================
 
-/**
- * LLM 配置
- */
-export type LLMConfig = {
-  base_url?: string;
-  api_key?: string;
-  model_name?: string;
+export type PublicModelConfig = {
   temperature?: number;
   max_tokens?: number;
+  description?: string;
+  badge?: string;
   [key: string]: unknown;
+};
+
+export type ListModelItem = {
+  id: string;
+  display_name: string;
+  provider: string;
+  enabled: boolean;
+  sort_order: number;
+  config?: PublicModelConfig;
+};
+
+export type ModelsData = {
+  default_model_id: string;
+  models: ListModelItem[];
 };
 
 /**
@@ -155,6 +167,7 @@ export type Session = {
   latest_message_at: string;
   status: SessionStatus;
   unread_message_count: number;
+  current_model_id?: string | null;
   [key: string]: unknown;
 };
 
@@ -194,6 +207,7 @@ export type ChatMessage = {
 export type ChatParams = {
   message?: string;
   attachments?: string[];
+  event_id?: string;
   [key: string]: unknown;
 };
 
@@ -202,6 +216,15 @@ export type ChatParams = {
  */
 export type SessionDetail = Session & {
   events?: SSEEventData[];
+};
+
+export type UpdateSessionModelParams = {
+  model_id: string;
+};
+
+export type UpdateSessionModelResponse = {
+  session_id: string;
+  current_model_id: string;
 };
 
 /**
@@ -268,7 +291,14 @@ export type SSEEventData =
   | { type: "tool"; data: ToolEvent }
   | { type: "wait"; data: Record<string, unknown> }
   | { type: "done"; data: Record<string, unknown> }
-  | { type: "error"; data: { error: string } };
+  | {
+      type: "error";
+      data: {
+        error: string;
+        error_key?: string | null;
+        error_params?: Record<string, unknown> | null;
+      };
+    };
 
 /**
  * SSE 事件处理器
@@ -304,4 +334,3 @@ export type ViewShellParams = {
   shell_session_id: string;
   [key: string]: unknown;
 };
-

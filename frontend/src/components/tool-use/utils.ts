@@ -1,4 +1,5 @@
 import type { ToolEvent } from '@/lib/api/types'
+import type { AppLocale } from '@/lib/i18n'
 
 export type ToolKind =
   | 'message'
@@ -56,7 +57,11 @@ export function getToolKind(data: ToolEvent | null | undefined): ToolKind {
 /**
  * 根据工具 name/function 和 args 生成事件列表中的人性化提示
  */
-export function getFriendlyToolLabel(data: ToolEvent | null | undefined): string {
+export function getFriendlyToolLabel(
+  data: ToolEvent | null | undefined,
+  locale: AppLocale = 'zh-CN',
+): string {
+  const isEnglish = locale === 'en-US'
   if (!data) return '—'
   const name = (data.name ?? '').toLowerCase()
   const fn = (data.function ?? '').toLowerCase()
@@ -77,96 +82,132 @@ export function getFriendlyToolLabel(data: ToolEvent | null | undefined): string
   if (name === 'file') {
     switch (fn) {
       case 'read_file':
-        return filepath ? `正在读取文件 ${truncate(filepath, 60)}` : '正在读取文件'
+        return filepath
+          ? isEnglish ? `Reading file ${truncate(filepath, 60)}` : `正在读取文件 ${truncate(filepath, 60)}`
+          : isEnglish ? 'Reading file' : '正在读取文件'
       case 'write_file':
-        return filepath ? `正在写入文件 ${truncate(filepath, 60)}` : '正在写入文件'
+        return filepath
+          ? isEnglish ? `Writing file ${truncate(filepath, 60)}` : `正在写入文件 ${truncate(filepath, 60)}`
+          : isEnglish ? 'Writing file' : '正在写入文件'
       case 'replace_in_file':
-        return filepath ? `正在替换文件内容 ${truncate(filepath, 60)}` : '正在替换文件内容'
+        return filepath
+          ? isEnglish ? `Replacing in file ${truncate(filepath, 60)}` : `正在替换文件内容 ${truncate(filepath, 60)}`
+          : isEnglish ? 'Replacing file content' : '正在替换文件内容'
       case 'search_in_file':
-        return filepath ? `正在在文件中搜索 ${truncate(filepath, 60)}` : '正在在文件中搜索'
+        return filepath
+          ? isEnglish ? `Searching in file ${truncate(filepath, 60)}` : `正在在文件中搜索 ${truncate(filepath, 60)}`
+          : isEnglish ? 'Searching in file' : '正在在文件中搜索'
       case 'find_files':
-        return dirPath ? `正在查找文件 ${truncate(dirPath, 60)}` : '正在查找文件'
+        return dirPath
+          ? isEnglish ? `Finding files in ${truncate(dirPath, 60)}` : `正在查找文件 ${truncate(dirPath, 60)}`
+          : isEnglish ? 'Finding files' : '正在查找文件'
       case 'list_files':
-        return dirPath ? `正在列出目录 ${truncate(dirPath, 60)}` : '正在列出目录'
+        return dirPath
+          ? isEnglish ? `Listing directory ${truncate(dirPath, 60)}` : `正在列出目录 ${truncate(dirPath, 60)}`
+          : isEnglish ? 'Listing directory' : '正在列出目录'
       default:
-        return filepath ? `正在访问文件 ${truncate(filepath, 60)}` : dirPath ? `正在访问目录 ${truncate(dirPath, 60)}` : '正在访问文件'
+        return filepath
+          ? isEnglish ? `Accessing file ${truncate(filepath, 60)}` : `正在访问文件 ${truncate(filepath, 60)}`
+          : dirPath
+            ? isEnglish ? `Accessing directory ${truncate(dirPath, 60)}` : `正在访问目录 ${truncate(dirPath, 60)}`
+            : isEnglish ? 'Accessing files' : '正在访问文件'
     }
   }
 
   if (name === 'browser' || fn.startsWith('browser_')) {
     switch (fn) {
       case 'browser_view':
-        return '正在查看当前页面'
+        return isEnglish ? 'Viewing current page' : '正在查看当前页面'
       case 'browser_navigate':
-        return url ? `正在打开页面 ${truncate(url, 80)}` : '正在打开页面'
+        return url
+          ? isEnglish ? `Opening page ${truncate(url, 80)}` : `正在打开页面 ${truncate(url, 80)}`
+          : isEnglish ? 'Opening page' : '正在打开页面'
       case 'browser_restart':
-        return url ? `正在重启浏览器并打开 ${truncate(url, 80)}` : '正在重启浏览器'
+        return url
+          ? isEnglish ? `Restarting browser and opening ${truncate(url, 80)}` : `正在重启浏览器并打开 ${truncate(url, 80)}`
+          : isEnglish ? 'Restarting browser' : '正在重启浏览器'
       case 'browser_click':
-        return '正在点击页面元素'
+        return isEnglish ? 'Clicking page element' : '正在点击页面元素'
       case 'browser_input':
-        return '正在输入内容'
+        return isEnglish ? 'Typing input' : '正在输入内容'
       case 'browser_move_mouse':
-        return '正在移动鼠标'
+        return isEnglish ? 'Moving mouse' : '正在移动鼠标'
       case 'browser_press_key':
-        return key ? `正在按键 ${key}` : '正在按键'
+        return key
+          ? isEnglish ? `Pressing key ${key}` : `正在按键 ${key}`
+          : isEnglish ? 'Pressing key' : '正在按键'
       case 'browser_select_option':
-        return '正在选择下拉选项'
+        return isEnglish ? 'Selecting option' : '正在选择下拉选项'
       case 'browser_scroll_up':
-        return '正在向上滚动页面'
+        return isEnglish ? 'Scrolling up' : '正在向上滚动页面'
       case 'browser_scroll_down':
-        return '正在向下滚动页面'
+        return isEnglish ? 'Scrolling down' : '正在向下滚动页面'
       case 'browser_console_exec':
-        return '正在执行控制台脚本'
+        return isEnglish ? 'Running console script' : '正在执行控制台脚本'
       case 'browser_console_view':
-        return '正在查看控制台输出'
+        return isEnglish ? 'Viewing console output' : '正在查看控制台输出'
       default:
-        return url ? `正在打开页面 ${truncate(url, 80)}` : '正在使用浏览器访问页面'
+        return url
+          ? isEnglish ? `Opening page ${truncate(url, 80)}` : `正在打开页面 ${truncate(url, 80)}`
+          : isEnglish ? 'Browsing page' : '正在使用浏览器访问页面'
     }
   }
 
   if (name === 'search' || fn === 'search_web' || fn.includes('search_web')) {
-    return query ? `正在搜索 ${truncate(query, 60)}` : '正在搜索'
+    return query
+      ? isEnglish ? `Searching ${truncate(query, 60)}` : `正在搜索 ${truncate(query, 60)}`
+      : isEnglish ? 'Searching' : '正在搜索'
   }
 
   if (name === 'shell') {
     switch (fn) {
       case 'shell_execute':
-        return command ? `正在执行命令 ${truncate(command, 60)}` : '正在执行命令'
+        return command
+          ? isEnglish ? `Running command ${truncate(command, 60)}` : `正在执行命令 ${truncate(command, 60)}`
+          : isEnglish ? 'Running command' : '正在执行命令'
       case 'shell_read_output':
-        return '正在查看命令输出'
+        return isEnglish ? 'Reading command output' : '正在查看命令输出'
       case 'shell_wait':
-        return '正在等待命令完成'
+        return isEnglish ? 'Waiting for command' : '正在等待命令完成'
       case 'shell_write_input':
-        return '正在向命令输入内容'
+        return isEnglish ? 'Sending input to command' : '正在向命令输入内容'
       case 'shell_kill_process':
-        return '正在终止进程'
+        return isEnglish ? 'Killing process' : '正在终止进程'
       default:
-        return command ? `正在执行命令 ${truncate(command, 60)}` : '正在执行命令'
+        return command
+          ? isEnglish ? `Running command ${truncate(command, 60)}` : `正在执行命令 ${truncate(command, 60)}`
+          : isEnglish ? 'Running command' : '正在执行命令'
     }
   }
 
   if (name.includes('bash') || fn === 'run' || fn === 'execute' || fn === 'run_command') {
     const cmd = command || (typeof args.input === 'string' ? args.input : '')
-    return cmd ? `正在执行命令 ${truncate(cmd, 60)}` : '正在执行命令'
+    return cmd
+      ? isEnglish ? `Running command ${truncate(cmd, 60)}` : `正在执行命令 ${truncate(cmd, 60)}`
+      : isEnglish ? 'Running command' : '正在执行命令'
   }
 
   if (name === 'a2a') {
     switch (fn) {
       case 'get_remote_agent_cards':
-        return '正在获取远程 Agent 列表'
+        return isEnglish ? 'Fetching remote agents' : '正在获取远程 Agent 列表'
       case 'call_remote_agent':
-        return query ? `正在调用远程 Agent：${truncate(query, 40)}` : '正在调用远程 Agent'
+        return query
+          ? isEnglish ? `Calling remote agent: ${truncate(query, 40)}` : `正在调用远程 Agent：${truncate(query, 40)}`
+          : isEnglish ? 'Calling remote agent' : '正在调用远程 Agent'
       default:
-        return '正在调用 Agent'
+        return isEnglish ? 'Calling agent' : '正在调用 Agent'
     }
   }
 
   if (name === 'mcp' || name.startsWith('mcp_')) {
     if (fn.includes('search_web') || fn.includes('search')) {
-      return query ? `正在搜索 ${truncate(query, 60)}` : '正在搜索'
+      return query
+        ? isEnglish ? `Searching ${truncate(query, 60)}` : `正在搜索 ${truncate(query, 60)}`
+        : isEnglish ? 'Searching' : '正在搜索'
     }
-    return '正在通过 MCP 服务执行操作'
+    return isEnglish ? 'Executing via MCP service' : '正在通过 MCP 服务执行操作'
   }
 
-  return '正在执行操作'
+  return isEnglish ? 'Executing operation' : '正在执行操作'
 }

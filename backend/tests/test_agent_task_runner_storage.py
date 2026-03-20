@@ -35,7 +35,7 @@ class _FailSandbox:
 
 
 class _DummyFileStorage:
-    async def upload_file(self, upload_file):
+    async def upload_file(self, upload_file, user_id=None):
         raise AssertionError("upload_file should not be called when sandbox download fails")
 
 
@@ -103,6 +103,7 @@ class _InvokeTask:
 def _build_runner_for_storage_sync() -> AgentTaskRunner:
     runner = object.__new__(AgentTaskRunner)
     runner._session_id = "session-1"
+    runner._user_id = "user-1"
     runner._uow_factory = lambda: _DummyUoW()
     runner._sandbox = _FailSandbox()
     runner._file_storage = _DummyFileStorage()
@@ -122,6 +123,7 @@ def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
     async def _raise_sync_error(filepath: str):
         raise RuntimeError(f"sync failed: {filepath}")
 
+    runner._user_id = "user-1"
     runner._sync_file_to_storage = _raise_sync_error
     event = MessageEvent(
         role="assistant",
@@ -143,8 +145,44 @@ def test_invoke_skips_empty_input_stream_event() -> None:
     runner._a2a_tool = _NoopA2ATool()
     runner._mcp_config = None
     runner._a2a_config = None
+    runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
     asyncio.run(runner.invoke(_InvokeTask()))
 
     assert session_repo.updated_status == SessionStatus.COMPLETED
+
+
+class _BrowserScreenshot:
+    async def screenshot(self) -> bytes:
+        return b"fake-image-bytes"
+
+
+class _ScreenshotFileStorage:
+    def __init__(self) -> None:
+        self.upload_user_ids: list[str | None] = []
+        self.upload_payloads: list[object] = []
+
+    async def upload_file(self, upload_file, user_id=None):
+        self.upload_user_ids.append(user_id)
+        self.upload_payloads.append(upload_file)
+        return File(id="file-screenshot", key="2026/03/19/s.png")
+
+    def get_file_url(self, file: File) -> str:
+        return f"https://cdn.example.com/{file.key}"
+
+
+def test_get_browser_screenshot_should_use_storage_url_provider() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    runner._browser = _BrowserScreenshot()
+    runner._user_id = "user-1"
+    runner._file_storage = _ScreenshotFileStorage()
+
+    screenshot_url = asyncio.run(runner._get_browser_screenshot())
+
+    assert screenshot_url == "https://cdn.example.com/2026/03/19/s.png"
+    assert runner._file_storage.upload_user_ids == ["user-1"]
+    payload = runner._file_storage.upload_payloads[0]
+    assert getattr(payload, "filename").endswith(".png")
+    assert getattr(payload, "size") == len(b"fake-image-bytes")
+    assert getattr(payload, "file").read() == b"fake-image-bytes"

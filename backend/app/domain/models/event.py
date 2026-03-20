@@ -133,6 +133,8 @@ class ErrorEvent(BaseEvent):
     """错误事件模型"""
     type: Literal["error"] = "error"
     error: str = ""
+    error_key: Optional[str] = None
+    error_params: Optional[Dict[str, Any]] = None
 
 
 class DoneEvent(BaseEvent):
