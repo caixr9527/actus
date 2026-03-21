@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : workflow_run_repository.py
 """
-from typing import Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 from app.domain.models import BaseEvent, File, Memory, Plan, Session, WorkflowRun, WorkflowRunStatus, Event
 
@@ -33,6 +33,15 @@ class WorkflowRunRepository(Protocol):
             checkpoint_id: Optional[str],
     ) -> None:
         """更新运行记录的 checkpoint 引用"""
+        ...
+
+    async def update_runtime_metadata(
+            self,
+            run_id: str,
+            runtime_metadata: Dict[str, Any],
+            current_step_id: Optional[str],
+    ) -> None:
+        """更新运行记录的 runtime_metadata 与当前步骤引用"""
         ...
 
     async def add_event_if_absent(

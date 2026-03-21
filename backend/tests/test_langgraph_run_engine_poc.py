@@ -15,6 +15,7 @@ from app.domain.models import (
     Session,
     WorkflowRun,
 )
+from app.domain.services.runtime.langgraph_state import GRAPH_STATE_CONTRACT_SCHEMA_VERSION
 from app.infrastructure.runtime.langgraph_graphs.planner_react_poc import build_planner_react_poc_graph
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
@@ -75,8 +76,10 @@ class _FakeGraphWithCheckpoint(_FakeGraph):
     def __init__(self) -> None:
         self.checkpointer = _FakeCheckpointer(checkpoint_id="cp-new")
         self.last_config = None
+        self.last_state = None
 
     async def ainvoke(self, _state, config=None):
+        self.last_state = _state
         self.last_config = config
         return await super().ainvoke(_state, config=config)
 
@@ -94,6 +97,7 @@ class _SessionRepo:
 class _WorkflowRunRepo:
     def __init__(self, run: WorkflowRun) -> None:
         self._run = run
+        self.updated_runtime_metadata: list[tuple[str, dict, str | None]] = []
 
     async def get_by_id(self, run_id: str):
         if run_id != self._run.id:
@@ -105,6 +109,20 @@ class _WorkflowRunRepo:
             raise ValueError("run not found")
         self._run.checkpoint_namespace = checkpoint_namespace
         self._run.checkpoint_id = checkpoint_id
+
+    async def update_runtime_metadata(
+            self,
+            run_id: str,
+            runtime_metadata: dict,
+            current_step_id: str | None,
+    ) -> None:
+        if run_id != self._run.id:
+            raise ValueError("run not found")
+        merged_metadata = dict(self._run.runtime_metadata or {})
+        merged_metadata.update(runtime_metadata or {})
+        self._run.runtime_metadata = merged_metadata
+        self._run.current_step_id = current_step_id
+        self.updated_runtime_metadata.append((run_id, runtime_metadata, current_step_id))
 
 
 class _UoW:
@@ -172,6 +190,10 @@ def test_langgraph_run_engine_should_sync_checkpoint_ref_to_workflow_run(monkeyp
     events = asyncio.run(_collect())
 
     assert len(events) == 5
+    assert fake_graph.last_state is not None
+    assert fake_graph.last_state["schema_version"] == GRAPH_STATE_CONTRACT_SCHEMA_VERSION
+    assert fake_graph.last_state["run_id"] == "run-1"
+    assert fake_graph.last_state["thread_id"] == "thread-1"
     assert fake_graph.last_config == {
         "configurable": {
             "thread_id": "thread-1",
@@ -181,6 +203,8 @@ def test_langgraph_run_engine_should_sync_checkpoint_ref_to_workflow_run(monkeyp
     }
     assert run.checkpoint_namespace == ""
     assert run.checkpoint_id == "cp-new"
+    assert run.runtime_metadata.get("graph_state_contract") is not None
+    assert run.runtime_metadata["graph_state_contract"]["schema_version"] == GRAPH_STATE_CONTRACT_SCHEMA_VERSION
 
 
 def test_planner_react_poc_graph_should_execute_async_nodes_without_coroutine_error() -> None:

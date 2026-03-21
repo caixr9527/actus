@@ -6,7 +6,7 @@
 @File   : db_workflow_run_repository.py
 """
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,6 +73,22 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
 
         record.checkpoint_namespace = checkpoint_namespace
         record.checkpoint_id = checkpoint_id
+
+    async def update_runtime_metadata(
+            self,
+            run_id: str,
+            runtime_metadata: Dict[str, Any],
+            current_step_id: Optional[str],
+    ) -> None:
+        """回写运行时契约元数据，并同步当前步骤指针。"""
+        record = await self._get_record_with_lock(run_id)
+        if record is None:
+            raise ValueError(f"运行[{run_id}]不存在，请核实后重试")
+
+        merged_metadata = dict(record.runtime_metadata or {})
+        merged_metadata.update(runtime_metadata or {})
+        record.runtime_metadata = merged_metadata
+        record.current_step_id = current_step_id
 
     async def _get_record_with_lock(self, run_id: str) -> Optional[WorkflowRunModel]:
         stmt = select(WorkflowRunModel).where(WorkflowRunModel.id == run_id).with_for_update()
