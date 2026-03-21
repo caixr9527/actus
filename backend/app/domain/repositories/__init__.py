@@ -11,6 +11,7 @@ from .llm_model_config_repository import LLMModelConfigRepository
 from .session_repository import SessionRepository
 from .uow import IUnitOfWork
 from .user_repository import UserRepository
+from .workflow_run_repository import WorkflowRunRepository
 
 __all__ = [
     "AppConfigRepository",
@@ -18,5 +19,6 @@ __all__ = [
     "FileRepository",
     "LLMModelConfigRepository",
     "UserRepository",
+    "WorkflowRunRepository",
     "IUnitOfWork",
 ]

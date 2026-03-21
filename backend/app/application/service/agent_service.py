@@ -26,7 +26,8 @@ from app.domain.models import (
     MessageEvent,
     Event,
     DoneEvent,
-    WaitEvent
+    WaitEvent,
+    WorkflowRunStatus,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
@@ -134,12 +135,19 @@ class AgentService:
         # 记录旧值，用于异常时回滚内存态与数据库态。
         previous_sandbox_id = session.sandbox_id
         previous_task_id = session.task_id
+        previous_current_run_id = session.current_run_id
 
         # 统一写回两个跨资源关联字段，确保会话视图一次提交完成。
         session.sandbox_id = sandbox.id
         session.task_id = task.id
         try:
             async with self._uow_factory() as uow:
+                run = await uow.workflow_run.create_for_session(
+                    session=session,
+                    status=WorkflowRunStatus.RUNNING,
+                    thread_id=session.id,
+                )
+                session.current_run_id = run.id
                 await uow.session.save(session=session)
             return task
         except Exception as save_err:
@@ -161,6 +169,7 @@ class AgentService:
             # 补偿3：回滚会话对象状态，并尽力写回数据库，避免出现悬挂关联字段。
             session.sandbox_id = previous_sandbox_id
             session.task_id = previous_task_id
+            session.current_run_id = previous_current_run_id
             try:
                 async with self._uow_factory() as uow:
                     await uow.session.save(session=session)

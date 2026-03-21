@@ -11,5 +11,18 @@ from .llm_model_config import LLMModelConfigModel
 from .session import SessionModel
 from .user import UserModel
 from .user_profile import UserProfileModel
+from .workflow_run import WorkflowRunModel
+from .workflow_run_event import WorkflowRunEventModel
+from .workflow_run_step import WorkflowRunStepModel
 
-__all__ = ["Base", "SessionModel", "FileModel", "UserModel", "UserProfileModel", "LLMModelConfigModel"]
+__all__ = [
+    "Base",
+    "SessionModel",
+    "FileModel",
+    "UserModel",
+    "UserProfileModel",
+    "LLMModelConfigModel",
+    "WorkflowRunModel",
+    "WorkflowRunEventModel",
+    "WorkflowRunStepModel",
+]

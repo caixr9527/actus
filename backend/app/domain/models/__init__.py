@@ -45,6 +45,12 @@ from .search import SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
 from .user import User, UserProfile, UserStatus
+from .workflow_run import (
+    WorkflowRun,
+    WorkflowRunStatus,
+    WorkflowRunEventRecord,
+    WorkflowRunStepRecord,
+)
 
 __all__ = [
     "AppConfig",
@@ -89,4 +95,8 @@ __all__ = [
     "User",
     "UserProfile",
     "UserStatus",
+    "WorkflowRun",
+    "WorkflowRunStatus",
+    "WorkflowRunEventRecord",
+    "WorkflowRunStepRecord",
 ]

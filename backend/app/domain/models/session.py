@@ -33,6 +33,7 @@ class Session(BaseModel):
     current_model_id: Optional[str] = None  # 当前会话显式选择的模型id，None表示走默认模型
     sandbox_id: Optional[str] = None  # 沙箱id
     task_id: Optional[str] = None  # 任务id
+    current_run_id: Optional[str] = None  # 当前运行id（WorkflowRun）
     title: str = ""  # 标题
     unread_message_count: int = 0  # 未读消息数
     latest_message: str = ""  # 最新消息

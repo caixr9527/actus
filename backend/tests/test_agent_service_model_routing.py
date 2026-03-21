@@ -56,9 +56,21 @@ class _SessionRepo:
         self.saved_sessions.append(session)
 
 
+class _WorkflowRunRepo:
+    def __init__(self) -> None:
+        self.created_for_session_ids: list[str] = []
+
+    async def create_for_session(self, session: Session, *, status, thread_id=None):
+        self.created_for_session_ids.append(session.id)
+        from app.domain.models import WorkflowRun
+
+        return WorkflowRun(id="run-1", session_id=session.id, user_id=session.user_id, status=status, thread_id=thread_id)
+
+
 class _UoW:
-    def __init__(self, session_repo: _SessionRepo) -> None:
+    def __init__(self, session_repo: _SessionRepo, workflow_run_repo: _WorkflowRunRepo) -> None:
         self.session = session_repo
+        self.workflow_run = workflow_run_repo
 
     async def __aenter__(self):
         return self
@@ -107,6 +119,7 @@ class _DummyJsonParser:
 
 def test_agent_service_create_task_should_build_llm_from_session_model() -> None:
     session_repo = _SessionRepo()
+    workflow_run_repo = _WorkflowRunRepo()
     resolver = _DummyResolver()
     llm_factory = _DummyLLMFactory()
     _TaskFactory.created_tasks = []
@@ -120,7 +133,7 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
         json_parser=_DummyJsonParser(),
         search_engine=_DummySearchEngine(),
         file_storage=_DummyFileStorage(),
-        uow_factory=lambda: _UoW(session_repo),
+        uow_factory=lambda: _UoW(session_repo, workflow_run_repo),
         model_runtime_resolver=resolver,
         llm_factory=llm_factory,
     )
@@ -133,3 +146,4 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
     assert llm_factory.configs[0].model_name == "gpt-5.4"
     assert llm_factory.configs[0].temperature == 0.3
     assert session_repo.saved_sessions[0].task_id == "task-1"
+    assert session_repo.saved_sessions[0].current_run_id == "run-1"

@@ -12,6 +12,7 @@ from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .session_repository import SessionRepository
 from .user_repository import UserRepository
+from .workflow_run_repository import WorkflowRunRepository
 
 T = TypeVar("T", bound="IUnitOfWork")
 
@@ -22,6 +23,7 @@ class IUnitOfWork(ABC):
     session: SessionRepository
     user: UserRepository
     llm_model_config: LLMModelConfigRepository
+    workflow_run: WorkflowRunRepository
 
     @abstractmethod
     async def commit(self):

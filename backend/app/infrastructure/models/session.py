@@ -47,6 +47,10 @@ class SessionModel(Base):
         String(255),
         nullable=True,
     )  # 当前会话显式选择的模型id，NULL表示走默认模型
+    current_run_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 当前会话关联运行id（WorkflowRun）
     sandbox_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 沙箱id
     task_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 任务id
     title: Mapped[str] = mapped_column(

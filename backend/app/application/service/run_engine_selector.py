@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 def build_run_engine(
-        *,
         llm: LLM,
         agent_config: AgentConfig,
         session_id: str,

@@ -13,9 +13,10 @@ from sqlalchemy import select, delete, update, func, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory
+from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory, PlanEvent
 from app.domain.repositories import SessionRepository
 from app.infrastructure.models import SessionModel
+from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 from app.infrastructure.storage.redis import get_redis_client
 from core.realtime import SESSION_LIST_CHANGE_CHANNEL
 
@@ -26,6 +27,29 @@ class DBSessionRepository(SessionRepository):
 
     def __init__(self, db_session: AsyncSession) -> None:
         self.db_session = db_session
+        self._workflow_run_repository = DBWorkflowRunRepository(db_session=db_session)
+
+    async def _get_current_run_id(self, session_id: str) -> Optional[str]:
+        stmt = select(SessionModel.current_run_id).where(SessionModel.id == session_id)
+        result = await self.db_session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _sync_event_to_workflow_run(self, session_id: str, run_id: Optional[str], event: BaseEvent) -> None:
+        if not run_id:
+            return
+        await self._workflow_run_repository.add_event_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
+        )
+        if isinstance(event, PlanEvent):
+            await self._workflow_run_repository.replace_steps_from_plan(run_id=run_id, plan=event.plan)
+
+    async def _apply_workflow_run_compat(self, session: Session) -> Session:
+        session.events = await self._workflow_run_repository.get_events_with_compat(session)
+        session.files = await self._workflow_run_repository.get_files_with_compat(session)
+        session.memories = await self._workflow_run_repository.get_memories_with_compat(session)
+        return session
 
     def _register_session_list_changed(self, session_id: str) -> None:
         """注册会话列表变更通知，在事务提交成功后再执行发布。"""
@@ -91,8 +115,14 @@ class DBSessionRepository(SessionRepository):
         # 获取查询结果，如果不存在则返回None
         record = result.scalar_one_or_none()
 
-        # 如果找到了记录，则转换为领域模型并返回；否则返回None
-        return record.to_domain() if record is not None else None
+        if record is None:
+            return None
+
+        # 兼容读取策略：
+        # 1) 优先从 WorkflowRun 读取 events/files/memories；
+        # 2) 若新运行模型数据不存在，则回退 Session 聚合中的旧字段。
+        session = record.to_domain()
+        return await self._apply_workflow_run_compat(session)
 
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的id删除会话"""
@@ -172,6 +202,8 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        run_id = await self._get_current_run_id(session_id=session_id)
+        await self._sync_event_to_workflow_run(session_id=session_id, run_id=run_id, event=event)
 
     async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
         """按事件ID幂等新增事件"""
@@ -198,6 +230,11 @@ class DBSessionRepository(SessionRepository):
         # 事件不存在才追加，确保同一event_id不会重复入库。
         current_events.append(event.model_dump(mode="json"))
         record.events = current_events
+        await self._sync_event_to_workflow_run(
+            session_id=session_id,
+            run_id=record.current_run_id,
+            event=event,
+        )
         return True
 
     async def add_event_with_snapshot_if_absent(
@@ -237,6 +274,18 @@ class DBSessionRepository(SessionRepository):
         if event_inserted:
             current_events.append(event.model_dump(mode="json"))
             record.events = current_events
+            await self._sync_event_to_workflow_run(
+                session_id=session_id,
+                run_id=record.current_run_id,
+                event=event,
+            )
+        elif isinstance(event, PlanEvent):
+            # 对计划事件，幂等重放也应收敛步骤快照，避免异常窗口导致运行步骤缺失。
+            if record.current_run_id:
+                await self._workflow_run_repository.replace_steps_from_plan(
+                    run_id=record.current_run_id,
+                    plan=event.plan,
+                )
 
         # 标题属于会话投影的一部分，按调用方意图进行更新。
         if title is not None:
@@ -284,6 +333,9 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        run_id = await self._get_current_run_id(session_id=session_id)
+        if run_id:
+            await self._workflow_run_repository.append_file_snapshot(run_id=run_id, file=file)
 
     async def remove_file(self, session_id: str, file_id: str) -> None:
         """移除会话中的指定文件"""
@@ -312,20 +364,33 @@ class DBSessionRepository(SessionRepository):
 
         # 更新会话记录中的文件列表
         record.files = new_files
+        if record.current_run_id:
+            await self._workflow_run_repository.remove_file_snapshot(
+                run_id=record.current_run_id,
+                file_id=file_id,
+            )
 
     async def get_file_by_path(self, session_id: str, filepath: str) -> Optional[File]:
         """根据文件路径获取文件信息"""
-        # 构建查询语句，根据session_id获取会话的所有文件列表
-        stmt = select(SessionModel.files).where(SessionModel.id == session_id)
+        # 构建查询语句，根据session_id获取会话当前运行与文件快照。
+        stmt = select(SessionModel).where(SessionModel.id == session_id)
         # 执行查询操作
         result = await self.db_session.execute(stmt)
-        # 获取查询结果
-        files = result.scalar_one_or_none()
+        record = result.scalar_one_or_none()
 
-        # 如果没有找到文件列表，返回None
-        if not files:
+        # 如果会话不存在，返回None
+        if record is None:
             return None
 
+        # 兼容读取：优先运行快照文件，回退会话旧文件字段。
+        if record.current_run_id:
+            run = await self._workflow_run_repository.get_by_id(record.current_run_id)
+            if run is not None and run.files_snapshot:
+                for file in run.files_snapshot:
+                    if file.filepath == filepath:
+                        return file
+
+        files = record.files or []
         # 遍历文件列表，查找匹配指定文件路径的文件
         for file in files:
             if file.get("filepath", "") == filepath:
@@ -430,23 +495,32 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        run_id = await self._get_current_run_id(session_id=session_id)
+        if run_id:
+            await self._workflow_run_repository.upsert_memory_snapshot(
+                run_id=run_id,
+                agent_name=agent_name,
+                memory=memory,
+            )
 
     async def get_memory(self, session_id: str, agent_name: str) -> Memory:
         """获取指定会话的agent记忆信息"""
-
-        # 构建查询语句，从会话中获取指定代理的记忆数据
-        stmt = (
-            select(SessionModel.memories[agent_name])
-            .where(SessionModel.id == session_id)
-        )
+        stmt = select(SessionModel).where(SessionModel.id == session_id)
         # 执行查询操作
         result = await self.db_session.execute(stmt)
-        # 获取查询结果，如果不存在则返回None
-        memory_data = result.scalar_one_or_none()
+        record = result.scalar_one_or_none()
+        if record is None:
+            return Memory(messages=[])
 
-        # 如果找到了记忆数据，则将其转换为Memory对象并返回
+        # 兼容读取：优先运行快照，回退会话旧字段。
+        if record.current_run_id:
+            run = await self._workflow_run_repository.get_by_id(record.current_run_id)
+            if run is not None and agent_name in run.memories_snapshot:
+                return run.memories_snapshot[agent_name]
+
+        memory_data = (record.memories or {}).get(agent_name)
         if memory_data:
-            return Memory(**memory_data)
+            return Memory.model_validate(memory_data)
 
         # 如果没有找到对应的记忆数据，返回一个空的记忆对象
         return Memory(messages=[])
