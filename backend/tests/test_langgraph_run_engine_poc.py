@@ -12,7 +12,10 @@ from app.domain.models import (
     ExecutionStatus,
     PlanEventStatus,
     StepEventStatus,
+    Session,
+    WorkflowRun,
 )
+from app.infrastructure.runtime.langgraph_graphs.planner_react_poc import build_planner_react_poc_graph
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
@@ -47,6 +50,83 @@ class _FakeGraph:
         }
 
 
+class _CheckpointTuple:
+    def __init__(self, config):
+        self.config = config
+
+
+class _FakeCheckpointer:
+    def __init__(self, checkpoint_id: str) -> None:
+        self._checkpoint_id = checkpoint_id
+
+    async def aget_tuple(self, _config):
+        return _CheckpointTuple(
+            {
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": self._checkpoint_id,
+                }
+            }
+        )
+
+
+class _FakeGraphWithCheckpoint(_FakeGraph):
+    def __init__(self) -> None:
+        self.checkpointer = _FakeCheckpointer(checkpoint_id="cp-new")
+        self.last_config = None
+
+    async def ainvoke(self, _state, config=None):
+        self.last_config = config
+        return await super().ainvoke(_state, config=config)
+
+
+class _SessionRepo:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    async def get_by_id(self, session_id: str, user_id=None):
+        if session_id != self._session.id:
+            return None
+        return self._session
+
+
+class _WorkflowRunRepo:
+    def __init__(self, run: WorkflowRun) -> None:
+        self._run = run
+
+    async def get_by_id(self, run_id: str):
+        if run_id != self._run.id:
+            return None
+        return self._run
+
+    async def update_checkpoint_ref(self, run_id: str, checkpoint_namespace: str, checkpoint_id: str) -> None:
+        if run_id != self._run.id:
+            raise ValueError("run not found")
+        self._run.checkpoint_namespace = checkpoint_namespace
+        self._run.checkpoint_id = checkpoint_id
+
+
+class _UoW:
+    def __init__(self, session_repo: _SessionRepo, workflow_run_repo: _WorkflowRunRepo) -> None:
+        self.session = session_repo
+        self.workflow_run = workflow_run_repo
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _POCLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "任务拆成最小POC计划" in prompt:
+            return {"role": "assistant", "content": "{\"title\": \"POC\", \"steps\": [\"步骤1\"]}"}
+        return {"role": "assistant", "content": "{\"success\": true, \"result\": \"完成\"}"}
+
+
 def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
@@ -66,3 +146,60 @@ def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
     assert isinstance(events[2], StepEvent)
     assert isinstance(events[3], MessageEvent)
     assert isinstance(events[4], DoneEvent)
+
+
+def test_langgraph_run_engine_should_sync_checkpoint_ref_to_workflow_run(monkeypatch) -> None:
+    fake_graph = _FakeGraphWithCheckpoint()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        lambda llm: fake_graph,
+    )
+
+    session = Session(id="session-1", current_run_id="run-1")
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        checkpoint_namespace="",
+        checkpoint_id="cp-old",
+    )
+    uow_factory = lambda: _UoW(_SessionRepo(session), _WorkflowRunRepo(run))
+    engine = LangGraphRunEngine(session_id="session-1", llm=object(), uow_factory=uow_factory)
+
+    async def _collect():
+        return [event async for event in engine.invoke(Message(message="hello"))]
+
+    events = asyncio.run(_collect())
+
+    assert len(events) == 5
+    assert fake_graph.last_config == {
+        "configurable": {
+            "thread_id": "thread-1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "cp-old",
+        }
+    }
+    assert run.checkpoint_namespace == ""
+    assert run.checkpoint_id == "cp-new"
+
+
+def test_planner_react_poc_graph_should_execute_async_nodes_without_coroutine_error() -> None:
+    graph = build_planner_react_poc_graph(llm=_POCLLM())
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "帮我做个计划",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+
+    assert any(isinstance(event, TitleEvent) for event in events)
+    assert any(isinstance(event, PlanEvent) for event in events)
+    assert any(isinstance(event, StepEvent) for event in events)
+    assert any(isinstance(event, DoneEvent) for event in events)

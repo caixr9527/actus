@@ -164,9 +164,16 @@ def build_planner_react_poc_graph(llm: LLM) -> Any:
     if not LANGGRAPH_AVAILABLE:
         raise RuntimeError(f"LangGraph 未安装，无法构建 POC 图: {LANGGRAPH_IMPORT_ERROR}")
 
+    # 显式 async wrapper，避免 lambda 返回 coroutine 导致节点返回值非法。
+    async def _create_plan_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
+        return await _create_plan_node(state, llm)
+
+    async def _execute_step_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
+        return await _execute_step_node(state, llm)
+
     graph = StateGraph(PlannerReActPOCState)
-    graph.add_node("create_plan", lambda state: _create_plan_node(state, llm))
-    graph.add_node("execute_step", lambda state: _execute_step_node(state, llm))
+    graph.add_node("create_plan", _create_plan_with_llm)
+    graph.add_node("execute_step", _execute_step_with_llm)
     graph.add_node("finalize", _finalize_node)
     graph.add_edge(START, "create_plan")
     graph.add_edge("create_plan", "execute_step")

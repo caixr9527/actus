@@ -38,7 +38,11 @@ def build_run_engine(
     if engine_kind == "langgraph_poc":
         try:
             logger.info("启用 LangGraph POC 运行时引擎")
-            return LangGraphRunEngine(session_id=session_id, llm=llm)
+            return LangGraphRunEngine(
+                session_id=session_id,
+                llm=llm,
+                uow_factory=uow_factory,
+            )
         except Exception as e:
             logger.warning(f"LangGraph POC 初始化失败，回退 legacy planner-react: {e}")
 
