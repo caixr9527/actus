@@ -145,6 +145,53 @@ class _POCLLM:
         return {"role": "assistant", "content": "{\"success\": true, \"result\": \"完成\"}"}
 
 
+class _V1GraphLLM:
+    def __init__(self) -> None:
+        self._execute_count = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "创建一个计划" in prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"message\": \"已生成计划\","
+                    "\"goal\": \"完成两步任务\","
+                    "\"title\": \"V1 计划\","
+                    "\"language\": \"zh\","
+                    "\"steps\": ["
+                    "{\"id\": \"step-1\", \"description\": \"执行第一步\"},"
+                    "{\"id\": \"step-2\", \"description\": \"执行第二步\"}"
+                    "]"
+                    "}"
+                ),
+            }
+        if "你正在更新计划" in prompt:
+            return {
+                "role": "assistant",
+                "content": "{\"steps\": [{\"id\": \"step-2\", \"description\": \"执行第二步\"}]}",
+            }
+        if "任务已完成，你需要将最终结果交付给用户" in prompt:
+            return {
+                "role": "assistant",
+                "content": "{\"message\": \"最终总结\", \"attachments\": [\"/home/ubuntu/report.md\"]}",
+            }
+        if "你正在执行任务" in prompt:
+            self._execute_count += 1
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"success\": true,"
+                    f"\"result\": \"步骤{self._execute_count}完成\","
+                    "\"attachments\": []"
+                    "}"
+                ),
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
 def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
@@ -226,4 +273,32 @@ def test_planner_react_poc_graph_should_execute_async_nodes_without_coroutine_er
     assert any(isinstance(event, TitleEvent) for event in events)
     assert any(isinstance(event, PlanEvent) for event in events)
     assert any(isinstance(event, StepEvent) for event in events)
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_cover_execute_replan_summarize_path() -> None:
+    graph = build_planner_react_poc_graph(llm=_V1GraphLLM())
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "请完成一个两步任务",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+
+    plan_events = [event for event in events if isinstance(event, PlanEvent)]
+    step_events = [event for event in events if isinstance(event, StepEvent)]
+    message_events = [event for event in events if isinstance(event, MessageEvent)]
+
+    assert any(event.status == PlanEventStatus.CREATED for event in plan_events)
+    assert any(event.status == PlanEventStatus.UPDATED for event in plan_events)
+    assert any(event.status == PlanEventStatus.COMPLETED for event in plan_events)
+    assert len([event for event in step_events if event.status == StepEventStatus.COMPLETED]) >= 2
+    assert any(event.message == "最终总结" for event in message_events)
     assert any(isinstance(event, DoneEvent) for event in events)

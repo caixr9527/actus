@@ -95,6 +95,9 @@ class PlannerReActPOCState(TypedDict, total=False):
     user_message: str
     plan: Plan
     current_step_id: Optional[str]
+    execution_count: int
+    max_execution_steps: int
+    last_executed_step: Optional[Step]
     step_states: List[StepState]
     human_tasks: Dict[str, HumanTaskState]
     tool_invocations: Dict[str, ToolInvocationState]
@@ -120,6 +123,8 @@ class GraphStateContractMapper:
         "user_message",
         "plan",
         "current_step_id",
+        "execution_count",
+        "max_execution_steps",
         "step_states",
         "human_tasks",
         "tool_invocations",
@@ -313,6 +318,9 @@ class GraphStateContractMapper:
             "user_message": user_message,
             "plan": plan,
             "current_step_id": current_step_id,
+            "execution_count": int(graph_state_from_metadata.get("execution_count") or 0),
+            "max_execution_steps": int(graph_state_from_metadata.get("max_execution_steps") or 20),
+            "last_executed_step": None,
             "step_states": step_states,
             "human_tasks": cls._normalize_human_tasks(graph_state_from_metadata.get("human_tasks")),
             "tool_invocations": cls._normalize_tool_invocations(graph_state_from_metadata.get("tool_invocations")),
@@ -516,6 +524,8 @@ class GraphStateContractMapper:
                     "checkpoint_ref_namespace": state.get("checkpoint_ref_namespace"),
                     "checkpoint_ref_id": state.get("checkpoint_ref_id"),
                     "current_step_id": state.get("current_step_id"),
+                    "execution_count": int(state.get("execution_count") or 0),
+                    "max_execution_steps": int(state.get("max_execution_steps") or 20),
                     "step_states": cls._to_json_safe(state.get("step_states") or []),
                     "human_tasks": cls._to_json_safe(state.get("human_tasks") or {}),
                     "tool_invocations": cls._to_json_safe(state.get("tool_invocations") or {}),

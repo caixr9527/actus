@@ -8,10 +8,11 @@
 import json
 import logging
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, List, Literal, Optional
 
 from app.domain.external import LLM
 from app.domain.models import (
+    File,
     Plan,
     Step,
     ExecutionStatus,
@@ -23,6 +24,7 @@ from app.domain.models import (
     MessageEvent,
     DoneEvent,
 )
+from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, SUMMARIZE_PROMPT, UPDATE_PLAN_PROMPT
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import PlannerReActPOCState
 
@@ -54,49 +56,96 @@ def _safe_parse_json(content: str | None) -> Dict[str, Any]:
         return {}
 
 
-async def _create_plan_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
+def _normalize_attachments(raw_attachments: Any) -> List[str]:
+    if isinstance(raw_attachments, str):
+        return [raw_attachments]
+    if isinstance(raw_attachments, list):
+        return [str(item) for item in raw_attachments if str(item).strip()]
+    return []
+
+
+def _build_step_from_payload(payload: Any, fallback_index: int) -> Step:
+    if isinstance(payload, dict):
+        step_id = str(payload.get("id") or str(uuid.uuid4()))
+        description = str(payload.get("description") or f"步骤{fallback_index + 1}")
+        return Step(
+            id=step_id,
+            description=description,
+            status=ExecutionStatus.PENDING,
+        )
+
+    return Step(
+        id=str(uuid.uuid4()),
+        description=str(payload).strip() or f"步骤{fallback_index + 1}",
+        status=ExecutionStatus.PENDING,
+    )
+
+
+def _route_after_plan(state: PlannerReActPOCState) -> Literal["execute_step", "summarize"]:
+    plan = state.get("plan")
+    if plan is None:
+        return "summarize"
+    if state.get("execution_count", 0) >= state.get("max_execution_steps", 20):
+        logger.warning("LangGraph V1 执行次数达到上限，提前进入总结阶段")
+        return "summarize"
+    return "execute_step" if plan.get_next_step() is not None else "summarize"
+
+
+def _route_after_replan(state: PlannerReActPOCState) -> Literal["execute_step", "summarize"]:
+    return _route_after_plan(state)
+
+
+async def _create_or_reuse_plan_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
+    """创建计划或复用已恢复计划。"""
+    plan = state.get("plan")
+    if plan is not None and len(plan.steps) > 0 and not plan.done:
+        next_step = plan.get_next_step()
+        return {
+            **state,
+            "current_step_id": next_step.id if next_step is not None else None,
+        }
+
     user_message = state.get("user_message", "").strip()
-    prompt = (
-        "请将用户任务拆成最小POC计划，并返回JSON。"
-        "格式：{\"title\": \"任务标题\", \"steps\": [\"步骤1\", \"步骤2\"]}。"
-        "如果任务无法拆分，也至少返回一个步骤。"
-        f"\n用户任务：{user_message}"
+    prompt = CREATE_PLAN_PROMPT.format(
+        message=user_message,
+        attachments="",
     )
     llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
     parsed = _safe_parse_json(llm_message.get("content"))
-    title = str(parsed.get("title") or "LangGraph POC 任务")
+
+    title = str(parsed.get("title") or "LangGraph 任务")
+    language = str(parsed.get("language") or "zh")
+    goal = str(parsed.get("goal") or user_message)
+    planner_message = str(parsed.get("message") or user_message or "已生成任务计划")
     raw_steps = parsed.get("steps")
     if not isinstance(raw_steps, list) or len(raw_steps) == 0:
         raw_steps = [user_message or "处理用户任务"]
 
-    steps = [
-        Step(
-            id=str(uuid.uuid4()),
-            description=str(item).strip() or "执行任务步骤",
-            status=ExecutionStatus.PENDING,
-        )
-        for item in raw_steps
-    ]
+    steps = [_build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
     plan = Plan(
         title=title,
-        goal=user_message,
-        language="zh",
-        message=user_message,
+        goal=goal,
+        language=language,
+        message=planner_message,
         steps=steps,
         status=ExecutionStatus.PENDING,
     )
+    next_step = plan.get_next_step()
     return {
         **state,
         "plan": plan,
+        "current_step_id": next_step.id if next_step is not None else None,
         "emitted_events": append_events(
             state.get("emitted_events"),
             TitleEvent(title=title),
+            MessageEvent(role="assistant", message=planner_message),
             PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
         ),
     }
 
 
 async def _execute_step_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
+    """执行单个步骤，完成后交给 replan 节点更新后续计划。"""
     plan = state.get("plan")
     if plan is None:
         return state
@@ -111,72 +160,164 @@ async def _execute_step_node(state: PlannerReActPOCState, llm: LLM) -> PlannerRe
         status=StepEventStatus.STARTED,
     )
 
-    prompt = (
-        "请执行以下任务步骤，并返回JSON。"
-        "格式：{\"success\": true, \"result\": \"执行结果\"}"
-        f"\n任务步骤：{step.description}"
-        f"\n用户原始需求：{state.get('user_message', '')}"
+    prompt = EXECUTION_PROMPT.format(
+        message=state.get("user_message", ""),
+        attachments="",
+        language=plan.language or "zh",
+        step=step.description,
     )
     llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
     parsed = _safe_parse_json(llm_message.get("content"))
     step.success = bool(parsed.get("success", True))
     step.result = str(parsed.get("result") or f"已完成步骤：{step.description}")
+    step.attachments = _normalize_attachments(parsed.get("attachments"))
     step.status = ExecutionStatus.COMPLETED if step.success else ExecutionStatus.FAILED
 
     completed_event = StepEvent(
         step=step.model_copy(deep=True),
         status=StepEventStatus.COMPLETED if step.success else StepEventStatus.FAILED,
     )
-    assistant_message_event = MessageEvent(role="assistant", message=step.result or "")
+    events = [started_event, completed_event]
+    if step.result:
+        events.append(MessageEvent(role="assistant", message=step.result))
+    next_step = plan.get_next_step()
 
     return {
         **state,
         "plan": plan,
+        "last_executed_step": step.model_copy(deep=True),
+        "execution_count": int(state.get("execution_count", 0)) + 1,
+        "current_step_id": next_step.id if next_step is not None else None,
         "final_message": step.result or "",
         "emitted_events": append_events(
             state.get("emitted_events"),
-            started_event,
-            completed_event,
-            assistant_message_event,
+            *events,
         ),
     }
 
 
-async def _finalize_node(state: PlannerReActPOCState) -> PlannerReActPOCState:
+async def _replan_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
+    """根据最新步骤执行结果更新后续未完成步骤。"""
     plan = state.get("plan")
+    last_step = state.get("last_executed_step")
+    if plan is None or last_step is None:
+        return state
+
+    prompt = UPDATE_PLAN_PROMPT.format(
+        step=last_step.model_dump_json(),
+        plan=plan.model_dump_json(),
+    )
+    llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
+    parsed = _safe_parse_json(llm_message.get("content"))
+
+    raw_steps = parsed.get("steps")
+    if not isinstance(raw_steps, list):
+        return state
+
+    new_steps = [_build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
+    first_pending_index: Optional[int] = None
+    for index, current_step in enumerate(plan.steps):
+        if not current_step.done:
+            first_pending_index = index
+            break
+
+    if first_pending_index is not None:
+        updated_steps = plan.steps[:first_pending_index]
+        updated_steps.extend(new_steps)
+        plan.steps = updated_steps
+
+    next_step = plan.get_next_step()
+    return {
+        **state,
+        "plan": plan,
+        "current_step_id": next_step.id if next_step is not None else None,
+        "emitted_events": append_events(
+            state.get("emitted_events"),
+            PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.UPDATED),
+        ),
+    }
+
+
+async def _summarize_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
+    """在所有步骤完成后汇总结果。"""
+    plan = state.get("plan")
+    prompt = SUMMARIZE_PROMPT
+    llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
+    parsed = _safe_parse_json(llm_message.get("content"))
+    summary_message = str(parsed.get("message") or state.get("final_message") or "任务已完成")
+    attachment_paths = _normalize_attachments(parsed.get("attachments"))
+    attachments = [File(filepath=filepath) for filepath in attachment_paths]
+
+    final_events: List[Any] = [
+        MessageEvent(role="assistant", message=summary_message, attachments=attachments),
+    ]
     if plan is not None:
         plan.status = ExecutionStatus.COMPLETED
-
-    final_events = []
-    if plan is not None:
         final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
-    final_events.append(DoneEvent())
 
     return {
         **state,
         "plan": plan,
+        "current_step_id": None,
+        "final_message": summary_message,
         "emitted_events": append_events(state.get("emitted_events"), *final_events),
     }
 
 
+async def _finalize_node(state: PlannerReActPOCState) -> PlannerReActPOCState:
+    """结束节点，追加 done 事件。"""
+    events = list(state.get("emitted_events") or [])
+    if events and isinstance(events[-1], DoneEvent):
+        return state
+
+    return {
+        **state,
+        "emitted_events": append_events(state.get("emitted_events"), DoneEvent()),
+    }
+
+
 def build_planner_react_poc_graph(llm: LLM) -> Any:
-    """构建 LangGraph POC 图。"""
+    """构建 LangGraph Planner-ReAct V1 图（沿用 POC 编译入口）。"""
     if not LANGGRAPH_AVAILABLE:
         raise RuntimeError(f"LangGraph 未安装，无法构建 POC 图: {LANGGRAPH_IMPORT_ERROR}")
 
     # 显式 async wrapper，避免 lambda 返回 coroutine 导致节点返回值非法。
     async def _create_plan_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
-        return await _create_plan_node(state, llm)
+        return await _create_or_reuse_plan_node(state, llm)
 
     async def _execute_step_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
         return await _execute_step_node(state, llm)
 
+    async def _replan_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
+        return await _replan_node(state, llm)
+
+    async def _summarize_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
+        return await _summarize_node(state, llm)
+
     graph = StateGraph(PlannerReActPOCState)
-    graph.add_node("create_plan", _create_plan_with_llm)
+    graph.add_node("create_plan_or_reuse", _create_plan_with_llm)
     graph.add_node("execute_step", _execute_step_with_llm)
+    graph.add_node("replan", _replan_with_llm)
+    graph.add_node("summarize", _summarize_with_llm)
     graph.add_node("finalize", _finalize_node)
-    graph.add_edge(START, "create_plan")
-    graph.add_edge("create_plan", "execute_step")
-    graph.add_edge("execute_step", "finalize")
+    graph.add_edge(START, "create_plan_or_reuse")
+    graph.add_conditional_edges(
+        "create_plan_or_reuse",
+        _route_after_plan,
+        {
+            "execute_step": "execute_step",
+            "summarize": "summarize",
+        },
+    )
+    graph.add_edge("execute_step", "replan")
+    graph.add_conditional_edges(
+        "replan",
+        _route_after_replan,
+        {
+            "execute_step": "execute_step",
+            "summarize": "summarize",
+        },
+    )
+    graph.add_edge("summarize", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=InMemorySaver())
