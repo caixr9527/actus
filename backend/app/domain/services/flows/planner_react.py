@@ -25,6 +25,8 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agents import PlannerAgent, ReActAgent
 from app.domain.services.tools import (
+    CapabilityBuildContext,
+    ToolRuntimeAdapter,
     BrowserTool,
     FileTool,
     ShellTool,
@@ -52,6 +54,7 @@ class PlannerReActFlow(BaseFlow):
             search_engine: SearchEngine,
             mcp_tool: MCPTool,
             a2a_tool: A2ATool,
+            tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
     ):
         # 初始化会话ID和会话仓库，用于后续的交互和状态管理
         self._session_id = session_id
@@ -61,16 +64,30 @@ class PlannerReActFlow(BaseFlow):
         self.status = FlowStatus.IDLE
         self.plan: Optional[Plan] = None
 
-        # 构建工具列表，包括文件操作、shell命令执行、浏览器控制、搜索功能、消息处理、MCP和A2A工具
-        tools = [
-            FileTool(sandbox=sandbox),  # 文件操作工具
-            ShellTool(sandbox=sandbox),  # Shell命令执行工具
-            BrowserTool(browser=browser),  # 浏览器控制工具
-            SearchTool(search_engine=search_engine),  # 搜索引擎工具
-            MessageTool(),  # 消息处理工具
-            mcp_tool,  # MCP工具
-            a2a_tool,  # A2A工具
-        ]
+        # BE-LG-05：优先通过 ToolRuntimeAdapter + CapabilityRegistry 组装工具。
+        # 当 adapter 未注入时，继续沿用原有硬编码方式，保证旧链路兼容。
+        if tool_runtime_adapter is not None:
+            capability_context = CapabilityBuildContext(
+                sandbox=sandbox,
+                browser=browser,
+                search_engine=search_engine,
+            )
+            tools = tool_runtime_adapter.build_runtime_tools(
+                capability_context=capability_context,
+                mcp_tool=mcp_tool,
+                a2a_tool=a2a_tool,
+            )
+        else:
+            # 兼容旧模式：按固定清单初始化工具。
+            tools = [
+                FileTool(sandbox=sandbox),  # 文件操作工具
+                ShellTool(sandbox=sandbox),  # Shell命令执行工具
+                BrowserTool(browser=browser),  # 浏览器控制工具
+                SearchTool(search_engine=search_engine),  # 搜索引擎工具
+                MessageTool(),  # 消息处理工具
+                mcp_tool,  # MCP工具
+                a2a_tool,  # A2A工具
+            ]
 
         # 创建规划代理实例，负责制定任务计划
         self.planner = PlannerAgent(

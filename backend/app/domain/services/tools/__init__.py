@@ -8,9 +8,11 @@
 from .a2a import A2ATool
 from .base import BaseTool
 from .browser import BrowserTool
+from .capability_registry import CapabilityBuildContext, CapabilityDefinition, CapabilityRegistry
 from .file import FileTool
 from .mcp import MCPClientManager, MCPTool
 from .message import MessageTool
+from .runtime_adapter import ToolRuntimeAdapter, ToolRuntimeEventHooks
 from .search import SearchTool
 from .shell import ShellTool
 
@@ -23,5 +25,10 @@ __all__ = [
     "BrowserTool",
     "ShellTool",
     "A2ATool",
-    "MessageTool"
+    "MessageTool",
+    "CapabilityBuildContext",
+    "CapabilityDefinition",
+    "CapabilityRegistry",
+    "ToolRuntimeAdapter",
+    "ToolRuntimeEventHooks",
 ]

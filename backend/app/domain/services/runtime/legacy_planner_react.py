@@ -12,7 +12,7 @@ from app.domain.models import Message, BaseEvent, AgentConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.flows import PlannerReActFlow
 from app.domain.services.runtime.run_engine import RunEngine
-from app.domain.services.tools import MCPTool, A2ATool
+from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter
 
 
 class LegacyPlannerReActRunEngine(RunEngine):
@@ -30,6 +30,7 @@ class LegacyPlannerReActRunEngine(RunEngine):
             search_engine: SearchEngine,
             mcp_tool: MCPTool,
             a2a_tool: A2ATool,
+            tool_runtime_adapter: ToolRuntimeAdapter | None = None,
     ) -> None:
         self._flow = PlannerReActFlow(
             llm=llm,
@@ -42,6 +43,7 @@ class LegacyPlannerReActRunEngine(RunEngine):
             search_engine=search_engine,
             mcp_tool=mcp_tool,
             a2a_tool=a2a_tool,
+            tool_runtime_adapter=tool_runtime_adapter,
         )
 
     async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:

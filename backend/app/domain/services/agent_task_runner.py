@@ -37,22 +37,14 @@ from app.domain.models import (
     Message,
     BaseEvent,
     ToolEvent,
-    ToolEventStatus,
     ToolResult,
-    SearchResults,
     DoneEvent,
     TitleEvent,
     WaitEvent,
-    BrowserToolContent,
-    SearchToolContent,
-    ShellToolContent,
-    FileToolContent,
-    MCPToolContent,
-    A2AToolContent,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine, LegacyPlannerReActRunEngine
-from app.domain.services.tools import MCPTool, A2ATool
+from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, ToolRuntimeEventHooks
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +70,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox: Sandbox,
             run_engine: Optional[RunEngine] = None,
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
+            tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
     ) -> None:
         self._session_id = session_id
         self._user_id = user_id
@@ -89,6 +82,9 @@ class AgentTaskRunner(TaskRunner):
         self._file_storage = file_storage
         self._browser = browser
         self._uow_factory = uow_factory
+        # BE-LG-05：统一工具运行时适配入口。
+        # 若外部未显式注入，则使用默认实现（包含 CapabilityRegistry.default_v1）。
+        self._tool_runtime_adapter = tool_runtime_adapter or ToolRuntimeAdapter()
         self._run_engine = run_engine or self._build_run_engine(
             llm=llm,
             agent_config=agent_config,
@@ -100,6 +96,14 @@ class AgentTaskRunner(TaskRunner):
             search_engine=search_engine,
             run_engine_factory=run_engine_factory,
         )
+
+    def _get_tool_runtime_adapter(self) -> ToolRuntimeAdapter:
+        """懒加载 tool runtime adapter，兼容测试中 object.__new__ 的构造方式。"""
+        adapter = getattr(self, "_tool_runtime_adapter", None)
+        if adapter is None:
+            adapter = ToolRuntimeAdapter()
+            self._tool_runtime_adapter = adapter
+        return adapter
 
     def _build_run_engine(
             self,
@@ -125,6 +129,7 @@ class AgentTaskRunner(TaskRunner):
                 search_engine=search_engine,
                 mcp_tool=self._mcp_tool,
                 a2a_tool=self._a2a_tool,
+                tool_runtime_adapter=self._get_tool_runtime_adapter(),
             )
 
         return LegacyPlannerReActRunEngine(
@@ -138,6 +143,7 @@ class AgentTaskRunner(TaskRunner):
             search_engine=search_engine,
             mcp_tool=self._mcp_tool,
             a2a_tool=self._a2a_tool,
+            tool_runtime_adapter=self._get_tool_runtime_adapter(),
         )
 
     async def _put_and_add_event(
@@ -329,81 +335,23 @@ class AgentTaskRunner(TaskRunner):
         )
         return self._file_storage.get_file_url(file)
 
+    async def _read_shell_output_for_tool(self, session_id: str) -> ToolResult:
+        """读取 shell 控制台输出，供 ToolRuntimeAdapter 富化 shell 工具结果。"""
+        return await self._sandbox.read_shell_output(session_id=session_id, console=True)
+
+    async def _read_file_content_for_tool(self, filepath: str) -> ToolResult:
+        """读取文件内容，供 ToolRuntimeAdapter 富化 file 工具结果。"""
+        return await self._sandbox.read_file(file_path=filepath)
+
     async def _handle_tool_event(self, event: ToolEvent) -> None:
         try:
-            # 检查工具事件的状态是否为已调用
-            if event.status == ToolEventStatus.CALLED:
-                # 处理浏览器工具事件 - 生成屏幕截图
-                if event.tool_name == "browser":
-                    event.tool_content = BrowserToolContent(
-                        screenshot=await self._get_browser_screenshot(),
-                    )
-                # 处理搜索工具事件 - 提取搜索结果
-                elif event.tool_name == "search":
-                    search_results: ToolResult[SearchResults] = event.function_result
-                    logger.info(f"搜索工具结果: {search_results}")
-                    event.tool_content = SearchToolContent(results=search_results.data.results)
-                # 处理Shell工具事件 - 读取Shell命令输出
-                elif event.tool_name == "shell":
-                    if "session_id" in event.function_args:
-                        # 如果提供了session_id参数，读取对应会话的shell输出
-                        shell_result = await self._sandbox.read_shell_output(
-                            session_id=event.function_args["session_id"],
-                            console=True
-                        )
-                        event.tool_content = ShellToolContent(
-                            console=(shell_result.data or {}).get("console_records", [])
-                        )
-                    else:
-                        # 如果没有session_id参数，设置默认值
-                        event.tool_content = ShellToolContent(console="(No console)")
-                # 处理文件工具事件 - 读取文件内容并同步到存储
-                elif event.tool_name == "file":
-                    if "filepath" in event.function_args:
-                        # 从函数参数中获取文件路径
-                        filepath = event.function_args["filepath"]
-                        # 从沙箱中读取文件内容
-                        file_read_result = await self._sandbox.read_file(file_path=filepath)
-                        file_content: str = (file_read_result.data or {}).get("content", "")
-                        event.tool_content = FileToolContent(content=file_content)
-                        # 将文件同步到沙存储
-                        await self._sync_file_to_storage(filepath=filepath)
-                    else:
-                        # 如果没有提供文件路径参数，设置默认内容
-                        event.tool_content = FileToolContent(content="(No Content)")
-                # 处理MCP和A2A工具事件 - 处理外部工具调用结果
-                elif event.tool_name in ["mcp", "a2a"]:
-                    logger.info(f"处理MCP/A2A工具事件, function_result: {event.function_result}")
-                    if event.function_result:
-                        # 检查函数结果是否有数据属性
-                        if hasattr(event.function_result, "data") and event.function_result.data:
-                            logger.info(f"MCP/A2A工具调用结果: {event.function_result.data}")
-                            # 根据工具名称设置相应的工具内容
-                            event.tool_content = MCPToolContent(result=event.function_result.data) \
-                                if event.tool_name == "mcp" \
-                                else A2AToolContent(a2a_result=event.function_result.data)
-                        # 检查函数结果是否成功但无数据
-                        elif hasattr(event.function_result, "success") and event.function_result.success:
-                            logger.info(f"MCP/A2A工具调用成功返回，但无结果: {event.function_result}")
-                            # 获取结果数据，优先使用model_dump方法
-                            result_data = event.function_result.model_dump() \
-                                if hasattr(event.function_result, "model_dump") \
-                                else str(event.function_result)
-                            event.tool_content = MCPToolContent(result=result_data) \
-                                if event.tool_name == "mcp" \
-                                else A2AToolContent(a2a_result=result_data)
-                        # 其他情况，直接转换为字符串
-                        else:
-                            logger.info(f"MCP/A2A工具结果: {event.function_result}")
-                            event.tool_content = MCPToolContent(result=str(event.function_result)) \
-                                if event.tool_name == "mcp" \
-                                else A2AToolContent(a2a_result=str(event.function_result))
-                    else:
-                        # 没有找到函数结果时的默认处理
-                        logger.warning("MCP/A2A工具调用结果未发现")
-                        event.tool_content = MCPToolContent(result="(MCP工具无可用结果)") \
-                            if event.tool_name == "mcp" \
-                            else A2AToolContent(a2a_result="(A2A智能体无可用结果)")
+            hooks = ToolRuntimeEventHooks(
+                get_browser_screenshot=self._get_browser_screenshot,
+                read_shell_output=self._read_shell_output_for_tool,
+                read_file_content=self._read_file_content_for_tool,
+                sync_file_to_storage=self._sync_file_to_storage,
+            )
+            await self._get_tool_runtime_adapter().enrich_tool_event(event=event, hooks=hooks)
         except Exception as e:
             # 记录处理工具事件时发生的异常
             logger.exception(f"处理工具事件失败: {e}")
@@ -433,16 +381,10 @@ class AgentTaskRunner(TaskRunner):
         注意：该方法必须在初始化MCP/A2A的同一个asyncio Task中调用，
         否则anyio的cancel scope会检测到任务上下文切换并抛出RuntimeError。
         """
-        try:
-            if self._mcp_tool:
-                await self._mcp_tool.cleanup()
-        except Exception as e:
-            logger.warning(f"清理MCP工具资源时出错: {e}")
-        try:
-            if self._a2a_tool:
-                await self._a2a_tool.manager.cleanup()
-        except Exception as e:
-            logger.warning(f"清理A2A工具资源时出错: {e}")
+        await self._get_tool_runtime_adapter().cleanup_remote_tools(
+            mcp_tool=self._mcp_tool,
+            a2a_tool=self._a2a_tool,
+        )
 
     async def _mark_session_completed_fallback(self, scene: str) -> None:
         """在事件写入失败时兜底更新会话状态为COMPLETED"""
@@ -460,8 +402,12 @@ class AgentTaskRunner(TaskRunner):
 
             # 确保沙箱环境就绪并初始化各种工具
             await self._sandbox.ensure_sandbox()
-            await self._mcp_tool.initialize(self._mcp_config)
-            await self._a2a_tool.initialize(self._a2a_config)
+            await self._get_tool_runtime_adapter().initialize_remote_tools(
+                mcp_tool=self._mcp_tool,
+                mcp_config=self._mcp_config,
+                a2a_tool=self._a2a_tool,
+                a2a_config=self._a2a_config,
+            )
 
             # 循环处理输入流中的事件，直到输入流为空
             while not await task.input_stream.is_empty():

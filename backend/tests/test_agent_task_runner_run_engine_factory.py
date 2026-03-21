@@ -1,5 +1,6 @@
 from app.domain.models import AgentConfig, MCPConfig, A2AConfig
 from app.domain.services.agent_task_runner import AgentTaskRunner
+from app.domain.services.tools import ToolRuntimeAdapter
 
 
 class _DummyRunEngine:
@@ -36,3 +37,4 @@ def test_agent_task_runner_should_build_run_engine_with_task_scoped_tools() -> N
     assert captured["session_id"] == "session-1"
     assert captured["mcp_tool"] is runner._mcp_tool
     assert captured["a2a_tool"] is runner._a2a_tool
+    assert isinstance(captured["tool_runtime_adapter"], ToolRuntimeAdapter)

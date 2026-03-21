@@ -12,7 +12,7 @@ from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine
 from app.domain.models import AgentConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine, LegacyPlannerReActRunEngine
-from app.domain.services.tools import MCPTool, A2ATool
+from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter
 from app.infrastructure.runtime import LangGraphRunEngine
 from core.config import get_settings
 
@@ -30,6 +30,7 @@ def build_run_engine(
         search_engine: SearchEngine,
         mcp_tool: MCPTool,
         a2a_tool: A2ATool,
+        tool_runtime_adapter: ToolRuntimeAdapter | None = None,
 ) -> RunEngine:
     """根据配置选择运行时引擎，LangGraph POC 不可用时自动回退旧实现。"""
     settings = get_settings()
@@ -57,4 +58,5 @@ def build_run_engine(
         search_engine=search_engine,
         mcp_tool=mcp_tool,
         a2a_tool=a2a_tool,
+        tool_runtime_adapter=tool_runtime_adapter,
     )
