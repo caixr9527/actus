@@ -10,7 +10,7 @@ import io
 import logging
 import uuid
 from datetime import datetime
-from typing import List, AsyncGenerator, Callable, BinaryIO, Optional
+from typing import List, AsyncGenerator, Callable, BinaryIO, Optional, Any
 
 from pydantic import TypeAdapter
 
@@ -268,8 +268,48 @@ class AgentTaskRunner(TaskRunner):
         # 返回文件大小
         return size
 
-    async def _sync_file_to_storage(self, filepath: str) -> File:
+    @staticmethod
+    def _parse_sandbox_file_exists_payload(payload: Any) -> Optional[bool]:
+        """解析沙箱 check_file_exists 的 data 字段，兼容不同返回结构。"""
+        if isinstance(payload, bool):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("exists", "is_exists", "file_exists", "found"):
+                if key in payload:
+                    return bool(payload[key])
+        if payload is None:
+            return None
+        return bool(payload)
+
+    async def _check_sandbox_file_exists(self, filepath: str) -> bool:
+        """判断沙箱文件是否存在；检查失败时按“不存在”处理，避免误下载。"""
         try:
+            result = await self._sandbox.check_file_exists(file_path=filepath)
+        except Exception as e:
+            logger.warning(f"检查沙箱文件[{filepath}]是否存在失败，跳过附件同步: {e}")
+            return False
+
+        if not result.success:
+            logger.info(f"沙箱文件[{filepath}]不存在或不可访问，跳过附件同步: {result.message}")
+            return False
+
+        parsed = self._parse_sandbox_file_exists_payload(result.data)
+        if parsed is None:
+            # 兼容历史返回：仅返回 success，不带 data。
+            return True
+        return parsed
+
+    async def _sync_file_to_storage(self, filepath: str) -> Optional[File]:
+        try:
+            if not filepath.strip():
+                logger.info("接收到空附件路径，跳过附件同步")
+                return None
+
+            # BE-LG-08 bugfix：
+            # 先校验沙箱路径是否存在，避免模型幻觉附件触发不必要的沙箱下载。
+            if not await self._check_sandbox_file_exists(filepath=filepath):
+                return None
+
             # 根据文件路径从会话存储中获取旧文件信息（如存在）
             async with self._uow_factory() as uow:
                 old_file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)

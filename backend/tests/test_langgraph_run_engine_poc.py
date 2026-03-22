@@ -192,6 +192,79 @@ class _V1GraphLLM:
         return {"role": "assistant", "content": "{}"}
 
 
+class _SingleStepHallucinatedSummaryLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "创建一个计划" in prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"message\": \"你好\","
+                    "\"goal\": \"回复用户问候\","
+                    "\"title\": \"问候任务\","
+                    "\"language\": \"zh\","
+                    "\"steps\": [{\"id\": \"step-1\", \"description\": \"向用户问好\"}]"
+                    "}"
+                ),
+            }
+        if "你正在更新计划" in prompt:
+            return {"role": "assistant", "content": "{\"steps\": []}"}
+        if "任务已完成，你需要将最终结果交付给用户" in prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"message\": \"# 任务完成总结报告\\n我已完成数据清洗、异常检测、趋势预测并输出报告。"
+                    "以下是详细分析：1. 增长率 2. 异常值 3. 下季度预测......\","
+                    "\"attachments\": [\"/home/ubuntu/report.md\"]"
+                    "}"
+                ),
+            }
+        if "你正在执行任务" in prompt:
+            return {
+                "role": "assistant",
+                "content": "{\"success\": true, \"result\": \"你好！很高兴见到你。\", \"attachments\": []}",
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
+class _SingleStepRepeatedSummaryLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "创建一个计划" in prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"message\": \"你好\","
+                    "\"goal\": \"回复用户问候\","
+                    "\"title\": \"问候任务\","
+                    "\"language\": \"zh\","
+                    "\"steps\": [{\"id\": \"step-1\", \"description\": \"向用户问好\"}]"
+                    "}"
+                ),
+            }
+        if "你正在更新计划" in prompt:
+            return {"role": "assistant", "content": "{\"steps\": []}"}
+        if "任务已完成，你需要将最终结果交付给用户" in prompt:
+            return {
+                "role": "assistant",
+                "content": "{\"message\": \"你好！很高兴见到你。\", \"attachments\": []}",
+            }
+        if "你正在执行任务" in prompt:
+            return {
+                "role": "assistant",
+                "content": "{\"success\": true, \"result\": \"你好！很高兴见到你。\", \"attachments\": []}",
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
+class _NeverInvokeLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        raise AssertionError("纯问候分支不应调用LLM")
+
+
 def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
@@ -301,4 +374,78 @@ def test_planner_react_v1_graph_should_cover_execute_replan_summarize_path() -> 
     assert any(event.status == PlanEventStatus.COMPLETED for event in plan_events)
     assert len([event for event in step_events if event.status == StepEventStatus.COMPLETED]) >= 2
     assert any(event.message == "最终总结" for event in message_events)
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_fallback_to_step_result_when_single_step_summary_is_irrelevant() -> None:
+    graph = build_planner_react_poc_graph(llm=_SingleStepHallucinatedSummaryLLM())
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "请向我问好",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+    assistant_messages = [event for event in events if isinstance(event, MessageEvent) and event.role == "assistant"]
+
+    # summarize 产出与步骤结果无关时，应回退到步骤结果。
+    final_greeting_messages = [event.message for event in assistant_messages if event.message == "你好！很高兴见到你。"]
+    assert len(final_greeting_messages) == 1
+    assert all("数据清洗" not in event.message for event in assistant_messages)
+
+
+def test_planner_react_v1_graph_should_not_emit_duplicate_message_when_summary_equals_last_step_result() -> None:
+    graph = build_planner_react_poc_graph(llm=_SingleStepRepeatedSummaryLLM())
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "请向我问好",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+    message_events = [event for event in events if isinstance(event, MessageEvent) and event.role == "assistant"]
+
+    greeting_message = "你好！很高兴见到你。"
+    # summarize 与上一步结果一致且无附件时，应避免重复追加 assistant message。
+    assert len([event for event in message_events if event.message == greeting_message]) == 1
+    assert state.get("final_message") == greeting_message
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_skip_plan_and_step_for_simple_greeting() -> None:
+    graph = build_planner_react_poc_graph(llm=_NeverInvokeLLM())
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "你好",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+
+    assistant_messages = [event for event in events if isinstance(event, MessageEvent) and event.role == "assistant"]
+    plan_events = [event for event in events if isinstance(event, PlanEvent)]
+    step_events = [event for event in events if isinstance(event, StepEvent)]
+
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0].message == "你好！我是助手，很高兴为您服务。"
+    assert len(plan_events) == 0
+    assert len(step_events) == 0
     assert any(isinstance(event, DoneEvent) for event in events)

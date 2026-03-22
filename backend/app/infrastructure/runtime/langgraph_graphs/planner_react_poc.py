@@ -7,6 +7,7 @@
 """
 import json
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Literal, Optional
 
@@ -45,6 +46,18 @@ except ImportError as e:  # pragma: no cover - 依赖缺失时的保护逻辑
     LANGGRAPH_IMPORT_ERROR = e
 
 
+_SIMPLE_GREETING_NORMALIZED_SET = {
+    "你好",
+    "您好",
+    "嗨",
+    "哈喽",
+    "在吗",
+    "hi",
+    "hello",
+    "hey",
+}
+
+
 def _safe_parse_json(content: str | None) -> Dict[str, Any]:
     if not content:
         return {}
@@ -64,6 +77,79 @@ def _normalize_attachments(raw_attachments: Any) -> List[str]:
     return []
 
 
+def _normalize_user_text(text: str) -> str:
+    """归一化用户消息文本，便于做轻量意图判断。"""
+    return re.sub(r"[\s\W_]+", "", text.strip().lower(), flags=re.UNICODE)
+
+
+def _is_simple_greeting_message(user_message: str) -> bool:
+    """识别纯问候类输入，避免进入完整 planner/step 流程。"""
+    normalized = _normalize_user_text(user_message)
+    return normalized in _SIMPLE_GREETING_NORMALIZED_SET
+
+
+def _build_simple_greeting_reply(user_message: str) -> str:
+    """根据问候语种返回简洁回复。"""
+    has_ascii_letters = re.search(r"[a-z]", user_message, flags=re.IGNORECASE) is not None
+    has_cjk = re.search(r"[\u4e00-\u9fff]", user_message) is not None
+    if has_ascii_letters and not has_cjk:
+        return "Hello! I'm your assistant, happy to help."
+    return "你好！我是助手，很高兴为您服务。"
+
+
+def _get_last_assistant_message(events: List[Any]) -> str:
+    """获取当前事件列表中最后一条 assistant message 文本。"""
+    for event in reversed(events):
+        if isinstance(event, MessageEvent) and event.role == "assistant":
+            return str(event.message or "")
+    return ""
+
+
+def _build_summarize_prompt(state: PlannerReActPOCState) -> str:
+    """构建带上下文的总结提示词，降低无关总结风险。"""
+    plan = state.get("plan")
+    plan_snapshot = plan.model_dump(mode="json") if plan is not None else {}
+    final_message = str(state.get("final_message") or "")
+    user_message = str(state.get("user_message") or "")
+    execution_count = int(state.get("execution_count") or 0)
+
+    return (
+        f"{SUMMARIZE_PROMPT}\n\n"
+        "请严格基于以下运行上下文输出总结，禁止引入上下文之外的场景或数据：\n"
+        f"- 用户原始消息: {user_message}\n"
+        f"- 执行轮次: {execution_count}\n"
+        f"- 最近一步结果: {final_message}\n"
+        f"- 计划快照(JSON): {json.dumps(plan_snapshot, ensure_ascii=False)}\n"
+    )
+
+
+def _should_accept_summary_message(
+        state: PlannerReActPOCState,
+        candidate_message: str,
+        fallback_message: str,
+) -> bool:
+    """判断是否接受模型总结文本，避免简单任务被无关长文覆盖。"""
+    candidate = candidate_message.strip()
+    if not candidate:
+        return False
+
+    # 单步任务通常没有必要产出超长总结；若出现明显异常长文，回退到步骤结果。
+    execution_count = int(state.get("execution_count") or 0)
+    if execution_count <= 1 and fallback_message.strip():
+        # 单步任务优先与执行结果保持一致；若总结与步骤结果无明显关联，则拒绝覆盖。
+        fallback = fallback_message.strip()
+        if fallback not in candidate and candidate not in fallback:
+            logger.warning("LangGraph summarize 与单步执行结果无关联，回退到步骤结果")
+            return False
+
+        max_allowed_length = len(fallback_message.strip()) * 3 + 120
+        if len(candidate) > max_allowed_length:
+            logger.warning("LangGraph summarize 产出异常长文本，回退到步骤结果以避免无关回复")
+            return False
+
+    return True
+
+
 def _build_step_from_payload(payload: Any, fallback_index: int) -> Step:
     if isinstance(payload, dict):
         step_id = str(payload.get("id") or str(uuid.uuid4()))
@@ -81,17 +167,38 @@ def _build_step_from_payload(payload: Any, fallback_index: int) -> Step:
     )
 
 
-def _route_after_plan(state: PlannerReActPOCState) -> Literal["execute_step", "summarize"]:
+def _should_emit_planner_message(user_message: str, planner_message: str, steps: List[Step]) -> bool:
+    """判断是否需要对外输出规划阶段消息，避免简单问候场景的回显噪音。"""
+    normalized_planner_message = planner_message.strip()
+    if not normalized_planner_message:
+        return False
+
+    normalized_user_message = user_message.strip()
+    # 规划消息与用户输入完全一致时，通常是模型回显，不需要额外展示。
+    if normalized_user_message and normalized_planner_message == normalized_user_message:
+        return False
+
+    # 单步任务下若规划消息仅重复步骤描述，同样不输出，避免和步骤结果形成“多条问候”。
+    if len(steps) == 1:
+        first_step_description = str(steps[0].description or "").strip()
+        if first_step_description and normalized_planner_message == first_step_description:
+            return False
+
+    return True
+
+
+def _route_after_plan(state: PlannerReActPOCState) -> Literal["execute_step", "summarize", "finalize"]:
     plan = state.get("plan")
     if plan is None:
-        return "summarize"
+        # 无 plan 且已有最终回复时，直接结束，避免无意义 summarize。
+        return "finalize" if str(state.get("final_message") or "").strip() else "summarize"
     if state.get("execution_count", 0) >= state.get("max_execution_steps", 20):
         logger.warning("LangGraph V1 执行次数达到上限，提前进入总结阶段")
         return "summarize"
     return "execute_step" if plan.get_next_step() is not None else "summarize"
 
 
-def _route_after_replan(state: PlannerReActPOCState) -> Literal["execute_step", "summarize"]:
+def _route_after_replan(state: PlannerReActPOCState) -> Literal["execute_step", "summarize", "finalize"]:
     return _route_after_plan(state)
 
 
@@ -106,6 +213,20 @@ async def _create_or_reuse_plan_node(state: PlannerReActPOCState, llm: LLM) -> P
         }
 
     user_message = state.get("user_message", "").strip()
+    if _is_simple_greeting_message(user_message):
+        # 纯问候直接回复并结束，不生成 plan/step，避免前端出现无意义步骤卡片。
+        greeting_reply = _build_simple_greeting_reply(user_message=user_message)
+        return {
+            **state,
+            "plan": None,
+            "current_step_id": None,
+            "final_message": greeting_reply,
+            "emitted_events": append_events(
+                state.get("emitted_events"),
+                MessageEvent(role="assistant", message=greeting_reply),
+            ),
+        }
+
     prompt = CREATE_PLAN_PROMPT.format(
         message=user_message,
         attachments="",
@@ -131,15 +252,22 @@ async def _create_or_reuse_plan_node(state: PlannerReActPOCState, llm: LLM) -> P
         status=ExecutionStatus.PENDING,
     )
     next_step = plan.get_next_step()
+    planner_events: List[Any] = [TitleEvent(title=title)]
+    if _should_emit_planner_message(
+            user_message=user_message,
+            planner_message=planner_message,
+            steps=steps,
+    ):
+        planner_events.append(MessageEvent(role="assistant", message=planner_message))
+    planner_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED))
+
     return {
         **state,
         "plan": plan,
         "current_step_id": next_step.id if next_step is not None else None,
         "emitted_events": append_events(
             state.get("emitted_events"),
-            TitleEvent(title=title),
-            MessageEvent(role="assistant", message=planner_message),
-            PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
+            *planner_events,
         ),
     }
 
@@ -241,16 +369,32 @@ async def _replan_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOC
 async def _summarize_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
     """在所有步骤完成后汇总结果。"""
     plan = state.get("plan")
-    prompt = SUMMARIZE_PROMPT
+    prompt = _build_summarize_prompt(state)
     llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
     parsed = _safe_parse_json(llm_message.get("content"))
-    summary_message = str(parsed.get("message") or state.get("final_message") or "任务已完成")
-    attachment_paths = _normalize_attachments(parsed.get("attachments"))
+    fallback_message = str(state.get("final_message") or "任务已完成")
+    candidate_summary_message = str(parsed.get("message") or "")
+    accepted_candidate = _should_accept_summary_message(
+        state=state,
+        candidate_message=candidate_summary_message,
+        fallback_message=fallback_message,
+    )
+    summary_message = candidate_summary_message if accepted_candidate else fallback_message
+    attachment_paths = _normalize_attachments(parsed.get("attachments")) if accepted_candidate else []
     attachments = [File(filepath=filepath) for filepath in attachment_paths]
+    previous_assistant_message = _get_last_assistant_message(list(state.get("emitted_events") or []))
 
-    final_events: List[Any] = [
-        MessageEvent(role="assistant", message=summary_message, attachments=attachments),
-    ]
+    final_events: List[Any] = []
+    # 单步问候等轻量场景下，如果 summarize 回退文本与上一次 assistant 输出一致且无附件，
+    # 不再重复发一条 message，避免前端看到“最终回复重复”。
+    if not (
+            summary_message.strip()
+            and previous_assistant_message.strip()
+            and summary_message.strip() == previous_assistant_message.strip()
+            and len(attachments) == 0
+    ):
+        final_events.append(MessageEvent(role="assistant", message=summary_message, attachments=attachments))
+
     if plan is not None:
         plan.status = ExecutionStatus.COMPLETED
         final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
@@ -307,6 +451,7 @@ def build_planner_react_poc_graph(llm: LLM) -> Any:
         {
             "execute_step": "execute_step",
             "summarize": "summarize",
+            "finalize": "finalize",
         },
     )
     graph.add_edge("execute_step", "replan")
@@ -316,6 +461,7 @@ def build_planner_react_poc_graph(llm: LLM) -> Any:
         {
             "execute_step": "execute_step",
             "summarize": "summarize",
+            "finalize": "finalize",
         },
     )
     graph.add_edge("summarize", "finalize")

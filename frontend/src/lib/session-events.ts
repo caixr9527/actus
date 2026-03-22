@@ -8,7 +8,6 @@
 
 import type {
   SSEEventData,
-  SSEEventType,
   ChatMessage,
   PlanStep,
   PlanEvent,
@@ -16,35 +15,12 @@ import type {
   ToolEvent,
   SessionFile,
 } from "./api/types";
+import { visitSessionEvent } from "./session-event-adapter";
 import { getApiErrorMessageFromPayload } from "./api/error-i18n";
 import { translateRuntime } from "./i18n/runtime";
 import type { AppLocale } from "./i18n";
 
-/** 后端返回的原始事件（可能用 event 或 type 表示类型） */
-type RawEvent = { event?: string; type?: string; data?: unknown };
-
-/**
- * 将后端单条事件转为前端 SSEEventData（统一 type + data）
- */
-export function normalizeEvent(raw: RawEvent): SSEEventData | null {
-  const type = (raw.type ?? raw.event) as SSEEventType | undefined;
-  const data = raw.data;
-  if (!type || data === undefined) return null;
-  return { type, data } as SSEEventData;
-}
-
-/**
- * 将后端事件列表转为前端 SSEEventData[]
- */
-export function normalizeEvents(rawList: unknown): SSEEventData[] {
-  if (!Array.isArray(rawList)) return [];
-  const out: SSEEventData[] = [];
-  for (const raw of rawList) {
-    const normalized = normalizeEvent(raw as RawEvent);
-    if (normalized) out.push(normalized);
-  }
-  return out;
-}
+export { normalizeEvent, normalizeEvents } from "./session-event-adapter";
 
 /** 时间线单项：用于渲染对话区的一条记录 */
 export type TimelineItem =
@@ -348,27 +324,12 @@ export function appendTimelineEvent(
   ev: SSEEventData,
   locale: AppLocale = "zh-CN",
 ): void {
-  switch (ev.type) {
-    case "message":
-      appendMessageEvent(context, ev.data as ChatMessage);
-      break;
-    case "step":
-      appendStepEvent(context, ev.data as StepEvent);
-      break;
-    case "tool":
-      appendToolEvent(context, ev.data as ToolEvent, locale);
-      break;
-    case "error":
-      appendErrorEvent(context, ev.data, locale);
-      break;
-    case "title":
-    case "plan":
-    case "wait":
-    case "done":
-      break;
-    default:
-      break;
-  }
+  visitSessionEvent(ev, {
+    message: (event) => appendMessageEvent(context, event.data as ChatMessage),
+    step: (event) => appendStepEvent(context, event.data as StepEvent),
+    tool: (event) => appendToolEvent(context, event.data as ToolEvent, locale),
+    error: (event) => appendErrorEvent(context, event.data, locale),
+  });
 }
 
 function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildContext {

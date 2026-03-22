@@ -30,6 +30,23 @@ test('reduceSessionRuntimeStateOnEvent should process a complex event sequence',
   assert.deepEqual(state, { status: 'completed', streaming: false })
 })
 
+test('reduceSessionRuntimeStateOnEvent should honor compat semantic type for waiting transition', () => {
+  const event = eventOf('tool', {
+    function: 'message_ask_user',
+    extensions: {
+      compat: {
+        semantic_type: 'tool.calling',
+      },
+    },
+  })
+
+  const next = reduceSessionRuntimeStateOnEvent(
+    { status: 'running', streaming: true },
+    event,
+  )
+  assert.deepEqual(next, { status: 'waiting', streaming: false })
+})
+
 test('classifyMessageStreamCloseReason should map abort, stream end and generic errors', () => {
   const abortError = new Error('aborted')
   abortError.name = 'AbortError'

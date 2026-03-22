@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { configApi } from '@/lib/api/config'
 import { sessionApi } from '@/lib/api/session'
-import { normalizeEvent, normalizeEvents } from '@/lib/session-events'
+import { normalizeEvents, unwrapNestedEvent, visitSessionEvent } from '@/lib/session-event-adapter'
 import { canRetry, computeRetryDelayMs, shouldStartEmptySessionStream, type RetryPolicy } from '@/lib/session-stream-policy'
 import {
   classifyMessageStreamCloseReason,
@@ -100,23 +100,21 @@ export function useSessionDetail(
   }, [])
 
   const appendEvent = useCallback((ev: SSEEventData) => {
-    let evToAppend = ev
-    if (ev.data && typeof ev.data === 'object' && ('event' in ev.data || 'type' in ev.data) && 'data' in ev.data) {
-      const normalized = normalizeEvent(ev.data as { event?: string; type?: string; data?: unknown })
-      if (normalized) evToAppend = normalized
-    }
+    const evToAppend = unwrapNestedEvent(ev)
 
     const eventId = (evToAppend.data as { event_id?: string })?.event_id
     if (eventId) lastEventIdRef.current = eventId
 
     setEvents((prev) => [...prev, evToAppend])
 
-    // 更新会话标题
-    if (evToAppend.type === 'title' && evToAppend.data && typeof (evToAppend.data as { title?: string }).title === 'string') {
-      setSession((prev) =>
-        prev ? { ...prev, title: (evToAppend.data as { title: string }).title } : null
-      )
-    }
+    // 更新会话标题（通过统一事件分发表驱动）
+    visitSessionEvent(evToAppend, {
+      title: (event) => {
+        const title = (event.data as { title?: string }).title
+        if (typeof title !== 'string') return
+        setSession((prev) => (prev ? { ...prev, title } : null))
+      },
+    })
 
     // 统一运行时状态迁移（status + streaming）
     const nextRuntime = reduceSessionRuntimeStateOnEvent(

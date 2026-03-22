@@ -4,6 +4,7 @@ from typing import Optional
 import pytest
 
 from app.domain.models import File, MessageEvent, SessionStatus
+from app.domain.models.tool_result import ToolResult
 from app.domain.services.agent_task_runner import AgentTaskRunner
 
 
@@ -30,6 +31,9 @@ class _DummyUoW:
 
 
 class _FailSandbox:
+    async def check_file_exists(self, file_path: str):
+        return ToolResult(success=True, data=True)
+
     async def download_file(self, file_path: str):
         raise RuntimeError("download failed")
 
@@ -37,6 +41,19 @@ class _FailSandbox:
 class _DummyFileStorage:
     async def upload_file(self, upload_file, user_id=None):
         raise AssertionError("upload_file should not be called when sandbox download fails")
+
+
+class _MissingFileSandbox:
+    async def check_file_exists(self, file_path: str):
+        return ToolResult(success=True, data=False)
+
+    async def download_file(self, file_path: str):
+        raise AssertionError("download_file should not be called when file does not exist")
+
+
+class _MissingFileStorage:
+    async def upload_file(self, upload_file, user_id=None):
+        raise AssertionError("upload_file should not be called when file does not exist")
 
 
 class _NoopSandbox:
@@ -115,6 +132,19 @@ def test_sync_file_to_storage_re_raises_exception() -> None:
 
     with pytest.raises(RuntimeError, match="download failed"):
         asyncio.run(runner._sync_file_to_storage("/tmp/a.txt"))
+
+
+def test_sync_file_to_storage_should_skip_when_file_not_exists() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _DummyUoW()
+    runner._sandbox = _MissingFileSandbox()
+    runner._file_storage = _MissingFileStorage()
+
+    synced = asyncio.run(runner._sync_file_to_storage("/tmp/not_exists.txt"))
+
+    assert synced is None
 
 
 def test_sync_message_attachments_to_storage_re_raises_exception() -> None:

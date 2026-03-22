@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
-import { PlanPanel } from '@/components/plan-panel'
+import { RunTimelinePanel } from '@/components/run-timeline-panel'
 import { ChatMessage } from '@/components/chat-message'
 import { FilePreviewPanel } from '@/components/file-preview-panel'
 import { ToolPreviewPanel } from '@/components/tool-preview-panel'
@@ -14,7 +14,6 @@ import { useSessionDetail } from '@/hooks/use-session-detail'
 import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
-  getLatestPlanFromEvents,
 } from '@/lib/session-events'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -94,7 +93,6 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
   const timeline = useMemo(() => eventsToTimeline(events, locale), [events, locale])
-  const planSteps = useMemo(() => getLatestPlanFromEvents(events), [events])
 
   const [fileListOpen, setFileListOpen] = useState(false)
   const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null)
@@ -461,7 +459,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
             </div>
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">
-              <PlanPanel className="mb-2" steps={planSteps} />
+              <RunTimelinePanel className="mb-2" events={events} />
               <ChatInput
                 onSend={handleSend}
                 sessionId={sessionId}

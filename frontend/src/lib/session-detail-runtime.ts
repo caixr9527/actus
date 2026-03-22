@@ -1,4 +1,5 @@
 import type { SSEEventData, SessionStatus } from './api/types'
+import { adaptSessionEvent, visitSessionEvent } from './session-event-adapter'
 
 export type SessionRuntimeState = {
   status: SessionStatus | null
@@ -13,35 +14,40 @@ export function reduceSessionRuntimeStateOnEvent(
 ): SessionRuntimeState {
   let nextStatus = prev.status
   let nextStreaming = prev.streaming
+  const adapted = adaptSessionEvent(event)
 
-  if (event.type === 'step') {
-    const stepData = event.data as { status?: string }
-    if (stepData.status === 'running') {
-      nextStatus = 'running'
-    }
-    if (stepData.status === 'waiting') {
+  visitSessionEvent(event, {
+    step: (stepEvent) => {
+      const stepData = stepEvent.data as { status?: string }
+      if (stepData.status === 'running' || adapted.semanticType === 'step.started') {
+        nextStatus = 'running'
+      }
+      if (stepData.status === 'waiting' || adapted.semanticType === 'step.waiting') {
+        nextStatus = 'waiting'
+        nextStreaming = false
+      }
+    },
+    tool: (toolEvent) => {
+      const toolData = toolEvent.data as { function?: string; status?: string }
+      const isCalling = toolData.status === 'calling' || adapted.semanticType === 'tool.calling'
+      if (toolData.function === 'message_ask_user' && isCalling) {
+        nextStatus = 'waiting'
+        nextStreaming = false
+      }
+    },
+    wait: () => {
       nextStatus = 'waiting'
       nextStreaming = false
-    }
-  }
-
-  if (event.type === 'tool') {
-    const toolData = event.data as { function?: string; status?: string }
-    if (toolData.function === 'message_ask_user' && toolData.status === 'calling') {
-      nextStatus = 'waiting'
+    },
+    done: () => {
+      nextStatus = 'completed'
       nextStreaming = false
-    }
-  }
-
-  if (event.type === 'wait') {
-    nextStatus = 'waiting'
-    nextStreaming = false
-  }
-
-  if (event.type === 'done' || event.type === 'error') {
-    nextStatus = 'completed'
-    nextStreaming = false
-  }
+    },
+    error: () => {
+      nextStatus = 'completed'
+      nextStreaming = false
+    },
+  })
 
   return {
     status: nextStatus,
