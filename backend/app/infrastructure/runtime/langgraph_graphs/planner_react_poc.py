@@ -26,10 +26,14 @@ from app.domain.models import (
     DoneEvent,
 )
 from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, SUMMARIZE_PROMPT, UPDATE_PLAN_PROMPT
+from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import PlannerReActPOCState
+from app.infrastructure.runtime.langgraph_graphs.skill_subgraphs import build_default_skill_graph_registry
 
 logger = logging.getLogger(__name__)
+
+PLANNER_EXECUTE_STEP_SKILL_ID = "planner_react.execute_step"
 
 try:
     from langgraph.graph import StateGraph, START, END
@@ -167,6 +171,36 @@ def _build_step_from_payload(payload: Any, fallback_index: int) -> Step:
     )
 
 
+def _format_attachments_for_prompt(attachments: List[str]) -> str:
+    if not attachments:
+        return "无"
+    return "\n".join(f"- {item}" for item in attachments)
+
+
+async def _execute_step_with_prompt(
+        *,
+        llm: LLM,
+        user_message: str,
+        step: Step,
+        language: str,
+        attachments: List[str],
+) -> Dict[str, Any]:
+    """回退路径：直接使用执行提示词完成步骤执行。"""
+    prompt = EXECUTION_PROMPT.format(
+        message=user_message,
+        attachments=_format_attachments_for_prompt(attachments),
+        language=language,
+        step=step.description,
+    )
+    llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
+    parsed = _safe_parse_json(llm_message.get("content"))
+    return {
+        "success": bool(parsed.get("success", True)),
+        "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
+        "attachments": _normalize_attachments(parsed.get("attachments")),
+    }
+
+
 def _should_emit_planner_message(user_message: str, planner_message: str, steps: List[Step]) -> bool:
     """判断是否需要对外输出规划阶段消息，避免简单问候场景的回显噪音。"""
     normalized_planner_message = planner_message.strip()
@@ -272,7 +306,11 @@ async def _create_or_reuse_plan_node(state: PlannerReActPOCState, llm: LLM) -> P
     }
 
 
-async def _execute_step_node(state: PlannerReActPOCState, llm: LLM) -> PlannerReActPOCState:
+async def _execute_step_node(
+        state: PlannerReActPOCState,
+        llm: LLM,
+        skill_runtime: Optional[SkillGraphRuntime] = None,
+) -> PlannerReActPOCState:
     """执行单个步骤，完成后交给 replan 节点更新后续计划。"""
     plan = state.get("plan")
     if plan is None:
@@ -288,17 +326,44 @@ async def _execute_step_node(state: PlannerReActPOCState, llm: LLM) -> PlannerRe
         status=StepEventStatus.STARTED,
     )
 
-    prompt = EXECUTION_PROMPT.format(
-        message=state.get("user_message", ""),
-        attachments="",
-        language=plan.language or "zh",
-        step=step.description,
-    )
-    llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
-    parsed = _safe_parse_json(llm_message.get("content"))
-    step.success = bool(parsed.get("success", True))
-    step.result = str(parsed.get("result") or f"已完成步骤：{step.description}")
-    step.attachments = _normalize_attachments(parsed.get("attachments"))
+    user_message = str(state.get("user_message", ""))
+    language = plan.language or "zh"
+    attachments: List[str] = []
+    execution_payload: Optional[Dict[str, Any]] = None
+
+    # 优先走 Skill 子图运行时。失败时回退到原提示词执行，保证主链路稳定。
+    if skill_runtime is not None:
+        try:
+            skill_result = await skill_runtime.execute_skill(
+                skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+                payload={
+                    "session_id": str(state.get("session_id") or ""),
+                    "user_message": user_message,
+                    "step_description": step.description,
+                    "language": language,
+                    "attachments": attachments,
+                },
+            )
+            execution_payload = {
+                "success": bool(getattr(skill_result, "success", True)),
+                "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
+                "attachments": _normalize_attachments(getattr(skill_result, "attachments", [])),
+            }
+        except Exception as e:
+            logger.warning("执行步骤 Skill 运行失败，回退默认执行链路: %s", e)
+
+    if execution_payload is None:
+        execution_payload = await _execute_step_with_prompt(
+            llm=llm,
+            user_message=user_message,
+            step=step,
+            language=language,
+            attachments=attachments,
+        )
+
+    step.success = bool(execution_payload.get("success", True))
+    step.result = str(execution_payload.get("result") or f"已完成步骤：{step.description}")
+    step.attachments = _normalize_attachments(execution_payload.get("attachments"))
     step.status = ExecutionStatus.COMPLETED if step.success else ExecutionStatus.FAILED
 
     completed_event = StepEvent(
@@ -425,12 +490,18 @@ def build_planner_react_poc_graph(llm: LLM) -> Any:
     if not LANGGRAPH_AVAILABLE:
         raise RuntimeError(f"LangGraph 未安装，无法构建 POC 图: {LANGGRAPH_IMPORT_ERROR}")
 
+    skill_runtime: Optional[SkillGraphRuntime] = None
+    try:
+        skill_runtime = build_default_skill_graph_registry().create_runtime(llm=llm)
+    except Exception as e:
+        logger.warning("初始化默认 Skill 注册表失败，继续使用无 Skill 模式: %s", e)
+
     # 显式 async wrapper，避免 lambda 返回 coroutine 导致节点返回值非法。
     async def _create_plan_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
         return await _create_or_reuse_plan_node(state, llm)
 
     async def _execute_step_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
-        return await _execute_step_node(state, llm)
+        return await _execute_step_node(state, llm, skill_runtime=skill_runtime)
 
     async def _replan_with_llm(state: PlannerReActPOCState) -> PlannerReActPOCState:
         return await _replan_node(state, llm)

@@ -1,5 +1,7 @@
 import asyncio
 
+from pydantic import BaseModel, Field
+
 from app.domain.models import (
     Message,
     TitleEvent,
@@ -265,6 +267,12 @@ class _NeverInvokeLLM:
         raise AssertionError("纯问候分支不应调用LLM")
 
 
+class _SkillStepOutput(BaseModel):
+    success: bool = True
+    result: str
+    attachments: list[str] = Field(default_factory=list)
+
+
 def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
@@ -375,6 +383,48 @@ def test_planner_react_v1_graph_should_cover_execute_replan_summarize_path() -> 
     assert len([event for event in step_events if event.status == StepEventStatus.COMPLETED]) >= 2
     assert any(event.message == "最终总结" for event in message_events)
     assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_execute_step_via_skill_runtime(monkeypatch) -> None:
+    skill_calls: list[tuple[str, dict]] = []
+
+    class _SpySkillRuntime:
+        async def execute_skill(self, *, skill_id: str, payload: dict, version: str | None = None):
+            skill_calls.append((skill_id, payload))
+            return _SkillStepOutput(
+                success=True,
+                result=f"skill执行:{payload.get('step_description', '')}",
+                attachments=[],
+            )
+
+    class _SpySkillRegistry:
+        def create_runtime(self, llm):
+            return _SpySkillRuntime()
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_poc.build_default_skill_graph_registry",
+        lambda: _SpySkillRegistry(),
+    )
+
+    graph = build_planner_react_poc_graph(llm=_V1GraphLLM())
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "请完成一个两步任务",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+    message_events = [event for event in events if isinstance(event, MessageEvent)]
+
+    assert len(skill_calls) >= 1
+    assert all(call[0] == "planner_react.execute_step" for call in skill_calls)
+    assert any(event.message.startswith("skill执行:") for event in message_events)
 
 
 def test_planner_react_v1_graph_should_fallback_to_step_result_when_single_step_summary_is_irrelevant() -> None:
