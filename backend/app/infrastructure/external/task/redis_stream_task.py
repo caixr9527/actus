@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 class RedisStreamTask(Task):
     """Redis Stream任务执行器"""
 
+    # 进程内任务注册表：
+    # - 当前用于通过 task_id 快速定位活跃任务实例；
+    # - 在 BE-LG-07 后该结构退化为实现细节，不再由 AgentService 直接依赖。
     _task_registry: Dict[str, "RedisStreamTask"] = {}
 
     def __init__(self, task_runner: TaskRunner):
@@ -63,6 +66,7 @@ class RedisStreamTask(Task):
             self._streams_cleaned = True
 
     def _schedule_cleanup_streams(self) -> None:
+        # 流清理使用异步任务执行，避免阻塞主流程（尤其是 cancel/done 回调路径）。
         try:
             asyncio.create_task(self._cleanup_streams())
         except RuntimeError as e:
@@ -91,6 +95,9 @@ class RedisStreamTask(Task):
 
     async def invoke(self) -> None:
         """任务执行方法"""
+        # done=True 表示“当前没有活跃执行协程”：
+        # - 首次调用时 _execution_task 为 None，因此允许启动；
+        # - 历史执行结束后再次 invoke 也允许启动新一轮执行。
         if self.done:
             self._execution_task = asyncio.create_task(self._execute_task())
             logger.info(f"开始执行任务: {self._id}")
@@ -126,6 +133,7 @@ class RedisStreamTask(Task):
     @property
     def done(self) -> bool:
         """任务是否完成"""
+        # 未启动执行协程时视为“已完成/可启动”，方便上层按统一条件触发 invoke。
         if self._execution_task is None:
             return True
         return self._execution_task.done()

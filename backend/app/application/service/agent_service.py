@@ -14,7 +14,7 @@ from pydantic import TypeAdapter
 
 from app.application.errors import AppException, NotFoundError
 from app.application.errors import error_keys
-from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage
+from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage, Browser
 from app.domain.models import (
     BaseEvent,
     ErrorEvent,
@@ -27,11 +27,10 @@ from app.domain.models import (
     Event,
     DoneEvent,
     WaitEvent,
-    WorkflowRunStatus,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
-from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +54,7 @@ class AgentService:
             model_runtime_resolver=None,
             llm_factory=None,
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
+            graph_runtime: Optional[GraphRuntime] = None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -68,52 +68,25 @@ class AgentService:
         self._agent_config = agent_config
         self._a2a_config = a2a_config
         self._run_engine_factory = run_engine_factory
+        # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
+        # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
+        self._graph_runtime = graph_runtime or DefaultGraphRuntime(
+            sandbox_cls=self._sandbox_cls,
+            task_cls=self._task_cls,
+            uow_factory=self._uow_factory,
+            task_runner_factory=self._build_task_runner,
+        )
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
 
-    async def _get_task(self, session) -> Optional[Task]:
-        task_id = session.task_id
-        if not task_id:
-            return None
-
-        return self._task_cls.get(task_id=task_id)
-
-    async def _resolve_runtime_llm(self, session: Session) -> LLM:
-        """根据会话当前模型解析运行时 LLM。"""
-        model_runtime_resolver = getattr(self, "_model_runtime_resolver", None)
-        llm_factory = getattr(self, "_llm_factory", None)
-        if model_runtime_resolver is not None and llm_factory is not None:
-            resolved_model_id, llm_config = await model_runtime_resolver.resolve(session)
-            logger.info(
-                f"会话{session.id}运行时模型解析完成: requested={session.current_model_id}, resolved={resolved_model_id}")
-            return llm_factory.create(llm_config)
-
-        raise RuntimeError("未配置运行时LLM解析能力")
-
-    async def _create_task(self, session: Session) -> Task:
-        # 获取沙箱实例。
-        # 注意：这里不再在“创建沙箱后立即单独落库”，而是统一在任务创建完成后一次性写回。
-        # 这样可以把sandbox_id/task_id收敛为同一事务边界，减少跨阶段窗口。
-        sandbox = None
-        sandbox_id = session.sandbox_id
-        created_new_sandbox = False
-        if sandbox_id:
-            sandbox = await self._sandbox_cls.get(id=sandbox_id)
-
-        # 如果没有沙箱，则创建新的沙箱。
-        # 这里先只在内存中持有，等任务也创建成功后再统一写回会话。
-        if not sandbox:
-            sandbox = await self._sandbox_cls.create()
-            created_new_sandbox = True
-
-        # 获取沙箱中的浏览器实例
-        browser = await sandbox.get_browser()
-        if not browser:
-            logger.error(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
-            raise RuntimeError(f"会话{session.id}的聊天请求失败: 沙箱{sandbox_id},创建浏览器失败")
-
-        llm = await self._resolve_runtime_llm(session)
-        # 创建任务运行器
-        task_runner = AgentTaskRunner(
+    def _build_task_runner(
+            self,
+            session: Session,
+            llm: LLM,
+            sandbox: Sandbox,
+            browser: Browser,
+    ) -> AgentTaskRunner:
+        """构建任务执行器，供 GraphRuntime 在创建任务时回调。"""
+        return AgentTaskRunner(
             llm=llm,
             agent_config=self._agent_config,
             mcp_config=self._mcp_config,
@@ -129,54 +102,39 @@ class AgentService:
             run_engine_factory=self._run_engine_factory,
         )
 
-        # 创建任务并关联到会话
-        task = self._task_cls.create(task_runner=task_runner)
+    async def _get_task(self, session: Session) -> Optional[Task]:
+        """读取会话任务实例，优先走 GraphRuntime，保留历史回退以兼容旧测试。"""
+        runtime = getattr(self, "_graph_runtime", None)
+        if runtime is not None:
+            return await runtime.get_task(session=session)
 
-        # 记录旧值，用于异常时回滚内存态与数据库态。
-        previous_sandbox_id = session.sandbox_id
-        previous_task_id = session.task_id
-        previous_current_run_id = session.current_run_id
+        task_id = session.task_id
+        if not task_id:
+            return None
+        task_cls = getattr(self, "_task_cls", None)
+        if task_cls is None:
+            return None
+        return task_cls.get(task_id=task_id)
 
-        # 统一写回两个跨资源关联字段，确保会话视图一次提交完成。
-        session.sandbox_id = sandbox.id
-        session.task_id = task.id
-        try:
-            async with self._uow_factory() as uow:
-                run = await uow.workflow_run.create_for_session(
-                    session=session,
-                    status=WorkflowRunStatus.RUNNING,
-                    thread_id=session.id,
-                )
-                session.current_run_id = run.id
-                await uow.session.save(session=session)
-            return task
-        except Exception as save_err:
-            logger.error(f"会话{session.id}写回sandbox/task关联失败，开始补偿: {save_err}")
+    async def _resolve_runtime_llm(self, session: Session) -> LLM:
+        """根据会话当前模型解析运行时 LLM。"""
+        model_runtime_resolver = getattr(self, "_model_runtime_resolver", None)
+        llm_factory = getattr(self, "_llm_factory", None)
+        if model_runtime_resolver is not None and llm_factory is not None:
+            resolved_model_id, llm_config = await model_runtime_resolver.resolve(session)
+            logger.info(
+                f"会话{session.id}运行时模型解析完成: requested={session.current_model_id}, resolved={resolved_model_id}")
+            return llm_factory.create(llm_config)
 
-            # 补偿1：先从任务注册表移除刚创建的任务，避免无主任务残留。
-            try:
-                task.cancel()
-            except Exception as cancel_err:
-                logger.error(f"会话{session.id}补偿取消任务失败: {cancel_err}")
+        raise RuntimeError("未配置运行时LLM解析能力")
 
-            # 补偿2：若本次新建了沙箱，写回失败时立即销毁，避免外部资源泄露。
-            if created_new_sandbox:
-                try:
-                    await sandbox.destroy()
-                except Exception as destroy_err:
-                    logger.error(f"会话{session.id}补偿销毁沙箱失败: {destroy_err}")
-
-            # 补偿3：回滚会话对象状态，并尽力写回数据库，避免出现悬挂关联字段。
-            session.sandbox_id = previous_sandbox_id
-            session.task_id = previous_task_id
-            session.current_run_id = previous_current_run_id
-            try:
-                async with self._uow_factory() as uow:
-                    await uow.session.save(session=session)
-            except Exception as rollback_err:
-                logger.error(f"会话{session.id}补偿回滚关联字段失败: {rollback_err}")
-
-            raise
+    async def _create_task(self, session: Session) -> Task:
+        """创建会话任务：解析 LLM 后交由 GraphRuntime 统一处理任务生命周期。"""
+        llm = await self._resolve_runtime_llm(session)
+        runtime = getattr(self, "_graph_runtime", None)
+        if runtime is None:
+            raise RuntimeError("未配置GraphRuntime，无法创建会话任务")
+        return await runtime.create_task(session=session, llm=llm)
 
     async def _safe_update_unread_count(self, session_id: str) -> None:
         """在独立的后台任务中安全地更新未读消息计数
@@ -382,5 +340,10 @@ class AgentService:
     async def shutdown(self) -> None:
         """关闭会话服务"""
         logger.info("关闭会话服务并释放资源")
-        await self._task_cls.destroy()
+        runtime = getattr(self, "_graph_runtime", None)
+        if runtime is not None:
+            await runtime.destroy()
+        else:
+            # 兼容历史测试中 object.__new__ 未注入 GraphRuntime 的构造方式。
+            await self._task_cls.destroy()
         logger.info("会话服务已关闭")
