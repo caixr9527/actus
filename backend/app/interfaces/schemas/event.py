@@ -15,6 +15,7 @@ from app.domain.models import (
     Event,
     File,
     ExecutionStatus,
+    WaitEvent,
     ToolEvent,
     ToolEventStatus,
     PlanEvent,
@@ -238,9 +239,74 @@ class DoneSSEEvent(BaseSSEEvent):
     event: Literal["done"] = "done"
 
 
+class WaitEventData(BaseEventData):
+    """等待事件数据"""
+
+    human_task_id: Optional[str] = None
+    reason: str = "wait_event"
+    question: str = ""
+    attachments: List[str] = Field(default_factory=list)
+    suggest_user_takeover: Literal["none", "browser"] = "none"
+    resume_token: Optional[str] = None
+    resume_command: Dict[str, Any] = Field(default_factory=dict)
+    resume_point: Dict[str, Any] = Field(default_factory=dict)
+    timeout_seconds: Optional[int] = None
+    timeout_at: Optional[datetime] = None
+    status: Optional[str] = None
+
+    @field_serializer("timeout_at", when_used="json")
+    def serialize_timeout_at(self, value: Optional[datetime]) -> Optional[int]:
+        return int(value.timestamp()) if value is not None else None
+
+
 class WaitSSEEvent(BaseSSEEvent):
     """等待人类输入流式事件"""
     event: Literal["wait"] = "wait"
+    data: WaitEventData
+
+    @classmethod
+    def from_event(cls, event: WaitEvent) -> Self:
+        human_task = event.human_task
+        return cls(
+            data=WaitEventData(
+                **BaseEventData.base_event_data(event),
+                human_task_id=human_task.id if human_task is not None else None,
+                reason=human_task.reason if human_task is not None else "wait_event",
+                question=human_task.question if human_task is not None else "",
+                attachments=list(human_task.attachments or []) if human_task is not None else [],
+                suggest_user_takeover=(
+                    human_task.suggest_user_takeover
+                    if human_task is not None
+                    else "none"
+                ),
+                resume_token=human_task.resume_token if human_task is not None else None,
+                resume_command=(
+                    human_task.resume_command.model_dump(mode="json")
+                    if human_task is not None and human_task.resume_command is not None
+                    else {}
+                ),
+                resume_point=(
+                    human_task.resume_point.model_dump(mode="json")
+                    if human_task is not None and human_task.resume_point is not None
+                    else {}
+                ),
+                timeout_seconds=(
+                    human_task.timeout.timeout_seconds
+                    if human_task is not None
+                    else None
+                ),
+                timeout_at=(
+                    human_task.timeout.timeout_at
+                    if human_task is not None
+                    else None
+                ),
+                status=(
+                    human_task.status.value
+                    if human_task is not None
+                    else None
+                ),
+            )
+        )
 
 
 class ErrorEventData(BaseEventData):

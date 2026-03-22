@@ -63,6 +63,14 @@ class HumanTaskState(TypedDict, total=False):
     task_id: str
     status: str
     reason: str
+    question: str
+    attachments: List[str]
+    suggest_user_takeover: str
+    resume_token: Optional[str]
+    resume_command: Dict[str, Any]
+    resume_point: Dict[str, Any]
+    timeout_seconds: Optional[int]
+    timeout_at: Optional[str]
     created_at: str
     updated_at: str
     wait_event_id: Optional[str]
@@ -239,10 +247,37 @@ class GraphStateContractMapper:
         for task_id, payload in raw.items():
             if not isinstance(payload, dict):
                 continue
+            raw_attachments = payload.get("attachments")
+            if isinstance(raw_attachments, str):
+                attachments = [raw_attachments] if raw_attachments.strip() else []
+            elif isinstance(raw_attachments, list):
+                attachments = [str(item) for item in raw_attachments if str(item).strip()]
+            else:
+                attachments = []
             normalized[str(task_id)] = {
                 "task_id": str(payload.get("task_id") or task_id),
                 "status": str(payload.get("status") or HumanTaskStatus.WAITING.value),
                 "reason": str(payload.get("reason") or ""),
+                "question": str(payload.get("question") or ""),
+                "attachments": attachments,
+                "suggest_user_takeover": str(payload.get("suggest_user_takeover") or "none"),
+                "resume_token": str(payload.get("resume_token")) if payload.get("resume_token") else None,
+                "resume_command": (
+                    payload.get("resume_command")
+                    if isinstance(payload.get("resume_command"), dict)
+                    else {}
+                ),
+                "resume_point": (
+                    payload.get("resume_point")
+                    if isinstance(payload.get("resume_point"), dict)
+                    else {}
+                ),
+                "timeout_seconds": (
+                    int(payload.get("timeout_seconds"))
+                    if payload.get("timeout_seconds") is not None
+                    else None
+                ),
+                "timeout_at": str(payload.get("timeout_at")) if payload.get("timeout_at") else None,
                 "created_at": str(payload.get("created_at") or datetime.now().isoformat()),
                 "updated_at": str(payload.get("updated_at") or datetime.now().isoformat()),
                 "wait_event_id": str(payload.get("wait_event_id")) if payload.get("wait_event_id") else None,
@@ -337,6 +372,10 @@ class GraphStateContractMapper:
             "final_message": "",
             "error": None,
         }
+        state["human_tasks"] = cls._mark_timeout_tasks(
+            human_tasks=dict(state.get("human_tasks") or {}),
+            reference_at=datetime.now(),
+        )
         return state
 
     @classmethod
@@ -370,6 +409,36 @@ class GraphStateContractMapper:
                 human_tasks[task_id] = task
                 break
         return human_tasks
+
+    @staticmethod
+    def _parse_iso_datetime(raw: Any) -> Optional[datetime]:
+        if not raw:
+            return None
+        if isinstance(raw, datetime):
+            return raw
+        try:
+            return datetime.fromisoformat(str(raw))
+        except Exception:
+            return None
+
+    @classmethod
+    def _mark_timeout_tasks(
+            cls,
+            human_tasks: Dict[str, HumanTaskState],
+            reference_at: datetime,
+    ) -> Dict[str, HumanTaskState]:
+        updated = dict(human_tasks)
+        for task_id, payload in list(updated.items()):
+            task = dict(payload)
+            if task.get("status") != HumanTaskStatus.WAITING.value:
+                continue
+            timeout_at = cls._parse_iso_datetime(task.get("timeout_at"))
+            if timeout_at is None or timeout_at > reference_at:
+                continue
+            task["status"] = HumanTaskStatus.TIMEOUT.value
+            task["updated_at"] = reference_at.isoformat()
+            updated[task_id] = task
+        return updated
 
     @classmethod
     def _extract_artifact_refs_from_event(cls, event: BaseEvent) -> List[str]:
@@ -450,20 +519,52 @@ class GraphStateContractMapper:
                 continue
 
             if isinstance(event, WaitEvent):
-                task_id = f"wait:{event.id}"
+                task = event.human_task
+                task_id = str(task.id) if task is not None else f"wait:{event.id}"
                 human_tasks[task_id] = {
                     "task_id": task_id,
                     "status": HumanTaskStatus.WAITING.value,
-                    "reason": "wait_event",
+                    "reason": task.reason if task is not None else "wait_event",
+                    "question": task.question if task is not None else "",
+                    "attachments": list(task.attachments or []) if task is not None else [],
+                    "suggest_user_takeover": (
+                        task.suggest_user_takeover if task is not None else "none"
+                    ),
+                    "resume_token": task.resume_token if task is not None else None,
+                    "resume_command": (
+                        task.resume_command.model_dump(mode="json")
+                        if task is not None and task.resume_command is not None
+                        else {}
+                    ),
+                    "resume_point": (
+                        task.resume_point.model_dump(mode="json")
+                        if task is not None and task.resume_point is not None
+                        else {}
+                    ),
+                    "timeout_seconds": (
+                        task.timeout.timeout_seconds
+                        if task is not None
+                        else None
+                    ),
+                    "timeout_at": (
+                        cls._to_iso(task.timeout.timeout_at)
+                        if task is not None and task.timeout.timeout_at is not None
+                        else None
+                    ),
                     "created_at": cls._to_iso(event.created_at),
                     "updated_at": cls._to_iso(event.created_at),
                     "wait_event_id": str(event.id),
                     "resume_event_id": None,
                 }
                 graph_metadata["latest_wait_event_id"] = str(event.id)
+                graph_metadata["latest_human_task_id"] = task_id
                 continue
 
             if isinstance(event, MessageEvent) and event.role == "user":
+                human_tasks = cls._mark_timeout_tasks(
+                    human_tasks=human_tasks,
+                    reference_at=event.created_at,
+                )
                 human_tasks = cls._mark_latest_waiting_task_resumed(
                     human_tasks=human_tasks,
                     resume_event_id=str(event.id),
@@ -480,6 +581,12 @@ class GraphStateContractMapper:
             if isinstance(event, DoneEvent):
                 graph_metadata["run_status"] = "completed"
                 graph_metadata["last_done_event_id"] = str(event.id)
+
+        reference_at = events[-1].created_at if events else datetime.now()
+        human_tasks = cls._mark_timeout_tasks(
+            human_tasks=human_tasks,
+            reference_at=reference_at,
+        )
 
         if not next_state.get("current_step_id"):
             for step_state in step_states:
@@ -499,6 +606,49 @@ class GraphStateContractMapper:
         next_state["artifact_refs"] = list(dict.fromkeys(artifact_refs))
         next_state["audit_events"] = audit_events
         return next_state
+
+    @classmethod
+    def reduce_human_tasks_from_events(
+            cls,
+            events: List[BaseEvent],
+            reference_at: Optional[datetime] = None,
+    ) -> Dict[str, HumanTaskState]:
+        reduced = cls.apply_emitted_events(
+            state={
+                "emitted_events": list(events or []),
+                "human_tasks": {},
+                "step_states": [],
+                "tool_invocations": {},
+                "graph_metadata": {},
+                "artifact_refs": [],
+                "audit_events": [],
+            }
+        )
+        human_tasks = dict(reduced.get("human_tasks") or {})
+        if reference_at is not None:
+            human_tasks = cls._mark_timeout_tasks(
+                human_tasks=human_tasks,
+                reference_at=reference_at,
+            )
+        return human_tasks
+
+    @staticmethod
+    def find_latest_waiting_human_task(
+            human_tasks: Dict[str, HumanTaskState],
+    ) -> Optional[HumanTaskState]:
+        for task_id in reversed(list(human_tasks.keys())):
+            task = dict(human_tasks[task_id])
+            if task.get("status") == HumanTaskStatus.WAITING.value:
+                return task
+        return None
+
+    @staticmethod
+    def find_latest_human_task(
+            human_tasks: Dict[str, HumanTaskState],
+    ) -> Optional[HumanTaskState]:
+        for task_id in reversed(list(human_tasks.keys())):
+            return dict(human_tasks[task_id])
+        return None
 
     @classmethod
     def build_runtime_metadata(cls, state: PlannerReActPOCState) -> Dict[str, Any]:

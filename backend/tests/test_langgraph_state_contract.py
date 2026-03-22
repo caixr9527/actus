@@ -1,7 +1,13 @@
+from datetime import datetime
+
 from app.domain.models import (
     DoneEvent,
     ExecutionStatus,
     File,
+    HumanTask,
+    HumanTaskResumeCommand,
+    HumanTaskResumePoint,
+    HumanTaskTimeoutPolicy,
     MessageEvent,
     Plan,
     PlanEvent,
@@ -124,7 +130,20 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
         result="完成第一步",
     )
 
-    wait_event = WaitEvent()
+    wait_event = WaitEvent.build_for_user_input(
+        session_id="session-1",
+        question="请确认是否继续？",
+        reason="ask_user",
+        attachments=["/tmp/reference.md"],
+        suggest_user_takeover="browser",
+        timeout_seconds=300,
+        run_id="run-1",
+        thread_id="thread-1",
+        checkpoint_namespace="",
+        checkpoint_id="cp-1",
+        current_step_id="step-1",
+        resume_token="resume-token-1",
+    )
     user_reply_event = MessageEvent(
         role="user",
         message="我补充一下需求",
@@ -167,9 +186,48 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
         task.get("status") == HumanTaskStatus.RESUMED.value
         for task in reduced_state["human_tasks"].values()
     )
+    resumed_task = next(iter(reduced_state["human_tasks"].values()))
+    assert resumed_task["question"] == "请确认是否继续？"
+    assert resumed_task["resume_token"] == "resume-token-1"
+    assert resumed_task["suggest_user_takeover"] == "browser"
+    assert resumed_task["resume_point"]["run_id"] == "run-1"
 
     contract = runtime_metadata["graph_state_contract"]
     assert contract["schema_version"] == GRAPH_STATE_CONTRACT_SCHEMA_VERSION
     assert contract["audit"]["event_count"] == len(state["emitted_events"])
     assert contract["graph_state"]["current_step_id"] is None
     assert "workflow_runs.plan_snapshot" in contract["planes"]["projection_only_fields"]
+
+
+def test_graph_state_contract_should_mark_waiting_task_timeout_when_reference_time_passed() -> None:
+    wait_event = WaitEvent(
+        id="evt-wait-timeout",
+        human_task=HumanTask(
+            id="human-task-timeout",
+            reason="ask_user",
+            question="请补充上下文",
+            resume_token="resume-timeout",
+            resume_command=HumanTaskResumeCommand(
+                session_id="session-1",
+                resume_token="resume-timeout",
+            ),
+            resume_point=HumanTaskResumePoint(
+                session_id="session-1",
+                run_id="run-1",
+                thread_id="thread-1",
+            ),
+            timeout=HumanTaskTimeoutPolicy(
+                timeout_seconds=60,
+                timeout_at=datetime(2026, 3, 22, 12, 0, 0),
+            ),
+        ),
+        created_at=datetime(2026, 3, 22, 11, 59, 0),
+    )
+
+    human_tasks = GraphStateContractMapper.reduce_human_tasks_from_events(
+        events=[wait_event],
+        reference_at=datetime(2026, 3, 22, 12, 1, 0),
+    )
+
+    assert human_tasks["human-task-timeout"]["status"] == HumanTaskStatus.TIMEOUT.value
+    assert GraphStateContractMapper.find_latest_waiting_human_task(human_tasks) is None

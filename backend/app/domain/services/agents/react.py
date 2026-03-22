@@ -23,6 +23,8 @@ from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WAIT_TIMEOUT_SECONDS = 30 * 60
+
 
 class ReActAgent(BaseAgent):
     """
@@ -71,7 +73,14 @@ class ReActAgent(BaseAgent):
                         )
                     # 工具已调用：产出等待事件并结束当前步骤
                     elif event.status == ToolEventStatus.CALLED:
-                        yield WaitEvent()
+                        yield WaitEvent.build_for_user_input(
+                            session_id=self._session_id,
+                            reason="ask_user",
+                            question=str(event.function_args.get("text", "")),
+                            attachments=event.function_args.get("attachments"),
+                            suggest_user_takeover=event.function_args.get("suggest_user_takeover"),
+                            timeout_seconds=DEFAULT_WAIT_TIMEOUT_SECONDS,
+                        )
                         return
                     continue
             # 处理消息事件（通常是模型返回的结果）

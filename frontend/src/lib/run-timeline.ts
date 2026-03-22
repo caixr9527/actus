@@ -1,4 +1,4 @@
-import type { SSEEventData, PlanEvent, StepEvent, ToolEvent } from './api/types'
+import type { SSEEventData, PlanEvent, StepEvent, ToolEvent, WaitEventData } from './api/types'
 import type { AppLocale } from './i18n'
 import { getFriendlyToolLabel } from '../components/tool-use/utils'
 import { adaptSessionEvent, type EventRuntimeContext, visitSessionEvent } from './session-event-adapter'
@@ -50,6 +50,62 @@ function truncate(text: string, limit: number): string {
   return `${text.slice(0, limit)}...`
 }
 
+function toNonEmptyText(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function parseOptionalTimestamp(raw: unknown): number | null {
+  if (typeof raw === 'number') return parseTimestamp(raw)
+  if (typeof raw === 'string' && raw.trim().length > 0) {
+    const parsed = Number(raw)
+    if (!Number.isNaN(parsed)) return parseTimestamp(parsed)
+  }
+  return null
+}
+
+export type WaitEventContext = {
+  question: string | null
+  reason: string | null
+  displayText: string | null
+  resumeToken: string | null
+  suggestUserTakeover: boolean
+  timeoutAt: number | null
+}
+
+/**
+ * Wait 事件展示文案优先级：question > reason > message > prompt
+ */
+export function resolveWaitDisplayText(data: WaitEventData): string | null {
+  return (
+    toNonEmptyText(data.question)
+    ?? toNonEmptyText(data.reason)
+    ?? toNonEmptyText(data.message)
+    ?? toNonEmptyText(data.prompt)
+  )
+}
+
+export function parseWaitEventContext(data: WaitEventData): WaitEventContext {
+  return {
+    question: toNonEmptyText(data.question),
+    reason: toNonEmptyText(data.reason),
+    displayText: resolveWaitDisplayText(data),
+    resumeToken: toNonEmptyText(data.resume_token),
+    suggestUserTakeover: data.suggest_user_takeover === true,
+    timeoutAt: parseOptionalTimestamp(data.timeout_at),
+  }
+}
+
+export function findLatestWaitEventContext(events: SSEEventData[]): WaitEventContext | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event.type !== 'wait') continue
+    return parseWaitEventContext(event.data as WaitEventData)
+  }
+  return null
+}
+
 function messageSummary(data: { role?: string; message?: string }, locale: AppLocale): string {
   const role = data.role === 'assistant'
     ? (locale === 'en-US' ? 'Assistant' : '助手')
@@ -79,12 +135,9 @@ function stepSummary(data: StepEvent, locale: AppLocale): string {
   return locale === 'en-US' ? `Step ${data.id}` : `步骤 ${data.id}`
 }
 
-function waitSummary(data: Record<string, unknown>, locale: AppLocale): string {
-  const reason = typeof data.reason === 'string' ? data.reason : ''
-  const message = typeof data.message === 'string' ? data.message : ''
-  const prompt = typeof data.prompt === 'string' ? data.prompt : ''
-  const question = reason || message || prompt
-  if (question.trim().length > 0) return truncate(question.trim(), 80)
+function waitSummary(data: WaitEventData, locale: AppLocale): string {
+  const question = resolveWaitDisplayText(data)
+  if (question) return truncate(question, 80)
   return locale === 'en-US' ? 'Waiting for your input' : '等待你的输入'
 }
 
@@ -150,7 +203,7 @@ export function buildRunTimeline(events: SSEEventData[], locale: AppLocale = 'zh
         items.push({
           ...base,
           kind: 'wait',
-          summary: waitSummary(waitEvent.data as Record<string, unknown>, locale),
+          summary: waitSummary(waitEvent.data as WaitEventData, locale),
         })
       },
       error: (errorEvent) => {

@@ -15,6 +15,7 @@ import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
 } from '@/lib/session-events'
+import { findLatestWaitEventContext } from '@/lib/run-timeline'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useAuth } from '@/hooks/use-auth'
@@ -23,7 +24,7 @@ import type { ToolEvent, FileInfo } from '@/lib/api/types'
 import type { AttachmentFile, TimelineItem } from '@/lib/session-events'
 import { sessionApi } from '@/lib/api/session'
 import { toast } from 'sonner'
-import { Loader2 } from 'lucide-react'
+import { Clock3, Loader2 } from 'lucide-react'
 import { useI18n } from '@/lib/i18n'
 
 export interface SessionDetailViewProps {
@@ -64,6 +65,15 @@ function removeInitQueryParamFromUrl(): void {
 
 const TIMELINE_WINDOW_SIZE = 120
 
+function formatWaitTimeoutLabel(timeoutAt: number | null, locale: 'zh-CN' | 'en-US'): string | null {
+  if (timeoutAt === null) return null
+  const date = new Date(timeoutAt)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toLocaleString(locale === 'en-US' ? 'en-US' : 'zh-CN', {
+    hour12: false,
+  })
+}
+
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   const router = useRouter()
   const pathname = usePathname()
@@ -93,6 +103,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
   const timeline = useMemo(() => eventsToTimeline(events, locale), [events, locale])
+  const waitContext = useMemo(() => findLatestWaitEventContext(events), [events])
+  const isWaitingForResume = session?.status === 'waiting'
+  const waitResumeToken = waitContext?.resumeToken ?? undefined
+  const waitTimeoutLabel = useMemo(
+    () => formatWaitTimeoutLabel(waitContext?.timeoutAt ?? null, locale),
+    [locale, waitContext?.timeoutAt],
+  )
 
   const [fileListOpen, setFileListOpen] = useState(false)
   const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null)
@@ -184,13 +201,14 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     async (message: string, uploadedFiles: FileInfo[]) => {
       try {
         const attachmentIds = uploadedFiles.map((f) => f.id)
-        await sendMessage(message, attachmentIds)
+        const resumeToken = isWaitingForResume ? waitResumeToken : undefined
+        await sendMessage(message, attachmentIds, resumeToken)
       } catch (e) {
         toast.error(getApiErrorMessage(e, 'sessionDetail.sendFailed', t))
         throw e
       }
     },
-    [sendMessage, t]
+    [isWaitingForResume, sendMessage, t, waitResumeToken]
   )
 
   const handleModelChange = useCallback(
@@ -460,6 +478,24 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">
               <RunTimelinePanel className="mb-2" events={events} />
+              {isWaitingForResume && (
+                <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                  <p className="text-xs font-semibold text-amber-900">{t('sessionDetail.waitCardTitle')}</p>
+                  <p className="mt-1 text-xs text-amber-900">
+                    {waitContext?.displayText ?? t('sessionDetail.waitCardFallback')}
+                  </p>
+                  {waitContext?.suggestUserTakeover && (
+                    <p className="mt-1 text-xs text-amber-800">{t('sessionDetail.waitCardTakeoverHint')}</p>
+                  )}
+                  {waitTimeoutLabel && (
+                    <div className="mt-1 inline-flex items-center gap-1 text-xs text-amber-800">
+                      <Clock3 className="size-3.5" />
+                      <span>{t('sessionDetail.waitCardTimeout', { time: waitTimeoutLabel })}</span>
+                    </div>
+                  )}
+                  <p className="mt-1 text-[11px] text-amber-700">{t('sessionDetail.waitCardResumeHint')}</p>
+                </div>
+              )}
               <ChatInput
                 onSend={handleSend}
                 sessionId={sessionId}

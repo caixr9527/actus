@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildRunTimeline, buildStepViewState } from '../src/lib/run-timeline'
+import { buildRunTimeline, buildStepViewState, findLatestWaitEventContext } from '../src/lib/run-timeline'
 import type { SSEEventData } from '../src/lib/api/types'
 
 function eventOf(type: SSEEventData['type'], data: unknown): SSEEventData {
@@ -46,6 +46,44 @@ test('buildRunTimeline should consume compat semantic type when available', () =
   const timeline = buildRunTimeline(events, 'en-US')
   assert.equal(timeline[0]?.semanticType, 'step.started')
   assert.equal(timeline[0]?.compatSchemaVersion, 'be-lg-08.v2')
+})
+
+test('buildRunTimeline should prioritize wait question in summary', () => {
+  const events: SSEEventData[] = [
+    eventOf('wait', {
+      question: '请确认是否继续执行后续步骤？',
+      reason: '需要用户确认',
+      message: 'fallback message',
+    }),
+  ]
+
+  const timeline = buildRunTimeline(events, 'zh-CN')
+  assert.equal(timeline[0]?.kind, 'wait')
+  assert.equal(timeline[0]?.summary, '请确认是否继续执行后续步骤？')
+})
+
+test('findLatestWaitEventContext should parse latest wait payload for resume', () => {
+  const events: SSEEventData[] = [
+    eventOf('wait', {
+      reason: '需要确认',
+      resume_token: 'old-token',
+      timeout_at: '1711111111',
+    }),
+    eventOf('message', { role: 'assistant', message: '补充说明' }),
+    eventOf('wait', {
+      question: '请补充目标网站地址',
+      resume_token: 'new-token',
+      suggest_user_takeover: true,
+      timeout_at: 1712222222,
+    }),
+  ]
+
+  const context = findLatestWaitEventContext(events)
+  assert.ok(context)
+  assert.equal(context?.displayText, '请补充目标网站地址')
+  assert.equal(context?.resumeToken, 'new-token')
+  assert.equal(context?.suggestUserTakeover, true)
+  assert.equal(context?.timeoutAt, 1712222222000)
 })
 
 test('buildStepViewState should merge plan snapshot and step updates', () => {

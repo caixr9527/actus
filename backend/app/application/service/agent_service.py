@@ -12,12 +12,13 @@ from typing import AsyncGenerator, Optional, List, Type, Callable
 
 from pydantic import TypeAdapter
 
-from app.application.errors import AppException, NotFoundError
+from app.application.errors import AppException, BadRequestError, NotFoundError
 from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage, Browser
 from app.domain.models import (
     BaseEvent,
     ErrorEvent,
+    HumanTaskStatus,
     SessionStatus,
     AgentConfig,
     MCPConfig,
@@ -31,6 +32,7 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
+from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +166,66 @@ class AgentService:
             # 修复失败不影响当前SSE消息继续下发，避免用户流式体验被阻断。
             logger.warning(f"会话{session_id}输出流事件历史修复失败: {e}")
 
+    @staticmethod
+    def _get_latest_human_task(session: Session) -> Optional[dict]:
+        human_tasks = GraphStateContractMapper.reduce_human_tasks_from_events(
+            list(session.events or []),
+            reference_at=datetime.now(),
+        )
+        return GraphStateContractMapper.find_latest_human_task(human_tasks)
+
+    def _validate_waiting_resume_request(
+            self,
+            session: Session,
+            resume_token: Optional[str],
+    ) -> None:
+        waiting_task = self._get_latest_human_task(session)
+        if waiting_task is None:
+            raise BadRequestError(
+                msg="当前会话没有可恢复的等待任务",
+                error_key=error_keys.SESSION_WAIT_TASK_NOT_FOUND,
+                error_params={"session_id": session.id},
+            )
+
+        if waiting_task.get("status") == HumanTaskStatus.TIMEOUT.value:
+            raise BadRequestError(
+                msg="当前等待任务已超时，请重新发起请求",
+                error_key=error_keys.SESSION_WAIT_TASK_TIMEOUT,
+                error_params={
+                    "session_id": session.id,
+                    "task_id": waiting_task.get("task_id"),
+                },
+            )
+        if waiting_task.get("status") != HumanTaskStatus.WAITING.value:
+            raise BadRequestError(
+                msg="当前会话没有可恢复的等待任务",
+                error_key=error_keys.SESSION_WAIT_TASK_NOT_FOUND,
+                error_params={"session_id": session.id},
+            )
+
+        token_from_task = str(waiting_task.get("resume_token") or "").strip()
+        token_from_request = str(resume_token or "").strip()
+        if not token_from_request:
+            if token_from_task:
+                logger.info("会话[%s]恢复请求未携带resume_token，按兼容模式继续执行", session.id)
+            return
+        if not token_from_task or token_from_request != token_from_task:
+            raise BadRequestError(
+                msg="resume token 无效或已过期",
+                error_key=error_keys.SESSION_RESUME_TOKEN_INVALID,
+                error_params={
+                    "session_id": session.id,
+                    "task_id": waiting_task.get("task_id"),
+                },
+            )
+
     async def chat(
             self,
             session_id: str,
             user_id: str,
             message: Optional[str] = None,
             attachments: Optional[List[str]] = None,
+            resume_token: Optional[str] = None,
             latest_event_id: Optional[str] = None,
             timestamp: Optional[datetime] = None,
     ) -> AsyncGenerator[BaseEvent, None]:
@@ -192,6 +248,12 @@ class AgentService:
             if message:
                 # 统一归一化可选参数，避免后续列表处理触发None错误。
                 attachments = attachments or []
+
+                if session.status == SessionStatus.WAITING:
+                    self._validate_waiting_resume_request(
+                        session=session,
+                        resume_token=resume_token,
+                    )
 
                 # 如果会话未处于运行状态，或者没有任务，则创建新任务
                 if session.status != SessionStatus.RUNNING or task is None:

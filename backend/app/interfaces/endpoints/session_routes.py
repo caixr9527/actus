@@ -234,6 +234,7 @@ async def chat(
                 user_id=current_user.id,
                 message=request.message,
                 attachments=request.attachments,
+                resume_token=request.resume_token,
                 latest_event_id=request.event_id,
                 timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
         ):

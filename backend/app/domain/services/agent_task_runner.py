@@ -30,6 +30,7 @@ from app.domain.models import (
     MCPConfig,
     A2AConfig,
     ErrorEvent,
+    HumanTask,
     SessionStatus,
     Event,
     MessageEvent,
@@ -396,6 +397,37 @@ class AgentTaskRunner(TaskRunner):
             # 记录处理工具事件时发生的异常
             logger.exception(f"处理工具事件失败: {e}")
 
+    async def _enrich_wait_event_human_task(self, event: WaitEvent) -> WaitEvent:
+        """为等待事件补齐可恢复上下文。"""
+        try:
+            async with self._uow_factory() as uow:
+                session = await uow.session.get_by_id(session_id=self._session_id)
+                run = (
+                    await uow.workflow_run.get_by_id(session.current_run_id)
+                    if session is not None and session.current_run_id
+                    else None
+                )
+        except Exception as e:
+            logger.warning(f"补齐等待事件上下文失败，继续按最小语义输出: {e}")
+            session = None
+            run = None
+
+        session_id = session.id if session is not None else self._session_id
+        base_human_task = event.human_task or HumanTask.build_wait_for_user_input(
+            session_id=session_id,
+            question="",
+            reason="wait_event",
+        )
+        event.human_task = base_human_task.with_resume_point(
+            session_id=session_id,
+            run_id=run.id if run is not None else None,
+            thread_id=run.thread_id if run is not None else session_id,
+            checkpoint_namespace=run.checkpoint_namespace if run is not None else None,
+            checkpoint_id=run.checkpoint_id if run is not None else None,
+            current_step_id=run.current_step_id if run is not None else None,
+        )
+        return event
+
     async def _run_flow(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         # 检查消息是否为空，如果为空则记录警告并返回错误事件
         if not message.message:
@@ -497,6 +529,7 @@ class AgentTaskRunner(TaskRunner):
                             increment_unread=True,
                         )
                     elif isinstance(event, WaitEvent):
+                        event = await self._enrich_wait_event_human_task(event)
                         # 等待事件：事件历史 + 状态切换为WAITING，并立即结束本轮消费。
                         await self._put_and_add_event(
                             task=task,

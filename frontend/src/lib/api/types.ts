@@ -208,6 +208,7 @@ export type ChatParams = {
   message?: string;
   attachments?: string[];
   event_id?: string;
+  resume_token?: string;
   [key: string]: unknown;
 };
 
@@ -268,6 +269,20 @@ export type ToolEvent = {
 };
 
 /**
+ * 等待事件数据
+ */
+export type WaitEventData = {
+  reason?: string;
+  question?: string;
+  message?: string;
+  prompt?: string;
+  suggest_user_takeover?: boolean;
+  resume_token?: string;
+  timeout_at?: number | string | null;
+  [key: string]: unknown;
+};
+
+/**
  * SSE 事件类型
  */
 export type SSEEventType =
@@ -289,7 +304,7 @@ export type SSEEventData =
   | { type: "plan"; data: PlanEvent }
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
-  | { type: "wait"; data: Record<string, unknown> }
+  | { type: "wait"; data: WaitEventData }
   | { type: "done"; data: Record<string, unknown> }
   | {
       type: "error";

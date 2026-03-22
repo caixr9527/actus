@@ -26,7 +26,7 @@ export type UseSessionDetailResult = {
   refresh: () => Promise<void>
   refreshFiles: () => Promise<void>
   updateSessionModel: (modelId: string) => Promise<void>
-  sendMessage: (message: string, attachmentIds: string[]) => Promise<void>
+  sendMessage: (message: string, attachmentIds: string[], resumeToken?: string) => Promise<void>
   streaming: boolean
 }
 
@@ -402,7 +402,7 @@ export function useSessionDetail(
   }, [stopEmptyStream, stopMessageStream])
 
   const sendMessage = useCallback(
-    async (message: string, attachmentIds: string[]) => {
+    async (message: string, attachmentIds: string[], resumeToken?: string) => {
       if (!sessionId || !enabled) return
 
       const streamEpoch = sessionEpochRef.current
@@ -441,9 +441,15 @@ export function useSessionDetail(
         }
       }
 
+      const chatParams = {
+        message,
+        attachments: attachmentIds,
+        ...(resumeToken ? { resume_token: resumeToken } : {}),
+      }
+
       const messageStreamCleanup = sessionApi.chat(
         streamSessionId,
-        { message, attachments: attachmentIds },
+        chatParams,
         onEvent,
         (err) => {
           if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {

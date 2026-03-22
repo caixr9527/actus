@@ -97,4 +97,37 @@ test("getApiErrorMessage should map new model-related error_key values", () => {
     ),
     "Failed to load A2A agents. Please try again later.",
   )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.session.wait_task_not_found",
+      },
+      "sessionDetail.sendFailed",
+      translate("zh-CN"),
+    ),
+    "未找到可恢复的等待任务，请刷新后重试",
+  )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.session.resume_token_invalid",
+      },
+      "sessionDetail.sendFailed",
+      translate("en-US"),
+    ),
+    "The resume token is invalid. Refresh and try again.",
+  )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.session.wait_task_timeout",
+      },
+      "sessionDetail.sendFailed",
+      translate("en-US"),
+    ),
+    "The wait task has timed out. Please send a new instruction.",
+  )
 })

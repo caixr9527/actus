@@ -38,6 +38,7 @@ class ChatRequest(BaseModel):
     """聊天请求结构"""
     message: Optional[str] = None  # 人类消息
     attachments: Optional[List[str]] = Field(default_factory=list)  # 附件列表(传递的是文件id列表)
+    resume_token: Optional[str] = None  # 恢复等待任务所需token
     event_id: Optional[str] = None  # 最新事件id
     timestamp: Optional[int] = None  # 当前时间戳
 

@@ -36,6 +36,13 @@ from .event import (
 )
 from .file import File
 from .health_status import HealthStatus
+from .human_task import (
+    HumanTask,
+    HumanTaskStatus,
+    HumanTaskResumePoint,
+    HumanTaskResumeCommand,
+    HumanTaskTimeoutPolicy,
+)
 from .llm_model_config import LLMModelConfig
 from .memory import Memory
 from .message import Message
@@ -59,6 +66,11 @@ __all__ = [
     "MCPTransport",
     "MCPServerConfig",
     "HealthStatus",
+    "HumanTask",
+    "HumanTaskStatus",
+    "HumanTaskResumePoint",
+    "HumanTaskResumeCommand",
+    "HumanTaskTimeoutPolicy",
     "LLMModelConfig",
     "Memory",
     "Plan",
