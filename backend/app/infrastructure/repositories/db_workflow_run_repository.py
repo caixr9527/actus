@@ -8,7 +8,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import (
@@ -16,9 +16,12 @@ from app.domain.models import (
     DoneEvent,
     ErrorEvent,
     Event,
+    ExecutionStatus,
     File,
     Memory,
     Plan,
+    PlanEvent,
+    StepEvent,
     WaitEvent,
     Session,
     WorkflowRun,
@@ -95,6 +98,68 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         result = await self.db_session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def _get_step_record_with_lock(self, run_id: str, step_id: str) -> Optional[WorkflowRunStepModel]:
+        stmt = (
+            select(WorkflowRunStepModel)
+            .where(
+                WorkflowRunStepModel.run_id == run_id,
+                WorkflowRunStepModel.step_id == step_id,
+            )
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _resolve_step_index(self, run_record: WorkflowRunModel, step_id: str) -> int:
+        """优先按 plan_snapshot 推断步骤顺序，缺失时回退到当前最大索引+1。"""
+        plan_snapshot = run_record.plan_snapshot if isinstance(run_record.plan_snapshot, dict) else {}
+        raw_steps = plan_snapshot.get("steps") if isinstance(plan_snapshot, dict) else None
+        if isinstance(raw_steps, list):
+            for index, step in enumerate(raw_steps):
+                if isinstance(step, dict) and str(step.get("id", "")) == step_id:
+                    return index
+
+        stmt = select(func.max(WorkflowRunStepModel.step_index)).where(WorkflowRunStepModel.run_id == run_record.id)
+        result = await self.db_session.execute(stmt)
+        max_index = result.scalar_one_or_none()
+        return int(max_index or -1) + 1
+
+    async def upsert_step_from_event(self, run_id: str, event: StepEvent) -> None:
+        """基于 StepEvent 增量收敛 workflow_run_steps 快照。"""
+        run_record = await self._get_record_with_lock(run_id)
+        if run_record is None:
+            return
+
+        step = event.step
+        step_record = await self._get_step_record_with_lock(run_id=run_id, step_id=step.id)
+        if step_record is None:
+            # 步骤不存在时创建快照，尽量保持与计划中的顺序一致。
+            step_record = WorkflowRunStepModel(
+                run_id=run_id,
+                step_id=step.id,
+                step_index=await self._resolve_step_index(run_record=run_record, step_id=step.id),
+                description=step.description,
+                status=step.status.value,
+                result=step.result,
+                error=step.error,
+                success=step.success,
+                attachments=list(step.attachments or []),
+            )
+            self.db_session.add(step_record)
+        else:
+            # 步骤已存在时仅做字段收敛，避免覆盖既有顺序。
+            step_record.description = step.description
+            step_record.status = step.status.value
+            step_record.result = step.result
+            step_record.error = step.error
+            step_record.success = step.success
+            step_record.attachments = list(step.attachments or [])
+
+        if step.status in {ExecutionStatus.RUNNING, ExecutionStatus.PENDING}:
+            run_record.current_step_id = step.id
+        elif step.done and run_record.current_step_id == step.id:
+            run_record.current_step_id = None
+
     async def _refresh_run_status_by_event(self, run_id: str, event: BaseEvent) -> None:
         record = await self._get_record_with_lock(run_id)
         if record is None:
@@ -146,6 +211,11 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         )
         self.db_session.add(event_record)
         await self._refresh_run_status_by_event(run_id=run_id, event=event)
+        # BE-LG-08：步骤投影同步策略统一收口到 run 仓库。
+        if isinstance(event, PlanEvent):
+            await self.replace_steps_from_plan(run_id=run_id, plan=event.plan)
+        elif isinstance(event, StepEvent):
+            await self.upsert_step_from_event(run_id=run_id, event=event)
         return True
 
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:

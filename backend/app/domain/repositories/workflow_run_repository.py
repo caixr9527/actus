@@ -7,7 +7,17 @@
 """
 from typing import Any, Dict, List, Optional, Protocol
 
-from app.domain.models import BaseEvent, File, Memory, Plan, Session, WorkflowRun, WorkflowRunStatus, Event
+from app.domain.models import (
+    BaseEvent,
+    Event,
+    File,
+    Memory,
+    Plan,
+    Session,
+    StepEvent,
+    WorkflowRun,
+    WorkflowRunStatus,
+)
 
 
 class WorkflowRunRepository(Protocol):
@@ -55,6 +65,10 @@ class WorkflowRunRepository(Protocol):
 
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
         """用计划快照替换运行步骤快照"""
+        ...
+
+    async def upsert_step_from_event(self, run_id: str, event: StepEvent) -> None:
+        """基于 StepEvent 增量更新运行步骤快照"""
         ...
 
     async def append_file_snapshot(self, run_id: str, file: File) -> None:

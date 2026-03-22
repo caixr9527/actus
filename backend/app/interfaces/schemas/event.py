@@ -18,14 +18,29 @@ from app.domain.models import (
     ToolEvent,
     ToolEventStatus,
     PlanEvent,
-    StepEvent
+    PlanEventStatus,
+    StepEvent,
+    StepEventStatus,
 )
+
+# BE-LG-08：SSE 兼容层版本号。
+# 用于标识“内部事件 -> 旧 SSE 协议”映射已进入 V2 兼容语义。
+EVENT_COMPAT_SCHEMA_VERSION = "be-lg-08.v2"
+
+
+class EventCompatContext(BaseModel):
+    """事件兼容映射上下文（可选）"""
+    session_id: Optional[str] = None
+    run_id: Optional[str] = None
+    channel: Optional[str] = None
 
 
 class BaseEventData(BaseModel):
     """基础事件数据"""
     event_id: Optional[str] = None  # 事件id
     created_at: datetime = Field(default_factory=datetime.now)  # 事件时间
+    # BE-LG-08：统一扩展字段，旧前端可忽略，新前端可读取 richer event 元信息。
+    extensions: Dict[str, Any] = Field(default_factory=dict)
 
     @field_serializer("created_at", when_used="json")
     def serialize_created_at(self, value: datetime) -> int:
@@ -117,6 +132,7 @@ class StepEventData(BaseEventData):
     """步骤事件数据"""
     id: str  # 步骤id
     status: ExecutionStatus  # 步骤执行状态
+    event_status: StepEventStatus  # 步骤事件状态（started/completed/failed）
     description: str  # 步骤描述
 
 
@@ -131,6 +147,7 @@ class StepSSEEvent(BaseSSEEvent):
             data=StepEventData(
                 **BaseEventData.base_event_data(event),
                 status=event.step.status,
+                event_status=event.status,
                 id=event.step.id,
                 description=event.step.description
             )
@@ -140,6 +157,12 @@ class StepSSEEvent(BaseSSEEvent):
 class PlanEventData(BaseEventData):
     """计划事件数据"""
     steps: List[StepEventData]
+    title: str = ""
+    goal: str = ""
+    message: str = ""
+    language: str = ""
+    status: PlanEventStatus = PlanEventStatus.CREATED
+    plan_status: ExecutionStatus = ExecutionStatus.PENDING
 
 
 class PlanSSEEvent(BaseSSEEvent):
@@ -157,10 +180,25 @@ class PlanSSEEvent(BaseSSEEvent):
                         **BaseEventData.base_event_data(event),
                         id=step.id,
                         status=step.status,
+                        event_status=(
+                            StepEventStatus.FAILED
+                            if step.status == ExecutionStatus.FAILED
+                            else (
+                                StepEventStatus.COMPLETED
+                                if step.status == ExecutionStatus.COMPLETED
+                                else StepEventStatus.STARTED
+                            )
+                        ),
                         description=step.description,
                     )
                     for step in event.plan.steps
-                ]
+                ],
+                title=event.plan.title,
+                goal=event.plan.goal,
+                message=event.plan.message,
+                language=event.plan.language,
+                status=event.status,
+                plan_status=event.plan.status,
             )
         )
 
@@ -286,7 +324,44 @@ class EventMapper:
         return mapping
 
     @staticmethod
-    def event_to_sse_event(event: Event) -> AgentSSEEvent:
+    def _resolve_semantic_type(event: Event) -> str:
+        """将事件归一化为细粒度语义类型，便于前端做增量增强。"""
+        if isinstance(event, PlanEvent):
+            return f"plan.{event.status.value}"
+        if isinstance(event, StepEvent):
+            return f"step.{event.status.value}"
+        if isinstance(event, ToolEvent):
+            return f"tool.{event.status.value}"
+        return event.type
+
+    @staticmethod
+    def _build_extensions(event: Event, context: Optional[EventCompatContext]) -> Dict[str, Any]:
+        """构建 BE-LG-08 V2 兼容扩展字段。"""
+        extensions: Dict[str, Any] = {
+            "compat": {
+                "schema_version": EVENT_COMPAT_SCHEMA_VERSION,
+                "semantic_type": EventMapper._resolve_semantic_type(event),
+            }
+        }
+
+        runtime_context: Dict[str, Any] = {}
+        if context is not None:
+            if context.session_id:
+                runtime_context["session_id"] = context.session_id
+            if context.run_id:
+                runtime_context["run_id"] = context.run_id
+            if context.channel:
+                runtime_context["channel"] = context.channel
+        if runtime_context:
+            extensions["runtime"] = runtime_context
+
+        return extensions
+
+    @staticmethod
+    def event_to_sse_event(
+            event: Event,
+            context: Optional[EventCompatContext] = None,
+    ) -> AgentSSEEvent:
         """将领域事件转换为Agent流式事件模型"""
         # 获取事件类型到SSE事件类的映射关系
         event_type_mapping = EventMapper._get_event_type_mapping()
@@ -297,14 +372,20 @@ class EventMapper:
         # 如果找到匹配的事件映射，则使用对应SSE事件类构建流式事件
         if event_mapping:
             sse_event = event_mapping.sse_event_class.from_event(event)
-            return sse_event
+        else:
+            # 如果未找到匹配的事件映射，则使用通用SSE事件类进行转换
+            sse_event = CommonSSEEvent.from_event(event)
 
-        # 如果未找到匹配的事件映射，则使用通用SSE事件类进行转换
-        return CommonSSEEvent.from_event(event)
+        # BE-LG-08：无论走哪个映射分支，都附加统一扩展字段。
+        sse_event.data.extensions = EventMapper._build_extensions(event=event, context=context)
+        return sse_event
 
     @staticmethod
-    def events_to_sse_events(events: List[Event]) -> List[AgentSSEEvent]:
+    def events_to_sse_events(
+            events: List[Event],
+            context: Optional[EventCompatContext] = None,
+    ) -> List[AgentSSEEvent]:
         """将领域事件模型列表转换为SSE流式事件列表"""
         return list(filter(lambda x: x is not None, [
-            EventMapper.event_to_sse_event(event) for event in events
+            EventMapper.event_to_sse_event(event, context=context) for event in events
         ]))

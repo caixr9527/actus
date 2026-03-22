@@ -13,7 +13,7 @@ from sqlalchemy import select, delete, update, func, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory, PlanEvent
+from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory, PlanEvent, StepEvent
 from app.domain.repositories import SessionRepository
 from app.infrastructure.models import SessionModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
@@ -42,8 +42,6 @@ class DBSessionRepository(SessionRepository):
             run_id=run_id,
             event=event,
         )
-        if isinstance(event, PlanEvent):
-            await self._workflow_run_repository.replace_steps_from_plan(run_id=run_id, plan=event.plan)
 
     async def _apply_workflow_run_compat(self, session: Session) -> Session:
         session.events = await self._workflow_run_repository.get_events_with_compat(session)
@@ -285,6 +283,13 @@ class DBSessionRepository(SessionRepository):
                 await self._workflow_run_repository.replace_steps_from_plan(
                     run_id=record.current_run_id,
                     plan=event.plan,
+                )
+        elif isinstance(event, StepEvent):
+            # 对步骤事件，幂等重放时也需要补齐步骤快照，避免详情步骤状态落后于事件流。
+            if record.current_run_id:
+                await self._workflow_run_repository.upsert_step_from_event(
+                    run_id=record.current_run_id,
+                    event=event,
                 )
 
         # 标题属于会话投影的一部分，按调用方意图进行更新。

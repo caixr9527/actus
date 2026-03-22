@@ -1,7 +1,21 @@
 from datetime import datetime
 
-from app.domain.models import ErrorEvent, MessageEvent
-from app.interfaces.schemas.event import BaseEventData, CommonEventData, EventMapper
+from app.domain.models import (
+    ErrorEvent,
+    ExecutionStatus,
+    MessageEvent,
+    Plan,
+    PlanEvent,
+    PlanEventStatus,
+    Step,
+)
+from app.interfaces.schemas.event import (
+    BaseEventData,
+    CommonEventData,
+    EVENT_COMPAT_SCHEMA_VERSION,
+    EventCompatContext,
+    EventMapper,
+)
 
 
 def test_base_event_data_created_at_serialized_as_timestamp() -> None:
@@ -60,3 +74,63 @@ def test_event_mapper_should_serialize_error_event_key_and_params() -> None:
     assert payload["data"]["error"] == "任务会话不存在"
     assert payload["data"]["error_key"] == "error.session.not_found"
     assert payload["data"]["error_params"] == {"session_id": "session-1"}
+
+
+def test_event_mapper_should_attach_v2_extensions_with_context() -> None:
+    event = MessageEvent(
+        id="evt-ctx-1",
+        created_at=datetime(2026, 3, 11, 12, 0, 5),
+        role="assistant",
+        message="兼容层测试",
+    )
+
+    sse_event = EventMapper.event_to_sse_event(
+        event,
+        context=EventCompatContext(
+            session_id="session-1",
+            run_id="run-1",
+            channel="chat_stream",
+        ),
+    )
+    payload = sse_event.model_dump(mode="json")
+
+    assert payload["data"]["extensions"]["compat"]["schema_version"] == EVENT_COMPAT_SCHEMA_VERSION
+    assert payload["data"]["extensions"]["compat"]["semantic_type"] == "message"
+    assert payload["data"]["extensions"]["runtime"]["session_id"] == "session-1"
+    assert payload["data"]["extensions"]["runtime"]["run_id"] == "run-1"
+    assert payload["data"]["extensions"]["runtime"]["channel"] == "chat_stream"
+
+
+def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
+    event = PlanEvent(
+        id="evt-plan-1",
+        created_at=datetime(2026, 3, 11, 12, 0, 6),
+        status=PlanEventStatus.UPDATED,
+        plan=Plan(
+            title="任务标题",
+            goal="任务目标",
+            language="zh",
+            message="计划说明",
+            status=ExecutionStatus.RUNNING,
+            steps=[
+                Step(
+                    id="step-1",
+                    description="执行步骤1",
+                    status=ExecutionStatus.COMPLETED,
+                    success=True,
+                )
+            ],
+        ),
+    )
+
+    sse_event = EventMapper.event_to_sse_event(event)
+    payload = sse_event.model_dump(mode="json")
+
+    assert payload["event"] == "plan"
+    assert payload["data"]["title"] == "任务标题"
+    assert payload["data"]["goal"] == "任务目标"
+    assert payload["data"]["message"] == "计划说明"
+    assert payload["data"]["language"] == "zh"
+    assert payload["data"]["status"] == PlanEventStatus.UPDATED.value
+    assert payload["data"]["plan_status"] == ExecutionStatus.RUNNING.value
+    assert payload["data"]["steps"][0]["event_status"] == "completed"

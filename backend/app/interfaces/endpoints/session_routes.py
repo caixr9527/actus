@@ -28,6 +28,7 @@ from app.interfaces.schemas import (
     ListSessionItem,
     ChatRequest,
     EventMapper,
+    EventCompatContext,
     GetSessionResponse,
     UpdateSessionModelRequest,
     UpdateSessionModelResponse,
@@ -220,6 +221,13 @@ async def chat(
 
     async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
         """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""
+        # BE-LG-08：chat 流式映射上下文。
+        # run_id 使用会话快照值；若本次聊天触发新 run，后续事件仍保持旧协议兼容，不依赖该字段。
+        event_context = EventCompatContext(
+            session_id=session_id,
+            run_id=session.current_run_id,
+            channel="chat_stream",
+        )
         # 调用Agent服务发起聊天
         async for event in agent_service.chat(
                 session_id=session_id,
@@ -230,7 +238,7 @@ async def chat(
                 timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
         ):
             # 将Agent事件转换为sse数据(因为普通的event没法通过流式事件传输)
-            sse_event = EventMapper.event_to_sse_event(event)
+            sse_event = EventMapper.event_to_sse_event(event, context=event_context)
             if sse_event:
                 yield ServerSentEvent(
                     event=sse_event.event,
@@ -266,7 +274,14 @@ async def get_session(
             title=session.title,
             status=session.status,
             current_model_id=session.current_model_id,
-            events=EventMapper.events_to_sse_events(session.events),
+            events=EventMapper.events_to_sse_events(
+                session.events,
+                context=EventCompatContext(
+                    session_id=session.id,
+                    run_id=session.current_run_id,
+                    channel="session_detail",
+                ),
+            ),
         )
     )
 

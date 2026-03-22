@@ -33,6 +33,7 @@ from .auth import (
 from .base import Response
 from .event import (
     BaseEventData,
+    EventCompatContext,
     BaseSSEEvent,
     AgentSSEEvent,
     CommonSSEEvent,
@@ -92,6 +93,7 @@ __all__ = [
     "ListSessionItem",
     "ChatRequest",
     "BaseEventData",
+    "EventCompatContext",
     "BaseSSEEvent",
     "AgentSSEEvent",
     "CommonSSEEvent",
