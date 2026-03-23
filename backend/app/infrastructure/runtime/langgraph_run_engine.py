@@ -6,15 +6,23 @@
 @File   : langgraph_run_engine.py
 """
 import logging
-from typing import AsyncGenerator, Callable, Dict, Optional
+import asyncio
+import json
+from contextlib import suppress
+from typing import AsyncGenerator, Callable, Dict, Optional, List
 
 from app.domain.external import LLM
 from app.domain.models import BaseEvent, Message
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
+from app.domain.services.tools import BaseTool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActPOCState
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
-from app.infrastructure.runtime.langgraph_graphs import build_planner_react_poc_graph
+from app.infrastructure.runtime.langgraph_graphs import (
+    bind_live_event_sink,
+    build_planner_react_poc_graph,
+    unbind_live_event_sink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +35,23 @@ class LangGraphRunEngine(RunEngine):
             session_id: str,
             llm: LLM,
             uow_factory: Optional[Callable[[], IUnitOfWork]] = None,
+            runtime_tools: Optional[List[BaseTool]] = None,
+            max_tool_iterations: Optional[int] = None,
     ) -> None:
         self._session_id = session_id
         self._uow_factory = uow_factory
-        self._graph = build_planner_react_poc_graph(llm=llm)
+        if runtime_tools is None and max_tool_iterations is None:
+            self._graph = build_planner_react_poc_graph(llm=llm)
+        else:
+            try:
+                self._graph = build_planner_react_poc_graph(
+                    llm=llm,
+                    runtime_tools=runtime_tools,
+                    max_tool_iterations=max_tool_iterations or 5,
+                )
+            except TypeError:
+                # 兼容测试/历史 monkeypatch 场景：回退到仅传 llm 的构图签名。
+                self._graph = build_planner_react_poc_graph(llm=llm)
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
             if uow_factory is not None
@@ -135,13 +156,71 @@ class LangGraphRunEngine(RunEngine):
             invoke_config=invoke_config,
         )
         state: Optional[PlannerReActPOCState] = None
-        try:
-            state = await self._graph.ainvoke(
-                graph_input_state,
-                config=invoke_config,
+        emitted_event_ids: set[str] = set()
+        emitted_event_signatures: set[str] = set()
+        live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
+
+        def _build_event_signature(event: BaseEvent) -> str:
+            """构建事件签名，作为 event.id 之外的防重复兜底键。"""
+            payload = event.model_dump(mode="json")
+            payload.pop("id", None)
+            return json.dumps(
+                {
+                    "event_type": event.type,
+                    "payload": payload,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
             )
+
+        def _should_emit_event(event: BaseEvent) -> bool:
+            event_id = str(event.id or "")
+            event_signature = _build_event_signature(event)
+            if event_id and event_id in emitted_event_ids:
+                return False
+            if event_signature in emitted_event_signatures:
+                return False
+            if event_id:
+                emitted_event_ids.add(event_id)
+            emitted_event_signatures.add(event_signature)
+            return True
+
+        async def _enqueue_live_event(event: BaseEvent) -> None:
+            await live_event_queue.put(event)
+
+        sink_token = bind_live_event_sink(_enqueue_live_event)
+        graph_task: asyncio.Task | None = None
+        try:
+            graph_task = asyncio.create_task(
+                self._graph.ainvoke(
+                    graph_input_state,
+                    config=invoke_config,
+                )
+            )
+
+            # 边执行边转发 LangGraph 节点实时事件，提升前端过程可见性。
+            while True:
+                if graph_task.done() and live_event_queue.empty():
+                    break
+                try:
+                    event = await asyncio.wait_for(live_event_queue.get(), timeout=0.1)
+                except TimeoutError:
+                    continue
+
+                if _should_emit_event(event):
+                    # 对外输出副本，避免下游写入 event.id 反向污染 graph state 中的同一对象。
+                    yield event.model_copy(deep=True)
+
+            state = await graph_task
             state = GraphStateContractMapper.apply_emitted_events(state=state)
         finally:
+            unbind_live_event_sink(sink_token)
+            if graph_task is not None and not graph_task.done():
+                graph_task.cancel()
+                with suppress(Exception):
+                    await graph_task
+
             if self._checkpoint_adapter is not None:
                 # 无论图执行成功或失败，都尝试同步最新 checkpoint 引用，保证恢复点尽量前移。
                 await self._checkpoint_adapter.sync_latest_checkpoint_ref(
@@ -156,4 +235,5 @@ class LangGraphRunEngine(RunEngine):
             )
 
         for event in (state or {}).get("emitted_events", []):
-            yield event
+            if _should_emit_event(event):
+                yield event.model_copy(deep=True)

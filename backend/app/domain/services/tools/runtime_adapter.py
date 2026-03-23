@@ -6,6 +6,7 @@
 @File   : runtime_adapter.py
 """
 import logging
+import json
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
 
@@ -54,22 +55,60 @@ class ToolRuntimeAdapter:
     3. 统一处理 ToolEvent 的结果富化逻辑（search/browser/shell/file + 兼容 MCP/A2A）。
     """
 
-    # BE-LG-05 首批本地能力。MCP/A2A 不进入能力注册表，先保留兼容链路。
+    # BE-LG-05 本地能力基座；BE-LG-11 起 MCP 以 capability provider 形式接入。
     DEFAULT_LOCAL_CAPABILITIES: tuple[str, ...] = (
         CapabilityRegistry.CAPABILITY_SANDBOX_FILE,
         CapabilityRegistry.CAPABILITY_LOCAL_SHELL,
-        CapabilityRegistry.CAPABILITY_BROWSER,
         CapabilityRegistry.CAPABILITY_SEARCH,
+        CapabilityRegistry.CAPABILITY_BROWSER,
         CapabilityRegistry.CAPABILITY_MESSAGE,
+    )
+    DEFAULT_REMOTE_CAPABILITIES: tuple[str, ...] = (
+        CapabilityRegistry.CAPABILITY_MCP,
     )
 
     def __init__(self, capability_registry: Optional[CapabilityRegistry] = None) -> None:
         self._capability_registry = capability_registry or CapabilityRegistry.default_v1()
 
+    @staticmethod
+    def _render_file_tool_result(event: ToolEvent) -> str:
+        """将文件工具结果渲染为可读文本。
+
+        兼容场景：
+        - list_files / find_files：展示目录与文件列表；
+        - 其他文件工具：优先展示 data，其次展示 message。
+        """
+        function_result = event.function_result
+        if function_result is None:
+            return ""
+
+        result_data = function_result.data if hasattr(function_result, "data") else None
+        function_name = str(event.function_name or "").strip().lower()
+
+        if function_name in {"list_files", "find_files"} and isinstance(result_data, dict):
+            raw_files = result_data.get("files")
+            dir_path = str(result_data.get("dir_path") or event.function_args.get("dir_path") or "")
+            files = [str(item).strip() for item in (raw_files or []) if str(item).strip()]
+            if len(files) == 0:
+                return f"目录{dir_path}下未找到文件" if dir_path else "未找到文件"
+            header = f"目录: {dir_path}\n共 {len(files)} 项" if dir_path else f"共 {len(files)} 项"
+            return f"{header}\n" + "\n".join(files)
+
+        if result_data is not None:
+            if isinstance(result_data, str):
+                return result_data
+            return json.dumps(result_data, ensure_ascii=False, indent=2, default=str)
+
+        message = str(function_result.message or "").strip()
+        if message:
+            return message
+        return ""
+
     def build_runtime_tools(
             self,
             capability_context: CapabilityBuildContext,
             mcp_tool: Optional[MCPTool] = None,
+            mcp_config: Optional[MCPConfig] = None,
             a2a_tool: Optional[A2ATool] = None,
     ) -> List[BaseTool]:
         """构建运行时工具列表。
@@ -78,13 +117,33 @@ class ToolRuntimeAdapter:
         - 先按能力注册表构建本地工具；
         - 再追加 MCP/A2A（若存在）以兼容 legacy planner-react 现有能力。
         """
-        tools = self._capability_registry.build_tools(
-            capability_ids=self.DEFAULT_LOCAL_CAPABILITIES,
-            context=capability_context,
+        context = CapabilityBuildContext(
+            sandbox=capability_context.sandbox,
+            browser=capability_context.browser,
+            search_engine=capability_context.search_engine,
+            # 为兼容旧调用路径：优先使用显式参数，其次使用上下文已有值。
+            mcp_tool=mcp_tool if mcp_tool is not None else capability_context.mcp_tool,
+            a2a_tool=a2a_tool if a2a_tool is not None else capability_context.a2a_tool,
+            mcp_config=mcp_config if mcp_config is not None else capability_context.mcp_config,
+            a2a_config=capability_context.a2a_config,
+            session_id=capability_context.session_id,
+            user_id=capability_context.user_id,
         )
 
-        if mcp_tool is not None:
-            tools.append(mcp_tool)
+        tools = self._capability_registry.build_tools(
+            capability_ids=self.DEFAULT_LOCAL_CAPABILITIES,
+            context=context,
+        )
+
+        # MCP provider 升级为 capability provider，通过能力声明接入。
+        if context.mcp_tool is not None:
+            tools.extend(
+                self._capability_registry.build_tools(
+                    capability_ids=self.DEFAULT_REMOTE_CAPABILITIES,
+                    context=context,
+                )
+            )
+
         if a2a_tool is not None:
             tools.append(a2a_tool)
         return tools
@@ -160,7 +219,8 @@ class ToolRuntimeAdapter:
         if event.tool_name == "file":
             filepath = str(event.function_args.get("filepath") or "")
             if not filepath:
-                event.tool_content = FileToolContent(content="(No Content)")
+                rendered_result = self._render_file_tool_result(event)
+                event.tool_content = FileToolContent(content=rendered_result or "(No Content)")
                 return True
 
             file_read_result = await hooks.read_file_content(filepath)
@@ -169,7 +229,7 @@ class ToolRuntimeAdapter:
             await hooks.sync_file_to_storage(filepath)
             return True
 
-        # BE-LG-05 约束：MCP/A2A 不纳入能力注册表，但保留兼容富化。
+        # 事件富化层保留 MCP/A2A 兼容分支，确保既有前端结果卡片协议不变。
         if event.tool_name in {"mcp", "a2a"}:
             if event.function_result:
                 if hasattr(event.function_result, "data") and event.function_result.data:

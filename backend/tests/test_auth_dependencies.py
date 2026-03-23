@@ -5,6 +5,7 @@ from typing import Optional
 
 import jwt
 import pytest
+from fastapi import WebSocketException
 from starlette.requests import HTTPConnection
 
 from app.application.errors import UnauthorizedError
@@ -62,7 +63,11 @@ def _build_access_token(
     return jwt.encode(payload, secret_key, algorithm=algorithm)
 
 
-def _build_http_connection(authorization: Optional[str], scope_type: str = "http") -> HTTPConnection:
+def _build_http_connection(
+        authorization: Optional[str],
+        scope_type: str = "http",
+        query_string: str = "",
+) -> HTTPConnection:
     headers = []
     if authorization is not None:
         headers.append((b"authorization", authorization.encode("utf-8")))
@@ -72,6 +77,7 @@ def _build_http_connection(authorization: Optional[str], scope_type: str = "http
             "method": "GET",
             "path": "/api/sessions",
             "headers": headers,
+            "query_string": query_string.encode("utf-8"),
         }
     )
 
@@ -208,3 +214,40 @@ def test_get_current_auth_context_should_support_websocket_connection(monkeypatc
     context = asyncio.run(auth_dependencies.get_current_auth_context(websocket_connection))
 
     assert context.user.id == user.id
+
+
+def test_get_current_auth_context_should_support_websocket_query_access_token(monkeypatch) -> None:
+    user = User(
+        id="user-1",
+        email="tester@example.com",
+        password="hashed-password",
+    )
+    _patch_auth_dependency_runtime(monkeypatch, user=user)
+    access_token = _build_access_token(user_id=user.id)
+    websocket_connection = _build_http_connection(
+        authorization=None,
+        scope_type="websocket",
+        query_string=f"access_token={access_token}",
+    )
+
+    context = asyncio.run(auth_dependencies.get_current_auth_context(websocket_connection))
+
+    assert context.user.id == user.id
+    assert context.access_token == access_token
+
+
+def test_get_current_auth_context_should_reject_websocket_when_missing_header_and_query_token(monkeypatch) -> None:
+    user = User(
+        id="user-1",
+        email="tester@example.com",
+        password="hashed-password",
+    )
+    _patch_auth_dependency_runtime(monkeypatch, user=user)
+    websocket_connection = _build_http_connection(
+        authorization=None,
+        scope_type="websocket",
+    )
+
+    with pytest.raises(WebSocketException) as exc:
+        asyncio.run(auth_dependencies.get_current_auth_context(websocket_connection))
+    assert exc.value.code == 1008

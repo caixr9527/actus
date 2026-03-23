@@ -57,6 +57,28 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return access_token
 
 
+def _extract_access_token(connection: HTTPConnection) -> str:
+    """提取访问令牌。
+
+    优先级：
+    1. Authorization: Bearer <token>
+    2. （仅 WebSocket）query: access_token=<token>
+    """
+    authorization = connection.headers.get("Authorization")
+    if authorization is not None:
+        return _extract_bearer_token(authorization)
+
+    if _is_websocket_connection(connection):
+        query_token = str(connection.query_params.get("access_token") or "").strip()
+        if query_token:
+            return query_token
+
+    raise UnauthorizedError(
+        msg="缺少认证信息，请先登录",
+        error_key=error_keys.AUTH_MISSING_CREDENTIALS,
+    )
+
+
 def _decode_access_token(access_token: str) -> dict[str, Any]:
     settings = get_settings()
     try:
@@ -102,7 +124,7 @@ def get_access_token_ttl_seconds(token_payload: dict[str, Any]) -> int:
 async def get_current_auth_context(connection: HTTPConnection) -> AuthContext:
     """解析并校验当前请求的认证上下文（支持 HTTP + WebSocket）"""
     try:
-        access_token = _extract_bearer_token(connection.headers.get("Authorization"))
+        access_token = _extract_access_token(connection)
         blacklist_store = get_access_token_blacklist_store()
         try:
             if await blacklist_store.is_access_token_blacklisted(access_token):

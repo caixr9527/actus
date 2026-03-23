@@ -17,6 +17,7 @@ import {
   eventsToTimeline,
 } from '@/lib/session-events'
 import { findLatestWaitEventContext } from '@/lib/run-timeline'
+import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useAuth } from '@/hooks/use-auth'
@@ -143,22 +144,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
    * 通过 tool_call_id 匹配获取最新版本。
    */
   const resolvedPreviewTool = useMemo(() => {
-    if (!previewTool) return null
-    const id = (previewTool as { tool_call_id?: string }).tool_call_id
-    if (!id) return previewTool
-
-    for (let i = timeline.length - 1; i >= 0; i--) {
-      const item = timeline[i]
-      if (item.kind === 'tool' && (item.data as { tool_call_id?: string }).tool_call_id === id) {
-        return item.data
-      }
-      if (item.kind === 'step') {
-        for (const t of item.tools) {
-          if ((t as { tool_call_id?: string }).tool_call_id === id) return t
-        }
-      }
-    }
-    return previewTool
+    return resolvePreviewToolFromTimeline(previewTool, timeline)
   }, [previewTool, timeline])
 
   // 任务运行中自动追踪最新工具预览（VNC 打开时暂停）
@@ -281,6 +267,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const handleRealtimeRecover = useCallback(() => {
     void refresh()
   }, [refresh])
+  const isSessionRunning = session?.status === 'running'
 
   const isSessionNotFoundError = Boolean(
     error &&
@@ -501,7 +488,8 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
               <ChatInput
                 onSend={handleSend}
                 sessionId={sessionId}
-                isRunning={session?.status === 'running'}
+                isRunning={isSessionRunning}
+                disabled={streaming || isSessionRunning}
                 onStop={handleStop}
                 modelOptions={availableModels}
                 currentModelId={session.current_model_id}

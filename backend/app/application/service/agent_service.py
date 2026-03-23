@@ -295,6 +295,8 @@ class AgentService:
                             event=message_event,
                             latest_message=message,
                             latest_message_at=timestamp or datetime.now(),
+                            # 用户发起新一轮输入后立即置为 RUNNING，避免前端切换会话后丢失运行态。
+                            status=SessionStatus.RUNNING,
                         )
                 except Exception as add_err:
                     logger.error(f"会话{session_id}保存用户事件失败，开始补偿输入流消息: {add_err}")

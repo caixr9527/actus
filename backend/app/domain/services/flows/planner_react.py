@@ -14,6 +14,7 @@ from app.domain.models import (
     BaseEvent,
     Plan,
     AgentConfig,
+    MCPConfig,
     SessionStatus,
     DoneEvent,
     PlanEvent,
@@ -54,6 +55,8 @@ class PlannerReActFlow(BaseFlow):
             search_engine: SearchEngine,
             mcp_tool: MCPTool,
             a2a_tool: A2ATool,
+            mcp_config: Optional[MCPConfig] = None,
+            user_id: Optional[str] = None,
             tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
     ):
         # 初始化会话ID和会话仓库，用于后续的交互和状态管理
@@ -71,10 +74,15 @@ class PlannerReActFlow(BaseFlow):
                 sandbox=sandbox,
                 browser=browser,
                 search_engine=search_engine,
+                mcp_tool=mcp_tool,
+                mcp_config=mcp_config,
+                session_id=session_id,
+                user_id=user_id,
             )
             tools = tool_runtime_adapter.build_runtime_tools(
                 capability_context=capability_context,
                 mcp_tool=mcp_tool,
+                mcp_config=mcp_config,
                 a2a_tool=a2a_tool,
             )
         else:

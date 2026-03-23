@@ -6,13 +6,15 @@
 @File   : capability_registry.py
 """
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List, Optional
 
+from app.domain.models.app_config import A2AConfig, MCPConfig
 from app.domain.external import Browser, Sandbox, SearchEngine
 from app.domain.services.tools.base import BaseTool
 from app.domain.services.tools.browser import BrowserTool
 from app.domain.services.tools.file import FileTool
 from app.domain.services.tools.message import MessageTool
+from app.domain.services.tools.mcp_capability_adapter import MCPCapabilityAdapter
 from app.domain.services.tools.search import SearchTool
 from app.domain.services.tools.shell import ShellTool
 
@@ -29,6 +31,12 @@ class CapabilityBuildContext:
     sandbox: Sandbox
     browser: Browser
     search_engine: SearchEngine
+    mcp_tool: Optional[BaseTool] = None
+    a2a_tool: Optional[BaseTool] = None
+    mcp_config: Optional[MCPConfig] = None
+    a2a_config: Optional[A2AConfig] = None
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 CapabilityToolFactory = Callable[[CapabilityBuildContext], BaseTool]
@@ -65,6 +73,7 @@ class CapabilityRegistry:
     CAPABILITY_BROWSER = "browser"
     CAPABILITY_SANDBOX_FILE = "sandbox_file"
     CAPABILITY_MESSAGE = "message"
+    CAPABILITY_MCP = "mcp"
 
     def __init__(self) -> None:
         self._definitions: Dict[str, CapabilityDefinition] = {}
@@ -150,6 +159,17 @@ class CapabilityRegistry:
                     description="用户通知/提问能力",
                     tool_family="message",
                     factory=lambda _context: MessageTool(),
+                ),
+                CapabilityDefinition(
+                    capability_id=cls.CAPABILITY_MCP,
+                    description="MCP能力适配器（统一超时/审计/错误语义）",
+                    tool_family="mcp",
+                    factory=lambda context: MCPCapabilityAdapter(
+                        mcp_tool=context.mcp_tool,
+                        mcp_config=context.mcp_config,
+                        session_id=context.session_id,
+                        user_id=context.user_id,
+                    ),
                 ),
             ]
         )

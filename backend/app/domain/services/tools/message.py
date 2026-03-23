@@ -12,6 +12,7 @@ from ...models import ToolResult
 
 
 class MessageTool(BaseTool):
+    name: str = "message"
 
     def __init__(self) -> None:
         super().__init__()

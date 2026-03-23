@@ -8,6 +8,8 @@ from app.domain.models import (
     PlanEvent,
     StepEvent,
     MessageEvent,
+    ToolEvent,
+    ToolEventStatus,
     DoneEvent,
     Plan,
     Step,
@@ -16,9 +18,16 @@ from app.domain.models import (
     StepEventStatus,
     Session,
     WorkflowRun,
+    ToolResult,
 )
+from app.domain.services.tools import BaseTool
 from app.domain.services.runtime.langgraph_state import GRAPH_STATE_CONTRACT_SCHEMA_VERSION
-from app.infrastructure.runtime.langgraph_graphs.planner_react_poc import build_planner_react_poc_graph
+from app.infrastructure.runtime.langgraph_graphs.planner_react_poc import (
+    _emit_live_events,
+    _execute_step_node,
+    _execute_step_with_prompt,
+    build_planner_react_poc_graph,
+)
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
@@ -48,6 +57,24 @@ class _FakeGraph:
                     status=StepEventStatus.COMPLETED,
                 ),
                 MessageEvent(role="assistant", message="完成"),
+                DoneEvent(),
+            ]
+        }
+
+
+class _FakeLiveGraph:
+    def __init__(self) -> None:
+        self.returned = asyncio.Event()
+
+    async def ainvoke(self, _state, config=None):
+        # 复用同一个事件实例：验证 RunEngine 在“实时事件 + 最终state”双来源下不会重复输出。
+        live_event = MessageEvent(role="assistant", message="实时事件")
+        await _emit_live_events(live_event)
+        await asyncio.sleep(0.05)
+        self.returned.set()
+        return {
+            "emitted_events": [
+                live_event,
                 DoneEvent(),
             ]
         }
@@ -262,6 +289,23 @@ class _SingleStepRepeatedSummaryLLM:
         return {"role": "assistant", "content": "{}"}
 
 
+class _InvalidPlanJSONLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "创建一个计划" in prompt:
+            return {"role": "assistant", "content": "```json\n{invalid}\n```"}
+        if "你正在更新计划" in prompt:
+            return {"role": "assistant", "content": "{\"steps\": []}"}
+        if "任务已完成，你需要将最终结果交付给用户" in prompt:
+            return {"role": "assistant", "content": "{\"message\": \"总结完成\", \"attachments\": []}"}
+        if "你正在执行任务" in prompt:
+            return {
+                "role": "assistant",
+                "content": "{\"success\": true, \"result\": \"步骤执行完成\", \"attachments\": []}",
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
 class _NeverInvokeLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         raise AssertionError("纯问候分支不应调用LLM")
@@ -271,6 +315,345 @@ class _SkillStepOutput(BaseModel):
     success: bool = True
     result: str
     attachments: list[str] = Field(default_factory=list)
+
+
+class _FakeSearchTool(BaseTool):
+    name = "search"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations: list[tuple[str, dict]] = []
+
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "search web",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, tool_name: str) -> bool:
+        return tool_name == "search_web"
+
+    async def invoke(self, tool_name: str, **kwargs):
+        self.invocations.append((tool_name, kwargs))
+        return ToolResult(success=True, data={"query": kwargs.get("query", ""), "results": []})
+
+
+class _FakeBrowserTool(BaseTool):
+    name = "browser"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations: list[tuple[str, dict]] = []
+
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_navigate",
+                    "description": "navigate browser",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string"},
+                        },
+                        "required": ["url"],
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, tool_name: str) -> bool:
+        return tool_name == "browser_navigate"
+
+    async def invoke(self, tool_name: str, **kwargs):
+        self.invocations.append((tool_name, kwargs))
+        return ToolResult(success=True, data={"url": kwargs.get("url", "")})
+
+
+class _FakeWriteFileTool(BaseTool):
+    name = "file"
+
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "write file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filepath": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["filepath", "content"],
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, tool_name: str) -> bool:
+        return tool_name == "write_file"
+
+    async def invoke(self, tool_name: str, **kwargs):
+        filepath = str(kwargs.get("filepath") or "")
+        content = str(kwargs.get("content") or "")
+        return ToolResult(success=True, data={"filepath": filepath, "bytes_written": len(content)})
+
+
+class _ToolCallingLLM:
+    def __init__(self) -> None:
+        self._execute_round = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "创建一个计划" in prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"message\": \"已生成计划\","
+                    "\"goal\": \"做一次联网检索\","
+                    "\"title\": \"检索任务\","
+                    "\"language\": \"zh\","
+                    "\"steps\": [{\"id\": \"step-1\", \"description\": \"检索AI Agent课程\"}]"
+                    "}"
+                ),
+            }
+        if "你正在更新计划" in prompt:
+            return {"role": "assistant", "content": "{\"steps\": []}"}
+        if "任务已完成，你需要将最终结果交付给用户" in prompt:
+            return {"role": "assistant", "content": "{\"message\": \"最终总结\", \"attachments\": []}"}
+        if "你正在执行任务" in prompt:
+            self._execute_round += 1
+            if self._execute_round == 1:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "search_web",
+                                "arguments": "{\"query\":\"AI Agent 体系课\"}",
+                            },
+                        }
+                    ],
+                }
+            return {
+                "role": "assistant",
+                "content": "{\"success\": true, \"result\": \"已完成检索\", \"attachments\": []}",
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
+class _WriteFileToolCallingLLM:
+    def __init__(self) -> None:
+        self._execute_round = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "创建一个计划" in prompt:
+            return {
+                "role": "assistant",
+                "content": (
+                    "{"
+                    "\"message\": \"已生成计划\","
+                    "\"goal\": \"输出推荐文档\","
+                    "\"title\": \"推荐任务\","
+                    "\"language\": \"zh\","
+                    "\"steps\": [{\"id\": \"step-1\", \"description\": \"生成推荐文档\"}]"
+                    "}"
+                ),
+            }
+        if "你正在更新计划" in prompt:
+            return {"role": "assistant", "content": "{\"steps\": []}"}
+        if "任务已完成，你需要将最终结果交付给用户" in prompt:
+            # 故意不返回附件，验证 summarize 节点会从步骤产物兜底附件。
+            return {"role": "assistant", "content": "{\"message\": \"详细信息已保存为推荐文档。\", \"attachments\": []}"}
+        if "你正在执行任务" in prompt:
+            self._execute_round += 1
+            if self._execute_round == 1:
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-write-1",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"filepath\":\"/home/ubuntu/recommendation.md\",\"content\":\"# report\"}",
+                            },
+                        }
+                    ],
+                }
+            return {
+                "role": "assistant",
+                "content": "{\"success\": true, \"result\": \"详细信息已保存为推荐文档。\", \"attachments\": []}",
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
+class _MultiToolCallsLLM:
+    def __init__(self) -> None:
+        self._execute_round = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        prompt = messages[0]["content"]
+        if "你正在执行任务" in prompt:
+            self._execute_round += 1
+            if self._execute_round == 1:
+                # 同轮返回 browser + search，由运行时仲裁优先执行 search。
+                return {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-browser-1",
+                            "type": "function",
+                            "function": {
+                                "name": "browser_navigate",
+                                "arguments": "{\"url\":\"https://example.com\"}",
+                            },
+                        },
+                        {
+                            "id": "call-search-1",
+                            "type": "function",
+                            "function": {
+                                "name": "search_web",
+                                "arguments": "{\"query\":\"AI Agent 课程\"}",
+                            },
+                        },
+                    ],
+                }
+            return {
+                "role": "assistant",
+                "content": "{\"success\": true, \"result\": \"已完成检索\", \"attachments\": []}",
+            }
+        return {"role": "assistant", "content": "{}"}
+
+
+def test_execute_step_with_prompt_should_emit_tool_events_incrementally_via_callback() -> None:
+    llm = _ToolCallingLLM()
+    step = Step(
+        id="step-1",
+        description="检索AI Agent课程",
+        status=ExecutionStatus.PENDING,
+    )
+    observed_statuses: list[ToolEventStatus] = []
+
+    async def _invoke():
+        result, events = await _execute_step_with_prompt(
+            llm=llm,
+            user_message="帮我检索AI Agent课程",
+            step=step,
+            language="zh",
+            attachments=[],
+            runtime_tools=[_FakeSearchTool()],
+            max_tool_iterations=3,
+            on_tool_event=lambda event: observed_statuses.append(event.status),
+        )
+        return result, events
+
+    result, events = asyncio.run(_invoke())
+
+    assert result["success"] is True
+    assert observed_statuses == [ToolEventStatus.CALLING, ToolEventStatus.CALLED]
+    assert [event.status for event in events] == [ToolEventStatus.CALLING, ToolEventStatus.CALLED]
+
+
+def test_execute_step_with_prompt_should_prefer_search_tool_when_model_returns_multiple_tool_calls() -> None:
+    llm = _MultiToolCallsLLM()
+    step = Step(
+        id="step-1",
+        description="推荐3门Java课程",
+        status=ExecutionStatus.PENDING,
+    )
+    search_tool = _FakeSearchTool()
+    browser_tool = _FakeBrowserTool()
+
+    async def _invoke():
+        result, events = await _execute_step_with_prompt(
+            llm=llm,
+            user_message="看下慕课网的Java课程推荐3门",
+            step=step,
+            language="zh",
+            attachments=[],
+            runtime_tools=[search_tool, browser_tool],
+            max_tool_iterations=3,
+        )
+        return result, events
+
+    result, events = asyncio.run(_invoke())
+
+    assert result["success"] is True
+    assert search_tool.invocations == [("search_web", {"query": "AI Agent 课程"})]
+    assert browser_tool.invocations == []
+    assert [event.function_name for event in events if event.status == ToolEventStatus.CALLING] == ["search_web"]
+
+
+def test_execute_step_node_should_emit_started_and_final_events_in_separate_batches(monkeypatch) -> None:
+    emitted_batches: list[list[str]] = []
+
+    async def _capture_emit(*events):
+        emitted_batches.append([event.type for event in events])
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_poc._emit_live_events",
+        _capture_emit,
+    )
+
+    plan = Plan(
+        title="检索计划",
+        goal="推荐课程",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                description="检索AI Agent课程",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+        message="开始执行",
+        status=ExecutionStatus.PENDING,
+    )
+    state = {
+        "session_id": "session-1",
+        "user_message": "帮我检索AI Agent课程",
+        "plan": plan,
+        "execution_count": 0,
+        "emitted_events": [],
+    }
+
+    async def _invoke():
+        return await _execute_step_node(
+            state=state,
+            llm=_ToolCallingLLM(),
+            runtime_tools=[_FakeSearchTool()],
+            max_tool_iterations=3,
+        )
+
+    next_state = asyncio.run(_invoke())
+
+    assert isinstance(next_state.get("plan"), Plan)
+    assert emitted_batches[0] == ["step"]
+    assert any(batch == ["tool"] for batch in emitted_batches[1:-1])
+    assert emitted_batches[-1][0] == "step"
 
 
 def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
@@ -335,6 +718,59 @@ def test_langgraph_run_engine_should_sync_checkpoint_ref_to_workflow_run(monkeyp
     assert run.runtime_metadata["graph_state_contract"]["schema_version"] == GRAPH_STATE_CONTRACT_SCHEMA_VERSION
 
 
+def test_langgraph_run_engine_should_stream_live_events_before_graph_completion(monkeypatch) -> None:
+    fake_graph = _FakeLiveGraph()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        lambda llm: fake_graph,
+    )
+
+    engine = LangGraphRunEngine(session_id="session-1", llm=object())
+
+    async def _collect():
+        events = []
+        streamed_before_completion = False
+        async for event in engine.invoke(Message(message="hello")):
+            if not fake_graph.returned.is_set():
+                streamed_before_completion = True
+            events.append(event)
+        return events, streamed_before_completion
+
+    events, streamed_before_completion = asyncio.run(_collect())
+
+    assert streamed_before_completion is True
+    assert len(events) == 2
+    assert isinstance(events[0], MessageEvent)
+    assert isinstance(events[1], DoneEvent)
+    assert len({event.id for event in events}) == 2
+
+
+def test_langgraph_run_engine_should_not_duplicate_event_when_consumer_mutates_event_id(monkeypatch) -> None:
+    fake_graph = _FakeLiveGraph()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        lambda llm: fake_graph,
+    )
+
+    engine = LangGraphRunEngine(session_id="session-1", llm=object())
+
+    async def _collect():
+        events = []
+        async for event in engine.invoke(Message(message="hello")):
+            # 模拟下游（如 TaskRunner 持久化）改写 event.id 的历史行为。
+            if isinstance(event, MessageEvent):
+                event.id = "mutated-by-consumer"
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+    message_events = [event for event in events if isinstance(event, MessageEvent)]
+
+    assert len(events) == 2
+    assert len(message_events) == 1
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
 def test_planner_react_poc_graph_should_execute_async_nodes_without_coroutine_error() -> None:
     graph = build_planner_react_poc_graph(llm=_POCLLM())
 
@@ -382,6 +818,31 @@ def test_planner_react_v1_graph_should_cover_execute_replan_summarize_path() -> 
     assert any(event.status == PlanEventStatus.COMPLETED for event in plan_events)
     assert len([event for event in step_events if event.status == StepEventStatus.COMPLETED]) >= 2
     assert any(event.message == "最终总结" for event in message_events)
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_build_readable_fallback_title_when_plan_json_invalid() -> None:
+    graph = build_planner_react_poc_graph(llm=_InvalidPlanJSONLLM())
+    user_message = "请帮我分析线上故障日志并给出完整修复方案以及回归验证步骤"
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": user_message,
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+    title_events = [event for event in events if isinstance(event, TitleEvent)]
+
+    assert len(title_events) >= 1
+    assert title_events[0].title != "LangGraph 任务"
+    assert title_events[0].title.startswith(user_message[:6])
+    assert len(title_events[0].title) <= 27
     assert any(isinstance(event, DoneEvent) for event in events)
 
 
@@ -471,6 +932,72 @@ def test_planner_react_v1_graph_should_not_emit_duplicate_message_when_summary_e
     # summarize 与上一步结果一致且无附件时，应避免重复追加 assistant message。
     assert len([event for event in message_events if event.message == greeting_message]) == 1
     assert state.get("final_message") == greeting_message
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_fallback_attachments_from_write_file_tool_events() -> None:
+    graph = build_planner_react_poc_graph(
+        llm=_WriteFileToolCallingLLM(),
+        runtime_tools=[_FakeWriteFileTool()],
+    )
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "请推荐3门Java课程并保存成文档",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+    assistant_messages = [event for event in events if isinstance(event, MessageEvent) and event.role == "assistant"]
+    completed_steps = [
+        event.step for event in events
+        if isinstance(event, StepEvent) and event.status == StepEventStatus.COMPLETED
+    ]
+
+    assert len(completed_steps) >= 1
+    assert "/home/ubuntu/recommendation.md" in completed_steps[-1].attachments
+    duplicated_summary_messages = [
+        message
+        for message in assistant_messages
+        if message.message == "详细信息已保存为推荐文档。"
+    ]
+    # summarize 与步骤消息在文本和附件一致时，不应重复输出两条最终内容。
+    assert len(duplicated_summary_messages) == 1
+    assert any(
+        any(str(getattr(attachment, "filepath", "")) == "/home/ubuntu/recommendation.md" for attachment in message.attachments)
+        for message in assistant_messages
+    )
+    assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_planner_react_v1_graph_should_emit_tool_events_when_runtime_tools_available() -> None:
+    graph = build_planner_react_poc_graph(
+        llm=_ToolCallingLLM(),
+        runtime_tools=[_FakeSearchTool()],
+    )
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "帮我检索AI Agent课程",
+                "emitted_events": [],
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+    events = state.get("emitted_events", [])
+    tool_events = [event for event in events if isinstance(event, ToolEvent)]
+
+    assert any(event.status == ToolEventStatus.CALLING for event in tool_events)
+    assert any(event.status == ToolEventStatus.CALLED for event in tool_events)
+    assert any(event.function_name == "search_web" for event in tool_events)
     assert any(isinstance(event, DoneEvent) for event in events)
 
 

@@ -12,6 +12,7 @@ import { getApiErrorMessage } from '@/lib/api'
 import {fileApi} from '@/lib/api/file'
 import type {FileInfo, ListModelItem} from '@/lib/api/types'
 import { performModelSelection, resolveModelSelectorState } from '@/lib/chat-model-selector'
+import { resolveChatInputInteractionState } from '@/lib/chat-input-interaction'
 import {toast} from 'sonner'
 import { useI18n } from '@/lib/i18n'
 
@@ -74,6 +75,14 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
     const showModelSelector = onModelChange !== undefined
     const modelButtonLabel = selectedModel?.display_name ?? t('chatInput.modelAuto')
     const modelButtonBadge = selectedModel?.config?.badge ?? (selectedModelId === 'auto' ? t('chatInput.modelAutoBadge') : null)
+    const interactionState = resolveChatInputInteractionState({
+      disabled,
+      isRunning,
+      sending,
+      inputValue,
+      modelsLoading,
+      modelUpdating,
+    })
 
     const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const value = e.target.value
@@ -163,6 +172,9 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
     }
 
     const handleModelSelect = async (modelId: string) => {
+      if (!interactionState.canSwitchModel) {
+        return
+      }
       try {
         await performModelSelection({
           nextModelId: modelId,
@@ -178,6 +190,9 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
     }
 
     const handleSend = async () => {
+      if (!interactionState.canSend) {
+        return
+      }
       const trimmedMessage = inputValue.trim()
       
       // 验证消息不为空
@@ -274,7 +289,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
           onKeyDown={handleKeyDown}
           placeholder={t('chatInput.placeholder')}
           className="scrollbar-hide outline-none w-full text-sm resize-none h-[46px] min-h-[40px]"
-          disabled={sending || disabled}
+          disabled={!interactionState.canEditInput}
         />
       </div>
       {/* 底部上传&发送按钮 */}
@@ -310,7 +325,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
                   type="button"
                   variant="outline"
                   className="h-8 max-w-[220px] rounded-full px-3 text-xs font-medium text-gray-700 shadow-none"
-                  disabled={modelsLoading || modelUpdating || disabled || isRunning}
+                  disabled={!interactionState.canSwitchModel}
                 >
                   <span className="inline-flex min-w-0 items-center gap-2">
                     <Sparkles className="size-3.5 text-gray-500" />
@@ -416,7 +431,7 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
               variant="outline"
               className="rounded-full w-8 h-8 cursor-pointer"
               onClick={handleSend}
-              disabled={sending || disabled || !inputValue.trim()}
+              disabled={!interactionState.canSend}
             >
               {sending ? (
                 <Loader2 className="size-4 animate-spin"/>

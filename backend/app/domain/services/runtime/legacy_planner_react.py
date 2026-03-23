@@ -8,7 +8,7 @@
 from typing import Callable, AsyncGenerator
 
 from app.domain.external import Sandbox, Browser, SearchEngine, LLM, JSONParser
-from app.domain.models import Message, BaseEvent, AgentConfig
+from app.domain.models import Message, BaseEvent, AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.flows import PlannerReActFlow
 from app.domain.services.runtime.run_engine import RunEngine
@@ -30,6 +30,8 @@ class LegacyPlannerReActRunEngine(RunEngine):
             search_engine: SearchEngine,
             mcp_tool: MCPTool,
             a2a_tool: A2ATool,
+            mcp_config: MCPConfig | None = None,
+            user_id: str | None = None,
             tool_runtime_adapter: ToolRuntimeAdapter | None = None,
     ) -> None:
         self._flow = PlannerReActFlow(
@@ -43,6 +45,8 @@ class LegacyPlannerReActRunEngine(RunEngine):
             search_engine=search_engine,
             mcp_tool=mcp_tool,
             a2a_tool=a2a_tool,
+            mcp_config=mcp_config,
+            user_id=user_id,
             tool_runtime_adapter=tool_runtime_adapter,
         )
 

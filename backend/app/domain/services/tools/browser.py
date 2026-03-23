@@ -7,9 +7,9 @@
 """
 from typing import Optional
 
-from .base import BaseTool, tool
 from app.domain.external import Browser
 from app.domain.models import ToolResult
+from .base import BaseTool, tool
 
 
 class BrowserTool(BaseTool):

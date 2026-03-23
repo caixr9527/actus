@@ -97,7 +97,11 @@ async def _execute_step_skill_node(
         language=str(state.get("language") or "zh"),
         step=str(state.get("step_description") or ""),
     )
-    llm_message = await llm.invoke(messages=[{"role": "user", "content": prompt}], tools=[])
+    llm_message = await llm.invoke(
+        messages=[{"role": "user", "content": prompt}],
+        tools=[],
+        response_format={"type": "json_object"},
+    )
     parsed = _safe_parse_json(llm_message.get("content"))
 
     step_description = str(state.get("step_description") or "")

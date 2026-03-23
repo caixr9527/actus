@@ -130,6 +130,8 @@ class AgentTaskRunner(TaskRunner):
                 search_engine=search_engine,
                 mcp_tool=self._mcp_tool,
                 a2a_tool=self._a2a_tool,
+                mcp_config=self._mcp_config,
+                user_id=self._user_id,
                 tool_runtime_adapter=self._get_tool_runtime_adapter(),
             )
 
@@ -144,6 +146,8 @@ class AgentTaskRunner(TaskRunner):
             search_engine=search_engine,
             mcp_tool=self._mcp_tool,
             a2a_tool=self._a2a_tool,
+            mcp_config=self._mcp_config,
+            user_id=self._user_id,
             tool_runtime_adapter=self._get_tool_runtime_adapter(),
         )
 
@@ -161,14 +165,18 @@ class AgentTaskRunner(TaskRunner):
         try:
             # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
             event_id = await task.output_stream.put(event.model_dump_json())
-            event.id = event_id
+            # 注意：不要原地修改传入 event.id。
+            # LangGraphRunEngine 会对同一事件对象做 live + final replay 去重，
+            # 若这里直接改写 id，可能导致 replay 阶段去重失效并重复落库。
+            persisted_event = event.model_copy(deep=True)
+            persisted_event.id = event_id
 
             # 再把同一事件和会话投影在单事务内落库。
             # 这样可以保证“事件历史”与“会话列表投影(latest/status/title/unread)”一致提交。
             async with self._uow_factory() as uow:
                 await uow.session.add_event_with_snapshot_if_absent(
                     session_id=self._session_id,
-                    event=event,
+                    event=persisted_event,
                     title=title,
                     latest_message=latest_message,
                     latest_message_at=latest_message_at,

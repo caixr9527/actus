@@ -1,6 +1,6 @@
 import asyncio
 
-from app.domain.models import Session, WorkflowRun
+from app.domain.models import Session, SessionStatus, WorkflowRun
 from app.domain.services.runtime.graph_runtime import DefaultGraphRuntime
 
 
@@ -124,8 +124,10 @@ def test_default_graph_runtime_create_task_should_persist_session_links() -> Non
     assert session.sandbox_id == "sandbox-1"
     assert session.task_id == "task-1"
     assert session.current_run_id == "run-1"
+    assert session.status == SessionStatus.RUNNING
     assert workflow_run_repo.created_for_session_ids == ["session-a"]
     assert session_repo.saved_sessions[0].current_run_id == "run-1"
+    assert session_repo.saved_sessions[0].status == SessionStatus.RUNNING
 
 
 def test_default_graph_runtime_get_and_cancel_task_by_session() -> None:

@@ -1,13 +1,24 @@
 import asyncio
 
 from app.domain.models import (
+    MCPConfig,
+    MCPServerConfig,
+    MCPTransport,
     SearchResultItem,
     SearchResults,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
 )
-from app.domain.services.tools import CapabilityBuildContext, CapabilityRegistry, ToolRuntimeAdapter, ToolRuntimeEventHooks
+from app.domain.services.tools import (
+    BaseTool,
+    CapabilityBuildContext,
+    CapabilityRegistry,
+    MCPCapabilityAdapter,
+    MessageTool,
+    ToolRuntimeAdapter,
+    ToolRuntimeEventHooks,
+)
 
 
 def test_capability_registry_default_v1_should_build_expected_local_tools() -> None:
@@ -114,3 +125,168 @@ def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> Non
     assert event.tool_content is not None
     assert event.tool_content.content == "hello world"
     assert synced_paths == ["/tmp/a.txt"]
+
+
+def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="file",
+        function_name="list_files",
+        function_args={"dir_path": "/home/ubuntu"},
+        function_result=ToolResult(
+            success=True,
+            data={
+                "dir_path": "/home/ubuntu",
+                "files": ["/home/ubuntu/a.md", "/home/ubuntu/b.md"],
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+    read_file_calls: list[str] = []
+    sync_calls: list[str] = []
+
+    async def _get_browser_screenshot() -> str:
+        return "unused"
+
+    async def _read_shell_output(_session_id: str) -> ToolResult:
+        return ToolResult(success=True, data={})
+
+    async def _read_file_content(filepath: str) -> ToolResult:
+        read_file_calls.append(filepath)
+        return ToolResult(success=True, data={"content": "unused"})
+
+    async def _sync_file_to_storage(filepath: str) -> None:
+        sync_calls.append(filepath)
+        return None
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(
+                get_browser_screenshot=_get_browser_screenshot,
+                read_shell_output=_read_shell_output,
+                read_file_content=_read_file_content,
+                sync_file_to_storage=_sync_file_to_storage,
+            ),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert "目录: /home/ubuntu" in event.tool_content.content
+    assert "/home/ubuntu/a.md" in event.tool_content.content
+    assert "/home/ubuntu/b.md" in event.tool_content.content
+    assert read_file_calls == []
+    assert sync_calls == []
+
+
+class _FakeMCPTool(BaseTool):
+    name = "mcp"
+
+    def __init__(self, delay_seconds: float = 0.0) -> None:
+        super().__init__()
+        self._delay_seconds = delay_seconds
+        self.invocations: list[tuple[str, dict]] = []
+
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp_demo_ping",
+                    "description": "demo",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            }
+        ]
+
+    def has_tool(self, tool_name: str) -> bool:
+        return tool_name == "mcp_demo_ping"
+
+    async def invoke(self, tool_name: str, **kwargs) -> ToolResult:
+        self.invocations.append((tool_name, kwargs))
+        if self._delay_seconds > 0:
+            await asyncio.sleep(self._delay_seconds)
+        return ToolResult(success=True, data="pong")
+
+
+def test_tool_runtime_adapter_should_build_mcp_capability_tool() -> None:
+    adapter = ToolRuntimeAdapter()
+    fake_mcp_tool = _FakeMCPTool()
+
+    tools = adapter.build_runtime_tools(
+        capability_context=CapabilityBuildContext(
+            sandbox=object(),
+            browser=object(),
+            search_engine=object(),
+            mcp_tool=fake_mcp_tool,
+            mcp_config=MCPConfig(
+                mcpServers={
+                    "demo": MCPServerConfig(
+                        transport=MCPTransport.STREAMABLE_HTTP,
+                        url="https://mcp.example.com",
+                        enabled=True,
+                    ),
+                }
+            ),
+            session_id="session-1",
+            user_id="user-1",
+        ),
+        mcp_tool=fake_mcp_tool,
+    )
+
+    assert any(tool.has_tool("mcp_demo_ping") for tool in tools)
+
+
+def test_message_tool_should_have_stable_tool_name() -> None:
+    tool = MessageTool()
+
+    assert tool.name == "message"
+    assert tool.has_tool("message_ask_user") is True
+    assert tool.has_tool("message_notify_user") is True
+
+
+def test_mcp_capability_adapter_should_timeout_and_normalize_error() -> None:
+    fake_mcp_tool = _FakeMCPTool(delay_seconds=0.05)
+    adapter = MCPCapabilityAdapter(
+        mcp_tool=fake_mcp_tool,
+        invoke_timeout_seconds=0.01,
+    )
+
+    result = asyncio.run(adapter.invoke("mcp_demo_ping"))
+
+    assert result.success is False
+    assert "超时" in (result.message or "")
+
+
+def test_mcp_capability_adapter_should_resolve_dash_alias() -> None:
+    fake_mcp_tool = _FakeMCPTool()
+    adapter = MCPCapabilityAdapter(mcp_tool=fake_mcp_tool)
+
+    # 兼容前端/模型输出中 `-/_` 混用的工具名漂移。
+    assert adapter.has_tool("mcp-demo-ping") is True
+    result = asyncio.run(adapter.invoke("mcp-demo-ping"))
+
+    assert result.success is True
+    assert fake_mcp_tool.invocations == [("mcp_demo_ping", {})]
+
+
+def test_mcp_capability_adapter_should_block_disabled_server() -> None:
+    fake_mcp_tool = _FakeMCPTool()
+    adapter = MCPCapabilityAdapter(
+        mcp_tool=fake_mcp_tool,
+        mcp_config=MCPConfig(
+            mcpServers={
+                "demo": MCPServerConfig(
+                    transport=MCPTransport.STREAMABLE_HTTP,
+                    url="https://mcp.example.com",
+                    enabled=False,
+                )
+            }
+        ),
+    )
+
+    result = asyncio.run(adapter.invoke("mcp_demo_ping"))
+
+    assert result.success is False
+    assert "不可用或未启用" in (result.message or "")

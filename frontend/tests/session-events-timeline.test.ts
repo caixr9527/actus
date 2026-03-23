@@ -52,6 +52,7 @@ test('eventsToTimeline should merge tool updates and reset step context across u
   const firstStep = stepItems[0]
   assert.equal(firstStep.kind, 'step')
   if (firstStep.kind === 'step') {
+    // 同一 tool_call_id 的 calling/called 应合并为一条最新状态记录，避免重复展示。
     assert.equal(firstStep.tools.length, 1)
     assert.equal((firstStep.tools[0] as { status?: string }).status, 'called')
     assert.equal((firstStep.tools[0] as { content?: string }).content, 'ok')

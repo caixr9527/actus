@@ -9,7 +9,7 @@ import logging
 from typing import Callable, Optional, Protocol, Type
 
 from app.domain.external import Browser, LLM, Sandbox, Task, TaskRunner
-from app.domain.models import Session, WorkflowRunStatus
+from app.domain.models import Session, SessionStatus, WorkflowRunStatus
 from app.domain.repositories import IUnitOfWork
 
 logger = logging.getLogger(__name__)
@@ -123,6 +123,8 @@ class DefaultGraphRuntime(GraphRuntime):
         # 在单一写回流程中完成 run 创建与会话关联落库，保证关联视图一致性。
         session.sandbox_id = sandbox.id
         session.task_id = task.id
+        # 会话启动新任务时同步切换为 RUNNING，确保前端可实时展示“思考中”与禁用输入态。
+        session.status = SessionStatus.RUNNING
         try:
             async with self._uow_factory() as uow:
                 run = await uow.workflow_run.create_for_session(

@@ -93,6 +93,13 @@ export function createTimelineBuildContext(): TimelineBuildContext {
   };
 }
 
+function buildToolTimelineKey(tool: ToolEvent): string | null {
+  const toolCallId = (tool as { tool_call_id?: string }).tool_call_id
+  if (!toolCallId) return null
+  // 会话对话区按“一次调用一条记录”展示，calling/called 通过状态就地更新，避免重复步骤噪音。
+  return String(toolCallId)
+}
+
 /** 将时间戳格式化为相对时间，如 2天前、刚刚 */
 function formatTimeLabel(
   ts: number | string | undefined,
@@ -230,7 +237,7 @@ function appendToolEvent(
   tool: ToolEvent,
   locale: AppLocale,
 ): void {
-  const toolCallId = (tool as { tool_call_id?: string }).tool_call_id;
+  const toolTimelineKey = buildToolTimelineKey(tool);
   const activeStepId = context.lastStepId;
 
   if (activeStepId !== null) {
@@ -238,10 +245,10 @@ function appendToolEvent(
     if (stepIdx !== undefined) {
       const stepItem = context.list[stepIdx];
       if (stepItem?.kind === "step") {
-        if (toolCallId != null) {
+        if (toolTimelineKey != null) {
           const stepToolIndexes = context.stepToolIndexByStepId.get(activeStepId) ?? new Map<string, number>();
           context.stepToolIndexByStepId.set(activeStepId, stepToolIndexes);
-          const existingToolIdx = stepToolIndexes.get(toolCallId);
+          const existingToolIdx = stepToolIndexes.get(toolTimelineKey);
           if (
             existingToolIdx !== undefined &&
             existingToolIdx >= 0 &&
@@ -254,7 +261,7 @@ function appendToolEvent(
           }
           const nextToolIdx = stepItem.tools.length;
           context.list[stepIdx] = { ...stepItem, tools: [...stepItem.tools, tool] };
-          stepToolIndexes.set(toolCallId, nextToolIdx);
+          stepToolIndexes.set(toolTimelineKey, nextToolIdx);
           return;
         }
 
@@ -264,8 +271,8 @@ function appendToolEvent(
     }
   }
 
-  if (toolCallId != null) {
-    const existingStandaloneIdx = context.standaloneToolIndexByCallId.get(toolCallId);
+  if (toolTimelineKey != null) {
+    const existingStandaloneIdx = context.standaloneToolIndexByCallId.get(toolTimelineKey);
     if (existingStandaloneIdx !== undefined) {
       const existingItem = context.list[existingStandaloneIdx];
       if (existingItem?.kind === "tool") {
@@ -282,8 +289,8 @@ function appendToolEvent(
     data: tool,
     timeLabel: getToolTimeLabel(tool, locale),
   });
-  if (toolCallId != null) {
-    context.standaloneToolIndexByCallId.set(toolCallId, nextIdx);
+  if (toolTimelineKey != null) {
+    context.standaloneToolIndexByCallId.set(toolTimelineKey, nextIdx);
   }
 }
 
