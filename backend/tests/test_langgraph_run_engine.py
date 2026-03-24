@@ -22,11 +22,13 @@ from app.domain.models import (
 )
 from app.domain.services.tools import BaseTool
 from app.domain.services.runtime.langgraph_state import GRAPH_STATE_CONTRACT_SCHEMA_VERSION
-from app.infrastructure.runtime.langgraph_graphs.planner_react_poc import (
-    _emit_live_events,
-    _execute_step_node,
-    _execute_step_with_prompt,
-    build_planner_react_poc_graph,
+from app.domain.services.prompts import EXECUTION_PROMPT
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import build_planner_react_langgraph_graph
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.live_events import emit_live_events
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import execute_step_node
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
+    build_execution_prompt,
+    execute_step_with_prompt,
 )
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
@@ -35,7 +37,7 @@ class _FakeGraph:
     async def ainvoke(self, _state, config=None):
         return {
             "emitted_events": [
-                TitleEvent(title="POC 标题"),
+                TitleEvent(title="LangGraph 标题"),
                 PlanEvent(
                     plan=Plan(
                         title="x",
@@ -69,7 +71,7 @@ class _FakeLiveGraph:
     async def ainvoke(self, _state, config=None):
         # 复用同一个事件实例：验证 RunEngine 在“实时事件 + 最终state”双来源下不会重复输出。
         live_event = MessageEvent(role="assistant", message="实时事件")
-        await _emit_live_events(live_event)
+        await emit_live_events(live_event)
         await asyncio.sleep(0.05)
         self.returned.set()
         return {
@@ -166,11 +168,11 @@ class _UoW:
         return False
 
 
-class _POCLLM:
+class _LangGraphLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         prompt = messages[0]["content"]
-        if "任务拆成最小POC计划" in prompt:
-            return {"role": "assistant", "content": "{\"title\": \"POC\", \"steps\": [\"步骤1\"]}"}
+        if "创建一个计划" in prompt:
+            return {"role": "assistant", "content": "{\"title\": \"LangGraph\", \"steps\": [\"步骤1\"]}"}
         return {"role": "assistant", "content": "{\"success\": true, \"result\": \"完成\"}"}
 
 
@@ -556,14 +558,19 @@ def test_execute_step_with_prompt_should_emit_tool_events_incrementally_via_call
         status=ExecutionStatus.PENDING,
     )
     observed_statuses: list[ToolEventStatus] = []
+    execution_prompt = build_execution_prompt(
+        execution_prompt_template=EXECUTION_PROMPT,
+        user_message="帮我检索AI Agent课程",
+        step_description=step.description,
+        language="zh",
+        attachments=[],
+    )
 
     async def _invoke():
-        result, events = await _execute_step_with_prompt(
+        result, events = await execute_step_with_prompt(
             llm=llm,
-            user_message="帮我检索AI Agent课程",
+            execution_prompt=execution_prompt,
             step=step,
-            language="zh",
-            attachments=[],
             runtime_tools=[_FakeSearchTool()],
             max_tool_iterations=3,
             on_tool_event=lambda event: observed_statuses.append(event.status),
@@ -586,14 +593,19 @@ def test_execute_step_with_prompt_should_prefer_search_tool_when_model_returns_m
     )
     search_tool = _FakeSearchTool()
     browser_tool = _FakeBrowserTool()
+    execution_prompt = build_execution_prompt(
+        execution_prompt_template=EXECUTION_PROMPT,
+        user_message="看下慕课网的Java课程推荐3门",
+        step_description=step.description,
+        language="zh",
+        attachments=[],
+    )
 
     async def _invoke():
-        result, events = await _execute_step_with_prompt(
+        result, events = await execute_step_with_prompt(
             llm=llm,
-            user_message="看下慕课网的Java课程推荐3门",
+            execution_prompt=execution_prompt,
             step=step,
-            language="zh",
-            attachments=[],
             runtime_tools=[search_tool, browser_tool],
             max_tool_iterations=3,
         )
@@ -614,7 +626,7 @@ def test_execute_step_node_should_emit_started_and_final_events_in_separate_batc
         emitted_batches.append([event.type for event in events])
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_poc._emit_live_events",
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.emit_live_events",
         _capture_emit,
     )
 
@@ -641,7 +653,7 @@ def test_execute_step_node_should_emit_started_and_final_events_in_separate_batc
     }
 
     async def _invoke():
-        return await _execute_step_node(
+        return await execute_step_node(
             state=state,
             llm=_ToolCallingLLM(),
             runtime_tools=[_FakeSearchTool()],
@@ -658,7 +670,7 @@ def test_execute_step_node_should_emit_started_and_final_events_in_separate_batc
 
 def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
         lambda llm: _FakeGraph(),
     )
 
@@ -680,7 +692,7 @@ def test_langgraph_run_engine_yields_emitted_events(monkeypatch) -> None:
 def test_langgraph_run_engine_should_sync_checkpoint_ref_to_workflow_run(monkeypatch) -> None:
     fake_graph = _FakeGraphWithCheckpoint()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
         lambda llm: fake_graph,
     )
 
@@ -721,7 +733,7 @@ def test_langgraph_run_engine_should_sync_checkpoint_ref_to_workflow_run(monkeyp
 def test_langgraph_run_engine_should_stream_live_events_before_graph_completion(monkeypatch) -> None:
     fake_graph = _FakeLiveGraph()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
         lambda llm: fake_graph,
     )
 
@@ -748,7 +760,7 @@ def test_langgraph_run_engine_should_stream_live_events_before_graph_completion(
 def test_langgraph_run_engine_should_not_duplicate_event_when_consumer_mutates_event_id(monkeypatch) -> None:
     fake_graph = _FakeLiveGraph()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
         lambda llm: fake_graph,
     )
 
@@ -771,8 +783,8 @@ def test_langgraph_run_engine_should_not_duplicate_event_when_consumer_mutates_e
     assert any(isinstance(event, DoneEvent) for event in events)
 
 
-def test_planner_react_poc_graph_should_execute_async_nodes_without_coroutine_error() -> None:
-    graph = build_planner_react_poc_graph(llm=_POCLLM())
+def test_planner_react_langgraph_graph_should_execute_async_nodes_without_coroutine_error() -> None:
+    graph = build_planner_react_langgraph_graph(llm=_LangGraphLLM())
 
     async def _invoke():
         return await graph.ainvoke(
@@ -794,7 +806,7 @@ def test_planner_react_poc_graph_should_execute_async_nodes_without_coroutine_er
 
 
 def test_planner_react_v1_graph_should_cover_execute_replan_summarize_path() -> None:
-    graph = build_planner_react_poc_graph(llm=_V1GraphLLM())
+    graph = build_planner_react_langgraph_graph(llm=_V1GraphLLM())
 
     async def _invoke():
         return await graph.ainvoke(
@@ -822,7 +834,7 @@ def test_planner_react_v1_graph_should_cover_execute_replan_summarize_path() -> 
 
 
 def test_planner_react_v1_graph_should_build_readable_fallback_title_when_plan_json_invalid() -> None:
-    graph = build_planner_react_poc_graph(llm=_InvalidPlanJSONLLM())
+    graph = build_planner_react_langgraph_graph(llm=_InvalidPlanJSONLLM())
     user_message = "请帮我分析线上故障日志并给出完整修复方案以及回归验证步骤"
 
     async def _invoke():
@@ -863,11 +875,11 @@ def test_planner_react_v1_graph_should_execute_step_via_skill_runtime(monkeypatc
             return _SpySkillRuntime()
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_poc.build_default_skill_graph_registry",
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.build_default_skill_graph_registry",
         lambda: _SpySkillRegistry(),
     )
 
-    graph = build_planner_react_poc_graph(llm=_V1GraphLLM())
+    graph = build_planner_react_langgraph_graph(llm=_V1GraphLLM())
 
     async def _invoke():
         return await graph.ainvoke(
@@ -889,7 +901,7 @@ def test_planner_react_v1_graph_should_execute_step_via_skill_runtime(monkeypatc
 
 
 def test_planner_react_v1_graph_should_fallback_to_step_result_when_single_step_summary_is_irrelevant() -> None:
-    graph = build_planner_react_poc_graph(llm=_SingleStepHallucinatedSummaryLLM())
+    graph = build_planner_react_langgraph_graph(llm=_SingleStepHallucinatedSummaryLLM())
 
     async def _invoke():
         return await graph.ainvoke(
@@ -912,7 +924,7 @@ def test_planner_react_v1_graph_should_fallback_to_step_result_when_single_step_
 
 
 def test_planner_react_v1_graph_should_not_emit_duplicate_message_when_summary_equals_last_step_result() -> None:
-    graph = build_planner_react_poc_graph(llm=_SingleStepRepeatedSummaryLLM())
+    graph = build_planner_react_langgraph_graph(llm=_SingleStepRepeatedSummaryLLM())
 
     async def _invoke():
         return await graph.ainvoke(
@@ -936,7 +948,7 @@ def test_planner_react_v1_graph_should_not_emit_duplicate_message_when_summary_e
 
 
 def test_planner_react_v1_graph_should_fallback_attachments_from_write_file_tool_events() -> None:
-    graph = build_planner_react_poc_graph(
+    graph = build_planner_react_langgraph_graph(
         llm=_WriteFileToolCallingLLM(),
         runtime_tools=[_FakeWriteFileTool()],
     )
@@ -976,7 +988,7 @@ def test_planner_react_v1_graph_should_fallback_attachments_from_write_file_tool
 
 
 def test_planner_react_v1_graph_should_emit_tool_events_when_runtime_tools_available() -> None:
-    graph = build_planner_react_poc_graph(
+    graph = build_planner_react_langgraph_graph(
         llm=_ToolCallingLLM(),
         runtime_tools=[_FakeSearchTool()],
     )
@@ -1002,7 +1014,7 @@ def test_planner_react_v1_graph_should_emit_tool_events_when_runtime_tools_avail
 
 
 def test_planner_react_v1_graph_should_skip_plan_and_step_for_simple_greeting() -> None:
-    graph = build_planner_react_poc_graph(llm=_NeverInvokeLLM())
+    graph = build_planner_react_langgraph_graph(llm=_NeverInvokeLLM())
 
     async def _invoke():
         return await graph.ainvoke(

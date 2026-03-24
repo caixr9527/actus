@@ -11,7 +11,7 @@ from .legacy_planner_react import LegacyPlannerReActRunEngine
 from .langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
-    PlannerReActPOCState,
+    PlannerReActLangGraphState,
 )
 from .skill_graph_registry import (
     SkillRuntimePolicy,
@@ -27,7 +27,7 @@ __all__ = [
     "LegacyPlannerReActRunEngine",
     "GRAPH_STATE_CONTRACT_SCHEMA_VERSION",
     "GraphStateContractMapper",
-    "PlannerReActPOCState",
+    "PlannerReActLangGraphState",
     "SkillRuntimePolicy",
     "SkillDefinition",
     "SkillGraphRegistry",

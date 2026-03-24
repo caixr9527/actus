@@ -91,8 +91,8 @@ class ToolInvocationState(TypedDict, total=False):
     created_at: str
     updated_at: str
 
-class PlannerReActPOCState(TypedDict, total=False):
-    """LangGraph POC 状态对象（BE-LG-04 契约版本）。"""
+class PlannerReActLangGraphState(TypedDict, total=False):
+    """LangGraph 状态对象（BE-LG-04 契约版本）。"""
 
     schema_version: str
     session_id: str
@@ -327,7 +327,7 @@ class GraphStateContractMapper:
             thread_id: str,
             checkpoint_namespace: str,
             checkpoint_id: Optional[str],
-    ) -> PlannerReActPOCState:
+    ) -> PlannerReActLangGraphState:
         """构建 BE-LG-04 契约化初始状态。"""
         plan = cls._resolve_plan_snapshot(session=session, run=run)
         graph_state_from_metadata = cls._extract_contract_graph_state(run=run)
@@ -343,7 +343,7 @@ class GraphStateContractMapper:
             next_step = plan.get_next_step()
             current_step_id = next_step.id if next_step is not None else None
 
-        state: PlannerReActPOCState = {
+        state: PlannerReActLangGraphState = {
             "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
             "session_id": session.id,
             "run_id": run.id if run is not None else session.current_run_id,
@@ -460,10 +460,10 @@ class GraphStateContractMapper:
         return refs
 
     @classmethod
-    def apply_emitted_events(cls, state: PlannerReActPOCState) -> PlannerReActPOCState:
+    def apply_emitted_events(cls, state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         """根据 emitted events 收敛 step/human/tool/audit 状态。"""
         events = list(state.get("emitted_events") or [])
-        next_state: PlannerReActPOCState = dict(state)
+        next_state: PlannerReActLangGraphState = dict(state)
         step_states = list(next_state.get("step_states") or [])
         human_tasks = dict(next_state.get("human_tasks") or {})
         tool_invocations = dict(next_state.get("tool_invocations") or {})
@@ -651,7 +651,7 @@ class GraphStateContractMapper:
         return None
 
     @classmethod
-    def build_runtime_metadata(cls, state: PlannerReActPOCState) -> Dict[str, Any]:
+    def build_runtime_metadata(cls, state: PlannerReActLangGraphState) -> Dict[str, Any]:
         """将 graph state 收敛为 WorkflowRun.runtime_metadata。"""
         events = list(state.get("emitted_events") or [])
         last_event = events[-1] if events else None

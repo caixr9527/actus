@@ -41,4 +41,5 @@ class SearchTool(BaseTool):
         required=["query"]
     )
     async def search_web(self, query: str, data_range: Optional[str] = None) -> ToolResult[SearchResults]:
-        return await self.search_engine.invoke(query, data_range)
+        # 显式关键字传参，避免 SearchEngine 协议参数名演进时出现位置参数误用。
+        return await self.search_engine.invoke(query=query, date_range=data_range)

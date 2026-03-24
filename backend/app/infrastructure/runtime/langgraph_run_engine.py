@@ -9,26 +9,60 @@ import logging
 import asyncio
 import json
 from contextlib import suppress
-from typing import AsyncGenerator, Callable, Dict, Optional, List
+from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 
 from app.domain.external import LLM
 from app.domain.models import BaseEvent, Message
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.tools import BaseTool
-from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActPOCState
+from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph_graphs import (
     bind_live_event_sink,
-    build_planner_react_poc_graph,
+    build_planner_react_langgraph_graph,
     unbind_live_event_sink,
 )
 
 logger = logging.getLogger(__name__)
 
 
+class _EventDeduplicator:
+    """基于 event_id + payload signature 的事件去重器。"""
+
+    def __init__(self) -> None:
+        self._event_ids: set[str] = set()
+        self._event_signatures: set[str] = set()
+
+    @staticmethod
+    def _build_signature(event: BaseEvent) -> str:
+        payload = event.model_dump(mode="json")
+        payload.pop("id", None)
+        return json.dumps(
+            {
+                "event_type": event.type,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
+    def should_emit(self, event: BaseEvent) -> bool:
+        event_id = str(event.id or "")
+        event_signature = self._build_signature(event)
+        if event_id and event_id in self._event_ids:
+            return False
+        if event_signature in self._event_signatures:
+            return False
+        if event_id:
+            self._event_ids.add(event_id)
+        self._event_signatures.add(event_signature)
+        return True
+
+
 class LangGraphRunEngine(RunEngine):
-    """基于 LangGraph 的最小 POC 运行时引擎。"""
+    """基于 LangGraph 的运行时引擎。"""
 
     def __init__(
             self,
@@ -41,17 +75,17 @@ class LangGraphRunEngine(RunEngine):
         self._session_id = session_id
         self._uow_factory = uow_factory
         if runtime_tools is None and max_tool_iterations is None:
-            self._graph = build_planner_react_poc_graph(llm=llm)
+            self._graph = build_planner_react_langgraph_graph(llm=llm)
         else:
             try:
-                self._graph = build_planner_react_poc_graph(
+                self._graph = build_planner_react_langgraph_graph(
                     llm=llm,
                     runtime_tools=runtime_tools,
                     max_tool_iterations=max_tool_iterations or 5,
                 )
             except TypeError:
                 # 兼容测试/历史 monkeypatch 场景：回退到仅传 llm 的构图签名。
-                self._graph = build_planner_react_poc_graph(llm=llm)
+                self._graph = build_planner_react_langgraph_graph(llm=llm)
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
             if uow_factory is not None
@@ -63,7 +97,7 @@ class LangGraphRunEngine(RunEngine):
             message: Message,
             run_id: Optional[str],
             invoke_config: Dict[str, Dict[str, str]],
-    ) -> PlannerReActPOCState:
+    ) -> PlannerReActLangGraphState:
         """构建 BE-LG-04 契约化 graph input state。"""
         if self._uow_factory is None:
             return {
@@ -115,7 +149,7 @@ class LangGraphRunEngine(RunEngine):
     async def _sync_graph_state_contract(
             self,
             run_id: Optional[str],
-            state: Optional[PlannerReActPOCState],
+            state: Optional[PlannerReActLangGraphState],
     ) -> None:
         """回写 BE-LG-04 graph state contract 到 runtime_metadata。"""
         if self._uow_factory is None or state is None:
@@ -155,36 +189,9 @@ class LangGraphRunEngine(RunEngine):
             run_id=run_id,
             invoke_config=invoke_config,
         )
-        state: Optional[PlannerReActPOCState] = None
-        emitted_event_ids: set[str] = set()
-        emitted_event_signatures: set[str] = set()
+        state: Optional[PlannerReActLangGraphState] = None
+        deduplicator = _EventDeduplicator()
         live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
-
-        def _build_event_signature(event: BaseEvent) -> str:
-            """构建事件签名，作为 event.id 之外的防重复兜底键。"""
-            payload = event.model_dump(mode="json")
-            payload.pop("id", None)
-            return json.dumps(
-                {
-                    "event_type": event.type,
-                    "payload": payload,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            )
-
-        def _should_emit_event(event: BaseEvent) -> bool:
-            event_id = str(event.id or "")
-            event_signature = _build_event_signature(event)
-            if event_id and event_id in emitted_event_ids:
-                return False
-            if event_signature in emitted_event_signatures:
-                return False
-            if event_id:
-                emitted_event_ids.add(event_id)
-            emitted_event_signatures.add(event_signature)
-            return True
 
         async def _enqueue_live_event(event: BaseEvent) -> None:
             await live_event_queue.put(event)
@@ -198,19 +205,12 @@ class LangGraphRunEngine(RunEngine):
                     config=invoke_config,
                 )
             )
-
-            # 边执行边转发 LangGraph 节点实时事件，提升前端过程可见性。
-            while True:
-                if graph_task.done() and live_event_queue.empty():
-                    break
-                try:
-                    event = await asyncio.wait_for(live_event_queue.get(), timeout=0.1)
-                except TimeoutError:
-                    continue
-
-                if _should_emit_event(event):
-                    # 对外输出副本，避免下游写入 event.id 反向污染 graph state 中的同一对象。
-                    yield event.model_copy(deep=True)
+            async for live_event in self._forward_live_events(
+                    graph_task=graph_task,
+                    live_event_queue=live_event_queue,
+                    deduplicator=deduplicator,
+            ):
+                yield live_event
 
             state = await graph_task
             state = GraphStateContractMapper.apply_emitted_events(state=state)
@@ -235,5 +235,25 @@ class LangGraphRunEngine(RunEngine):
             )
 
         for event in (state or {}).get("emitted_events", []):
-            if _should_emit_event(event):
+            if deduplicator.should_emit(event):
+                yield event.model_copy(deep=True)
+
+    async def _forward_live_events(
+            self,
+            *,
+            graph_task: "asyncio.Task[Any]",
+            live_event_queue: "asyncio.Queue[BaseEvent]",
+            deduplicator: _EventDeduplicator,
+    ) -> AsyncGenerator[BaseEvent, None]:
+        """边执行边转发 LangGraph 节点实时事件。"""
+        while True:
+            if graph_task.done() and live_event_queue.empty():
+                break
+            try:
+                event = await asyncio.wait_for(live_event_queue.get(), timeout=0.1)
+            except TimeoutError:
+                continue
+
+            if deduplicator.should_emit(event):
+                # 对外输出副本，避免下游写入 event.id 反向污染 graph state 中的同一对象。
                 yield event.model_copy(deep=True)

@@ -15,7 +15,7 @@ class _DummyTool:
     pass
 
 
-class _FakePOCGraph:
+class _FakeLangGraph:
     async def ainvoke(self, _state, config=None):
         return {"emitted_events": [DoneEvent()]}
 
@@ -27,11 +27,11 @@ def _raise_langgraph_init_error(**kwargs):
 def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.get_settings",
-        lambda: type("S", (), {"agent_runtime_engine": "langgraph_poc"})(),
+        lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_poc_graph",
-        lambda llm: _FakePOCGraph(),
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        lambda llm: _FakeLangGraph(),
     )
 
     engine = build_run_engine(
@@ -60,7 +60,7 @@ def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
 def test_build_run_engine_falls_back_to_legacy_when_langgraph_init_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.get_settings",
-        lambda: type("S", (), {"agent_runtime_engine": "langgraph_poc"})(),
+        lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
     )
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.LangGraphRunEngine",

@@ -12,5 +12,5 @@ from app.domain.models import ToolResult, SearchResults
 
 class SearchEngine(Protocol):
 
-    async def invoke(self, query: str, data_range: Optional[str] = None) -> ToolResult[SearchResults]:
+    async def invoke(self, query: str, date_range: Optional[str] = None) -> ToolResult[SearchResults]:
         ...

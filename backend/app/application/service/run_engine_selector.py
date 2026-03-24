@@ -34,13 +34,13 @@ def build_run_engine(
         user_id: str | None = None,
         tool_runtime_adapter: ToolRuntimeAdapter | None = None,
 ) -> RunEngine:
-    """根据配置选择运行时引擎，LangGraph POC 不可用时自动回退旧实现。"""
+    """根据配置选择运行时引擎，LangGraph 不可用时自动回退旧实现。"""
     settings = get_settings()
     engine_kind = settings.agent_runtime_engine.strip().lower()
 
-    if engine_kind == "langgraph_poc":
+    if engine_kind == "langgraph":
         try:
-            logger.info("启用 LangGraph POC 运行时引擎")
+            logger.info("启用 LangGraph 运行时引擎")
             runtime_adapter = tool_runtime_adapter or ToolRuntimeAdapter()
             runtime_tools = runtime_adapter.build_runtime_tools(
                 capability_context=CapabilityBuildContext(
@@ -67,7 +67,7 @@ def build_run_engine(
                 max_tool_iterations=max_tool_iterations,
             )
         except Exception as e:
-            logger.warning(f"LangGraph POC 初始化失败，回退 legacy planner-react: {e}")
+            logger.warning(f"LangGraph 初始化失败，回退 legacy planner-react: {e}")
 
     return LegacyPlannerReActRunEngine(
         llm=llm,

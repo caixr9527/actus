@@ -5,12 +5,12 @@ from app.domain.services.tools.search import SearchTool
 
 
 class _FakeSearchEngine:
-    async def invoke(self, query: str, data_range: str | None = None) -> ToolResult[SearchResults]:
+    async def invoke(self, query: str, date_range: str | None = None) -> ToolResult[SearchResults]:
         return ToolResult(
             success=True,
             data=SearchResults(
                 query=query,
-                date_range=data_range,
+                date_range=date_range,
                 total_results=1,
                 results=[
                     SearchResultItem(
