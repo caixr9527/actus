@@ -50,7 +50,7 @@ class PlannerAgent(BaseAgent):
         # 构造创建计划的查询提示词，包含用户消息内容和附件信息
         query = CREATE_PLAN_PROMPT.format(
             message=message.message,
-            attachments="\n".join(message.attachments),
+            attachments=self._build_legacy_attachments_prompt(message),
         )
 
         # 调用大模型生成计划，并处理返回的事件流

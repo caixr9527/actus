@@ -16,3 +16,6 @@ class RuntimeLLMConfig(BaseModel):
     model_name: str
     temperature: float = Field(default=0.7)
     max_tokens: int = Field(default=8192, ge=0)
+    # BE-LG-12：模型输入能力声明。
+    multimodal: bool = Field(default=False)
+    supported: list[str] = Field(default_factory=lambda: ["text"])

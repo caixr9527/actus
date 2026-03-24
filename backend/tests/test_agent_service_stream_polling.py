@@ -12,18 +12,21 @@ class _Session:
         self.user_id = "user-1"
         self.task_id = "task-1"
         self.status = SessionStatus.RUNNING
+        self.unread_message_count = 0
 
 
 class _SessionRepo:
     def __init__(self, session: _Session) -> None:
         self._session = session
         self.unread_count_updated = False
+        self.unread_update_calls = 0
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
 
     async def update_unread_message_count(self, session_id: str, count: int) -> None:
         self.unread_count_updated = True
+        self.unread_update_calls += 1
 
     async def add_event_if_absent(self, session_id: str, event) -> bool:
         return True
@@ -150,3 +153,22 @@ def test_chat_does_not_reset_cursor_after_empty_poll() -> None:
     assert _CursorTaskFactory.task.output_stream.start_ids[:3] == [None, "evt-1", "evt-1"]
     assert len(assistant_messages) == 1
     assert any(getattr(event, "type", "") == "done" for event in events)
+
+
+def test_chat_should_reset_unread_count_only_once_for_stream_events() -> None:
+    session = _Session()
+    session.unread_message_count = 3
+    session_repo = _SessionRepo(session=session)
+    _CursorTaskFactory.task = _CursorTask()
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(session_repo)
+    service._task_cls = _CursorTaskFactory
+
+    async def _consume():
+        async for _ in service.chat(session_id=session.id, user_id=session.user_id):
+            pass
+
+    asyncio.run(_consume())
+
+    assert session_repo.unread_update_calls == 1

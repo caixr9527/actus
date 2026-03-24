@@ -101,6 +101,7 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     checkpoint_ref_namespace: str
     checkpoint_ref_id: Optional[str]
     user_message: str
+    input_parts: List[Dict[str, Any]]
     plan: Plan
     current_step_id: Optional[str]
     execution_count: int
@@ -129,6 +130,7 @@ class GraphStateContractMapper:
         "checkpoint_ref_namespace",
         "checkpoint_ref_id",
         "user_message",
+        "input_parts",
         "plan",
         "current_step_id",
         "execution_count",
@@ -319,14 +321,26 @@ class GraphStateContractMapper:
         return list(dict.fromkeys(refs))
 
     @classmethod
+    def _normalize_input_parts(cls, raw: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(cls._to_json_safe(item))
+        return normalized
+
+    @classmethod
     def build_initial_state(
             cls,
             session: Session,
             run: Optional[WorkflowRun],
             user_message: str,
-            thread_id: str,
-            checkpoint_namespace: str,
-            checkpoint_id: Optional[str],
+            input_parts: Optional[List[Dict[str, Any]]] = None,
+            thread_id: str = "",
+            checkpoint_namespace: str = "",
+            checkpoint_id: Optional[str] = None,
     ) -> PlannerReActLangGraphState:
         """构建 BE-LG-04 契约化初始状态。"""
         plan = cls._resolve_plan_snapshot(session=session, run=run)
@@ -351,6 +365,7 @@ class GraphStateContractMapper:
             "checkpoint_ref_namespace": checkpoint_namespace,
             "checkpoint_ref_id": checkpoint_id,
             "user_message": user_message,
+            "input_parts": cls._normalize_input_parts(input_parts),
             "plan": plan,
             "current_step_id": current_step_id,
             "execution_count": int(graph_state_from_metadata.get("execution_count") or 0),
@@ -673,6 +688,7 @@ class GraphStateContractMapper:
                     "thread_id": state.get("thread_id"),
                     "checkpoint_ref_namespace": state.get("checkpoint_ref_namespace"),
                     "checkpoint_ref_id": state.get("checkpoint_ref_id"),
+                    "input_parts": cls._to_json_safe(state.get("input_parts") or []),
                     "current_step_id": state.get("current_step_id"),
                     "execution_count": int(state.get("execution_count") or 0),
                     "max_execution_steps": int(state.get("max_execution_steps") or 20),

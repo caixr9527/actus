@@ -1,8 +1,9 @@
 import asyncio
 
+import pytest
+
 from app.application.service.run_engine_selector import build_run_engine
 from app.domain.models import AgentConfig, DoneEvent, Message
-from app.domain.services.runtime import LegacyPlannerReActRunEngine
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
@@ -57,7 +58,7 @@ def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
     assert isinstance(events[0], DoneEvent)
 
 
-def test_build_run_engine_falls_back_to_legacy_when_langgraph_init_fails(monkeypatch) -> None:
+def test_build_run_engine_should_raise_when_langgraph_init_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.get_settings",
         lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
@@ -67,17 +68,37 @@ def test_build_run_engine_falls_back_to_legacy_when_langgraph_init_fails(monkeyp
         _raise_langgraph_init_error,
     )
 
-    engine = build_run_engine(
-        llm=_DummyLLM(),
-        agent_config=AgentConfig(),
-        session_id="session-1",
-        uow_factory=lambda: None,
-        json_parser=object(),
-        browser=object(),
-        sandbox=object(),
-        search_engine=object(),
-        mcp_tool=_DummyTool(),
-        a2a_tool=_DummyTool(),
+    with pytest.raises(RuntimeError, match="boom"):
+        build_run_engine(
+            llm=_DummyLLM(),
+            agent_config=AgentConfig(),
+            session_id="session-1",
+            uow_factory=lambda: None,
+            json_parser=object(),
+            browser=object(),
+            sandbox=object(),
+            search_engine=object(),
+            mcp_tool=_DummyTool(),
+            a2a_tool=_DummyTool(),
+        )
+
+
+def test_build_run_engine_should_reject_non_langgraph_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_settings",
+        lambda: type("S", (), {"agent_runtime_engine": "legacy"})(),
     )
 
-    assert isinstance(engine, LegacyPlannerReActRunEngine)
+    with pytest.raises(ValueError, match="仅支持 langgraph"):
+        build_run_engine(
+            llm=_DummyLLM(),
+            agent_config=AgentConfig(),
+            session_id="session-1",
+            uow_factory=lambda: None,
+            json_parser=object(),
+            browser=object(),
+            sandbox=object(),
+            search_engine=object(),
+            mcp_tool=_DummyTool(),
+            a2a_tool=_DummyTool(),
+        )

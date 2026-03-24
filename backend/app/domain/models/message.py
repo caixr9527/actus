@@ -9,8 +9,11 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from .content_part import MessageInputEnvelope
+
 
 class Message(BaseModel):
     """消息模型"""
     message: str = ""
     attachments: List[str] = Field(default_factory=list)
+    input_envelope: MessageInputEnvelope = Field(default_factory=MessageInputEnvelope)

@@ -117,6 +117,16 @@ class _DummyJsonParser:
     pass
 
 
+class _DummyRunEngine:
+    async def invoke(self, message):
+        if False:
+            yield message
+
+
+def _dummy_run_engine_factory(**kwargs):
+    return _DummyRunEngine()
+
+
 def test_agent_service_create_task_should_build_llm_from_session_model() -> None:
     session_repo = _SessionRepo()
     workflow_run_repo = _WorkflowRunRepo()
@@ -136,6 +146,7 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
         uow_factory=lambda: _UoW(session_repo, workflow_run_repo),
         model_runtime_resolver=resolver,
         llm_factory=llm_factory,
+        run_engine_factory=_dummy_run_engine_factory,
     )
     session = Session(id="session-a", user_id="user-a", current_model_id="deepseek")
 

@@ -91,6 +91,11 @@ def test_event_mapper_should_attach_v2_extensions_with_context() -> None:
             session_id="session-1",
             run_id="run-1",
             channel="chat_stream",
+            runtime_extensions={
+                "input_part_summary": {"total": 2, "by_type": {"text": 1, "file_ref": 1}},
+                "downgrade_reason": "model_multimodal_disabled",
+                "unsupported_parts": [{"type": "image", "reason": "model_multimodal_disabled"}],
+            },
         ),
     )
     payload = sse_event.model_dump(mode="json")
@@ -100,6 +105,9 @@ def test_event_mapper_should_attach_v2_extensions_with_context() -> None:
     assert payload["data"]["extensions"]["runtime"]["session_id"] == "session-1"
     assert payload["data"]["extensions"]["runtime"]["run_id"] == "run-1"
     assert payload["data"]["extensions"]["runtime"]["channel"] == "chat_stream"
+    assert payload["data"]["extensions"]["runtime"]["input_part_summary"]["total"] == 2
+    assert payload["data"]["extensions"]["runtime"]["downgrade_reason"] == "model_multimodal_disabled"
+    assert payload["data"]["extensions"]["runtime"]["unsupported_parts"][0]["type"] == "image"
 
 
 def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:

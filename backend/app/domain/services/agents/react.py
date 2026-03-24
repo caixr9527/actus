@@ -47,7 +47,7 @@ class ReActAgent(BaseAgent):
         # 构造执行提示词，包含用户消息、附件、语言和步骤描述
         query = EXECUTION_PROMPT.format(
             message=message.message,
-            attachments="\n".join(message.attachments),
+            attachments=self._build_legacy_attachments_prompt(message),
             language=plan.language,
             step=step.description
         )

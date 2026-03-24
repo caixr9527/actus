@@ -26,11 +26,16 @@ from app.domain.external import (
     FileUploadPayload,
 )
 from app.domain.models import (
+    AudioContentPart,
     AgentConfig,
     MCPConfig,
     A2AConfig,
     ErrorEvent,
+    FileRefContentPart,
     HumanTask,
+    ImageContentPart,
+    MessageInputEnvelope,
+    PdfContentPart,
     SessionStatus,
     Event,
     MessageEvent,
@@ -39,12 +44,13 @@ from app.domain.models import (
     BaseEvent,
     ToolEvent,
     ToolResult,
+    TextContentPart,
     DoneEvent,
     TitleEvent,
     WaitEvent,
 )
 from app.domain.repositories import IUnitOfWork
-from app.domain.services.runtime import RunEngine, LegacyPlannerReActRunEngine
+from app.domain.services.runtime import RunEngine
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, ToolRuntimeEventHooks
 
 logger = logging.getLogger(__name__)
@@ -118,24 +124,12 @@ class AgentTaskRunner(TaskRunner):
             search_engine: SearchEngine,
             run_engine_factory: Optional[Callable[..., RunEngine]],
     ) -> RunEngine:
-        if run_engine_factory is not None:
-            return run_engine_factory(
-                llm=llm,
-                agent_config=agent_config,
-                session_id=session_id,
-                uow_factory=uow_factory,
-                json_parser=json_parser,
-                browser=browser,
-                sandbox=sandbox,
-                search_engine=search_engine,
-                mcp_tool=self._mcp_tool,
-                a2a_tool=self._a2a_tool,
-                mcp_config=self._mcp_config,
-                user_id=self._user_id,
-                tool_runtime_adapter=self._get_tool_runtime_adapter(),
+        if run_engine_factory is None:
+            raise RuntimeError(
+                "未配置 run_engine_factory，当前仅支持 LangGraph 运行时，禁止回退 legacy planner-react"
             )
 
-        return LegacyPlannerReActRunEngine(
+        return run_engine_factory(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
@@ -237,32 +231,170 @@ class AgentTaskRunner(TaskRunner):
                 async with self._uow_factory() as uow:
                     await uow.file.save(file=file)
                 return file
+            raise RuntimeError(
+                f"同步文件[{file_id}]到沙箱失败: {tool_result.message or 'upload_file returned unsuccessful result'}"
+            )
         except Exception as e:
             # 记录同步文件到沙箱时出现的异常
             logger.exception(f"同步文件 [{file_id}] 到沙箱失败: {e}")
+            raise
 
     async def _sync_message_attachments_to_sandbox(self, event: MessageEvent) -> None:
         # 初始化附件列表
         attachments: List[File] = []
+        # 检查事件是否包含附件
+        if not event.attachments:
+            return
         try:
-            # 检查事件是否包含附件
-            if event.attachments:
-                # 遍历所有附件，同步到沙箱环境
-                for attachment in event.attachments:
-                    # 将附件同步到沙箱
-                    file = await self._sync_file_to_sandbox(file_id=attachment.id)
-                    if file:
-                        # 添加到附件列表
-                        attachments.append(file)
-                        # 将文件添加到会话存储中
-                        async with self._uow_factory() as uow:
-                            await uow.session.add_file(session_id=self._session_id, file=file)
+            # 遍历所有附件，同步到沙箱环境
+            for attachment in event.attachments:
+                file_id = str(attachment.id or "").strip()
+                if not file_id:
+                    raise RuntimeError("消息附件缺少 file_id，无法同步到沙箱")
+                # 将附件同步到沙箱
+                file = await self._sync_file_to_sandbox(file_id=file_id)
+                # 添加到附件列表
+                attachments.append(file)
+                # 将文件添加到会话存储中
+                async with self._uow_factory() as uow:
+                    await uow.session.add_file(session_id=self._session_id, file=file)
 
-                # 更新事件中的附件列表为已同步的文件
-                event.attachments = attachments
+            # 更新事件中的附件列表为已同步的文件
+            event.attachments = attachments
         except Exception as e:
             # 记录同步附件到沙箱时发生的异常
             logger.exception(f"同步消息附件到沙箱失败: {e}")
+            raise
+
+    @classmethod
+    def _resolve_content_part_type(cls, attachment: File) -> str:
+        """基于文件后缀与 mime 判定输入片段类型。"""
+        extension = str(attachment.extension or "").strip().lower().lstrip(".")
+        mime_type = str(attachment.mime_type or "").strip().lower()
+
+        if mime_type.startswith(cls._TEXT_MIME_PREFIXES) or extension in cls._TEXT_EXTENSIONS:
+            return "text"
+        if mime_type.startswith("image/") or extension in cls._IMAGE_EXTENSIONS:
+            return "image"
+        if mime_type.startswith("audio/") or extension in cls._AUDIO_EXTENSIONS:
+            return "audio"
+        if mime_type == "application/pdf" or extension == "pdf":
+            return "pdf"
+        return "file_ref"
+
+    @classmethod
+    def _decode_text_attachment_bytes(cls, raw_bytes: bytes) -> str:
+        """尽量稳健地将文本文件字节解码为字符串。"""
+        for encoding in ("utf-8", "utf-8-sig", "gbk", "latin-1"):
+            try:
+                return raw_bytes.decode(encoding)
+            except Exception:
+                continue
+        return raw_bytes.decode("utf-8", errors="ignore")
+
+    @classmethod
+    def _normalize_inline_text_content(cls, content: str) -> str:
+        text = content.replace("\x00", "").strip()
+        if len(text) <= cls._MAX_INLINE_TEXT_ATTACHMENT_CHARS:
+            return text
+        return (
+            f"{text[:cls._MAX_INLINE_TEXT_ATTACHMENT_CHARS]}\n\n"
+            "[内容已截断，仅展示部分文本。]"
+        )
+
+    @classmethod
+    def _read_limited_bytes(cls, stream: BinaryIO, max_bytes: int) -> tuple[bytes, bool]:
+        """按字节上限分块读取，返回(raw_bytes, is_truncated)。"""
+        chunks: list[bytes] = []
+        total = 0
+
+        while total < max_bytes:
+            remaining = max_bytes - total
+            chunk_size = min(cls._TEXT_ATTACHMENT_READ_CHUNK_BYTES, remaining)
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+
+            if isinstance(chunk, str):
+                data = chunk.encode("utf-8", errors="ignore")
+            elif isinstance(chunk, (bytes, bytearray)):
+                data = bytes(chunk)
+            else:
+                data = str(chunk).encode("utf-8", errors="ignore")
+
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+
+        truncated = False
+        if total >= max_bytes:
+            probe = stream.read(1)
+            if probe:
+                truncated = True
+
+        return b"".join(chunks), truncated
+
+    async def _read_text_attachment_content(self, attachment: File) -> Optional[str]:
+        """从文件存储读取文本附件内容，供模型原生输入优先消费。"""
+        file_id = str(attachment.id or "").strip()
+        if not file_id:
+            return None
+
+        try:
+            file_stream, _ = await self._file_storage.download_file(
+                file_id=file_id,
+                user_id=self._user_id,
+            )
+            raw, truncated_by_size = self._read_limited_bytes(
+                stream=file_stream,
+                max_bytes=self._MAX_INLINE_TEXT_ATTACHMENT_BYTES,
+            )
+            content = self._decode_text_attachment_bytes(raw)
+            normalized = self._normalize_inline_text_content(content)
+            if truncated_by_size and normalized and "[内容已截断，仅展示部分文本。]" not in normalized:
+                normalized = f"{normalized}\n\n[内容已截断，仅展示部分文本。]"
+            return normalized if normalized else None
+        except Exception as e:
+            logger.warning(f"读取文本附件[{file_id}]内容失败，将回退路径模式: {e}")
+            return None
+
+    async def _build_message_input_envelope(
+            self,
+            *,
+            message: str,
+            attachments: List[File],
+    ) -> MessageInputEnvelope:
+        """构建统一输入封装，供 LangGraph 链路消费。"""
+        parts = [TextContentPart(text=message)]
+
+        for attachment in attachments:
+            part_type = self._resolve_content_part_type(attachment)
+            base_kwargs = {
+                "file_id": attachment.id or None,
+                "filepath": attachment.filepath or "",
+                "uri": self._file_storage.get_file_url(attachment),
+                "mime_type": attachment.mime_type or None,
+                "extension": attachment.extension or None,
+                "size": attachment.size or None,
+            }
+            if part_type == "text":
+                text_content = await self._read_text_attachment_content(attachment)
+                parts.append(FileRefContentPart(**base_kwargs, text_content=text_content))
+            elif part_type == "image":
+                parts.append(ImageContentPart(**base_kwargs))
+            elif part_type == "audio":
+                parts.append(AudioContentPart(**base_kwargs))
+            elif part_type == "pdf":
+                parts.append(PdfContentPart(**base_kwargs))
+            else:
+                parts.append(FileRefContentPart(**base_kwargs))
+
+        return MessageInputEnvelope(
+            source="user",
+            text=message,
+            parts=parts,
+        )
 
     @classmethod
     def _get_stream_size(cls, f: BinaryIO) -> int:
@@ -513,7 +645,11 @@ class AgentTaskRunner(TaskRunner):
                 # 创建消息对象，包含消息内容和附件路径列表
                 message_obj = Message(
                     message=message,
-                    attachments=[attachment.filepath for attachment in event.attachments]
+                    attachments=[attachment.filepath for attachment in event.attachments],
+                    input_envelope=await self._build_message_input_envelope(
+                        message=message,
+                        attachments=list(event.attachments or []),
+                    ),
                 )
 
                 # 运行流程并处理每个产生的事件
@@ -612,3 +748,17 @@ class AgentTaskRunner(TaskRunner):
 
     async def on_done(self, task: Task) -> None:
         logger.info(f"任务完成: {task.id}")
+
+    _TEXT_MIME_PREFIXES: tuple[str, ...] = (
+        "text/",
+    )
+    _TEXT_EXTENSIONS: set[str] = {
+        "txt", "md", "markdown", "csv", "tsv", "json", "yaml", "yml", "xml", "html", "htm",
+        "log", "ini", "cfg", "conf", "toml", "py", "js", "ts", "tsx", "jsx", "java", "c", "cpp",
+        "h", "hpp", "go", "rs", "sql", "sh", "bash", "zsh",
+    }
+    _MAX_INLINE_TEXT_ATTACHMENT_CHARS: int = 12000
+    _MAX_INLINE_TEXT_ATTACHMENT_BYTES: int = 512 * 1024
+    _TEXT_ATTACHMENT_READ_CHUNK_BYTES: int = 64 * 1024
+    _IMAGE_EXTENSIONS: set[str] = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"}
+    _AUDIO_EXTENSIONS: set[str] = {"mp3", "wav", "m4a", "aac", "flac", "ogg"}

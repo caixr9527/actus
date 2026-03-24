@@ -34,3 +34,13 @@ class LLM(Protocol):
     def max_tokens(self) -> int:
         """获取LLM模型最大token数"""
         ...
+
+    @property
+    def multimodal(self) -> bool:
+        """是否支持原生多模态输入"""
+        ...
+
+    @property
+    def supported(self) -> list[str]:
+        """支持的输入类型集合"""
+        ...

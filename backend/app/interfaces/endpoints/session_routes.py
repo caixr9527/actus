@@ -7,13 +7,11 @@
 """
 import asyncio
 import logging
-from datetime import datetime
-from typing import Optional, Dict, AsyncGenerator
+from typing import Optional, Dict
 
 import websockets
 from fastapi import APIRouter, Depends
-from redis.exceptions import RedisError
-from sse_starlette import EventSourceResponse, ServerSentEvent
+from sse_starlette import EventSourceResponse
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from websockets import ConnectionClosed
 
@@ -21,7 +19,7 @@ from app.application.errors import NotFoundError
 from app.application.errors import error_keys
 from app.application.service import SessionService, AgentService
 from app.domain.models import User
-from app.infrastructure.storage import get_redis_client
+from app.interfaces.facades import SessionStreamFacade
 from app.interfaces.schemas import (
     CreateSessionResponse,
     ListSessionResponse,
@@ -41,27 +39,10 @@ from app.interfaces.schemas import (
 )
 from app.interfaces.schemas import Response
 from app.interfaces.dependencies.auth import get_current_user
-from app.interfaces.dependencies.services import get_session_service, get_agent_service
-from core.realtime import SESSION_LIST_CHANGE_CHANNEL, SESSION_LIST_FALLBACK_REFRESH_SECONDS
+from app.interfaces.dependencies.services import get_session_service, get_agent_service, get_session_stream_facade
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["会话模块"])
-
-
-async def _build_session_list_payload(session_service: SessionService, user_id: str) -> str:
-    sessions = await session_service.get_all_sessions(user_id=user_id)
-    session_items = [
-        ListSessionItem(
-            session_id=session.id,
-            title=session.title,
-            latest_message=session.latest_message,
-            latest_message_at=session.latest_message_at,
-            status=session.status,
-            unread_message_count=session.unread_message_count,
-        )
-        for session in sessions
-    ]
-    return ListSessionResponse(sessions=session_items).model_dump_json()
 
 
 @router.post(
@@ -90,51 +71,15 @@ async def create_session(
 async def stream_sessions(
         current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
+        session_stream_facade: SessionStreamFacade = Depends(get_session_stream_facade),
 ) -> EventSourceResponse:
     """基于事件驱动流式获取会话列表，减少固定轮询带来的数据库压力"""
-
-    async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
-        previous_payload: str | None = None
-        pubsub = None
-
-        # 连接建立后先返回一次完整快照，避免客户端首屏等待。
-        initial_payload = await _build_session_list_payload(session_service, user_id=current_user.id)
-        previous_payload = initial_payload
-        yield ServerSentEvent(event="sessions", data=initial_payload)
-
-        try:
-            pubsub = get_redis_client().client.pubsub()
-            await pubsub.subscribe(SESSION_LIST_CHANGE_CHANNEL)
-        except (RuntimeError, RedisError, Exception) as e:
-            # Redis 异常时降级到周期兜底，保证能力可用。
-            logger.warning(f"订阅会话列表变更通道失败，降级为周期校准: {e}")
-            pubsub = None
-
-        try:
-            while True:
-                if pubsub is not None:
-                    # 事件触发增量刷新；超时后执行兜底校准，防止漏通知。
-                    await pubsub.get_message(
-                        ignore_subscribe_messages=True,
-                        timeout=SESSION_LIST_FALLBACK_REFRESH_SECONDS,
-                    )
-                else:
-                    await asyncio.sleep(SESSION_LIST_FALLBACK_REFRESH_SECONDS)
-
-                payload = await _build_session_list_payload(session_service, user_id=current_user.id)
-                if payload == previous_payload:
-                    continue
-                previous_payload = payload
-                yield ServerSentEvent(event="sessions", data=payload)
-        finally:
-            if pubsub is not None:
-                try:
-                    await pubsub.unsubscribe(SESSION_LIST_CHANGE_CHANNEL)
-                finally:
-                    await pubsub.aclose()
-
-    # 返回EventSourceResponse对象，用于流式传输会话列表数据
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        session_stream_facade.stream_sessions(
+            user_id=current_user.id,
+            session_service=session_service,
+        )
+    )
 
 
 @router.get(
@@ -209,44 +154,19 @@ async def chat(
         current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
         agent_service: AgentService = Depends(get_agent_service),
+        session_stream_facade: SessionStreamFacade = Depends(get_session_stream_facade),
 ) -> EventSourceResponse:
     """根据传递的会话id+chat请求数据向指定会话发起聊天请求"""
-    session = await session_service.get_session(user_id=current_user.id, session_id=session_id)
-    if not session:
-        raise NotFoundError(
-            msg="该会话不存在，请核实后重试",
-            error_key=error_keys.SESSION_NOT_FOUND,
-            error_params={"session_id": session_id},
-        )
-
-    async def event_generator() -> AsyncGenerator[ServerSentEvent, None]:
-        """定义事件生成器，用于配合EventSourceResponse生成流式响应数据"""
-        # BE-LG-08：chat 流式映射上下文。
-        # run_id 使用会话快照值；若本次聊天触发新 run，后续事件仍保持旧协议兼容，不依赖该字段。
-        event_context = EventCompatContext(
-            session_id=session_id,
-            run_id=session.current_run_id,
-            channel="chat_stream",
-        )
-        # 调用Agent服务发起聊天
-        async for event in agent_service.chat(
-                session_id=session_id,
-                user_id=current_user.id,
-                message=request.message,
-                attachments=request.attachments,
-                resume_token=request.resume_token,
-                latest_event_id=request.event_id,
-                timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
-        ):
-            # 将Agent事件转换为sse数据(因为普通的event没法通过流式事件传输)
-            sse_event = EventMapper.event_to_sse_event(event, context=event_context)
-            if sse_event:
-                yield ServerSentEvent(
-                    event=sse_event.event,
-                    data=sse_event.data.model_dump_json(),
-                )
-
-    return EventSourceResponse(event_generator())
+    chat_event_generator = await session_stream_facade.stream_chat(
+        user_id=current_user.id,
+        session_id=session_id,
+        request=request,
+        session_service=session_service,
+        agent_service=agent_service,
+    )
+    return EventSourceResponse(
+        chat_event_generator
+    )
 
 
 @router.get(
@@ -268,6 +188,10 @@ async def get_session(
             error_key=error_keys.SESSION_NOT_FOUND,
             error_params={"session_id": session_id},
         )
+    runtime_run_id, runtime_extensions = await session_service.get_runtime_extensions(
+        user_id=current_user.id,
+        session_id=session.id,
+    )
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(
@@ -279,8 +203,9 @@ async def get_session(
                 session.events,
                 context=EventCompatContext(
                     session_id=session.id,
-                    run_id=session.current_run_id,
+                    run_id=runtime_run_id or session.current_run_id,
                     channel="session_detail",
+                    runtime_extensions=runtime_extensions,
                 ),
             ),
         )

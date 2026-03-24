@@ -103,6 +103,7 @@ class LangGraphRunEngine(RunEngine):
             return {
                 "session_id": self._session_id,
                 "user_message": message.message,
+                "input_parts": message.input_envelope.model_dump(mode="json").get("parts", []),
                 "emitted_events": [],
             }
 
@@ -129,6 +130,7 @@ class LangGraphRunEngine(RunEngine):
                     session=session,
                     run=run,
                     user_message=message.message,
+                    input_parts=message.input_envelope.model_dump(mode="json").get("parts", []),
                     thread_id=thread_id,
                     checkpoint_namespace=checkpoint_namespace,
                     checkpoint_id=checkpoint_id,
@@ -143,6 +145,7 @@ class LangGraphRunEngine(RunEngine):
                 "checkpoint_ref_namespace": checkpoint_namespace,
                 "checkpoint_ref_id": checkpoint_id,
                 "user_message": message.message,
+                "input_parts": message.input_envelope.model_dump(mode="json").get("parts", []),
                 "emitted_events": [],
             }
 

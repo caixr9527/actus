@@ -23,6 +23,7 @@ from app.application.service import (
     AuthService,
     UserService,
 )
+from app.interfaces.facades import SessionStreamFacade
 from app.application.service.run_engine_selector import build_run_engine
 from app.application.service.session_service import SessionService
 from app.infrastructure.external.cache import ModelConfigCache
@@ -159,6 +160,12 @@ def get_user_service() -> UserService:
     """获取用户资料服务"""
     logger.info("加载获取UserService")
     return UserService(uow_factory=get_uow)
+
+
+@lru_cache()
+def get_session_stream_facade() -> SessionStreamFacade:
+    """获取会话流式 facade。"""
+    return SessionStreamFacade()
 
 
 def get_access_token_blacklist_store() -> RedisAccessTokenBlacklistStore:

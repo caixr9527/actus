@@ -29,6 +29,7 @@ from app.domain.services.tools import BaseTool
 from .live_events import emit_live_events
 from .parsers import (
     build_fallback_plan_title,
+    format_attachments_for_prompt,
     build_simple_greeting_reply,
     build_step_from_payload,
     build_summarize_prompt,
@@ -39,6 +40,7 @@ from .parsers import (
     is_simple_greeting_message,
     merge_attachment_paths,
     normalize_attachments,
+    resolve_model_input_policy,
     safe_parse_json,
     should_accept_summary_message,
     should_emit_planner_message,
@@ -73,9 +75,30 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             "emitted_events": append_events(state.get("emitted_events"), greeting_event),
         }
 
-    prompt = CREATE_PLAN_PROMPT.format(message=user_message, attachments="")
+    input_parts = list(state.get("input_parts") or [])
+    input_policy = resolve_model_input_policy(
+        llm=llm,
+        input_parts=input_parts,
+    )
+    prompt = CREATE_PLAN_PROMPT.format(
+        message=user_message,
+        attachments=format_attachments_for_prompt(input_policy["text_attachment_paths"]),
+    )
+    if bool(input_policy.get("inline_text_from_attachments")):
+        prompt = (
+            f"{prompt}\n\n"
+            "注意：你已经拿到文本附件正文，视为存在有效附件；不要声称“未检测到附件”，也不要调用 read_file。"
+        )
+    planner_user_content: Any
+    if len(input_policy["native_user_content_parts"]) > 0:
+        planner_user_content = [
+            {"type": "text", "text": prompt},
+            *list(input_policy["native_user_content_parts"]),
+        ]
+    else:
+        planner_user_content = prompt
     llm_message = await llm.invoke(
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": planner_user_content}],
         tools=[],
         response_format={"type": "json_object"},
     )
@@ -114,6 +137,14 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
         **state,
         "plan": plan,
         "current_step_id": next_step.id if next_step is not None else None,
+        "graph_metadata": {
+            **dict(state.get("graph_metadata") or {}),
+            "input_policy": {
+                "multimodal": input_policy["multimodal"],
+                "supported": input_policy["supported"],
+                "unsupported_parts": input_policy["unsupported_parts"],
+            },
+        },
         "emitted_events": append_events(state.get("emitted_events"), *planner_events),
     }
 
@@ -140,7 +171,19 @@ async def execute_step_node(
 
     user_message = str(state.get("user_message", ""))
     language = plan.language or "zh"
-    attachments: List[str] = []
+    input_parts = list(state.get("input_parts") or [])
+    input_policy = resolve_model_input_policy(
+        llm=llm,
+        input_parts=input_parts,
+    )
+    attachments = list(input_policy["text_attachment_paths"])
+    native_user_content_parts = list(input_policy["native_user_content_parts"])
+    has_inline_text_attachments = bool(
+        input_policy.get("inline_text_from_attachments")
+    ) or any(
+        isinstance(part, dict) and str(part.get("type") or "").strip().lower() == "text"
+        for part in native_user_content_parts
+    )
     execution_prompt = build_execution_prompt(
         execution_prompt_template=EXECUTION_PROMPT,
         user_message=user_message,
@@ -148,6 +191,11 @@ async def execute_step_node(
         language=language,
         attachments=attachments,
     )
+    if has_inline_text_attachments:
+        execution_prompt = (
+            f"{execution_prompt}\n\n"
+            "注意：文本附件正文已在输入中提供，请优先直接基于输入内容完成任务，不要调用 read_file。"
+        )
 
     execution_payload: Optional[Dict[str, Any]] = None
     tool_events: List[ToolEvent] = []
@@ -161,6 +209,8 @@ async def execute_step_node(
             runtime_tools=runtime_tools,
             max_tool_iterations=max_tool_iterations,
             on_tool_event=emit_live_events,
+            extra_user_content_parts=native_user_content_parts,
+            disallowed_function_names=["read_file"] if has_inline_text_attachments else [],
         )
 
     # 无工具能力时保持原 BE-LG-10 skill 路径。
@@ -190,6 +240,8 @@ async def execute_step_node(
             execution_prompt=execution_prompt,
             step=step,
             on_tool_event=emit_live_events,
+            extra_user_content_parts=native_user_content_parts,
+            disallowed_function_names=["read_file"] if has_inline_text_attachments else [],
         )
 
     step.success = bool(execution_payload.get("success", True))
@@ -218,12 +270,19 @@ async def execute_step_node(
 
     events: List[Any] = [started_event, *tool_events, *final_step_events]
     next_step = plan.get_next_step()
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata["input_policy"] = {
+        "multimodal": input_policy["multimodal"],
+        "supported": input_policy["supported"],
+        "unsupported_parts": input_policy["unsupported_parts"],
+    }
     return {
         **state,
         "plan": plan,
         "last_executed_step": step.model_copy(deep=True),
         "execution_count": int(state.get("execution_count", 0)) + 1,
         "current_step_id": next_step.id if next_step is not None else None,
+        "graph_metadata": graph_metadata,
         "final_message": step.result or "",
         "emitted_events": append_events(state.get("emitted_events"), *events),
     }

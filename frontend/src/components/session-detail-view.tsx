@@ -6,6 +6,7 @@ import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { RunTimelinePanel } from '@/components/run-timeline-panel'
 import { SkillDebugPanel } from '@/components/skill-debug-panel'
+import { RuntimeInputPolicyPanel } from '@/components/runtime-input-policy-panel'
 import { ChatMessage } from '@/components/chat-message'
 import { FilePreviewPanel } from '@/components/file-preview-panel'
 import { ToolPreviewPanel } from '@/components/tool-preview-panel'
@@ -466,6 +467,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">
               <RunTimelinePanel className="mb-2" events={events} />
+              <RuntimeInputPolicyPanel className="mb-2" events={events} />
               <SkillDebugPanel className="mb-2" events={events} />
               {isWaitingForResume && (
                 <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">

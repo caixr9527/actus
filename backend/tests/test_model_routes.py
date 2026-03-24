@@ -62,6 +62,9 @@ class _RouteSessionService:
             current_model_id="auto",
         )
 
+    async def get_runtime_extensions(self, user_id: str, session_id: str):
+        return None, {}
+
 
 def test_get_models_route_should_return_public_model_fields() -> None:
     app = FastAPI()

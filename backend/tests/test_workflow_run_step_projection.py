@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.domain.models import (
     ExecutionStatus,
+    MessageEvent,
     Plan,
     PlanEvent,
     PlanEventStatus,
+    Session,
     Step,
     StepEvent,
     StepEventStatus,
@@ -156,3 +158,38 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     assert existing_step_record.result == "完成"
     assert existing_step_record.success is True
     assert existing_step_record.attachments == ["file-1"]
+
+
+def test_get_events_with_compat_should_fallback_to_session_events_when_run_events_empty() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+    repo._list_events_by_run_id = AsyncMock(return_value=[])
+    session = Session(
+        id="session-1",
+        current_run_id="run-1",
+        events=[MessageEvent(id="legacy-event-1", role="assistant", message="legacy")],
+    )
+
+    events = asyncio.run(repo.get_events_with_compat(session=session))
+
+    assert len(events) == 1
+    assert events[0].id == "legacy-event-1"
+    repo._list_events_by_run_id.assert_awaited_once_with("run-1")
+
+
+def test_get_events_with_compat_should_prefer_workflow_run_events() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+    runtime_event = MessageEvent(id="runtime-event-1", role="assistant", message="runtime")
+    repo._list_events_by_run_id = AsyncMock(return_value=[runtime_event])
+    session = Session(
+        id="session-2",
+        current_run_id="run-2",
+        events=[MessageEvent(id="legacy-event-2", role="assistant", message="legacy")],
+    )
+
+    events = asyncio.run(repo.get_events_with_compat(session=session))
+
+    assert len(events) == 1
+    assert events[0].id == "runtime-event-1"
+    repo._list_events_by_run_id.assert_awaited_once_with("run-2")

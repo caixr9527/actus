@@ -48,6 +48,36 @@ test('buildRunTimeline should consume compat semantic type when available', () =
   assert.equal(timeline[0]?.compatSchemaVersion, 'be-lg-08.v2')
 })
 
+test('buildRunTimeline should carry runtime multimodal context for downstream rendering', () => {
+  const events: SSEEventData[] = [
+    eventOf('step', {
+      id: 's1',
+      description: 'step 1',
+      status: 'running',
+      extensions: {
+        runtime: {
+          input_part_summary: { total: 3, by_type: { text: 1, file_ref: 1, image: 1 } },
+          downgrade_reason: 'model_multimodal_disabled',
+          unsupported_parts: [{ type: 'image', reason: 'model_multimodal_disabled' }],
+        },
+      },
+    }),
+  ]
+
+  const timeline = buildRunTimeline(events, 'zh-CN')
+  const runtimeContext = timeline[0]?.runtimeContext as Record<string, unknown> | null
+
+  assert.ok(runtimeContext)
+  assert.deepEqual(runtimeContext?.input_part_summary, {
+    total: 3,
+    by_type: { text: 1, file_ref: 1, image: 1 },
+  })
+  assert.equal(runtimeContext?.downgrade_reason, 'model_multimodal_disabled')
+  assert.deepEqual(runtimeContext?.unsupported_parts, [
+    { type: 'image', reason: 'model_multimodal_disabled' },
+  ])
+})
+
 test('buildRunTimeline should prioritize wait question in summary', () => {
   const events: SSEEventData[] = [
     eventOf('wait', {

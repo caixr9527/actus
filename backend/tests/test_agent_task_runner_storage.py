@@ -1,4 +1,5 @@
 import asyncio
+import io
 from typing import Optional
 
 import pytest
@@ -127,11 +128,53 @@ def _build_runner_for_storage_sync() -> AgentTaskRunner:
     return runner
 
 
+class _SandboxUploadFail:
+    async def upload_file(self, *, file_data, file_path: str, filename: str):
+        return ToolResult(success=False, message="sandbox rejected")
+
+
+class _SandboxSyncFileStorage:
+    async def download_file(self, file_id: str):
+        return io.BytesIO(b"hello"), File(id=file_id, filename="a.txt")
+
+
+class _SandboxSyncFileRepo:
+    async def save(self, file: File) -> None:
+        return None
+
+
+class _SandboxSyncSessionRepo:
+    async def add_file(self, session_id: str, file: File) -> None:
+        return None
+
+
+class _SandboxSyncUoW:
+    def __init__(self) -> None:
+        self.file = _SandboxSyncFileRepo()
+        self.session = _SandboxSyncSessionRepo()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 def test_sync_file_to_storage_re_raises_exception() -> None:
     runner = _build_runner_for_storage_sync()
 
     with pytest.raises(RuntimeError, match="download failed"):
         asyncio.run(runner._sync_file_to_storage("/tmp/a.txt"))
+
+
+def test_sync_file_to_sandbox_should_re_raise_when_upload_unsuccessful() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    runner._sandbox = _SandboxUploadFail()
+    runner._file_storage = _SandboxSyncFileStorage()
+    runner._uow_factory = lambda: _SandboxSyncUoW()
+
+    with pytest.raises(RuntimeError, match="sandbox rejected"):
+        asyncio.run(runner._sync_file_to_sandbox("file-1"))
 
 
 def test_sync_file_to_storage_should_skip_when_file_not_exists() -> None:
@@ -163,6 +206,19 @@ def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
 
     with pytest.raises(RuntimeError, match="sync failed: /tmp/a.txt"):
         asyncio.run(runner._sync_message_attachments_to_storage(event))
+
+
+def test_sync_message_attachments_to_sandbox_should_re_raise_when_file_id_missing() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    runner._uow_factory = lambda: _SandboxSyncUoW()
+    event = MessageEvent(
+        role="user",
+        message="hello",
+        attachments=[File(id="", filename="a.txt", filepath="/tmp/a.txt")],
+    )
+
+    with pytest.raises(RuntimeError, match="缺少 file_id"):
+        asyncio.run(runner._sync_message_attachments_to_sandbox(event))
 
 
 def test_invoke_skips_empty_input_stream_event() -> None:

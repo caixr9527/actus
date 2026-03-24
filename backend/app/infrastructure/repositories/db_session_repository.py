@@ -34,14 +34,32 @@ class DBSessionRepository(SessionRepository):
         result = await self.db_session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def _sync_event_to_workflow_run(self, session_id: str, run_id: Optional[str], event: BaseEvent) -> None:
-        if not run_id:
-            return
-        await self._workflow_run_repository.add_event_if_absent(
-            session_id=session_id,
-            run_id=run_id,
-            event=event,
+    async def _get_session_record_with_lock(self, session_id: str) -> SessionModel:
+        """按会话ID加锁读取记录，保证事件幂等判断与投影更新在同一事务内。"""
+        stmt = (
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
         )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record is None:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        return record
+
+    @staticmethod
+    def _require_current_run_id(record: SessionModel, session_id: str) -> str:
+        """事件已迁移到 workflow_run_events 作为真相源，写入时必须存在 current_run_id。"""
+        # Context: 事件写路径已从 sessions.events 迁移到 workflow_run_events。
+        # Decision: 当前会话缺少 current_run_id 时直接 fail-fast。
+        # Trade-off: 对历史脏数据容忍度下降，但可避免静默丢事件与双写继续扩散。
+        # Removal Plan: 会话 run 关联全量补齐后，可将该校验转为初始化阶段硬约束。
+        run_id = str(record.current_run_id or "").strip()
+        if not run_id:
+            raise RuntimeError(
+                f"会话[{session_id}]缺少 current_run_id，无法写入 workflow_run_events"
+            )
+        return run_id
 
     async def _apply_workflow_run_compat(self, session: Session) -> Session:
         session.events = await self._workflow_run_repository.get_events_with_compat(session)
@@ -182,58 +200,24 @@ class DBSessionRepository(SessionRepository):
 
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
-        # 将事件对象转换为JSON格式的数据
-        event_data = event.model_dump(mode="json")
-
-        # 构建更新语句，将会话的events字段更新为原events列表加上新事件数据的新列表
-        # 使用coalesce函数处理events字段为空的情况，如果为空则视为空列表
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(
-                events=func.coalesce(SessionModel.events, cast([], JSONB)) + cast([event_data], JSONB),
-            )
+        # 事件历史以 workflow_run_events 为唯一写入真相源，sessions.events 仅保留兼容读取。
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        run_id = self._require_current_run_id(record=record, session_id=session_id)
+        await self._workflow_run_repository.add_event_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
         )
-        # 执行更新操作
-        result = await self.db_session.execute(stmt)
-
-        # 检查是否有行被更新，如果没有则抛出异常
-        if result.rowcount == 0:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-        run_id = await self._get_current_run_id(session_id=session_id)
-        await self._sync_event_to_workflow_run(session_id=session_id, run_id=run_id, event=event)
 
     async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
         """按事件ID幂等新增事件"""
-        # 这里使用行级锁而不是直接JSONB append，目的是保证“存在性判断+写入”原子化。
-        stmt = (
-            select(SessionModel)
-            .where(SessionModel.id == session_id)
-            .with_for_update()
-        )
-        result = await self.db_session.execute(stmt)
-        record = result.scalar_one_or_none()
-        if not record:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-        # 读取当前事件列表，缺省时按空列表处理。
-        current_events = list(record.events or [])
-        event_id = str(event.id)
-
-        # 幂等判断：只要事件ID已存在就视为已处理，直接返回False。
-        for current_event in current_events:
-            if str(current_event.get("id", "")) == event_id:
-                return False
-
-        # 事件不存在才追加，确保同一event_id不会重复入库。
-        current_events.append(event.model_dump(mode="json"))
-        record.events = current_events
-        await self._sync_event_to_workflow_run(
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        run_id = self._require_current_run_id(record=record, session_id=session_id)
+        return await self._workflow_run_repository.add_event_if_absent(
             session_id=session_id,
-            run_id=record.current_run_id,
+            run_id=run_id,
             event=event,
         )
-        return True
 
     async def add_event_with_snapshot_if_absent(
             self,
@@ -246,51 +230,29 @@ class DBSessionRepository(SessionRepository):
             status: Optional[SessionStatus] = None,
     ) -> bool:
         """按事件ID幂等新增事件，并在同一事务中更新会话投影"""
-        # 与add_event_if_absent一致：使用悲观锁保证并发安全和幂等判断准确性。
-        stmt = (
-            select(SessionModel)
-            .where(SessionModel.id == session_id)
-            .with_for_update()
+        # Context: 事件幂等写入与会话投影更新需要跨多个字段保持一致。
+        # Decision: 同一行锁事务内完成“事件写入 + 投影收敛”。
+        # Trade-off: 锁持有时间略增，但可避免重放场景下历史与投影分叉。
+        # Removal Plan: 若后续拆分为独立投影模型，可改为异步投影并保留幂等主线。
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        run_id = self._require_current_run_id(record=record, session_id=session_id)
+        event_inserted = await self._workflow_run_repository.add_event_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
         )
-        result = await self.db_session.execute(stmt)
-        record = result.scalar_one_or_none()
-        if not record:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-        # 事件幂等判断与投影更新要分离：
-        # 1) 事件历史只允许按event_id写入一次；
-        # 2) 会话投影(status/title/latest)在幂等重放时仍应收敛到最新值。
-        current_events = list(record.events or [])
-        event_id = str(event.id)
-        event_inserted = True
-        for current_event in current_events:
-            if str(current_event.get("id", "")) == event_id:
-                event_inserted = False
-                break
-
-        # 事件不存在才写入历史，保证event_id幂等。
-        if event_inserted:
-            current_events.append(event.model_dump(mode="json"))
-            record.events = current_events
-            await self._sync_event_to_workflow_run(
-                session_id=session_id,
-                run_id=record.current_run_id,
+        if not event_inserted and isinstance(event, PlanEvent):
+            # 对计划事件，幂等重放也应收敛步骤快照，避免异常窗口导致运行步骤缺失。
+            await self._workflow_run_repository.replace_steps_from_plan(
+                run_id=run_id,
+                plan=event.plan,
+            )
+        elif not event_inserted and isinstance(event, StepEvent):
+            # 对步骤事件，幂等重放时也需要补齐步骤快照，避免详情步骤状态落后于事件流。
+            await self._workflow_run_repository.upsert_step_from_event(
+                run_id=run_id,
                 event=event,
             )
-        elif isinstance(event, PlanEvent):
-            # 对计划事件，幂等重放也应收敛步骤快照，避免异常窗口导致运行步骤缺失。
-            if record.current_run_id:
-                await self._workflow_run_repository.replace_steps_from_plan(
-                    run_id=record.current_run_id,
-                    plan=event.plan,
-                )
-        elif isinstance(event, StepEvent):
-            # 对步骤事件，幂等重放时也需要补齐步骤快照，避免详情步骤状态落后于事件流。
-            if record.current_run_id:
-                await self._workflow_run_repository.upsert_step_from_event(
-                    run_id=record.current_run_id,
-                    event=event,
-                )
 
         # 标题属于会话投影的一部分，按调用方意图进行更新。
         if title is not None:

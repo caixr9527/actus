@@ -148,6 +148,12 @@ class AgentService:
         try:
             uow = self._uow_factory()
             async with uow:
+                session = await uow.session.get_by_id(session_id=session_id)
+                if session is None:
+                    return
+                # 已经是0时直接短路，避免无效写入。
+                if int(getattr(session, "unread_message_count", 0) or 0) <= 0:
+                    return
                 await uow.session.update_unread_message_count(session_id, 0)
         except Exception as e:
             logger.warning(f"会话[{session_id}]后台更新未读消息计数失败: {e}")
@@ -229,6 +235,7 @@ class AgentService:
             latest_event_id: Optional[str] = None,
             timestamp: Optional[datetime] = None,
     ) -> AsyncGenerator[BaseEvent, None]:
+        unread_reset_pending = False
         try:
             # 获取会话信息
             async with self._uow_factory() as uow:
@@ -240,6 +247,11 @@ class AgentService:
                     error_key=error_keys.SESSION_NOT_FOUND,
                     error_params={"session_id": session_id},
                 )
+            # Context: 高频事件流会导致“每条事件重置未读数”的写放大。
+            # Decision: 未读数只在首条输出事件重置一次，finally 仅在 pending 时兜底。
+            # Trade-off: 状态收敛略依赖流程标志位，但显著降低无效写入。
+            # Removal Plan: 若后续引入独立未读服务，可迁移为事件驱动批量收敛。
+            unread_reset_pending = int(getattr(session, "unread_message_count", 0) or 0) > 0
 
             # 获取当前会话的任务实例
             task = await self._get_task(session)
@@ -337,9 +349,11 @@ class AgentService:
                 # 消费输出流时做一次幂等补写，用于修复“消息入流成功但DB历史缺失”的情况。
                 await self._repair_output_event_history(session_id=session_id, event=event)
 
-                # 重置未读消息计数
-                async with self._uow_factory() as uow:
-                    await uow.session.update_unread_message_count(session_id=session_id, count=0)
+                # 首条事件到达时重置一次未读数，后续事件不再重复写入。
+                if unread_reset_pending:
+                    async with self._uow_factory() as uow:
+                        await uow.session.update_unread_message_count(session_id=session_id, count=0)
+                    unread_reset_pending = False
 
                 # 返回事件给调用方
                 yield event
@@ -372,11 +386,12 @@ class AgentService:
             # 终止被中断的连接时也会被取消，从而产生ERROR日志并可能污染连接池。
             # 解决方案：将数据库更新操作放到独立的asyncio Task中执行，新Task不受当前
             # cancel scope的影响，可以正常完成数据库操作。
-            try:
-                await asyncio.create_task(self._safe_update_unread_count(session_id))
-            except RuntimeError:
-                # 事件循环已关闭（如应用正在关闭），无法创建后台任务
-                logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
+            if unread_reset_pending:
+                try:
+                    await asyncio.create_task(self._safe_update_unread_count(session_id))
+                except RuntimeError:
+                    # 事件循环已关闭（如应用正在关闭），无法创建后台任务
+                    logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
 
     async def stop_session(self, session_id: str, user_id: str) -> None:
         # 获取指定会话的信息

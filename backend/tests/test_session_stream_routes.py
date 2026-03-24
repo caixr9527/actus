@@ -2,6 +2,8 @@ import asyncio
 import json
 
 from app.domain.models import Session, User
+from app.interfaces.facades.session_stream_facade import SessionStreamFacade
+from app.interfaces.facades import session_stream_facade as session_stream_facade_module
 from app.interfaces.endpoints import session_routes
 
 
@@ -29,12 +31,17 @@ class _BrokenRedisClient:
 
 def test_stream_sessions_fallback_only_pushes_when_snapshot_changes(monkeypatch) -> None:
     service = _FakeSessionService()
+    stream_facade = SessionStreamFacade()
     current_user = User(id="user-1", email="tester@example.com", password="hashed-password")
-    monkeypatch.setattr(session_routes, "SESSION_LIST_FALLBACK_REFRESH_SECONDS", 0.001)
-    monkeypatch.setattr(session_routes, "get_redis_client", lambda: _BrokenRedisClient())
+    monkeypatch.setattr(session_stream_facade_module, "SESSION_LIST_FALLBACK_REFRESH_SECONDS", 0.001)
+    monkeypatch.setattr(session_stream_facade_module, "get_redis_client", lambda: _BrokenRedisClient())
 
     async def _collect_two_events():
-        response = await session_routes.stream_sessions(current_user=current_user, session_service=service)
+        response = await session_routes.stream_sessions(
+            current_user=current_user,
+            session_service=service,
+            session_stream_facade=stream_facade,
+        )
         iterator = response.body_iterator
         first_event = await anext(iterator)
         second_event = await anext(iterator)

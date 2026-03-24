@@ -7,6 +7,7 @@ import { buildSkillDebugItems, type SkillDebugItem } from '@/lib/skill-debug'
 import type { SSEEventData } from '@/lib/api/types'
 import { useI18n } from '@/lib/i18n'
 import type { Translate } from '@/lib/i18n'
+import { pickLatestRuntimeInputPolicySnapshot } from '@/lib/runtime-input-policy'
 
 export interface SkillDebugPanelProps {
   className?: string
@@ -57,6 +58,8 @@ export function SkillDebugPanel({ className, events }: SkillDebugPanelProps) {
   const { locale, t } = useI18n()
   const [expanded, setExpanded] = useState(false)
   const items = useMemo(() => buildSkillDebugItems(events), [events])
+  const runtimeSnapshot = useMemo(() => pickLatestRuntimeInputPolicySnapshot(events), [events])
+  const unsupportedParts = runtimeSnapshot.unsupportedParts
   const reversedItems = useMemo(() => [...items].reverse(), [items])
   const visibleItems = expanded ? reversedItems : reversedItems.slice(0, PREVIEW_COUNT)
   const hiddenCount = reversedItems.length - visibleItems.length
@@ -79,13 +82,32 @@ export function SkillDebugPanel({ className, events }: SkillDebugPanelProps) {
         )}
       </div>
 
-      {items.length === 0 ? (
+      {items.length === 0 && unsupportedParts.length === 0 ? (
         <div className="mt-2 rounded-lg border border-dashed bg-gray-50 px-3 py-3">
           <p className="text-xs text-gray-500">{t('sessionDetail.skillDebugEmpty')}</p>
           <p className="mt-1 text-[11px] text-gray-400">{t('sessionDetail.skillDebugHint')}</p>
         </div>
       ) : (
         <div className="mt-2 flex max-h-64 flex-col gap-2 overflow-y-auto pr-1">
+          {unsupportedParts.length > 0 && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-2.5 py-2">
+              <p className="text-[11px] font-medium text-red-800">{t('sessionDetail.runtimeUnsupportedListTitle')}</p>
+              <div className="mt-1 space-y-1">
+                {unsupportedParts.map((part, index) => (
+                  <div key={`${part.type}-${part.filepath ?? 'na'}-${index}`} className="text-[11px] text-red-800">
+                    <span>{t('sessionDetail.runtimeUnsupportedType', { type: part.type || 'unknown' })}</span>
+                    {part.reason && (
+                      <span className="ml-2">{t('sessionDetail.runtimeUnsupportedReason', { reason: part.reason })}</span>
+                    )}
+                    {part.filepath && (
+                      <div className="text-red-700">{t('sessionDetail.runtimeUnsupportedPath', { path: part.filepath })}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {hiddenCount > 0 && (
             <p className="text-center text-[11px] text-gray-500">
               {t('sessionDetail.skillDebugHiddenCount', { count: hiddenCount })}

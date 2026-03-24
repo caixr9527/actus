@@ -139,8 +139,30 @@ async def execute_step_with_prompt(
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
         on_tool_event: Optional[Callable[[ToolEvent], Optional[Awaitable[None]]]] = None,
+        extra_user_content_parts: Optional[List[Dict[str, Any]]] = None,
+        disallowed_function_names: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。"""
+
+    def _build_user_message() -> Dict[str, Any]:
+        native_parts = [
+            item
+            for item in list(extra_user_content_parts or [])
+            if isinstance(item, dict)
+        ]
+        if len(native_parts) == 0:
+            return {"role": "user", "content": execution_prompt}
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": execution_prompt}, *native_parts],
+        }
+
+    user_message = _build_user_message()
+    blocked_function_names = {
+        str(name or "").strip().lower()
+        for name in list(disallowed_function_names or [])
+        if str(name or "").strip()
+    }
 
     async def _notify_tool_event(event: ToolEvent) -> None:
         if on_tool_event is None:
@@ -154,7 +176,7 @@ async def execute_step_with_prompt(
 
     if not runtime_tools:
         llm_message = await llm.invoke(
-            messages=[{"role": "user", "content": execution_prompt}],
+            messages=[user_message],
             tools=[],
             response_format={"type": "json_object"},
         )
@@ -166,9 +188,15 @@ async def execute_step_with_prompt(
         }, []
 
     available_tools = collect_available_tools(runtime_tools)
+    if blocked_function_names:
+        available_tools = [
+            tool_schema
+            for tool_schema in available_tools
+            if _extract_function_name(tool_schema) not in blocked_function_names
+        ]
     if len(available_tools) == 0:
         llm_message = await llm.invoke(
-            messages=[{"role": "user", "content": execution_prompt}],
+            messages=[user_message],
             tools=[],
             response_format={"type": "json_object"},
         )
@@ -179,7 +207,7 @@ async def execute_step_with_prompt(
             "attachments": normalize_attachments(parsed.get("attachments")),
         }, []
 
-    messages: List[Dict[str, Any]] = [{"role": "user", "content": execution_prompt}]
+    messages: List[Dict[str, Any]] = [user_message]
     emitted_tool_events: List[ToolEvent] = []
     llm_message: Dict[str, Any] = {}
 
@@ -230,7 +258,9 @@ async def execute_step_with_prompt(
         emitted_tool_events.append(calling_event)
         await _notify_tool_event(calling_event)
 
-        if matched_tool is None:
+        if function_name.strip().lower() in blocked_function_names:
+            tool_result = ToolResult(success=False, message=f"工具已禁用: {function_name}")
+        elif matched_tool is None:
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
         else:
             try:

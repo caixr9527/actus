@@ -34,6 +34,7 @@ class EventCompatContext(BaseModel):
     session_id: Optional[str] = None
     run_id: Optional[str] = None
     channel: Optional[str] = None
+    runtime_extensions: Dict[str, Any] = Field(default_factory=dict)
 
 
 class BaseEventData(BaseModel):
@@ -418,6 +419,9 @@ class EventMapper:
                 runtime_context["run_id"] = context.run_id
             if context.channel:
                 runtime_context["channel"] = context.channel
+            if isinstance(context.runtime_extensions, dict):
+                for key, value in context.runtime_extensions.items():
+                    runtime_context[key] = value
         if runtime_context:
             extensions["runtime"] = runtime_context
 
