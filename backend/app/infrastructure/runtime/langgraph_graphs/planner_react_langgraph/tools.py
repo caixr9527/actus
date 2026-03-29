@@ -10,9 +10,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.domain.external import LLM
 from app.domain.models import Step, ToolEvent, ToolEventStatus, ToolResult
+from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.tools import BaseTool
-
-from .parsers import format_attachments_for_prompt, normalize_attachments, safe_parse_json
+from .parsers import normalize_attachments, safe_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -134,69 +134,36 @@ def _parse_tool_call_args(raw_arguments: Any) -> Dict[str, Any]:
 async def execute_step_with_prompt(
         *,
         llm: LLM,
-        execution_prompt: str,
         step: Step,
-        runtime_tools: Optional[List[BaseTool]] = None,
+        runtime_tools: Optional[List[BaseTool]],
         max_tool_iterations: int = 5,
-        on_tool_event: Optional[Callable[[ToolEvent], Optional[Awaitable[None]]]] = None,
-        extra_user_content_parts: Optional[List[Dict[str, Any]]] = None,
-        disallowed_function_names: Optional[List[str]] = None,
+        on_tool_event: Optional[Callable[[ToolEvent], Optional[Awaitable[None]]]],
+        user_content: List[Dict[str, Any]]
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。"""
 
-    def _build_user_message() -> Dict[str, Any]:
-        native_parts = [
-            item
-            for item in list(extra_user_content_parts or [])
-            if isinstance(item, dict)
-        ]
-        if len(native_parts) == 0:
-            return {"role": "user", "content": execution_prompt}
-        return {
-            "role": "user",
-            "content": [{"type": "text", "text": execution_prompt}, *native_parts],
-        }
-
-    user_message = _build_user_message()
-    blocked_function_names = {
-        str(name or "").strip().lower()
-        for name in list(disallowed_function_names or [])
-        if str(name or "").strip()
-    }
+    emitted_tool_events: List[ToolEvent] = []
 
     async def _notify_tool_event(event: ToolEvent) -> None:
         if on_tool_event is None:
             return
         try:
+            emitted_tool_events.append(event)
             maybe_awaitable = on_tool_event(event)
             if inspect.isawaitable(maybe_awaitable):
                 await maybe_awaitable
         except Exception as e:
             logger.warning("LangGraph 投递实时工具事件失败，继续主流程: %s", e)
 
-    if not runtime_tools:
-        llm_message = await llm.invoke(
-            messages=[user_message],
-            tools=[],
-            response_format={"type": "json_object"},
-        )
-        parsed = safe_parse_json(llm_message.get("content"))
-        return {
-            "success": bool(parsed.get("success", True)),
-            "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
-            "attachments": normalize_attachments(parsed.get("attachments")),
-        }, []
-
     available_tools = collect_available_tools(runtime_tools)
-    if blocked_function_names:
-        available_tools = [
-            tool_schema
-            for tool_schema in available_tools
-            if _extract_function_name(tool_schema) not in blocked_function_names
-        ]
+
     if len(available_tools) == 0:
+        logger.info("模型无可用工具，直接返回结果")
         llm_message = await llm.invoke(
-            messages=[user_message],
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT + REACT_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content}
+            ],
             tools=[],
             response_format={"type": "json_object"},
         )
@@ -207,11 +174,15 @@ async def execute_step_with_prompt(
             "attachments": normalize_attachments(parsed.get("attachments")),
         }, []
 
-    messages: List[Dict[str, Any]] = [user_message]
-    emitted_tool_events: List[ToolEvent] = []
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM_PROMPT + REACT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content}
+    ]
+
     llm_message: Dict[str, Any] = {}
 
-    for _ in range(max(1, int(max_tool_iterations))):
+    for index in range(max(1, int(max_tool_iterations))):
+        logger.info("模型执行第 %s 轮工具决策", index)
         llm_message = await llm.invoke(
             messages=messages,
             tools=available_tools,
@@ -219,7 +190,11 @@ async def execute_step_with_prompt(
         )
         tool_calls = llm_message.get("tool_calls") or []
         if len(tool_calls) == 0:
-            break
+            parsed = safe_parse_json(llm_message.get("content"))
+            # 如果模型返回结果为空，则尝试重新执行
+            if parsed.get("success", True) and str(parsed.get("result", "")).strip() == '':
+                logger.warning("模型返回结果为空，尝试重新执行")
+                continue
 
         selected_tool_call = pick_preferred_tool_call(
             tool_calls=[item for item in tool_calls if isinstance(item, dict)],
@@ -255,12 +230,9 @@ async def execute_step_with_prompt(
             function_args=function_args,
             status=ToolEventStatus.CALLING,
         )
-        emitted_tool_events.append(calling_event)
         await _notify_tool_event(calling_event)
 
-        if function_name.strip().lower() in blocked_function_names:
-            tool_result = ToolResult(success=False, message=f"工具已禁用: {function_name}")
-        elif matched_tool is None:
+        if matched_tool is None:
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
         else:
             try:
@@ -280,7 +252,6 @@ async def execute_step_with_prompt(
             function_result=tool_result,
             status=ToolEventStatus.CALLED,
         )
-        emitted_tool_events.append(called_event)
         await _notify_tool_event(called_event)
         messages.append(
             {
@@ -297,20 +268,3 @@ async def execute_step_with_prompt(
         "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
         "attachments": normalize_attachments(parsed.get("attachments")),
     }, emitted_tool_events
-
-
-def build_execution_prompt(
-        *,
-        execution_prompt_template: str,
-        user_message: str,
-        step_description: str,
-        language: str,
-        attachments: List[str],
-) -> str:
-    """基于模板构建单步执行提示词。"""
-    return execution_prompt_template.format(
-        message=user_message,
-        attachments=format_attachments_for_prompt(attachments),
-        language=language,
-        step=step_description,
-    )

@@ -94,28 +94,28 @@ class ToolInvocationState(TypedDict, total=False):
 class PlannerReActLangGraphState(TypedDict, total=False):
     """LangGraph 状态对象（BE-LG-04 契约版本）。"""
 
-    schema_version: str
-    session_id: str
-    run_id: Optional[str]
-    thread_id: str
-    checkpoint_ref_namespace: str
-    checkpoint_ref_id: Optional[str]
-    user_message: str
-    input_parts: List[Dict[str, Any]]
-    plan: Plan
-    current_step_id: Optional[str]
-    execution_count: int
-    max_execution_steps: int
-    last_executed_step: Optional[Step]
-    step_states: List[StepState]
-    human_tasks: Dict[str, HumanTaskState]
-    tool_invocations: Dict[str, ToolInvocationState]
-    graph_metadata: Dict[str, Any]
-    artifact_refs: List[str]
-    audit_events: List[BaseEvent]
-    final_message: str
-    emitted_events: List[BaseEvent]
-    error: Optional[str]
+    schema_version: str  # 状态契约版本号，用于跨版本兼容与迁移判断。
+    session_id: str  # 会话ID，标识当前对话上下文归属。
+    run_id: Optional[str]  # 运行ID，对应 workflow_runs 主记录，可为空（新建前）。
+    thread_id: str  # LangGraph/checkpoint 线程ID，用于恢复同一执行链路。
+    checkpoint_ref_namespace: str  # checkpoint 命名空间，支持多图/多环境隔离。
+    checkpoint_ref_id: Optional[str]  # 最近一次 checkpoint 引用ID，用于断点续跑。
+    user_message: str  # 本轮用户输入的纯文本主消息。
+    input_parts: List[Dict[str, Any]]  # 本轮统一输入片段（text/image/file/audio/video 等）。
+    plan: Plan  # 当前执行计划快照（标题、步骤、状态等）。
+    current_step_id: Optional[str]  # 当前正在执行或即将执行的步骤ID。
+    execution_count: int  # 已执行步骤轮次计数，用于循环收敛与保护。
+    max_execution_steps: int  # 最大允许执行步数，防止无限循环。
+    last_executed_step: Optional[Step]  # 最近一次执行完成的步骤快照，供 replan/summarize 使用。
+    step_states: List[StepState]  # 步骤状态平铺快照，便于投影与查询。
+    human_tasks: Dict[str, HumanTaskState]  # 人机协作任务集合（wait/resume/timeout）。
+    tool_invocations: Dict[str, ToolInvocationState]  # 工具调用轨迹集合（参数、结果、状态）。
+    graph_metadata: Dict[str, Any]  # 图运行元信息（如 input_policy、调试扩展字段）。
+    artifact_refs: List[str]  # 产物引用列表（文件ID、URL、附件引用等）。
+    audit_events: List[BaseEvent]  # 审计事件缓存，仅用于追踪/复盘，不参与决策。
+    final_message: str  # 当前已确定的最终回复候选文本。
+    emitted_events: List[BaseEvent]  # 已发射事件序列，供回放/去重/最终落库。
+    error: Optional[str]  # 图执行错误信息（可选），用于失败态透出与诊断。
 
 
 class GraphStateContractMapper:

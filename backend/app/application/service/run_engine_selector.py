@@ -8,7 +8,7 @@
 import logging
 from typing import Callable
 
-from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine
+from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine, FileStorage
 from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
@@ -23,6 +23,7 @@ def build_run_engine(
         llm: LLM,
         agent_config: AgentConfig,
         session_id: str,
+        file_storage: FileStorage,
         uow_factory: Callable[[], IUnitOfWork],
         json_parser: JSONParser,
         browser: Browser,
@@ -63,6 +64,8 @@ def build_run_engine(
     return LangGraphRunEngine(
         session_id=session_id,
         llm=llm,
+        file_storage=file_storage,
+        user_id=user_id,
         uow_factory=uow_factory,
         runtime_tools=runtime_tools,
         max_tool_iterations=max_tool_iterations,

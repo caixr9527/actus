@@ -91,7 +91,7 @@ def test_model_runtime_resolver_should_parse_multimodal_capabilities() -> None:
             models=[
                 _build_model(
                     "gpt-5.4",
-                    capabilities={"multimodal": True, "supported": ["image", "audio", "text"]},
+                    capabilities={"multimodal": True, "supported": ["image", "audio", "file"]},
                 )
             ],
             default_model_id="gpt-5.4",
@@ -102,10 +102,10 @@ def test_model_runtime_resolver_should_parse_multimodal_capabilities() -> None:
     _, llm_config = asyncio.run(resolver.resolve(session))
 
     assert llm_config.multimodal is True
-    assert llm_config.supported == ["image", "audio", "text"]
+    assert llm_config.supported == ["image", "audio", "file"]
 
 
-def test_model_runtime_resolver_should_fallback_supported_to_text() -> None:
+def test_model_runtime_resolver_should_fallback_supported_to_empty_when_invalid() -> None:
     resolver = ModelRuntimeResolver(
         model_config_service=_FakeModelConfigService(
             models=[
@@ -122,4 +122,4 @@ def test_model_runtime_resolver_should_fallback_supported_to_text() -> None:
     _, llm_config = asyncio.run(resolver.resolve(session))
 
     assert llm_config.multimodal is False
-    assert llm_config.supported == ["text"]
+    assert llm_config.supported == []

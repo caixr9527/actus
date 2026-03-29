@@ -18,4 +18,4 @@ class RuntimeLLMConfig(BaseModel):
     max_tokens: int = Field(default=8192, ge=0)
     # BE-LG-12：模型输入能力声明。
     multimodal: bool = Field(default=False)
-    supported: list[str] = Field(default_factory=lambda: ["text"])
+    supported: list[str] = Field(default_factory=list)

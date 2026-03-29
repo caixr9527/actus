@@ -25,16 +25,16 @@ class _FakeLLM:
         return self._supported
 
 
-def test_normalize_supported_input_types_should_always_include_text() -> None:
-    assert normalize_supported_input_types(["image"]) == ["text", "image"]
-    assert normalize_supported_input_types(["text", "image"]) == ["text", "image"]
-    assert normalize_supported_input_types("audio") == ["text", "audio"]
-    assert normalize_supported_input_types("invalid") == ["text"]
+def test_normalize_supported_input_types_should_keep_only_supported_multimodal_types() -> None:
+    assert normalize_supported_input_types(["image"]) == ["image"]
+    assert normalize_supported_input_types(["image", "text", "file"]) == ["image", "file"]
+    assert normalize_supported_input_types("audio") == ["audio"]
+    assert normalize_supported_input_types("invalid") == []
 
 
-def test_resolve_model_input_policy_should_downgrade_text_file_when_model_not_multimodal() -> None:
+def test_resolve_model_input_policy_should_mark_all_parts_unsupported_when_model_not_multimodal() -> None:
     policy = resolve_model_input_policy(
-        llm=_FakeLLM(multimodal=False, supported=["text"]),
+        llm=_FakeLLM(multimodal=False, supported=["file"]),
         input_parts=[
             {"type": "text", "text": "请读取附件"},
             {
@@ -46,38 +46,41 @@ def test_resolve_model_input_policy_should_downgrade_text_file_when_model_not_mu
             {
                 "type": "image",
                 "filepath": "/home/ubuntu/upload/image.png",
-                "uri": "https://cdn.example.com/image.png",
+                "base64": "ZmFrZS1pbWFnZQ==",
                 "mime_type": "image/png",
             },
         ],
     )
 
-    assert policy["text_attachment_paths"] == ["/home/ubuntu/upload/notes.md"]
     assert policy["native_user_content_parts"] == []
     assert policy["unsupported_parts"] == [
+        {
+            "type": "file",
+            "filepath": "/home/ubuntu/upload/notes.md",
+            "reason": "model_multimodal_disabled",
+        },
         {
             "type": "image",
             "filepath": "/home/ubuntu/upload/image.png",
             "reason": "model_multimodal_disabled",
-        }
+        },
     ]
-    assert policy["inline_text_from_attachments"] is False
 
 
 def test_resolve_model_input_policy_should_map_native_image_when_supported() -> None:
     policy = resolve_model_input_policy(
-        llm=_FakeLLM(multimodal=True, supported=["text", "image"]),
+        llm=_FakeLLM(multimodal=True, supported=["image"]),
         input_parts=[
             {
                 "type": "image",
                 "filepath": "/home/ubuntu/upload/image.png",
-                "uri": "https://cdn.example.com/image.png",
+                "base64": "ZmFrZS1pbWFnZQ==",
                 "mime_type": "image/png",
             },
             {
                 "type": "audio",
                 "filepath": "/home/ubuntu/upload/audio.mp3",
-                "uri": "https://cdn.example.com/audio.mp3",
+                "base64": "ZmFrZS1hdWRpbw==",
                 "mime_type": "audio/mpeg",
             },
         ],
@@ -85,8 +88,9 @@ def test_resolve_model_input_policy_should_map_native_image_when_supported() -> 
 
     assert policy["native_user_content_parts"] == [
         {
-            "type": "image_url",
-            "image_url": {"url": "https://cdn.example.com/image.png"},
+            "type": "image",
+            "base64": "ZmFrZS1pbWFnZQ==",
+            "mime_type": "image/png",
         }
     ]
     assert policy["unsupported_parts"] == [
@@ -96,66 +100,83 @@ def test_resolve_model_input_policy_should_map_native_image_when_supported() -> 
             "reason": "model_supported_not_contains_type",
         }
     ]
-    assert policy["inline_text_from_attachments"] is False
 
 
-def test_resolve_model_input_policy_should_prefer_native_text_file_ref_when_multimodal_enabled() -> None:
+def test_resolve_model_input_policy_should_map_file_ref_to_file_block() -> None:
     policy = resolve_model_input_policy(
-        llm=_FakeLLM(multimodal=True, supported=["text", "image"]),
+        llm=_FakeLLM(multimodal=True, supported=["file"]),
         input_parts=[
             {"type": "text", "text": "请读取文本附件"},
             {
                 "type": "file_ref",
                 "file_id": "file-1",
                 "filepath": "/home/ubuntu/upload/notes.md",
-                "uri": "https://cdn.example.com/notes.md",
+                "base64": "ZmFrZS1maWxl",
                 "mime_type": "text/markdown",
-                "extension": "md",
-                "text_content": "这是一个测试文本附件内容。",
             },
         ],
     )
 
-    assert policy["text_attachment_paths"] == []
     assert len(policy["native_user_content_parts"]) == 1
     native_part = policy["native_user_content_parts"][0]
-    assert native_part["type"] == "text"
-    assert "source: file-1" in native_part["text"]
-    assert "这是一个测试文本附件内容。" in native_part["text"]
+    assert native_part["type"] == "file"
+    assert native_part["base64"] == "ZmFrZS1maWxl"
+    assert native_part["mime_type"] == "text/markdown"
     assert policy["unsupported_parts"] == []
-    assert policy["inline_text_from_attachments"] is True
 
 
-def test_resolve_model_input_policy_should_fallback_to_sandbox_when_text_content_unavailable() -> None:
+def test_resolve_model_input_policy_should_not_fallback_to_sandbox_when_file_not_supported() -> None:
     policy = resolve_model_input_policy(
-        llm=_FakeLLM(multimodal=True, supported=["text", "image"]),
+        llm=_FakeLLM(multimodal=True, supported=["image"]),
         input_parts=[
             {
-                "type": "file_ref",
+                "type": "file",
                 "file_id": "file-1",
                 "filepath": "/home/ubuntu/upload/notes.md",
+                "base64": "ZmFrZS1maWxl",
                 "mime_type": "text/markdown",
                 "extension": "md",
             },
         ],
     )
 
-    assert policy["text_attachment_paths"] == ["/home/ubuntu/upload/notes.md"]
     assert policy["native_user_content_parts"] == []
     assert policy["unsupported_parts"] == [
         {
-            "type": "file_ref",
+            "type": "file",
             "filepath": "/home/ubuntu/upload/notes.md",
-            "reason": "text_content_unavailable_fallback_to_sandbox",
+            "reason": "model_supported_not_contains_type",
         }
     ]
-    assert policy["inline_text_from_attachments"] is False
+
+
+def test_resolve_model_input_policy_should_map_audio_with_base64_when_supported() -> None:
+    policy = resolve_model_input_policy(
+        llm=_FakeLLM(multimodal=True, supported=["audio"]),
+        input_parts=[
+            {
+                "type": "audio",
+                "filepath": "/home/ubuntu/upload/audio.wav",
+                "mime_type": "audio/wav",
+                "base64": "AAAAIGZ0eXBtcDQy",
+            }
+        ],
+    )
+
+    assert policy["native_user_content_parts"] == [
+        {
+            "type": "audio",
+            "base64": "AAAAIGZ0eXBtcDQy",
+            "mime_type": "audio/wav",
+        }
+    ]
+    assert policy["unsupported_parts"] == []
 
 
 def test_execute_step_with_prompt_should_send_multimodal_user_content_when_parts_provided() -> None:
     class _CaptureLLM(_FakeLLM):
         def __init__(self) -> None:
-            super().__init__(multimodal=True, supported=["text", "image"])
+            super().__init__(multimodal=True, supported=["image"])
             self.last_messages = None
 
         async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
@@ -172,8 +193,9 @@ def test_execute_step_with_prompt_should_send_multimodal_user_content_when_parts
             runtime_tools=None,
             extra_user_content_parts=[
                 {
-                    "type": "image_url",
-                    "image_url": {"url": "https://cdn.example.com/image.png"},
+                    "type": "image",
+                    "base64": "ZmFrZS1pbWFnZQ==",
+                    "mime_type": "image/png",
                 }
             ],
         )
@@ -184,8 +206,9 @@ def test_execute_step_with_prompt_should_send_multimodal_user_content_when_parts
     assert first_user_message["role"] == "user"
     assert first_user_message["content"][0] == {"type": "text", "text": "请识别图片内容"}
     assert first_user_message["content"][1] == {
-        "type": "image_url",
-        "image_url": {"url": "https://cdn.example.com/image.png"},
+        "type": "image",
+        "base64": "ZmFrZS1pbWFnZQ==",
+        "mime_type": "image/png",
     }
     assert payload["result"] == "ok"
 
@@ -210,7 +233,7 @@ def test_execute_step_with_prompt_should_block_disallowed_read_file_call() -> No
 
     class _ToolCallLLM(_FakeLLM):
         def __init__(self) -> None:
-            super().__init__(multimodal=True, supported=["text"])
+            super().__init__(multimodal=True, supported=[])
             self.call_index = 0
 
         async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
@@ -288,7 +311,7 @@ def test_execute_step_with_prompt_should_hide_disallowed_tool_from_schema() -> N
 
     class _CaptureToolSchemaLLM(_FakeLLM):
         def __init__(self) -> None:
-            super().__init__(multimodal=True, supported=["text"])
+            super().__init__(multimodal=True, supported=[])
             self.last_tools = None
 
         async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):

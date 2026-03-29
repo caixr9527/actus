@@ -65,7 +65,7 @@ def test_session_service_get_runtime_extensions_should_extract_input_policy_summ
                 "graph_state": {
                     "input_parts": [
                         {"type": "text", "text": "请读取附件"},
-                        {"type": "file_ref", "filepath": "/home/ubuntu/upload/a.md"},
+                        {"type": "file", "filepath": "/home/ubuntu/upload/a.md"},
                         {"type": "image", "filepath": "/home/ubuntu/upload/a.png"},
                     ],
                     "metadata": {
@@ -94,7 +94,7 @@ def test_session_service_get_runtime_extensions_should_extract_input_policy_summ
     assert runtime_extensions["input_part_summary"]["total"] == 3
     assert runtime_extensions["input_part_summary"]["by_type"] == {
         "text": 1,
-        "file_ref": 1,
+        "file": 1,
         "image": 1,
     }
     assert runtime_extensions["unsupported_parts"][0]["reason"] == "model_multimodal_disabled"

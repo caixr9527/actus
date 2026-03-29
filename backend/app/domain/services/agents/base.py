@@ -36,11 +36,6 @@ class BaseAgent(ABC):
     _format: Optional[str] = None  # 输出格式
     _retry_interval: float = 1.0  # 重试间隔
     _tool_choice: Optional[str] = None  # 工具选择策略
-    _TEXT_ATTACHMENT_EXTENSIONS: set[str] = {
-        "txt", "md", "markdown", "csv", "tsv", "json", "yaml", "yml", "xml", "html", "htm",
-        "log", "ini", "cfg", "conf", "toml", "py", "js", "ts", "tsx", "jsx", "java", "c", "cpp",
-        "h", "hpp", "go", "rs", "sql", "sh", "bash", "zsh",
-    }
 
     def __init__(self,
                  session_id: str,
@@ -79,40 +74,13 @@ class BaseAgent(ABC):
 
     @classmethod
     def _extract_attachment_paths_from_message(cls, message: Message) -> List[str]:
-        """提取 legacy 提示词可消费的附件路径（兼容 input_envelope）。"""
+        """提取 legacy 提示词可消费的附件路径。"""
         paths: List[str] = []
         seen: set[str] = set()
 
         for filepath in list(message.attachments or []):
             cls._append_unique_path(paths, seen, filepath)
 
-        parts = list(getattr(message.input_envelope, "parts", []) or [])
-        for part in parts:
-            cls._append_unique_path(paths, seen, str(getattr(part, "filepath", "") or ""))
-
-        return paths
-
-    @classmethod
-    def _extract_text_file_paths_from_envelope(cls, message: Message) -> List[str]:
-        """提取 input_envelope 中可读文本附件路径，供 legacy read_file 提示使用。"""
-        paths: List[str] = []
-        seen: set[str] = set()
-        parts = list(getattr(message.input_envelope, "parts", []) or [])
-        for part in parts:
-            part_type = str(getattr(part, "type", "") or "").strip().lower()
-            if part_type != "file_ref":
-                continue
-
-            filepath = str(getattr(part, "filepath", "") or "").strip()
-            if not filepath:
-                continue
-
-            mime_type = str(getattr(part, "mime_type", "") or "").strip().lower()
-            extension = str(getattr(part, "extension", "") or "").strip().lower().lstrip(".")
-            text_content = str(getattr(part, "text_content", "") or "").strip()
-            is_text_file = bool(text_content) or mime_type.startswith("text/") or extension in cls._TEXT_ATTACHMENT_EXTENSIONS
-            if is_text_file:
-                cls._append_unique_path(paths, seen, filepath)
         return paths
 
     @classmethod
@@ -121,15 +89,7 @@ class BaseAgent(ABC):
         attachment_paths = cls._extract_attachment_paths_from_message(message)
         if not attachment_paths:
             return "(无附件)"
-
-        text_file_paths = cls._extract_text_file_paths_from_envelope(message)
-        lines = list(attachment_paths)
-        if text_file_paths:
-            lines.append("")
-            lines.append("Text Attachment Hint (legacy read_file):")
-            lines.append("- Prefer using read_file for these text file paths:")
-            lines.extend(f"- {filepath}" for filepath in text_file_paths)
-        return "\n".join(lines)
+        return "\n".join(attachment_paths)
 
     def _get_available_tools(self) -> List[Dict[str, Any]]:
         """获取可用的工具列表"""

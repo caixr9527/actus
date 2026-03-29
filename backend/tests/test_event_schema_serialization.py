@@ -92,7 +92,7 @@ def test_event_mapper_should_attach_v2_extensions_with_context() -> None:
             run_id="run-1",
             channel="chat_stream",
             runtime_extensions={
-                "input_part_summary": {"total": 2, "by_type": {"text": 1, "file_ref": 1}},
+                "input_part_summary": {"total": 2, "by_type": {"text": 1, "file": 1}},
                 "downgrade_reason": "model_multimodal_disabled",
                 "unsupported_parts": [{"type": "image", "reason": "model_multimodal_disabled"}],
             },

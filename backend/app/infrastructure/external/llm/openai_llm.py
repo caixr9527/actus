@@ -8,10 +8,11 @@
 import logging
 from typing import Dict, Any, List
 
+from openai import AsyncOpenAI
+
 from app.application.errors.exceptions import ServerError
 from app.domain.external import LLM
 from app.domain.models import RuntimeLLMConfig
-from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,6 @@ class OpenAILLM(LLM):
         self._max_tokens = llm_config.max_tokens
         self._multimodal = bool(llm_config.multimodal)
         self._supported = [str(item) for item in list(llm_config.supported or []) if str(item).strip()]
-        if len(self._supported) == 0:
-            self._supported = ["text"]
         self._timeout = 3600
 
     @property
@@ -58,6 +57,59 @@ class OpenAILLM(LLM):
     def supported(self) -> list[str]:
         """支持的输入类型集合"""
         return list(self._supported)
+
+    async def _image_message_format(self, input_part: Dict[str, Any]) -> Dict[str, Any]:
+        if self.model_name.startswith("Qwen"):
+            return {
+                "type": "image_url",
+                "image_url":
+                    {
+                        "url": input_part.get("file_url")
+                    }
+            }
+        if self.model_name.startswith("Kimi"):
+            image_url = f"data:{input_part.get("mime_type")};base64,{input_part.get("base64_payload")}"
+            return {
+                "type": "image_url",  # <-- 使用 image_url 类型来上传图片，内容为使用 base64 编码过的图片内容
+                "image_url": {
+                    "url": image_url,
+                },
+            }
+
+    async def _video_message_format(self, input_part: Dict[str, Any]) -> Dict[str, Any]:
+        if self.model_name.startswith("Qwen"):
+            return {
+                "type": "video",
+                "video": [
+                    input_part.get("file_url")
+                ]
+            }
+        if self.model_name.startswith("Kimi"):
+            video_url = f"data:{input_part.get("mime_type")};base64,{input_part.get("base64_payload")}"
+            return {
+                "type": "video_url",  # <-- 使用 video_url 类型来上传视频，内容为使用 base64 编码过的视频内容
+                "video_url": {
+                    "url": video_url,
+                },
+            }
+
+    async def _audio_message_format(self, input_part: Dict[str, Any]) -> Dict[str, Any]:
+        if self.model_name.startswith("Qwen"):
+            return {}
+        if self.model_name.startswith("Kimi"):
+            return {}
+
+    async def format_multiplexed_message(self, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        attachments_message: List[Dict[str, Any]] = []
+        for input_part in input_parts:
+            if input_part.get("type") == "image":
+                attachments_message.append(await self._image_message_format(input_part))
+            if input_part.get("type") == "audio":
+                attachments_message.append(await self._audio_message_format(input_part))
+            if input_part.get("type") == "video":
+                attachments_message.append(await self._video_message_format(input_part))
+
+        return attachments_message
 
     @staticmethod
     def _extract_requested_tool_names(tools: list[Dict[str, Any]] | None) -> List[str]:
@@ -105,7 +157,7 @@ class OpenAILLM(LLM):
                      ) -> Dict[str, Any]:
         """调用模型"""
         try:
-            requested_tool_names = self._extract_requested_tool_names(tools)
+            requested_tool_names = []
             if tools:
                 logger.info(
                     "调用模型: model=%s tools_enabled=%s request_tools=%s",
@@ -153,7 +205,7 @@ class OpenAILLM(LLM):
                 self._model_name,
                 str(first_choice.get("finish_reason") or ""),
                 self._extract_tool_call_names(message_dump),
-                self._build_content_preview(message_dump.get("content")),
+                self._build_content_preview(message_dump.get("content"), 2000),
                 {
                     "prompt_tokens": usage_summary.get("prompt_tokens"),
                     "completion_tokens": usage_summary.get("completion_tokens"),

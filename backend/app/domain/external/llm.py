@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : llm.py
 """
-from typing import Protocol, Any, Dict
+from typing import Protocol, Any, Dict, List
 
 
 class LLM(Protocol):
@@ -43,4 +43,8 @@ class LLM(Protocol):
     @property
     def supported(self) -> list[str]:
         """支持的输入类型集合"""
+        ...
+
+    async def format_multiplexed_message(self, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """格式化多模态消息"""
         ...

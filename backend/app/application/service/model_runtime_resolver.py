@@ -7,9 +7,8 @@
 """
 from app.application.errors import ServerError
 from app.application.errors import error_keys
-from app.domain.models.content_part import SUPPORTED_CONTENT_PART_TYPES
-from app.domain.models import Session, RuntimeLLMConfig, LLMModelConfig
 from app.application.service.model_config_service import ModelConfigService
+from app.domain.models import Session, RuntimeLLMConfig, LLMModelConfig
 
 
 class ModelRuntimeResolver:
@@ -45,35 +44,10 @@ class ModelRuntimeResolver:
         return resolved_model.id, self._build_runtime_llm_config(resolved_model)
 
     @staticmethod
-    def _resolve_input_capabilities(model: LLMModelConfig) -> tuple[bool, list[str]]:
-        """解析模型输入能力声明，输出(multimodal, supported)。"""
-        config = model.config or {}
-        raw_capabilities = config.get("capabilities")
-        capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
-
-        multimodal = bool(capabilities.get("multimodal", False))
-        raw_supported = capabilities.get("supported")
-
-        normalized_supported: list[str] = []
-        if isinstance(raw_supported, str):
-            candidate = raw_supported.strip().lower()
-            if candidate in SUPPORTED_CONTENT_PART_TYPES:
-                normalized_supported.append(candidate)
-        elif isinstance(raw_supported, list):
-            for item in raw_supported:
-                candidate = str(item or "").strip().lower()
-                if candidate in SUPPORTED_CONTENT_PART_TYPES and candidate not in normalized_supported:
-                    normalized_supported.append(candidate)
-
-        if "text" not in normalized_supported:
-            normalized_supported.insert(0, "text")
-        return multimodal, normalized_supported
-
-    @staticmethod
     def _build_runtime_llm_config(model: LLMModelConfig) -> RuntimeLLMConfig:
         """把模型目录记录转换为运行时 LLM 配置。"""
         config = model.config or {}
-        multimodal, supported = ModelRuntimeResolver._resolve_input_capabilities(model)
+        capabilities = config.get("capabilities", {})
         try:
             return RuntimeLLMConfig(
                 base_url=model.base_url,
@@ -81,8 +55,8 @@ class ModelRuntimeResolver:
                 model_name=model.model_name,
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 8192),
-                multimodal=multimodal,
-                supported=supported,
+                multimodal=capabilities.get("multimodal", False),
+                supported=capabilities.get("supported", []),
             )
         except Exception as e:
             raise ServerError(

@@ -5,24 +5,27 @@
 @Author : caixiaorong01@outlook.com
 @File   : langgraph_run_engine.py
 """
-import logging
 import asyncio
+import base64
 import json
+import logging
+import mimetypes
 from contextlib import suppress
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 
-from app.domain.external import LLM
-from app.domain.models import BaseEvent, Message
+from app.domain.external import LLM, FileStorage
+from app.domain.models import BaseEvent, Message, File
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
-from app.domain.services.tools import BaseTool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
+from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph_graphs import (
     bind_live_event_sink,
     build_planner_react_langgraph_graph,
     unbind_live_event_sink,
 )
+from app.infrastructure.utils import BaseUtils
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +71,15 @@ class LangGraphRunEngine(RunEngine):
             self,
             session_id: str,
             llm: LLM,
+            file_storage: Optional[FileStorage] = None,
+            user_id: Optional[str] = None,
             uow_factory: Optional[Callable[[], IUnitOfWork]] = None,
             runtime_tools: Optional[List[BaseTool]] = None,
             max_tool_iterations: Optional[int] = None,
     ) -> None:
         self._session_id = session_id
+        self._file_storage = file_storage
+        self._user_id = user_id
         self._uow_factory = uow_factory
         if runtime_tools is None and max_tool_iterations is None:
             self._graph = build_planner_react_langgraph_graph(llm=llm)
@@ -92,6 +99,44 @@ class LangGraphRunEngine(RunEngine):
             else None
         )
 
+    async def _build_input_parts(
+            self,
+            message: Message,
+            uow: Optional[IUnitOfWork] = None,
+    ) -> List[Dict[str, Any]]:
+        """根据 message.attachments 构建输入片段。"""
+        parts: List[Dict[str, Any]] = []
+        attachment_paths = message.attachments or []
+
+        for filepath in attachment_paths:
+            part_type = BaseUtils.resolve_part_type_by_filepath(filepath=filepath)
+            file_record: Optional[File] = await uow.session.get_file_by_path(
+                session_id=self._session_id,
+                filepath=filepath,
+            )
+            if file_record is None:
+                continue
+
+            guessed_mime_type = str(mimetypes.guess_type(filepath)[0] or "").strip()
+            mime_type = file_record.mime_type or guessed_mime_type or "application/octet-stream"
+
+            file_stream, _ = await self._file_storage.download_file(
+                file_id=file_record.id,
+                user_id=self._user_id,
+            )
+
+            bytes_raw, _ = BaseUtils.read_limited_bytes(stream=file_stream)
+
+            part: Dict[str, Any] = {
+                "type": part_type,
+                "base64_payload": base64.b64encode(bytes_raw).decode('utf-8'),
+                "mime_type": mime_type,
+                "file_url": self._file_storage.get_file_url(file=file_record),
+                "sandbox_filepath": filepath,
+            }
+            parts.append(part)
+        return parts
+
     async def _build_graph_input_state(
             self,
             message: Message,
@@ -99,19 +144,11 @@ class LangGraphRunEngine(RunEngine):
             invoke_config: Dict[str, Dict[str, str]],
     ) -> PlannerReActLangGraphState:
         """构建 BE-LG-04 契约化 graph input state。"""
-        if self._uow_factory is None:
-            return {
-                "session_id": self._session_id,
-                "user_message": message.message,
-                "input_parts": message.input_envelope.model_dump(mode="json").get("parts", []),
-                "emitted_events": [],
-            }
 
         configurable = invoke_config.get("configurable") or {}
         thread_id = str(configurable.get("thread_id") or self._session_id)
         checkpoint_namespace = str(configurable.get("checkpoint_ns") or "")
-        checkpoint_id_raw = configurable.get("checkpoint_id")
-        checkpoint_id = str(checkpoint_id_raw) if checkpoint_id_raw else None
+        checkpoint_id = str(configurable.get("checkpoint_id") or None)
 
         try:
             async with self._uow_factory() as uow:
@@ -125,12 +162,13 @@ class LangGraphRunEngine(RunEngine):
                     if resolved_run_id
                     else None
                 )
+                input_parts = await self._build_input_parts(message=message, uow=uow)
 
                 return GraphStateContractMapper.build_initial_state(
                     session=session,
                     run=run,
                     user_message=message.message,
-                    input_parts=message.input_envelope.model_dump(mode="json").get("parts", []),
+                    input_parts=input_parts,
                     thread_id=thread_id,
                     checkpoint_namespace=checkpoint_namespace,
                     checkpoint_id=checkpoint_id,
@@ -145,7 +183,7 @@ class LangGraphRunEngine(RunEngine):
                 "checkpoint_ref_namespace": checkpoint_namespace,
                 "checkpoint_ref_id": checkpoint_id,
                 "user_message": message.message,
-                "input_parts": message.input_envelope.model_dump(mode="json").get("parts", []),
+                "input_parts": input_parts,
                 "emitted_events": [],
             }
 
