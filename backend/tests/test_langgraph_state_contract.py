@@ -54,10 +54,10 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
         thread_id="thread-1",
         checkpoint_namespace="",
         checkpoint_id="cp-1",
-        plan_snapshot=plan.model_dump(mode="json"),
         runtime_metadata={
             "graph_state_contract": {
                 "graph_state": {
+                    "plan": plan.model_dump(mode="json"),
                     "current_step_id": "step-1",
                     "human_tasks": {
                         "wait:1": {
@@ -196,7 +196,7 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
     assert contract["schema_version"] == GRAPH_STATE_CONTRACT_SCHEMA_VERSION
     assert contract["audit"]["event_count"] == len(state["emitted_events"])
     assert contract["graph_state"]["current_step_id"] is None
-    assert "workflow_runs.plan_snapshot" in contract["planes"]["projection_only_fields"]
+    assert contract["planes"]["projection_only_fields"] == ["sessions.title/latest_message/status"]
 
 
 def test_graph_state_contract_should_mark_waiting_task_timeout_when_reference_time_passed() -> None:

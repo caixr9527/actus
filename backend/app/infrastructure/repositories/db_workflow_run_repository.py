@@ -17,7 +17,6 @@ from app.domain.models import (
     ErrorEvent,
     Event,
     ExecutionStatus,
-    File,
     Plan,
     PlanEvent,
     StepEvent,
@@ -47,7 +46,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             user_id=session.user_id,
             thread_id=thread_id or session.id,
             status=status,
-            files_snapshot=list(session.files or []),
             started_at=datetime.now(),
         )
         record = WorkflowRunModel.from_domain(run)
@@ -109,14 +107,7 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         return result.scalar_one_or_none()
 
     async def _resolve_step_index(self, run_record: WorkflowRunModel, step_id: str) -> int:
-        """优先按 plan_snapshot 推断步骤顺序，缺失时回退到当前最大索引+1。"""
-        plan_snapshot = run_record.plan_snapshot if isinstance(run_record.plan_snapshot, dict) else {}
-        raw_steps = plan_snapshot.get("steps") if isinstance(plan_snapshot, dict) else None
-        if isinstance(raw_steps, list):
-            for index, step in enumerate(raw_steps):
-                if isinstance(step, dict) and str(step.get("id", "")) == step_id:
-                    return index
-
+        """步骤顺序统一依赖 step 投影表，缺失时回退到当前最大索引+1。"""
         stmt = select(func.max(WorkflowRunStepModel.step_index)).where(WorkflowRunStepModel.run_id == run_record.id)
         result = await self.db_session.execute(stmt)
         max_index = result.scalar_one_or_none()
@@ -221,7 +212,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         if run_record is None:
             return
 
-        run_record.plan_snapshot = plan.model_dump(mode="json")
         next_step = plan.get_next_step()
         run_record.current_step_id = next_step.id if next_step else None
 
@@ -243,28 +233,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                 )
             )
 
-    async def append_file_snapshot(self, run_id: str, file: File) -> None:
-        run_record = await self._get_record_with_lock(run_id)
-        if run_record is None:
-            return
-
-        current_files = list(run_record.files_snapshot or [])
-        file_data = file.model_dump(mode="json")
-        for current_file in current_files:
-            if str(current_file.get("id", "")) == file.id:
-                return
-        current_files.append(file_data)
-        run_record.files_snapshot = current_files
-
-    async def remove_file_snapshot(self, run_id: str, file_id: str) -> None:
-        run_record = await self._get_record_with_lock(run_id)
-        if run_record is None:
-            return
-        run_record.files_snapshot = [
-            file_data for file_data in list(run_record.files_snapshot or [])
-            if str(file_data.get("id", "")) != file_id
-        ]
-
     async def _list_events_by_run_id(self, run_id: str) -> List[Event]:
         stmt = (
             select(WorkflowRunEventModel)
@@ -281,10 +249,3 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             if run_events:
                 return run_events
         return list(session.events or [])
-
-    async def get_files_with_compat(self, session: Session) -> List[File]:
-        if session.current_run_id:
-            run = await self.get_by_id(session.current_run_id)
-            if run is not None and run.files_snapshot:
-                return list(run.files_snapshot)
-        return list(session.files or [])

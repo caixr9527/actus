@@ -91,7 +91,6 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
     run_record = SimpleNamespace(
         id="run-1",
         current_step_id=None,
-        plan_snapshot={},
     )
     repo._get_record_with_lock = AsyncMock(return_value=run_record)
     repo._get_step_record_with_lock = AsyncMock(return_value=None)
@@ -124,7 +123,6 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     run_record = SimpleNamespace(
         id="run-1",
         current_step_id="step-3",
-        plan_snapshot={},
     )
     existing_step_record = SimpleNamespace(
         step_index=0,

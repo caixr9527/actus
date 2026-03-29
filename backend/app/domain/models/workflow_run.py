@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from .event import Event
-from .file import File
 from .plan import ExecutionStatus
 
 
@@ -37,8 +36,6 @@ class WorkflowRun(BaseModel):
     checkpoint_namespace: Optional[str] = None
     checkpoint_id: Optional[str] = None
     current_step_id: Optional[str] = None
-    plan_snapshot: Dict[str, Any] = Field(default_factory=dict)
-    files_snapshot: List[File] = Field(default_factory=list)
     runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
     started_at: datetime = Field(default_factory=datetime.now)
     finished_at: Optional[datetime] = None

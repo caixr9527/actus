@@ -144,8 +144,6 @@ class GraphStateContractMapper:
 
     # projection plane：只作为查询投影，不进入 graph state。
     PROJECTION_ONLY_FIELDS: tuple[str, ...] = (
-        "workflow_runs.plan_snapshot",
-        "workflow_runs.files_snapshot",
         "sessions.title/latest_message/status",
     )
 
@@ -214,12 +212,18 @@ class GraphStateContractMapper:
             session: Session,
             run: Optional[WorkflowRun],
     ) -> Optional[Plan]:
-        # 优先使用 run 主线中的 plan 快照，保证 durable run 语义优先。
-        if run is not None and run.plan_snapshot:
+        # 优先使用 runtime_metadata 中的 graph_state_contract 计划快照。
+        graph_state = cls._extract_contract_graph_state(run=run)
+        graph_plan = graph_state.get("plan")
+        if isinstance(graph_plan, dict) and graph_plan:
             try:
-                return Plan.model_validate(run.plan_snapshot)
+                return Plan.model_validate(graph_plan)
             except Exception as e:
-                logger.warning("运行[%s]plan_snapshot反序列化失败，回退Session事件中的计划: %s", run.id, e)
+                logger.warning(
+                    "运行[%s]graph_state_contract.plan反序列化失败，回退Session事件中的计划: %s",
+                    run.id if run is not None else "",
+                    e,
+                )
 
         # run 不可用时回退到 session 事件投影。
         latest_plan = session.get_latest_plan()

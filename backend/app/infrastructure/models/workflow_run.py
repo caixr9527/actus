@@ -7,7 +7,7 @@
 """
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from sqlalchemy import (
     String,
@@ -51,16 +51,6 @@ class WorkflowRunModel(Base):
     checkpoint_namespace: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     checkpoint_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     current_step_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    plan_snapshot: Mapped[Dict[str, Any]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'{}'::jsonb"),
-    )
-    files_snapshot: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'[]'::jsonb"),
-    )
     runtime_metadata: Mapped[Dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -91,8 +81,6 @@ class WorkflowRunModel(Base):
             **run.model_dump(
                 mode="python",
                 exclude={
-                    "plan_snapshot",
-                    "files_snapshot",
                     "runtime_metadata",
                     "updated_at",
                     "created_at",
@@ -100,7 +88,7 @@ class WorkflowRunModel(Base):
             ),
             **run.model_dump(
                 mode="json",
-                include={"plan_snapshot", "files_snapshot", "runtime_metadata"},
+                include={"runtime_metadata"},
             ),
         )
 
@@ -111,8 +99,6 @@ class WorkflowRunModel(Base):
         base_data = run.model_dump(
             mode="python",
             exclude={
-                "plan_snapshot",
-                "files_snapshot",
                 "runtime_metadata",
                 "updated_at",
                 "created_at",
@@ -120,7 +106,7 @@ class WorkflowRunModel(Base):
         )
         json_data = run.model_dump(
             mode="json",
-            include={"plan_snapshot", "files_snapshot", "runtime_metadata"},
+            include={"runtime_metadata"},
         )
         for field, value in {**base_data, **json_data}.items():
             setattr(self, field, value)

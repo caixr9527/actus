@@ -63,7 +63,6 @@ class DBSessionRepository(SessionRepository):
 
     async def _apply_workflow_run_compat(self, session: Session) -> Session:
         session.events = await self._workflow_run_repository.get_events_with_compat(session)
-        session.files = await self._workflow_run_repository.get_files_with_compat(session)
         return session
 
     def _register_session_list_changed(self, session_id: str) -> None:
@@ -134,8 +133,9 @@ class DBSessionRepository(SessionRepository):
             return None
 
         # 兼容读取策略：
-        # 1) 优先从 WorkflowRun 读取 events/files/memories；
-        # 2) 若新运行模型数据不存在，则回退 Session 聚合中的旧字段。
+        # 1) 优先从 WorkflowRun 读取 events；
+        # 2) files/memories 继续由 Session 聚合字段承载；
+        # 3) 若新运行模型数据不存在，则回退 Session 聚合中的旧字段。
         session = record.to_domain()
         return await self._apply_workflow_run_compat(session)
 
@@ -299,9 +299,6 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-        run_id = await self._get_current_run_id(session_id=session_id)
-        if run_id:
-            await self._workflow_run_repository.append_file_snapshot(run_id=run_id, file=file)
 
     async def remove_file(self, session_id: str, file_id: str) -> None:
         """移除会话中的指定文件"""
@@ -330,15 +327,10 @@ class DBSessionRepository(SessionRepository):
 
         # 更新会话记录中的文件列表
         record.files = new_files
-        if record.current_run_id:
-            await self._workflow_run_repository.remove_file_snapshot(
-                run_id=record.current_run_id,
-                file_id=file_id,
-            )
 
     async def get_file_by_path(self, session_id: str, filepath: str) -> Optional[File]:
         """根据文件路径获取文件信息"""
-        # 构建查询语句，根据session_id获取会话当前运行与文件快照。
+        # 构建查询语句，根据 session_id 获取会话聚合中的文件列表。
         stmt = select(SessionModel).where(SessionModel.id == session_id)
         # 执行查询操作
         result = await self.db_session.execute(stmt)
@@ -347,14 +339,6 @@ class DBSessionRepository(SessionRepository):
         # 如果会话不存在，返回None
         if record is None:
             return None
-
-        # 兼容读取：优先运行快照文件，回退会话旧文件字段。
-        if record.current_run_id:
-            run = await self._workflow_run_repository.get_by_id(record.current_run_id)
-            if run is not None and run.files_snapshot:
-                for file in run.files_snapshot:
-                    if file.filepath == filepath:
-                        return file
 
         files = record.files or []
         # 遍历文件列表，查找匹配指定文件路径的文件
