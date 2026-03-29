@@ -115,13 +115,13 @@ class ToolRuntimeAdapter:
 
         规则：
         - 先按能力注册表构建本地工具；
-        - 再追加 MCP/A2A（若存在）以兼容 legacy planner-react 现有能力。
+        - 再按上下文追加远端 MCP/A2A 工具，保持统一运行时装配入口。
         """
         context = CapabilityBuildContext(
             sandbox=capability_context.sandbox,
             browser=capability_context.browser,
             search_engine=capability_context.search_engine,
-            # 为兼容旧调用路径：优先使用显式参数，其次使用上下文已有值。
+            # 优先使用显式参数，其次回退到上下文已有值。
             mcp_tool=mcp_tool if mcp_tool is not None else capability_context.mcp_tool,
             a2a_tool=a2a_tool if a2a_tool is not None else capability_context.a2a_tool,
             mcp_config=mcp_config if mcp_config is not None else capability_context.mcp_config,

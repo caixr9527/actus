@@ -149,6 +149,7 @@ class LangGraphRunEngine(RunEngine):
         thread_id = str(configurable.get("thread_id") or self._session_id)
         checkpoint_namespace = str(configurable.get("checkpoint_ns") or "")
         checkpoint_id = str(configurable.get("checkpoint_id") or None)
+        input_parts: List[Dict[str, Any]] = []
 
         try:
             async with self._uow_factory() as uow:
