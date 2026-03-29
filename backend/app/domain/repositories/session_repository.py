@@ -8,7 +8,7 @@
 from datetime import datetime
 from typing import Protocol, List, Optional
 
-from app.domain.models import BaseEvent, File, Memory
+from app.domain.models import BaseEvent, File
 from app.domain.models import Session, SessionStatus
 
 
@@ -93,12 +93,4 @@ class SessionRepository(Protocol):
 
     async def get_file_by_path(self, session_id: str, filepath: str) -> Optional[File]:
         """查询会话中的文件信息"""
-        ...
-
-    async def save_memory(self, session_id: str, agent_name: str, memory: Memory) -> None:
-        """更新or创建会话中指定Agent的记忆"""
-        ...
-
-    async def get_memory(self, session_id: str, agent_name: str) -> Memory:
-        """根据传递的会话id+Agent名字获取记忆"""
         ...

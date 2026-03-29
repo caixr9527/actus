@@ -34,7 +34,6 @@ def test_session_model_to_domain_should_map_current_model_id() -> None:
         latest_message_at=None,
         events=[],
         files=[],
-        memories={},
         status="pending",
         created_at=now,
         updated_at=now,

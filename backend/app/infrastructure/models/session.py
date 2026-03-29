@@ -82,11 +82,6 @@ class SessionModel(Base):
         nullable=False,
         server_default=text("'[]'::jsonb"),
     )
-    memories: Mapped[Dict[str, Any]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'{}'::jsonb"),
-    )  # 会话两个Agent的记忆
     status: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -111,12 +106,12 @@ class SessionModel(Base):
             # 基础字段: 使用BaseModel提供的python字典转换格式
             **session.model_dump(
                 mode="python",
-                exclude={"memories", "files", "events", "updated_at", "created_at"},
+                exclude={"files", "events", "updated_at", "created_at"},
             ),
             # 复杂字段: 使用BaseModel提供的json字典转换格式
             **session.model_dump(
                 mode="json",
-                include={"memories", "files", "events"},
+                include={"files", "events"},
             )
         )
 
@@ -129,13 +124,13 @@ class SessionModel(Base):
         # 基础字段: Python模式
         base_data = session.model_dump(
             mode="python",
-            exclude={"memories", "files", "events", "updated_at", "created_at"},
+            exclude={"files", "events", "updated_at", "created_at"},
         )
 
         # 复杂字段: JSON模式
         json_data = session.model_dump(
             mode="json",
-            include={"memories", "files", "events"},
+            include={"files", "events"},
         )
 
         # 合并更新

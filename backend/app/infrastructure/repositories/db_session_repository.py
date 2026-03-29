@@ -13,7 +13,7 @@ from sqlalchemy import select, delete, update, func, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory, PlanEvent, StepEvent
+from app.domain.models import Session, SessionStatus, BaseEvent, File, PlanEvent, StepEvent
 from app.domain.repositories import SessionRepository
 from app.infrastructure.models import SessionModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
@@ -134,7 +134,7 @@ class DBSessionRepository(SessionRepository):
 
         # 兼容读取策略：
         # 1) 优先从 WorkflowRun 读取 events；
-        # 2) files/memories 继续由 Session 聚合字段承载；
+        # 2) files 继续由 Session 聚合字段承载；
         # 3) 若新运行模型数据不存在，则回退 Session 聚合中的旧字段。
         session = record.to_domain()
         return await self._apply_workflow_run_compat(session)
@@ -420,44 +420,3 @@ class DBSessionRepository(SessionRepository):
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
         self._register_session_list_changed(session_id)
-
-    async def save_memory(self, session_id: str, agent_name: str, memory: Memory) -> None:
-        """存储或者更新会话中的记忆(字典直接覆盖)"""
-
-        # 将记忆对象转换为JSON格式数据
-        memory_data = memory.model_dump(mode="json")
-
-        # 创建补丁数据，以代理名称作为键，记忆数据作为值
-        patch_data = {agent_name: memory_data}
-
-        # 构建更新语句，将会话的记忆字段更新为原记忆字典与新记忆数据的合并
-        # 使用coalesce函数处理memories字段为空的情况，如果为空则视为默认空字典
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(
-                memories=func.coalesce(SessionModel.memories, cast({}, JSONB)) + cast(patch_data, JSONB),
-            )
-        )
-        # 执行更新操作
-        result = await self.db_session.execute(stmt)
-
-        # 检查是否有行被更新，如果没有则抛出异常
-        if result.rowcount == 0:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-    async def get_memory(self, session_id: str, agent_name: str) -> Memory:
-        """获取指定会话的agent记忆信息"""
-        stmt = select(SessionModel).where(SessionModel.id == session_id)
-        # 执行查询操作
-        result = await self.db_session.execute(stmt)
-        record = result.scalar_one_or_none()
-        if record is None:
-            return Memory(messages=[])
-
-        memory_data = (record.memories or {}).get(agent_name)
-        if memory_data:
-            return Memory.model_validate(memory_data)
-
-        # 如果没有找到对应的记忆数据，返回一个空的记忆对象
-        return Memory(messages=[])
