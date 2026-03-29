@@ -82,6 +82,11 @@ class _FakeLiveGraph:
         }
 
 
+class _FakeGraphWithInjectedCheckpointer(_FakeGraph):
+    def __init__(self, checkpointer) -> None:
+        self.checkpointer = checkpointer
+
+
 class _CheckpointTuple:
     def __init__(self, config):
         self.config = config
@@ -781,6 +786,26 @@ def test_langgraph_run_engine_should_not_duplicate_event_when_consumer_mutates_e
     assert len(events) == 2
     assert len(message_events) == 1
     assert any(isinstance(event, DoneEvent) for event in events)
+
+
+def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monkeypatch) -> None:
+    captured_kwargs = {}
+    llm = object()
+
+    def _fake_build_graph(**kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeGraphWithInjectedCheckpointer(kwargs.get("checkpointer"))
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        _fake_build_graph,
+    )
+
+    engine = LangGraphRunEngine(session_id="session-1", llm=llm)
+
+    assert captured_kwargs["llm"] is llm
+    assert captured_kwargs["checkpointer"] is not None
+    assert getattr(engine._graph, "checkpointer", None) is captured_kwargs["checkpointer"]
 
 
 def test_planner_react_langgraph_graph_should_execute_async_nodes_without_coroutine_error() -> None:

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # BE-LG-04 约定版本号。
 # 后续契约发生结构化变更时，必须升级该版本并做兼容迁移策略。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v1"
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v2"
 
 
 class HumanTaskStatus(str, Enum):
@@ -102,6 +102,15 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     checkpoint_ref_id: Optional[str]  # 最近一次 checkpoint 引用ID，用于断点续跑。
     user_message: str  # 本轮用户输入的纯文本主消息。
     input_parts: List[Dict[str, Any]]  # 本轮统一输入片段（text/image/file/audio/video 等）。
+    message_window: List[Dict[str, Any]]  # 线程级消息窗口，仅保留高价值消息摘要。
+    conversation_summary: str  # 被裁剪历史消息的滚动摘要。
+    working_memory: Dict[str, Any]  # 当前线程共享的结构化工作记忆。
+    retrieved_memories: List[Dict[str, Any]]  # 本轮从长期记忆召回的结果快照。
+    pending_memory_writes: List[Dict[str, Any]]  # 待固化的长期记忆候选。
+    planner_local_memory: Dict[str, Any]  # planner/replan 共用的局部工作区。
+    step_local_memory: Dict[str, Any]  # execute_step 局部工作区。
+    summary_local_memory: Dict[str, Any]  # summarize 局部工作区。
+    memory_context_version: Optional[str]  # 本轮记忆上下文版本/签名。
     plan: Plan  # 当前执行计划快照（标题、步骤、状态等）。
     current_step_id: Optional[str]  # 当前正在执行或即将执行的步骤ID。
     execution_count: int  # 已执行步骤轮次计数，用于循环收敛与保护。
@@ -131,10 +140,20 @@ class GraphStateContractMapper:
         "checkpoint_ref_id",
         "user_message",
         "input_parts",
+        "message_window",
+        "conversation_summary",
+        "working_memory",
+        "retrieved_memories",
+        "pending_memory_writes",
+        "planner_local_memory",
+        "step_local_memory",
+        "summary_local_memory",
+        "memory_context_version",
         "plan",
         "current_step_id",
         "execution_count",
         "max_execution_steps",
+        "last_executed_step",
         "step_states",
         "human_tasks",
         "tool_invocations",
@@ -335,6 +354,90 @@ class GraphStateContractMapper:
         return normalized
 
     @classmethod
+    def _normalize_message_window(cls, raw: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(cls._to_json_safe(item))
+        return normalized
+
+    @classmethod
+    def _normalize_dict_memory(cls, raw: Any) -> Dict[str, Any]:
+        if not isinstance(raw, dict):
+            return {}
+        return cls._to_json_safe(raw)
+
+    @classmethod
+    def _normalize_list_memory(cls, raw: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(cls._to_json_safe(item))
+        return normalized
+
+    @staticmethod
+    def _normalize_text(raw: Any) -> str:
+        return str(raw or "")
+
+    @classmethod
+    def _normalize_last_executed_step(cls, raw: Any) -> Optional[Step]:
+        if not isinstance(raw, dict) or not raw:
+            return None
+        try:
+            return Step.model_validate(raw)
+        except Exception:
+            return None
+
+    @classmethod
+    def _append_current_user_message(
+            cls,
+            message_window: List[Dict[str, Any]],
+            user_message: str,
+            input_parts: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        normalized_message = str(user_message or "").strip()
+        if not normalized_message and not input_parts:
+            return list(message_window)
+
+        updated_window = list(message_window)
+        next_message = {
+            "role": "user",
+            "message": user_message,
+            "input_part_count": len(input_parts),
+        }
+        if updated_window:
+            latest_message = dict(updated_window[-1])
+            if (
+                    latest_message.get("role") == next_message["role"]
+                    and latest_message.get("message") == next_message["message"]
+                    and int(latest_message.get("input_part_count") or 0) == next_message["input_part_count"]
+            ):
+                return updated_window
+
+        updated_window.append(next_message)
+        return updated_window
+
+    @staticmethod
+    def _extract_memory_ids(items: List[Dict[str, Any]]) -> List[str]:
+        ids: List[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            memory_id = item.get("id")
+            if memory_id is None:
+                continue
+            memory_id_str = str(memory_id).strip()
+            if memory_id_str:
+                ids.append(memory_id_str)
+        return list(dict.fromkeys(ids))
+
+    @classmethod
     def build_initial_state(
             cls,
             session: Session,
@@ -369,11 +472,30 @@ class GraphStateContractMapper:
             "checkpoint_ref_id": checkpoint_id,
             "user_message": user_message,
             "input_parts": cls._normalize_input_parts(input_parts),
+            "message_window": cls._append_current_user_message(
+                message_window=cls._normalize_message_window(graph_state_from_metadata.get("message_window")),
+                user_message=user_message,
+                input_parts=cls._normalize_input_parts(input_parts),
+            ),
+            "conversation_summary": cls._normalize_text(graph_state_from_metadata.get("conversation_summary")),
+            "working_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("working_memory")),
+            "retrieved_memories": cls._normalize_list_memory(graph_state_from_metadata.get("retrieved_memories")),
+            "pending_memory_writes": cls._normalize_list_memory(graph_state_from_metadata.get("pending_memory_writes")),
+            "planner_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("planner_local_memory")),
+            "step_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("step_local_memory")),
+            "summary_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("summary_local_memory")),
+            "memory_context_version": (
+                str(graph_state_from_metadata.get("memory_context_version"))
+                if graph_state_from_metadata.get("memory_context_version") is not None
+                else None
+            ),
             "plan": plan,
             "current_step_id": current_step_id,
             "execution_count": int(graph_state_from_metadata.get("execution_count") or 0),
             "max_execution_steps": int(graph_state_from_metadata.get("max_execution_steps") or 20),
-            "last_executed_step": None,
+            "last_executed_step": cls._normalize_last_executed_step(
+                graph_state_from_metadata.get("last_executed_step")
+            ),
             "step_states": step_states,
             "human_tasks": cls._normalize_human_tasks(graph_state_from_metadata.get("human_tasks")),
             "tool_invocations": cls._normalize_tool_invocations(graph_state_from_metadata.get("tool_invocations")),
@@ -675,6 +797,15 @@ class GraphStateContractMapper:
         last_event = events[-1] if events else None
 
         return {
+            "memory": {
+                "recall_count": len(state.get("retrieved_memories") or []),
+                "recall_ids": cls._extract_memory_ids(list(state.get("retrieved_memories") or [])),
+                "write_count": len(state.get("pending_memory_writes") or []),
+                "write_ids": cls._extract_memory_ids(list(state.get("pending_memory_writes") or [])),
+                "compacted": bool((state.get("graph_metadata") or {}).get("memory_compacted", False)),
+                "last_compaction_at": (state.get("graph_metadata") or {}).get("memory_last_compaction_at"),
+                "summary_version": state.get("memory_context_version"),
+            },
             "graph_state_contract": {
                 "schema_version": str(
                     state.get("schema_version") or GRAPH_STATE_CONTRACT_SCHEMA_VERSION
@@ -692,9 +823,20 @@ class GraphStateContractMapper:
                     "checkpoint_ref_namespace": state.get("checkpoint_ref_namespace"),
                     "checkpoint_ref_id": state.get("checkpoint_ref_id"),
                     "input_parts": cls._to_json_safe(state.get("input_parts") or []),
+                    "message_window": cls._to_json_safe(state.get("message_window") or []),
+                    "conversation_summary": str(state.get("conversation_summary") or ""),
+                    "working_memory": cls._to_json_safe(state.get("working_memory") or {}),
+                    "retrieved_memories": cls._to_json_safe(state.get("retrieved_memories") or []),
+                    "pending_memory_writes": cls._to_json_safe(state.get("pending_memory_writes") or []),
+                    "planner_local_memory": cls._to_json_safe(state.get("planner_local_memory") or {}),
+                    "step_local_memory": cls._to_json_safe(state.get("step_local_memory") or {}),
+                    "summary_local_memory": cls._to_json_safe(state.get("summary_local_memory") or {}),
+                    "memory_context_version": state.get("memory_context_version"),
+                    "plan": cls._to_json_safe(state.get("plan")),
                     "current_step_id": state.get("current_step_id"),
                     "execution_count": int(state.get("execution_count") or 0),
                     "max_execution_steps": int(state.get("max_execution_steps") or 20),
+                    "last_executed_step": cls._to_json_safe(state.get("last_executed_step")),
                     "step_states": cls._to_json_safe(state.get("step_states") or []),
                     "human_tasks": cls._to_json_safe(state.get("human_tasks") or {}),
                     "tool_invocations": cls._to_json_safe(state.get("tool_invocations") or {}),

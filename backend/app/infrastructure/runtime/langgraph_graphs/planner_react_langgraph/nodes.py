@@ -42,7 +42,7 @@ PLANNER_EXECUTE_STEP_SKILL_ID = "planner_react.execute_step"
 
 
 async def _build_message(llm: LLM, user_message_prompt: str, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if llm.multimodal and input_parts is not None and len(input_parts) > 0:
+    if getattr(llm, "multimodal", False) and input_parts is not None and len(input_parts) > 0:
         multiplexed_message = await llm.format_multiplexed_message(input_parts)
         user_content = [
             {"type": "text", "text": user_message_prompt},

@@ -29,6 +29,11 @@ from app.infrastructure.utils import BaseUtils
 
 logger = logging.getLogger(__name__)
 
+try:
+    from langgraph.checkpoint.memory import InMemorySaver
+except ImportError:  # pragma: no cover - 运行时依赖缺失时的保护逻辑
+    InMemorySaver = None
+
 
 class _EventDeduplicator:
     """基于 event_id + payload signature 的事件去重器。"""
@@ -81,23 +86,47 @@ class LangGraphRunEngine(RunEngine):
         self._file_storage = file_storage
         self._user_id = user_id
         self._uow_factory = uow_factory
-        if runtime_tools is None and max_tool_iterations is None:
-            self._graph = build_planner_react_langgraph_graph(llm=llm)
-        else:
-            try:
-                self._graph = build_planner_react_langgraph_graph(
-                    llm=llm,
-                    runtime_tools=runtime_tools,
-                    max_tool_iterations=max_tool_iterations or 5,
-                )
-            except TypeError:
-                # 兼容测试/历史 monkeypatch 场景：回退到仅传 llm 的构图签名。
-                self._graph = build_planner_react_langgraph_graph(llm=llm)
+        self._checkpointer = self._build_default_checkpointer()
+        self._graph = self._build_graph(
+            llm=llm,
+            runtime_tools=runtime_tools,
+            max_tool_iterations=max_tool_iterations,
+            checkpointer=self._checkpointer,
+        )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
             if uow_factory is not None
             else None
         )
+
+    @staticmethod
+    def _build_default_checkpointer() -> Any:
+        """构建默认 checkpointer；后续可替换为 PostgresSaver 等持久化实现。"""
+        if InMemorySaver is None:
+            return None
+        return InMemorySaver()
+
+    @staticmethod
+    def _build_graph(
+            *,
+            llm: LLM,
+            runtime_tools: Optional[List[BaseTool]],
+            max_tool_iterations: Optional[int],
+            checkpointer: Any,
+    ) -> Any:
+        graph_kwargs: Dict[str, Any] = {
+            "llm": llm,
+            "checkpointer": checkpointer,
+        }
+        if runtime_tools is not None or max_tool_iterations is not None:
+            graph_kwargs["runtime_tools"] = runtime_tools
+            graph_kwargs["max_tool_iterations"] = max_tool_iterations or 5
+
+        try:
+            return build_planner_react_langgraph_graph(**graph_kwargs)
+        except TypeError:
+            # 兼容测试/历史 monkeypatch 场景：回退到仅传 llm 的构图签名。
+            return build_planner_react_langgraph_graph(llm=llm)
 
     async def _build_input_parts(
             self,
@@ -185,6 +214,15 @@ class LangGraphRunEngine(RunEngine):
                 "checkpoint_ref_id": checkpoint_id,
                 "user_message": message.message,
                 "input_parts": input_parts,
+                "message_window": [],
+                "conversation_summary": "",
+                "working_memory": {},
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "planner_local_memory": {},
+                "step_local_memory": {},
+                "summary_local_memory": {},
+                "memory_context_version": None,
                 "emitted_events": [],
             }
 

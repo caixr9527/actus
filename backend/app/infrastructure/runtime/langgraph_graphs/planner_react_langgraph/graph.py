@@ -41,6 +41,7 @@ def build_planner_react_langgraph_graph(
         llm: LLM,
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
+        checkpointer: Optional[Any] = None,
 ) -> Any:
     """构建 LangGraph Planner-ReAct V1 图。"""
     if not LANGGRAPH_AVAILABLE:
@@ -99,4 +100,6 @@ def build_planner_react_langgraph_graph(
     )
     graph.add_edge("summarize", "finalize")
     graph.add_edge("finalize", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    # 默认保留 InMemorySaver 作为测试/开发兜底，生产环境由运行时注入持久化 checkpointer。
+    resolved_checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
+    return graph.compile(checkpointer=resolved_checkpointer)
