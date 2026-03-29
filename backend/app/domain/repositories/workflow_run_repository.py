@@ -69,6 +69,6 @@ class WorkflowRunRepository(Protocol):
         """基于 StepEvent 增量更新运行步骤快照"""
         ...
 
-    async def get_events_with_compat(self, session: Session) -> List[Event]:
-        """按兼容策略读取事件（优先运行事件，回退会话事件）"""
+    async def list_events(self, run_id: Optional[str]) -> List[Event]:
+        """按运行ID读取事件列表；缺少运行ID时返回空列表"""
         ...

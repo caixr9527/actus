@@ -31,11 +31,9 @@ def _build_repository(record, *, event_inserted: bool = True):
 
 
 def test_add_event_if_absent_should_write_only_workflow_run_events() -> None:
-    legacy_events = [{"id": "legacy-1"}]
     record = SimpleNamespace(
         id="session-1",
         current_run_id="run-1",
-        events=list(legacy_events),
     )
     repository, _ = _build_repository(record=record, event_inserted=True)
     event = MessageEvent(id="evt-1", role="assistant", message="hello")
@@ -43,7 +41,6 @@ def test_add_event_if_absent_should_write_only_workflow_run_events() -> None:
     inserted = asyncio.run(repository.add_event_if_absent(session_id="session-1", event=event))
 
     assert inserted is True
-    assert record.events == legacy_events
     repository._workflow_run_repository.add_event_if_absent.assert_awaited_once_with(
         session_id="session-1",
         run_id="run-1",
@@ -60,7 +57,6 @@ def test_add_event_with_snapshot_if_absent_should_reconcile_projection_on_replay
         latest_message_at=None,
         unread_message_count=3,
         status=SessionStatus.PENDING.value,
-        events=[{"id": "legacy-1"}],
     )
     repository, db_session = _build_repository(record=record, event_inserted=False)
     event = StepEvent(
@@ -85,7 +81,6 @@ def test_add_event_with_snapshot_if_absent_should_reconcile_projection_on_replay
     )
 
     assert inserted is False
-    assert record.events == [{"id": "legacy-1"}]
     assert record.title == "new-title"
     assert record.latest_message == "new-message"
     assert record.unread_message_count == 3
@@ -104,7 +99,6 @@ def test_add_event_with_snapshot_if_absent_should_increment_unread_on_first_inse
         latest_message_at=None,
         unread_message_count=0,
         status=SessionStatus.PENDING.value,
-        events=[{"id": "legacy-1"}],
     )
     repository, _ = _build_repository(record=record, event_inserted=True)
     event = MessageEvent(id="evt-2", role="assistant", message="reply")
@@ -119,7 +113,6 @@ def test_add_event_with_snapshot_if_absent_should_increment_unread_on_first_inse
     )
 
     assert inserted is True
-    assert record.events == [{"id": "legacy-1"}]
     assert record.unread_message_count == 1
     assert record.status == SessionStatus.RUNNING.value
 
@@ -128,7 +121,6 @@ def test_add_event_if_absent_should_fail_when_current_run_id_missing() -> None:
     record = SimpleNamespace(
         id="session-3",
         current_run_id=None,
-        events=[],
     )
     repository, _ = _build_repository(record=record, event_inserted=True)
     event = MessageEvent(id="evt-3", role="assistant", message="reply")

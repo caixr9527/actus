@@ -158,35 +158,24 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     assert existing_step_record.attachments == ["file-1"]
 
 
-def test_get_events_with_compat_should_fallback_to_session_events_when_run_events_empty() -> None:
+def test_list_events_should_return_empty_when_run_id_missing() -> None:
     execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
     repo = _build_repo(execute_result)
-    repo._list_events_by_run_id = AsyncMock(return_value=[])
-    session = Session(
-        id="session-1",
-        current_run_id="run-1",
-        events=[MessageEvent(id="legacy-event-1", role="assistant", message="legacy")],
-    )
+    repo._list_events_by_run_id = AsyncMock()
 
-    events = asyncio.run(repo.get_events_with_compat(session=session))
+    events = asyncio.run(repo.list_events(run_id=None))
 
-    assert len(events) == 1
-    assert events[0].id == "legacy-event-1"
-    repo._list_events_by_run_id.assert_awaited_once_with("run-1")
+    assert events == []
+    repo._list_events_by_run_id.assert_not_awaited()
 
 
-def test_get_events_with_compat_should_prefer_workflow_run_events() -> None:
+def test_list_events_should_return_workflow_run_events() -> None:
     execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
     repo = _build_repo(execute_result)
     runtime_event = MessageEvent(id="runtime-event-1", role="assistant", message="runtime")
     repo._list_events_by_run_id = AsyncMock(return_value=[runtime_event])
-    session = Session(
-        id="session-2",
-        current_run_id="run-2",
-        events=[MessageEvent(id="legacy-event-2", role="assistant", message="legacy")],
-    )
 
-    events = asyncio.run(repo.get_events_with_compat(session=session))
+    events = asyncio.run(repo.list_events(run_id="run-2"))
 
     assert len(events) == 1
     assert events[0].id == "runtime-event-1"

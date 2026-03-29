@@ -32,7 +32,6 @@ def test_session_model_to_domain_should_map_current_model_id() -> None:
         unread_message_count=0,
         latest_message="",
         latest_message_at=None,
-        events=[],
         files=[],
         status="pending",
         created_at=now,

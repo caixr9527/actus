@@ -61,8 +61,8 @@ class DBSessionRepository(SessionRepository):
             )
         return run_id
 
-    async def _apply_workflow_run_compat(self, session: Session) -> Session:
-        session.events = await self._workflow_run_repository.get_events_with_compat(session)
+    async def _hydrate_session_events(self, session: Session) -> Session:
+        session.events = await self._workflow_run_repository.list_events(session.current_run_id)
         return session
 
     def _register_session_list_changed(self, session_id: str) -> None:
@@ -132,12 +132,11 @@ class DBSessionRepository(SessionRepository):
         if record is None:
             return None
 
-        # 兼容读取策略：
-        # 1) 优先从 WorkflowRun 读取 events；
-        # 2) files 继续由 Session 聚合字段承载；
-        # 3) 若新运行模型数据不存在，则回退 Session 聚合中的旧字段。
+        # 详情读取策略：
+        # 1) events 统一从 workflow_run_events 聚合；
+        # 2) files 继续由 Session 聚合字段承载。
         session = record.to_domain()
-        return await self._apply_workflow_run_compat(session)
+        return await self._hydrate_session_events(session)
 
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的id删除会话"""
@@ -199,7 +198,7 @@ class DBSessionRepository(SessionRepository):
 
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
-        # 事件历史以 workflow_run_events 为唯一写入真相源，sessions.events 仅保留兼容读取。
+        # 事件历史以 workflow_run_events 为唯一写入真相源。
         record = await self._get_session_record_with_lock(session_id=session_id)
         run_id = self._require_current_run_id(record=record, session_id=session_id)
         await self._workflow_run_repository.add_event_if_absent(

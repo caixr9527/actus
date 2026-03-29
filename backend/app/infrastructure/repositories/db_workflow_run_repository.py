@@ -243,9 +243,7 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         records = result.scalars().all()
         return [record.to_domain().event_payload for record in records]
 
-    async def get_events_with_compat(self, session: Session) -> List[Event]:
-        if session.current_run_id:
-            run_events = await self._list_events_by_run_id(session.current_run_id)
-            if run_events:
-                return run_events
-        return list(session.events or [])
+    async def list_events(self, run_id: Optional[str]) -> List[Event]:
+        if not run_id:
+            return []
+        return await self._list_events_by_run_id(run_id)
