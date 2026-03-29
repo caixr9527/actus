@@ -64,7 +64,6 @@ class DBSessionRepository(SessionRepository):
     async def _apply_workflow_run_compat(self, session: Session) -> Session:
         session.events = await self._workflow_run_repository.get_events_with_compat(session)
         session.files = await self._workflow_run_repository.get_files_with_compat(session)
-        session.memories = await self._workflow_run_repository.get_memories_with_compat(session)
         return session
 
     def _register_session_list_changed(self, session_id: str) -> None:
@@ -462,13 +461,6 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-        run_id = await self._get_current_run_id(session_id=session_id)
-        if run_id:
-            await self._workflow_run_repository.upsert_memory_snapshot(
-                run_id=run_id,
-                agent_name=agent_name,
-                memory=memory,
-            )
 
     async def get_memory(self, session_id: str, agent_name: str) -> Memory:
         """获取指定会话的agent记忆信息"""
@@ -478,12 +470,6 @@ class DBSessionRepository(SessionRepository):
         record = result.scalar_one_or_none()
         if record is None:
             return Memory(messages=[])
-
-        # 兼容读取：优先运行快照，回退会话旧字段。
-        if record.current_run_id:
-            run = await self._workflow_run_repository.get_by_id(record.current_run_id)
-            if run is not None and agent_name in run.memories_snapshot:
-                return run.memories_snapshot[agent_name]
 
         memory_data = (record.memories or {}).get(agent_name)
         if memory_data:

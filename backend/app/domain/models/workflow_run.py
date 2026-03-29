@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field
 
 from .event import Event
 from .file import File
-from .memory import Memory
 from .plan import ExecutionStatus
 
 
@@ -40,7 +39,6 @@ class WorkflowRun(BaseModel):
     current_step_id: Optional[str] = None
     plan_snapshot: Dict[str, Any] = Field(default_factory=dict)
     files_snapshot: List[File] = Field(default_factory=list)
-    memories_snapshot: Dict[str, Memory] = Field(default_factory=dict)
     runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
     started_at: datetime = Field(default_factory=datetime.now)
     finished_at: Optional[datetime] = None
@@ -74,4 +72,3 @@ class WorkflowRunStepRecord(BaseModel):
     attachments: List[str] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=datetime.now)
     created_at: datetime = Field(default_factory=datetime.now)
-

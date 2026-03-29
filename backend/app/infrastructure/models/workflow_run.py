@@ -61,11 +61,6 @@ class WorkflowRunModel(Base):
         nullable=False,
         server_default=text("'[]'::jsonb"),
     )
-    memories_snapshot: Mapped[Dict[str, Any]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'{}'::jsonb"),
-    )
     runtime_metadata: Mapped[Dict[str, Any]] = mapped_column(
         JSONB,
         nullable=False,
@@ -98,7 +93,6 @@ class WorkflowRunModel(Base):
                 exclude={
                     "plan_snapshot",
                     "files_snapshot",
-                    "memories_snapshot",
                     "runtime_metadata",
                     "updated_at",
                     "created_at",
@@ -106,7 +100,7 @@ class WorkflowRunModel(Base):
             ),
             **run.model_dump(
                 mode="json",
-                include={"plan_snapshot", "files_snapshot", "memories_snapshot", "runtime_metadata"},
+                include={"plan_snapshot", "files_snapshot", "runtime_metadata"},
             ),
         )
 
@@ -119,7 +113,6 @@ class WorkflowRunModel(Base):
             exclude={
                 "plan_snapshot",
                 "files_snapshot",
-                "memories_snapshot",
                 "runtime_metadata",
                 "updated_at",
                 "created_at",
@@ -127,8 +120,7 @@ class WorkflowRunModel(Base):
         )
         json_data = run.model_dump(
             mode="json",
-            include={"plan_snapshot", "files_snapshot", "memories_snapshot", "runtime_metadata"},
+            include={"plan_snapshot", "files_snapshot", "runtime_metadata"},
         )
         for field, value in {**base_data, **json_data}.items():
             setattr(self, field, value)
-

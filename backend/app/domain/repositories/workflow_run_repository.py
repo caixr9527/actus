@@ -11,7 +11,6 @@ from app.domain.models import (
     BaseEvent,
     Event,
     File,
-    Memory,
     Plan,
     Session,
     StepEvent,
@@ -79,18 +78,10 @@ class WorkflowRunRepository(Protocol):
         """从运行快照移除文件"""
         ...
 
-    async def upsert_memory_snapshot(self, run_id: str, agent_name: str, memory: Memory) -> None:
-        """更新运行快照中的指定 Agent 记忆"""
-        ...
-
     async def get_events_with_compat(self, session: Session) -> List[Event]:
         """按兼容策略读取事件（优先运行事件，回退会话事件）"""
         ...
 
     async def get_files_with_compat(self, session: Session) -> List[File]:
         """按兼容策略读取文件（优先运行快照，回退会话文件）"""
-        ...
-
-    async def get_memories_with_compat(self, session: Session) -> Dict[str, Memory]:
-        """按兼容策略读取记忆（优先运行快照，回退会话记忆）"""
         ...

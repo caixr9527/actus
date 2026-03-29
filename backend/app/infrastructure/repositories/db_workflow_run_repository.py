@@ -18,7 +18,6 @@ from app.domain.models import (
     Event,
     ExecutionStatus,
     File,
-    Memory,
     Plan,
     PlanEvent,
     StepEvent,
@@ -49,7 +48,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             thread_id=thread_id or session.id,
             status=status,
             files_snapshot=list(session.files or []),
-            memories_snapshot=dict(session.memories or {}),
             started_at=datetime.now(),
         )
         record = WorkflowRunModel.from_domain(run)
@@ -267,15 +265,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             if str(file_data.get("id", "")) != file_id
         ]
 
-    async def upsert_memory_snapshot(self, run_id: str, agent_name: str, memory: Memory) -> None:
-        run_record = await self._get_record_with_lock(run_id)
-        if run_record is None:
-            return
-
-        current_memories = dict(run_record.memories_snapshot or {})
-        current_memories[agent_name] = memory.model_dump(mode="json")
-        run_record.memories_snapshot = current_memories
-
     async def _list_events_by_run_id(self, run_id: str) -> List[Event]:
         stmt = (
             select(WorkflowRunEventModel)
@@ -299,10 +288,3 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             if run is not None and run.files_snapshot:
                 return list(run.files_snapshot)
         return list(session.files or [])
-
-    async def get_memories_with_compat(self, session: Session) -> Dict[str, Memory]:
-        if session.current_run_id:
-            run = await self.get_by_id(session.current_run_id)
-            if run is not None and run.memories_snapshot:
-                return dict(run.memories_snapshot)
-        return dict(session.memories or {})

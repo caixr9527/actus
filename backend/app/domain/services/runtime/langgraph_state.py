@@ -146,7 +146,6 @@ class GraphStateContractMapper:
     PROJECTION_ONLY_FIELDS: tuple[str, ...] = (
         "workflow_runs.plan_snapshot",
         "workflow_runs.files_snapshot",
-        "workflow_runs.memories_snapshot",
         "sessions.title/latest_message/status",
     )
 
