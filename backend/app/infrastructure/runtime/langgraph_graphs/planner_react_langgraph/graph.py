@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.domain.external import LLM
+from app.domain.repositories import LongTermMemoryRepository
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
@@ -32,6 +33,7 @@ def build_planner_react_langgraph_graph(
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
         checkpointer: Optional[Any] = None,
+        long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
 ) -> Any:
     """构建 LangGraph Planner-ReAct V1 图。"""
 
@@ -45,7 +47,10 @@ def build_planner_react_langgraph_graph(
         return await create_or_reuse_plan_node(state, llm)
 
     async def _recall_memory_context(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await recall_memory_context_node(state)
+        return await recall_memory_context_node(
+            state,
+            long_term_memory_repository=long_term_memory_repository,
+        )
 
     async def _execute_step_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await execute_step_node(
@@ -63,7 +68,10 @@ def build_planner_react_langgraph_graph(
         return await summarize_node(state, llm)
 
     async def _consolidate_memory(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await consolidate_memory_node(state)
+        return await consolidate_memory_node(
+            state,
+            long_term_memory_repository=long_term_memory_repository,
+        )
 
     graph = StateGraph(PlannerReActLangGraphState)
     graph.add_node("recall_memory_context", _recall_memory_context)

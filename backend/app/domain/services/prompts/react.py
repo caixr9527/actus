@@ -105,6 +105,18 @@ interface Response {{
   message: string;
   /** 沙箱中生成的、需要交付给用户的文件路径数组 */
   attachments: string[];
+  /** 本轮任务中可以沉淀为会话稳定事实的短句数组；没有则返回空数组 */
+  facts_in_session: string[];
+  /** 本轮明确出现且后续可复用的用户偏好；没有则返回空对象 */
+  user_preferences: Record<string, string | number | boolean>;
+  /** 可直接进入长期记忆仓储的候选；没有则返回空数组 */
+  memory_candidates: Array<{{
+    memory_type: "profile" | "fact" | "instruction";
+    summary: string;
+    content: Record<string, unknown>;
+    tags: string[];
+    confidence: number;
+  }}>;
 }}
 ```
 
@@ -114,6 +126,24 @@ JSON 输出示例：
     "attachments": [
         "/home/ubuntu/report.md",
         "/home/ubuntu/data.csv"
+    ],
+    "facts_in_session": [
+        "当前会话明确要求只关注 backend"
+    ],
+    "user_preferences": {{
+        "language": "zh",
+        "response_style": "concise"
+    }},
+    "memory_candidates": [
+        {{
+            "memory_type": "fact",
+            "summary": "当前会话明确要求只关注 backend",
+            "content": {{
+                "text": "当前会话明确要求只关注 backend"
+            }},
+            "tags": ["backend"],
+            "confidence": 0.8
+        }}
     ]
 }}
 
@@ -122,4 +152,10 @@ JSON 输出示例：
 - 执行轮次: {execution_count}
 - 最近一步结果: {final_message}
 - 计划快照(JSON): {plan_snapshot}
+
+长期记忆提炼要求：
+- `facts_in_session` 只写本轮可复用、表达清晰、后续仍有价值的稳定事实。
+- `user_preferences` 只写用户明确表达或上下文中高度确认的偏好。
+- `memory_candidates` 只保留适合长期记忆的条目；不要把整段原始总结全文直接塞进去。
+- 如果没有可提炼内容，相关字段必须返回空数组或空对象。
 """

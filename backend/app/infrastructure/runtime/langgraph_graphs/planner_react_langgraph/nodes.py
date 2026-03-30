@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Planner-ReAct LangGraph 节点实现。"""
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -11,6 +12,7 @@ from app.domain.models import (
     DoneEvent,
     ExecutionStatus,
     File,
+    LongTermMemory,
     MessageEvent,
     Plan,
     PlanEvent,
@@ -20,6 +22,7 @@ from app.domain.models import (
     TitleEvent,
     ToolEvent,
 )
+from app.domain.repositories import LongTermMemoryRepository
 from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, UPDATE_PLAN_PROMPT, SYSTEM_PROMPT, \
     PLANNER_SYSTEM_PROMPT, SUMMARIZE_PROMPT
 from app.domain.services.runtime import SkillGraphRuntime
@@ -71,6 +74,272 @@ def _build_memory_context_version(state: PlannerReActLangGraphState) -> str:
             str(len(state.get("retrieved_memories") or [])),
         ]
     )
+
+
+def _build_memory_query(state: PlannerReActLangGraphState) -> str:
+    working_memory = _ensure_working_memory(state)
+    parts = [
+        str(state.get("user_message") or "").strip(),
+        str(state.get("conversation_summary") or "").strip(),
+        str(working_memory.get("goal") or "").strip(),
+    ]
+    return " | ".join([item for item in parts if item][:3])
+
+
+def _build_memory_namespace_prefixes(state: PlannerReActLangGraphState) -> List[str]:
+    prefixes: List[str] = []
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    if user_id:
+        prefixes.append(f"user/{user_id}/")
+    if session_id:
+        prefixes.append(f"session/{session_id}/")
+    prefixes.append("agent/planner_react/")
+    return prefixes
+
+
+def _build_memory_dedupe_key(*, namespace: str, memory_type: str, content: Dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "namespace": namespace,
+            "memory_type": memory_type,
+            "content": content,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _normalize_memory_fact_items(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    normalized_items: List[str] = []
+    for item in raw:
+        normalized_text = str(item or "").strip()
+        if normalized_text and normalized_text not in normalized_items:
+            normalized_items.append(normalized_text)
+    return normalized_items
+
+
+def _normalize_memory_preferences(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized_preferences: Dict[str, Any] = {}
+    for key, value in raw.items():
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            normalized_preferences[normalized_key] = value
+            continue
+        if value is None:
+            continue
+        normalized_value = str(value).strip()
+        if normalized_value:
+            normalized_preferences[normalized_key] = normalized_value
+    return normalized_preferences
+
+
+def _build_outcome_fact_text(
+        state: PlannerReActLangGraphState,
+        summary_message: str,
+) -> str:
+    normalized_summary = str(summary_message or "").strip()
+    if normalized_summary:
+        return normalized_summary
+
+    working_memory = _ensure_working_memory(state)
+    decisions = [str(item or "").strip() for item in list(working_memory.get("decisions") or []) if str(item or "").strip()]
+    if len(decisions) > 0:
+        return decisions[-1]
+
+    last_step = state.get("last_executed_step")
+    last_step_result = str(getattr(last_step, "result", "") or "").strip()
+    return last_step_result
+
+
+def _build_outcome_memory_candidate(
+        state: PlannerReActLangGraphState,
+        summary_message: str,
+) -> Optional[Dict[str, Any]]:
+    outcome_text = _build_outcome_fact_text(state, summary_message)
+    if not outcome_text:
+        return None
+
+    session_id = str(state.get("session_id") or "").strip()
+    run_id = str(state.get("run_id") or "").strip()
+    thread_id = str(state.get("thread_id") or "").strip()
+    namespace = f"session/{session_id}/fact"
+    content = {
+        "text": outcome_text[:2000],
+        "source_kind": "task_outcome",
+    }
+    return {
+        "namespace": namespace,
+        "memory_type": "fact",
+        "summary": outcome_text[:120],
+        "content": content,
+        "tags": ["task_outcome"],
+        "source": {
+            "session_id": session_id,
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "stage": "summarize",
+        },
+        "confidence": 0.5,
+        "dedupe_key": _build_memory_dedupe_key(
+            namespace=namespace,
+            memory_type="fact",
+            content=content,
+        ),
+    }
+
+
+def _merge_memory_candidates(
+        current_candidates: List[Dict[str, Any]],
+        new_candidates: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for item in [*current_candidates, *new_candidates]:
+        if not isinstance(item, dict):
+            continue
+        dedupe_key = str(item.get("dedupe_key") or item.get("id") or "").strip()
+        if not dedupe_key:
+            dedupe_key = hashlib.sha1(
+                json.dumps(item, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        merged.append(item)
+    return merged
+
+
+def _build_memory_candidates(state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
+    working_memory = _ensure_working_memory(state)
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    run_id = str(state.get("run_id") or "").strip()
+    thread_id = str(state.get("thread_id") or "").strip()
+    candidates: List[Dict[str, Any]] = []
+
+    user_preferences = dict(working_memory.get("user_preferences") or {})
+    if user_preferences:
+        namespace = f"user/{user_id}/profile" if user_id else f"session/{session_id}/profile"
+        candidates.append(
+            {
+                "namespace": namespace,
+                "memory_type": "profile",
+                "summary": "用户偏好",
+                "content": user_preferences,
+                "tags": list(user_preferences.keys())[:5],
+                "source": {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "stage": "summarize",
+                },
+                "confidence": 0.8,
+                "dedupe_key": _build_memory_dedupe_key(
+                    namespace=namespace,
+                    memory_type="profile",
+                    content=user_preferences,
+                ),
+            }
+        )
+
+    for fact in list(working_memory.get("facts_in_session") or []):
+        normalized_fact = str(fact or "").strip()
+        if not normalized_fact:
+            continue
+        namespace = f"session/{session_id}/fact"
+        content = {"text": normalized_fact}
+        candidates.append(
+            {
+                "namespace": namespace,
+                "memory_type": "fact",
+                "summary": normalized_fact[:120],
+                "content": content,
+                "tags": ["fact"],
+                "source": {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "stage": "summarize",
+                },
+                "confidence": 0.6,
+                "dedupe_key": _build_memory_dedupe_key(
+                    namespace=namespace,
+                    memory_type="fact",
+                    content=content,
+                ),
+            }
+        )
+
+    return candidates
+
+
+def _build_model_memory_candidates(
+        state: PlannerReActLangGraphState,
+        raw_candidates: Any,
+) -> List[Dict[str, Any]]:
+    if not isinstance(raw_candidates, list):
+        return []
+
+    session_id = str(state.get("session_id") or "").strip()
+    run_id = str(state.get("run_id") or "").strip()
+    thread_id = str(state.get("thread_id") or "").strip()
+    user_id = str(state.get("user_id") or "").strip()
+    normalized_candidates: List[Dict[str, Any]] = []
+    for item in raw_candidates:
+        if not isinstance(item, dict):
+            continue
+        memory_type = str(item.get("memory_type") or "fact").strip().lower()
+        if memory_type not in {"profile", "fact", "instruction"}:
+            continue
+        summary = str(item.get("summary") or "").strip()
+        content = item.get("content") if isinstance(item.get("content"), dict) else {}
+        if not summary and not content:
+            continue
+        namespace = str(item.get("namespace") or "").strip()
+        if not namespace:
+            if memory_type == "profile":
+                namespace = f"user/{user_id}/profile" if user_id else f"session/{session_id}/profile"
+            elif memory_type == "instruction":
+                namespace = "agent/planner_react/instruction"
+            else:
+                namespace = f"session/{session_id}/fact"
+        tags = [str(tag).strip() for tag in list(item.get("tags") or []) if str(tag).strip()]
+        confidence_raw = item.get("confidence")
+        try:
+            confidence = float(confidence_raw) if confidence_raw is not None else 0.6
+        except Exception:
+            confidence = 0.6
+        normalized_candidates.append(
+            {
+                "namespace": namespace,
+                "memory_type": memory_type,
+                "summary": summary[:120],
+                "content": content,
+                "tags": tags[:8],
+                "source": {
+                    "session_id": session_id,
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "stage": "summarize",
+                    "source_type": "llm_extract",
+                },
+                "confidence": max(0.0, min(confidence, 1.0)),
+                "dedupe_key": _build_memory_dedupe_key(
+                    namespace=namespace,
+                    memory_type=memory_type,
+                    content=content or {"summary": summary[:120]},
+                ),
+            }
+        )
+    return normalized_candidates
 
 
 def _append_message_window_entry(
@@ -406,7 +675,10 @@ async def execute_step_node(
     }
 
 
-async def recall_memory_context_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+async def recall_memory_context_node(
+        state: PlannerReActLangGraphState,
+        long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
+) -> PlannerReActLangGraphState:
     """统一整理线程级短期记忆，为后续 planner/react 节点提供稳定输入。"""
     plan = state.get("plan")
     working_memory = _ensure_working_memory(state)
@@ -414,16 +686,28 @@ async def recall_memory_context_node(state: PlannerReActLangGraphState) -> Plann
         working_memory["goal"] = str(getattr(plan, "goal", "") or state.get("user_message") or "")
 
     retrieved_memories = list(state.get("retrieved_memories") or [])
+    if long_term_memory_repository is not None:
+        try:
+            recalled_memories = await long_term_memory_repository.search(
+                namespace_prefixes=_build_memory_namespace_prefixes(state),
+                query=_build_memory_query(state),
+                limit=8,
+            )
+            retrieved_memories = [memory.model_dump(mode="json") for memory in recalled_memories]
+        except Exception as e:
+            logger.warning("长期记忆召回失败，回退已有线程态记忆快照: %s", e)
     if not dict(working_memory.get("user_preferences") or {}):
         working_memory["user_preferences"] = _extract_profile_preferences(retrieved_memories)
 
     graph_metadata = dict(state.get("graph_metadata") or {})
     graph_metadata["memory_recall_prepared_at"] = datetime.now().isoformat()
     graph_metadata["memory_recall_count"] = len(retrieved_memories)
+    graph_metadata["memory_recall_namespaces"] = _build_memory_namespace_prefixes(state)
 
     return {
         **state,
         "working_memory": working_memory,
+        "retrieved_memories": retrieved_memories,
         "planner_local_memory": dict(state.get("planner_local_memory") or {}),
         "step_local_memory": dict(state.get("step_local_memory") or {}),
         "summary_local_memory": dict(state.get("summary_local_memory") or {}),
@@ -508,6 +792,12 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     )
     parsed = safe_parse_json(llm_message.get("content"))
     summary_message = str(parsed.get("message") or "")
+    extracted_facts = _normalize_memory_fact_items(parsed.get("facts_in_session"))
+    extracted_preferences = _normalize_memory_preferences(parsed.get("user_preferences"))
+    model_memory_candidates = _build_model_memory_candidates(
+        state=state,
+        raw_candidates=parsed.get("memory_candidates"),
+    )
     # 附件处理
     summary_attachment_refs = merge_attachment_paths(normalize_attachments(parsed.get("attachments")))
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
@@ -519,34 +809,107 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
 
     await emit_live_events(*final_events)
+    working_memory = _ensure_working_memory(state)
+    working_memory["facts_in_session"] = list(working_memory.get("facts_in_session") or [])
+    for fact in extracted_facts:
+        working_memory["facts_in_session"] = _append_unique_text_item(
+            list(working_memory.get("facts_in_session") or []),
+            fact,
+        )
+    if extracted_preferences:
+        merged_preferences = dict(working_memory.get("user_preferences") or {})
+        merged_preferences.update(extracted_preferences)
+        working_memory["user_preferences"] = merged_preferences
+
     summary_local_memory = dict(state.get("summary_local_memory") or {})
     summary_local_memory["answer_outline"] = summary_message
     summary_local_memory["selected_artifacts"] = summary_attachment_refs
+    next_state_for_memory: PlannerReActLangGraphState = {
+        **state,
+        "working_memory": working_memory,
+        "final_message": summary_message,
+    }
+    memory_candidates = _build_memory_candidates(next_state_for_memory)
+    if len(memory_candidates) == 0:
+        outcome_candidate = _build_outcome_memory_candidate(
+            next_state_for_memory,
+            summary_message=summary_message,
+        )
+        if outcome_candidate is not None:
+            memory_candidates = [outcome_candidate]
+    memory_candidates = _merge_memory_candidates(memory_candidates, model_memory_candidates)
+    if len(model_memory_candidates) > 0:
+        summary_local_memory["memory_candidates_reason"] = "基于总结阶段的结构化提炼生成长期记忆候选"
+    elif extracted_facts or extracted_preferences:
+        summary_local_memory["memory_candidates_reason"] = "从总结阶段提炼出的稳定事实与偏好生成长期记忆候选"
+    elif len(memory_candidates) > 0:
+        summary_local_memory["memory_candidates_reason"] = "使用本轮任务结果生成保守的会话级长期记忆候选"
+    else:
+        summary_local_memory["memory_candidates_reason"] = ""
     return {
         **state,
         "plan": plan,
         "current_step_id": None,
         "final_message": summary_message,
+        "working_memory": working_memory,
+        "pending_memory_writes": _merge_memory_candidates(
+            list(state.get("pending_memory_writes") or []),
+            memory_candidates,
+        ),
         "summary_local_memory": summary_local_memory,
         "emitted_events": append_events(state.get("emitted_events"), *final_events),
     }
 
 
-async def consolidate_memory_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+async def consolidate_memory_node(
+        state: PlannerReActLangGraphState,
+        long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
+) -> PlannerReActLangGraphState:
     """统一收敛线程级短期记忆，压缩消息窗口并记录压缩元数据。"""
+    # 获取并初始化摘要本地记忆
     summary_local_memory = dict(state.get("summary_local_memory") or {})
+    
+    # 将最终消息和选中的附件添加到消息窗口中
     message_window = _append_message_window_entry(
         list(state.get("message_window") or []),
         role="assistant",
         message=str(state.get("final_message") or ""),
         attachments=list(summary_local_memory.get("selected_artifacts") or []),
     )
+    
+    # 压缩消息窗口，防止超出最大长度限制
     compacted_message_window = _compact_message_window(message_window)
+    
+    # 更新图元数据，记录记忆压缩相关信息
     graph_metadata = dict(state.get("graph_metadata") or {})
     graph_metadata["memory_compacted"] = True
     graph_metadata["memory_last_compaction_at"] = datetime.now().isoformat()
     graph_metadata["memory_message_window_size"] = len(compacted_message_window)
 
+    # 处理待写入的长期记忆候选项
+    pending_memory_writes = list(state.get("pending_memory_writes") or [])
+    remaining_memory_writes: List[Dict[str, Any]] = []
+    persisted_memory_ids: List[str] = []
+    
+    if long_term_memory_repository is None:
+        # 若未提供长期记忆仓库，则跳过写入，保留候选项供后续重试
+        graph_metadata["memory_write_skipped"] = len(pending_memory_writes) > 0
+        remaining_memory_writes = pending_memory_writes
+    else:
+        # 遍历所有待写入的记忆候选项，尝试持久化
+        for item in pending_memory_writes:
+            try:
+                memory = LongTermMemory.model_validate(item)
+                persisted_memory = await long_term_memory_repository.upsert(memory)
+                persisted_memory_ids.append(persisted_memory.id)
+            except Exception as e:
+                logger.warning("长期记忆写入失败，保留候选待后续重试：%s", e)
+                if isinstance(item, dict):
+                    remaining_memory_writes.append(item)
+        graph_metadata["memory_write_count"] = len(persisted_memory_ids)
+        graph_metadata["memory_write_ids"] = persisted_memory_ids
+
+    # 构建下一个状态对象，更新消息窗口、对话摘要、清理临时记忆并保留未成功写入的记忆候选
     next_state: PlannerReActLangGraphState = {
         **state,
         "message_window": compacted_message_window,
@@ -556,6 +919,7 @@ async def consolidate_memory_node(state: PlannerReActLangGraphState) -> PlannerR
                 "message_window": compacted_message_window,
             }
         ),
+        "pending_memory_writes": remaining_memory_writes,
         "planner_local_memory": {},
         "step_local_memory": {},
         "summary_local_memory": {},

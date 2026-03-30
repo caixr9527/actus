@@ -8,6 +8,7 @@
 from .base import Base
 from .file import FileModel
 from .llm_model_config import LLMModelConfigModel
+from .long_term_memory import LongTermMemoryModel
 from .session import SessionModel
 from .user import UserModel
 from .user_profile import UserProfileModel
@@ -22,6 +23,7 @@ __all__ = [
     "UserModel",
     "UserProfileModel",
     "LLMModelConfigModel",
+    "LongTermMemoryModel",
     "WorkflowRunModel",
     "WorkflowRunEventModel",
     "WorkflowRunStepModel",

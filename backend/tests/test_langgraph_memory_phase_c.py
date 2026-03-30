@@ -1,0 +1,436 @@
+import asyncio
+import json
+
+from app.domain.models import ExecutionStatus, LongTermMemory, Plan, Step
+from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import (
+    build_planner_react_langgraph_graph,
+)
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+    consolidate_memory_node,
+    recall_memory_context_node,
+    summarize_node,
+)
+
+
+class _FakeLongTermMemoryRepository:
+    def __init__(self, search_results=None) -> None:
+        self.search_results = list(search_results or [])
+        self.search_calls = []
+        self.upserted = []
+
+    async def search(
+            self,
+            *,
+            namespace_prefixes,
+            query="",
+            limit=10,
+            memory_types=None,
+            tags=None,
+    ):
+        self.search_calls.append(
+            {
+                "namespace_prefixes": list(namespace_prefixes),
+                "query": query,
+                "limit": limit,
+                "memory_types": list(memory_types or []),
+                "tags": list(tags or []),
+            }
+        )
+        return list(self.search_results)
+
+    async def upsert(self, memory: LongTermMemory) -> LongTermMemory:
+        persisted = memory.model_copy(
+            update={
+                "id": memory.id or f"mem-{len(self.upserted) + 1}",
+            }
+        )
+        self.upserted.append(persisted)
+        return persisted
+
+
+class _FakeLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "最终总结",
+                    "attachments": [],
+                    "facts_in_session": [],
+                    "user_preferences": {},
+                    "memory_candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _FakeStructuredMemoryLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "任务完成，后续都只需要关注 backend 并保持中文简洁回复。",
+                    "attachments": [],
+                    "facts_in_session": ["当前任务后续都只需要关注 backend"],
+                    "user_preferences": {"language": "zh", "response_style": "concise"},
+                    "memory_candidates": [
+                        {
+                            "memory_type": "instruction",
+                            "summary": "后续任务只关注 backend",
+                            "content": {"text": "后续任务只关注 backend"},
+                            "tags": ["backend"],
+                            "confidence": 0.85,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+def _build_plan(*, step_status: ExecutionStatus = ExecutionStatus.COMPLETED) -> Plan:
+    return Plan(
+        title="记忆阶段测试",
+        goal="验证长期记忆边界",
+        language="zh",
+        message="开始执行",
+        steps=[
+            Step(
+                id="step-1",
+                description="执行阶段",
+                status=step_status,
+                success=step_status == ExecutionStatus.COMPLETED,
+                result="步骤完成" if step_status == ExecutionStatus.COMPLETED else None,
+            )
+        ],
+        status=ExecutionStatus.PENDING,
+    )
+
+
+def test_recall_memory_context_node_should_search_long_term_memory() -> None:
+    repository = _FakeLongTermMemoryRepository(
+        search_results=[
+            LongTermMemory(
+                id="mem-1",
+                namespace="user/user-1/profile",
+                memory_type="profile",
+                summary="用户偏好中文",
+                content={"language": "zh", "style": "concise"},
+            )
+        ]
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "thread_id": "thread-1",
+        "user_message": "帮我整理长期记忆",
+        "conversation_summary": "用户之前一直要求中文简洁回复",
+        "working_memory": {},
+        "graph_metadata": {},
+    }
+
+    next_state = asyncio.run(
+        recall_memory_context_node(
+            state,
+            long_term_memory_repository=repository,
+        )
+    )
+
+    assert repository.search_calls[0]["namespace_prefixes"] == [
+        "user/user-1/",
+        "session/session-1/",
+        "agent/planner_react/",
+    ]
+    assert "帮我整理长期记忆" in repository.search_calls[0]["query"]
+    assert next_state["retrieved_memories"][0]["id"] == "mem-1"
+    assert next_state["working_memory"]["user_preferences"] == {
+        "language": "zh",
+        "style": "concise",
+    }
+    assert next_state["graph_metadata"]["memory_recall_count"] == 1
+
+
+def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates() -> None:
+    repository = _FakeLongTermMemoryRepository()
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "帮我完成总结",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证长期记忆边界",
+            "user_preferences": {"language": "zh"},
+            "facts_in_session": ["本会话只关注 backend"],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [
+            {"role": "user", "message": "帮我完成总结", "attachment_paths": []},
+        ],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert len(summarized_state["pending_memory_writes"]) == 2
+    assert summarized_state["summary_local_memory"]["memory_candidates_reason"] != ""
+
+    consolidated_state = asyncio.run(
+        consolidate_memory_node(
+            summarized_state,
+            long_term_memory_repository=repository,
+        )
+    )
+
+    assert len(repository.upserted) == 2
+    assert {item.memory_type for item in repository.upserted} == {"profile", "fact"}
+    assert consolidated_state["pending_memory_writes"] == []
+    assert consolidated_state["graph_metadata"]["memory_write_count"] == 2
+    assert len(consolidated_state["graph_metadata"]["memory_write_ids"]) == 2
+    assert consolidated_state["summary_local_memory"] == {}
+
+
+def test_summarize_should_generate_candidates_from_structured_extraction_when_working_memory_empty() -> None:
+    llm = _FakeStructuredMemoryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "后续任务只看 backend，并用中文简洁回复",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证长期记忆提炼",
+            "decisions": ["已经完成分析并准备总结"],
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["working_memory"]["facts_in_session"] == [
+        "当前任务后续都只需要关注 backend"
+    ]
+    assert summarized_state["working_memory"]["user_preferences"] == {
+        "language": "zh",
+        "response_style": "concise",
+    }
+    assert len(summarized_state["pending_memory_writes"]) == 3
+    assert {item["memory_type"] for item in summarized_state["pending_memory_writes"]} == {
+        "profile",
+        "fact",
+        "instruction",
+    }
+    assert summarized_state["summary_local_memory"]["memory_candidates_reason"] != ""
+
+
+def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_memory_available() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "帮我完成任务",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证兜底候选生成",
+            "decisions": ["已经完成任务并准备输出最终结果"],
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert len(summarized_state["pending_memory_writes"]) == 1
+    assert summarized_state["pending_memory_writes"][0]["memory_type"] == "fact"
+    assert summarized_state["pending_memory_writes"][0]["tags"] == ["task_outcome"]
+
+
+def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(monkeypatch) -> None:
+    repository = _FakeLongTermMemoryRepository()
+
+    def _append_trace(state: dict, marker: str) -> dict:
+        graph_metadata = dict(state.get("graph_metadata") or {})
+        trace = list(graph_metadata.get("trace") or [])
+        trace.append(marker)
+        graph_metadata["trace"] = trace
+        return {
+            **state,
+            "graph_metadata": graph_metadata,
+        }
+
+    async def _recall(state, long_term_memory_repository=None):
+        assert long_term_memory_repository is repository
+        return _append_trace(state, "recall")
+
+    async def _plan(state, _llm):
+        plan = _build_plan(step_status=ExecutionStatus.PENDING)
+        next_state = _append_trace(state, "plan")
+        return {
+            **next_state,
+            "plan": plan,
+            "current_step_id": "step-1",
+        }
+
+    async def _execute(state, _llm, skill_runtime=None, runtime_tools=None, max_tool_iterations=5):
+        plan = state["plan"].model_copy(deep=True)
+        plan.steps[0].status = ExecutionStatus.COMPLETED
+        plan.steps[0].success = True
+        plan.steps[0].result = "步骤执行完成"
+        next_state = _append_trace(state, "execute")
+        return {
+            **next_state,
+            "plan": plan,
+            "last_executed_step": plan.steps[0].model_copy(deep=True),
+            "current_step_id": None,
+        }
+
+    async def _replan(state, _llm):
+        next_state = _append_trace(state, "replan")
+        return {
+            **next_state,
+            "plan": state["plan"],
+            "current_step_id": None,
+        }
+
+    async def _summarize(state, _llm):
+        next_state = _append_trace(state, "summarize")
+        return {
+            **next_state,
+            "final_message": "最终总结",
+        }
+
+    async def _consolidate(state, long_term_memory_repository=None):
+        assert long_term_memory_repository is repository
+        return _append_trace(state, "consolidate")
+
+    async def _finalize(state):
+        return _append_trace(state, "finalize")
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.recall_memory_context_node",
+        _recall,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.create_or_reuse_plan_node",
+        _plan,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.execute_step_node",
+        _execute,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.replan_node",
+        _replan,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.summarize_node",
+        _summarize,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.consolidate_memory_node",
+        _consolidate,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.finalize_node",
+        _finalize,
+    )
+
+    graph = build_planner_react_langgraph_graph(
+        llm=object(),
+        long_term_memory_repository=repository,
+    )
+
+    async def _invoke():
+        return await graph.ainvoke(
+            {
+                "session_id": "session-1",
+                "user_message": "帮我整理记忆",
+                "graph_metadata": {},
+            },
+            config={"configurable": {"thread_id": "session-1"}},
+        )
+
+    state = asyncio.run(_invoke())
+
+    assert state["graph_metadata"]["trace"] == [
+        "recall",
+        "plan",
+        "execute",
+        "replan",
+        "summarize",
+        "consolidate",
+        "finalize",
+    ]
+
+
+def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> None:
+    state = {
+        "schema_version": "be-lg-04.v3",
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "retrieved_memories": [],
+        "pending_memory_writes": [],
+        "graph_metadata": {"memory_write_count": 2, "memory_write_ids": ["mem-1", "mem-2"]},
+        "message_window": [],
+        "conversation_summary": "",
+        "working_memory": {},
+        "planner_local_memory": {},
+        "step_local_memory": {},
+        "summary_local_memory": {},
+        "memory_context_version": "ctx-v3",
+        "execution_count": 0,
+        "max_execution_steps": 20,
+        "step_states": [],
+        "human_tasks": {},
+        "tool_invocations": {},
+        "artifact_refs": [],
+        "emitted_events": [],
+    }
+
+    runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
+
+    assert runtime_metadata["graph_state_contract"]["graph_state"]["user_id"] == "user-1"
+    assert runtime_metadata["memory"]["persisted_write_count"] == 2
+    assert runtime_metadata["memory"]["persisted_write_ids"] == ["mem-1", "mem-2"]

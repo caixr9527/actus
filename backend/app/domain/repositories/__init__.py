@@ -8,6 +8,7 @@
 from .app_config_repository import AppConfigRepository
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
+from .long_term_memory_repository import LongTermMemoryRepository
 from .session_repository import SessionRepository
 from .uow import IUnitOfWork
 from .user_repository import UserRepository
@@ -18,6 +19,7 @@ __all__ = [
     "SessionRepository",
     "FileRepository",
     "LLMModelConfigRepository",
+    "LongTermMemoryRepository",
     "UserRepository",
     "WorkflowRunRepository",
     "IUnitOfWork",

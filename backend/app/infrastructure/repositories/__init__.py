@@ -7,6 +7,7 @@
 """
 from .db_file_repository import DBFileRepository
 from .db_llm_model_config_repository import DBLLMModelConfigRepository
+from .db_long_term_memory_repository import DBLongTermMemoryRepository
 from .db_session_repository import DBSessionRepository
 from .db_uow import DBUnitOfWork
 from .db_user_repository import DBUserRepository
@@ -17,6 +18,7 @@ __all__ = [
     "FileAppConfigRepository",
     "DBFileRepository",
     "DBLLMModelConfigRepository",
+    "DBLongTermMemoryRepository",
     "DBSessionRepository",
     "DBUserRepository",
     "DBWorkflowRunRepository",

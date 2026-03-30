@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # BE-LG-04 约定版本号。
 # 后续契约发生结构化变更时，必须升级该版本并做兼容迁移策略。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v2"
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v3"
 
 
 class HumanTaskStatus(str, Enum):
@@ -96,6 +96,7 @@ class PlannerReActLangGraphState(TypedDict, total=False):
 
     schema_version: str  # 状态契约版本号，用于跨版本兼容与迁移判断。
     session_id: str  # 会话ID，标识当前对话上下文归属。
+    user_id: Optional[str]  # 当前线程归属用户ID，供长期记忆命名空间使用。
     run_id: Optional[str]  # 运行ID，对应 workflow_runs 主记录，可为空（新建前）。
     thread_id: str  # LangGraph/checkpoint 线程ID，用于恢复同一执行链路。
     checkpoint_ref_namespace: str  # checkpoint 命名空间，支持多图/多环境隔离。
@@ -134,6 +135,7 @@ class GraphStateContractMapper:
     GRAPH_STATE_FIELDS: tuple[str, ...] = (
         "schema_version",
         "session_id",
+        "user_id",
         "run_id",
         "thread_id",
         "checkpoint_ref_namespace",
@@ -466,6 +468,11 @@ class GraphStateContractMapper:
         state: PlannerReActLangGraphState = {
             "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
             "session_id": session.id,
+            "user_id": (
+                run.user_id
+                if run is not None and run.user_id is not None
+                else session.user_id
+            ),
             "run_id": run.id if run is not None else session.current_run_id,
             "thread_id": thread_id,
             "checkpoint_ref_namespace": checkpoint_namespace,
@@ -805,6 +812,10 @@ class GraphStateContractMapper:
                 "compacted": bool((state.get("graph_metadata") or {}).get("memory_compacted", False)),
                 "last_compaction_at": (state.get("graph_metadata") or {}).get("memory_last_compaction_at"),
                 "summary_version": state.get("memory_context_version"),
+                "persisted_write_count": int((state.get("graph_metadata") or {}).get("memory_write_count") or 0),
+                "persisted_write_ids": cls._to_json_safe(
+                    (state.get("graph_metadata") or {}).get("memory_write_ids") or []
+                ),
             },
             "graph_state_contract": {
                 "schema_version": str(
@@ -818,6 +829,7 @@ class GraphStateContractMapper:
                 },
                 "graph_state": {
                     "session_id": state.get("session_id"),
+                    "user_id": state.get("user_id"),
                     "run_id": state.get("run_id"),
                     "thread_id": state.get("thread_id"),
                     "checkpoint_ref_namespace": state.get("checkpoint_ref_namespace"),

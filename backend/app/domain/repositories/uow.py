@@ -10,6 +10,7 @@ from typing import TypeVar
 
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
+from .long_term_memory_repository import LongTermMemoryRepository
 from .session_repository import SessionRepository
 from .user_repository import UserRepository
 from .workflow_run_repository import WorkflowRunRepository
@@ -23,6 +24,7 @@ class IUnitOfWork(ABC):
     session: SessionRepository
     user: UserRepository
     llm_model_config: LLMModelConfigRepository
+    long_term_memory: LongTermMemoryRepository
     workflow_run: WorkflowRunRepository
 
     @abstractmethod

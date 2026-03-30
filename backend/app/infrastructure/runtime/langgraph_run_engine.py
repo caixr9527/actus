@@ -20,6 +20,7 @@ from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
+from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.runtime.langgraph_graphs import (
     bind_live_event_sink,
     build_planner_react_langgraph_graph,
@@ -87,11 +88,17 @@ class LangGraphRunEngine(RunEngine):
         self._user_id = user_id
         self._uow_factory = uow_factory
         self._checkpointer = self._build_default_checkpointer()
+        self._long_term_memory_repository = (
+            LangGraphLongTermMemoryRepository(uow_factory=uow_factory)
+            if uow_factory is not None
+            else None
+        )
         self._graph = self._build_graph(
             llm=llm,
             runtime_tools=runtime_tools,
             max_tool_iterations=max_tool_iterations,
             checkpointer=self._checkpointer,
+            long_term_memory_repository=self._long_term_memory_repository,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -113,10 +120,12 @@ class LangGraphRunEngine(RunEngine):
             runtime_tools: Optional[List[BaseTool]],
             max_tool_iterations: Optional[int],
             checkpointer: Any,
+            long_term_memory_repository: Any,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "llm": llm,
             "checkpointer": checkpointer,
+            "long_term_memory_repository": long_term_memory_repository,
         }
         if runtime_tools is not None or max_tool_iterations is not None:
             graph_kwargs["runtime_tools"] = runtime_tools
@@ -208,6 +217,7 @@ class LangGraphRunEngine(RunEngine):
             logger.warning("会话[%s]构建Graph初始状态失败，回退最小输入: %s", self._session_id, e)
             return {
                 "session_id": self._session_id,
+                "user_id": self._user_id,
                 "run_id": run_id,
                 "thread_id": thread_id,
                 "checkpoint_ref_namespace": checkpoint_namespace,
