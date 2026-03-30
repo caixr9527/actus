@@ -5,36 +5,26 @@
 import logging
 from typing import Any, List, Optional
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
+
 from app.domain.external import LLM
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph_graphs.skill_subgraphs import build_default_skill_graph_registry
-
 from .nodes import (
+    consolidate_memory_node,
     create_or_reuse_plan_node,
     execute_step_node,
     finalize_node,
+    recall_memory_context_node,
     replan_node,
     summarize_node,
 )
 from .routing import route_after_plan, route_after_replan
 
 logger = logging.getLogger(__name__)
-
-try:
-    from langgraph.checkpoint.memory import InMemorySaver
-    from langgraph.graph import END, START, StateGraph
-
-    LANGGRAPH_AVAILABLE = True
-    LANGGRAPH_IMPORT_ERROR = None
-except ImportError as e:  # pragma: no cover - 依赖缺失时的保护逻辑
-    StateGraph = None
-    START = "__start__"
-    END = "__end__"
-    InMemorySaver = None
-    LANGGRAPH_AVAILABLE = False
-    LANGGRAPH_IMPORT_ERROR = e
 
 
 def build_planner_react_langgraph_graph(
@@ -44,8 +34,6 @@ def build_planner_react_langgraph_graph(
         checkpointer: Optional[Any] = None,
 ) -> Any:
     """构建 LangGraph Planner-ReAct V1 图。"""
-    if not LANGGRAPH_AVAILABLE:
-        raise RuntimeError(f"LangGraph 未安装，无法构建图: {LANGGRAPH_IMPORT_ERROR}")
 
     skill_runtime: Optional[SkillGraphRuntime] = None
     try:
@@ -55,6 +43,9 @@ def build_planner_react_langgraph_graph(
 
     async def _create_plan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await create_or_reuse_plan_node(state, llm)
+
+    async def _recall_memory_context(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await recall_memory_context_node(state)
 
     async def _execute_step_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await execute_step_node(
@@ -71,21 +62,27 @@ def build_planner_react_langgraph_graph(
     async def _summarize_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await summarize_node(state, llm)
 
+    async def _consolidate_memory(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await consolidate_memory_node(state)
+
     graph = StateGraph(PlannerReActLangGraphState)
+    graph.add_node("recall_memory_context", _recall_memory_context)
     graph.add_node("create_plan_or_reuse", _create_plan_with_llm)
     graph.add_node("execute_step", _execute_step_with_llm)
     graph.add_node("replan", _replan_with_llm)
     graph.add_node("summarize", _summarize_with_llm)
+    graph.add_node("consolidate_memory", _consolidate_memory)
     graph.add_node("finalize", finalize_node)
 
-    graph.add_edge(START, "create_plan_or_reuse")
+    graph.add_edge(START, "recall_memory_context")
+    graph.add_edge("recall_memory_context", "create_plan_or_reuse")
     graph.add_conditional_edges(
         "create_plan_or_reuse",
         route_after_plan,
         {
             "execute_step": "execute_step",
             "summarize": "summarize",
-            "finalize": "finalize",
+            "consolidate_memory": "consolidate_memory",
         },
     )
     graph.add_edge("execute_step", "replan")
@@ -95,10 +92,11 @@ def build_planner_react_langgraph_graph(
         {
             "execute_step": "execute_step",
             "summarize": "summarize",
-            "finalize": "finalize",
+            "consolidate_memory": "consolidate_memory",
         },
     )
-    graph.add_edge("summarize", "finalize")
+    graph.add_edge("summarize", "consolidate_memory")
+    graph.add_edge("consolidate_memory", "finalize")
     graph.add_edge("finalize", END)
     # 默认保留 InMemorySaver 作为测试/开发兜底，生产环境由运行时注入持久化 checkpointer。
     resolved_checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
