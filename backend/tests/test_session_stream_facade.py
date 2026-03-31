@@ -126,3 +126,11 @@ def test_stream_chat_should_forward_resume_payload() -> None:
     assert agent_service.calls[0]["message"] is None
     assert agent_service.calls[0]["attachments"] == []
     assert agent_service.calls[0]["resume"] == {"approved": True}
+
+
+def test_chat_request_should_allow_empty_stream_request() -> None:
+    request = ChatRequest(event_id="evt-cursor-3")
+
+    assert request.message is None
+    assert request.resume is None
+    assert request.event_id == "evt-cursor-3"

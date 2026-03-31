@@ -209,8 +209,9 @@ class AgentService:
             # 获取当前会话的任务实例
             task = await self._get_task(session)
             is_resume_request = resume is not None
+            is_message_request = bool(str(message or "").strip())
 
-            if session.status == SessionStatus.WAITING and not is_resume_request:
+            if session.status == SessionStatus.WAITING and is_message_request and not is_resume_request:
                 raise BadRequestError(
                     msg="当前会话处于等待状态，请使用 resume 恢复执行",
                     error_key=error_keys.SESSION_RESUME_REQUIRED,
@@ -224,7 +225,7 @@ class AgentService:
                 )
 
             # 处理用户发送的消息
-            if message:
+            if is_message_request:
                 # 统一归一化可选参数，避免后续列表处理触发None错误。
                 attachments = attachments or []
 
@@ -303,9 +304,17 @@ class AgentService:
                         logger.error(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
                         raise RuntimeError(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
 
-                await task.input_stream.put(ResumeInput(value=resume).model_dump_json())
-                async with self._uow_factory() as uow:
-                    await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                event_id = await task.input_stream.put(ResumeInput(value=resume).model_dump_json())
+                try:
+                    async with self._uow_factory() as uow:
+                        await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                except Exception as update_err:
+                    logger.error(f"会话{session_id}更新恢复状态失败，开始补偿输入流消息: {update_err}")
+                    try:
+                        await task.input_stream.delete_message(event_id)
+                    except Exception as compensate_err:
+                        logger.error(f"会话{session_id}恢复输入流补偿删除失败: {compensate_err}")
+                    raise
 
                 await task.invoke()
                 logger.info("会话%s, 已写入恢复请求并启动执行", session_id)

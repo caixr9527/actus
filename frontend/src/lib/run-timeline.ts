@@ -56,44 +56,38 @@ function toNonEmptyText(raw: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
-function parseOptionalTimestamp(raw: unknown): number | null {
-  if (typeof raw === 'number') return parseTimestamp(raw)
-  if (typeof raw === 'string' && raw.trim().length > 0) {
-    const parsed = Number(raw)
-    if (!Number.isNaN(parsed)) return parseTimestamp(parsed)
-  }
-  return null
-}
-
 export type WaitEventContext = {
+  interruptId: string | null
+  kind: string | null
   question: string | null
   reason: string | null
   displayText: string | null
-  resumeToken: string | null
   suggestUserTakeover: boolean
-  timeoutAt: number | null
 }
 
 /**
  * Wait 事件展示文案优先级：question > reason > message > prompt
  */
 export function resolveWaitDisplayText(data: WaitEventData): string | null {
+  const payload = (data.payload ?? {}) as Record<string, unknown>
   return (
-    toNonEmptyText(data.question)
-    ?? toNonEmptyText(data.reason)
-    ?? toNonEmptyText(data.message)
-    ?? toNonEmptyText(data.prompt)
+    toNonEmptyText(payload.question)
+    ?? toNonEmptyText(payload.reason)
+    ?? toNonEmptyText(payload.message)
+    ?? toNonEmptyText(payload.prompt)
+    ?? toNonEmptyText(payload.value)
   )
 }
 
 export function parseWaitEventContext(data: WaitEventData): WaitEventContext {
+  const payload = (data.payload ?? {}) as Record<string, unknown>
   return {
-    question: toNonEmptyText(data.question),
-    reason: toNonEmptyText(data.reason),
+    interruptId: toNonEmptyText(data.interrupt_id),
+    kind: toNonEmptyText(payload.kind),
+    question: toNonEmptyText(payload.question),
+    reason: toNonEmptyText(payload.reason),
     displayText: resolveWaitDisplayText(data),
-    resumeToken: toNonEmptyText(data.resume_token),
-    suggestUserTakeover: data.suggest_user_takeover === true,
-    timeoutAt: parseOptionalTimestamp(data.timeout_at),
+    suggestUserTakeover: payload.suggest_user_takeover === 'browser',
   }
 }
 

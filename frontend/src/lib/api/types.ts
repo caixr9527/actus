@@ -208,7 +208,9 @@ export type ChatParams = {
   message?: string;
   attachments?: string[];
   event_id?: string;
-  resume_token?: string;
+  resume?: {
+    value: unknown;
+  };
   [key: string]: unknown;
 };
 
@@ -272,13 +274,8 @@ export type ToolEvent = {
  * 等待事件数据
  */
 export type WaitEventData = {
-  reason?: string;
-  question?: string;
-  message?: string;
-  prompt?: string;
-  suggest_user_takeover?: boolean;
-  resume_token?: string;
-  timeout_at?: number | string | null;
+  interrupt_id?: string | null;
+  payload?: Record<string, unknown>;
   [key: string]: unknown;
 };
 

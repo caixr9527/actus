@@ -342,6 +342,47 @@ class LangGraphRunEngine(RunEngine):
             "graph_metadata": graph_metadata,
         }
 
+    @staticmethod
+    def _same_event(left: BaseEvent, right: BaseEvent) -> bool:
+        return (
+            str(left.id or "") == str(right.id or "")
+            and _EventDeduplicator._build_signature(left) == _EventDeduplicator._build_signature(right)
+        )
+
+    @classmethod
+    def _resolve_output_events(
+            cls,
+            state: Optional[PlannerReActLangGraphState],
+            baseline_state: Optional[PlannerReActLangGraphState],
+    ) -> List[BaseEvent]:
+        # 获取当前状态和基准状态中已发射的事件列表
+        current_events = list((state or {}).get("emitted_events") or [])
+        baseline_events = list((baseline_state or {}).get("emitted_events") or [])
+        
+        # 如果基准事件为空，说明没有需要过滤的历史事件，直接返回当前所有事件
+        if not baseline_events:
+            return current_events
+
+        # 计算前后缀匹配长度，找出从开头开始连续相同的事件数量
+        max_prefix = min(len(current_events), len(baseline_events))
+        prefix_len = 0
+        while prefix_len < max_prefix and cls._same_event(current_events[prefix_len], baseline_events[prefix_len]):
+            prefix_len += 1
+
+        # 如果基准事件完全是当前事件的前缀，则返回当前事件中超出基准的部分（即新增事件）
+        if prefix_len == len(baseline_events):
+            return current_events[prefix_len:]
+
+        # 构建基准事件 ID 集合，用于快速查找
+        baseline_event_ids = {str(event.id or "") for event in baseline_events if str(event.id or "").strip()}
+        
+        # 如果基准事件没有有效 ID，则无法通过 ID 去重，保守返回所有当前事件
+        if not baseline_event_ids:
+            return current_events
+            
+        # 返回当前事件中那些不在基准事件 ID 集合中的事件（处理乱序或非前缀重复场景）
+        return [event for event in current_events if str(event.id or "") not in baseline_event_ids]
+
     async def _run_graph(
             self,
             *,
@@ -404,7 +445,7 @@ class LangGraphRunEngine(RunEngine):
                 state=state or fallback_state,
             )
 
-        for event in (state or {}).get("emitted_events", []):
+        for event in self._resolve_output_events(state=state, baseline_state=fallback_state):
             if deduplicator.should_emit(event):
                 yield event.model_copy(deep=True)
         for event in wait_events:

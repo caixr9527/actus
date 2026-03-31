@@ -11,9 +11,32 @@ class _TaskFactory:
         return None
 
 
+class _InputStream:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+        self.deleted: list[str] = []
+
+    async def put(self, message: str) -> str:
+        self.messages.append(message)
+        return "resume-msg-1"
+
+    async def delete_message(self, event_id: str) -> None:
+        self.deleted.append(event_id)
+
+
+class _Task:
+    def __init__(self) -> None:
+        self.input_stream = _InputStream()
+        self.invoked = False
+
+    async def invoke(self) -> None:
+        self.invoked = True
+
+
 class _SessionRepo:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, fail_on_update_status: bool = False) -> None:
         self._session = session
+        self._fail_on_update_status = fail_on_update_status
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
@@ -23,6 +46,11 @@ class _SessionRepo:
 
     async def update_unread_message_count(self, session_id: str, count: int) -> None:
         return None
+
+    async def update_status(self, session_id: str, status: SessionStatus) -> None:
+        if self._fail_on_update_status:
+            raise RuntimeError("update status failed")
+        self._session.status = status
 
 
 class _UoW:
@@ -86,3 +114,38 @@ def test_agent_service_chat_should_reject_resume_when_session_not_waiting() -> N
 
     assert isinstance(first_event, ErrorEvent)
     assert first_event.error_key == error_keys.SESSION_NOT_WAITING
+
+
+def test_agent_service_chat_should_rollback_resume_input_when_status_update_fails() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.WAITING,
+        current_run_id="run-1",
+    )
+    task = _Task()
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(_SessionRepo(session, fail_on_update_status=True))
+    service._task_cls = _TaskFactory
+
+    async def _get_task(_session: Session):
+        return task
+
+    service._get_task = _get_task
+
+    async def _collect_first_event():
+        async for event in service.chat(
+                session_id="session-1",
+                user_id="user-1",
+                resume={"approved": True},
+        ):
+            return event
+        return None
+
+    first_event = asyncio.run(_collect_first_event())
+
+    assert isinstance(first_event, ErrorEvent)
+    assert first_event.error == "update status failed"
+    assert task.input_stream.deleted == ["resume-msg-1"]
+    assert task.invoked is False

@@ -26,7 +26,7 @@ export type UseSessionDetailResult = {
   refresh: () => Promise<void>
   refreshFiles: () => Promise<void>
   updateSessionModel: (modelId: string) => Promise<void>
-  sendMessage: (message: string, attachmentIds: string[], resumeToken?: string) => Promise<void>
+  sendMessage: (message: string, attachmentIds: string[], options?: { resume?: boolean }) => Promise<void>
   streaming: boolean
 }
 
@@ -402,11 +402,16 @@ export function useSessionDetail(
   }, [stopEmptyStream, stopMessageStream])
 
   const sendMessage = useCallback(
-    async (message: string, attachmentIds: string[], resumeToken?: string) => {
+    async (message: string, attachmentIds: string[], options?: { resume?: boolean }) => {
       if (!sessionId || !enabled) return
+      const isResume = options?.resume === true
 
       const streamEpoch = sessionEpochRef.current
       const streamSessionId = sessionId
+
+      if (isResume && attachmentIds.length > 0) {
+        throw new Error(t('sessionDetail.resumeAttachmentUnsupported'))
+      }
 
       stopEmptyStream()
       stopMessageStream()
@@ -441,11 +446,18 @@ export function useSessionDetail(
         }
       }
 
-      const chatParams = {
-        message,
-        attachments: attachmentIds,
-        ...(resumeToken ? { resume_token: resumeToken } : {}),
-      }
+      const chatParams = isResume
+        ? {
+            resume: {
+              value: {
+                message,
+              },
+            },
+          }
+        : {
+            message,
+            attachments: attachmentIds,
+          }
 
       const messageStreamCleanup = sessionApi.chat(
         streamSessionId,

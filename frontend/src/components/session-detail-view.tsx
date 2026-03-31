@@ -27,7 +27,7 @@ import type { ToolEvent, FileInfo } from '@/lib/api/types'
 import type { AttachmentFile, TimelineItem } from '@/lib/session-events'
 import { sessionApi } from '@/lib/api/session'
 import { toast } from 'sonner'
-import { Clock3, Loader2 } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import { useI18n } from '@/lib/i18n'
 
 export interface SessionDetailViewProps {
@@ -68,15 +68,6 @@ function removeInitQueryParamFromUrl(): void {
 
 const TIMELINE_WINDOW_SIZE = 120
 
-function formatWaitTimeoutLabel(timeoutAt: number | null, locale: 'zh-CN' | 'en-US'): string | null {
-  if (timeoutAt === null) return null
-  const date = new Date(timeoutAt)
-  if (Number.isNaN(date.getTime())) return null
-  return date.toLocaleString(locale === 'en-US' ? 'en-US' : 'zh-CN', {
-    hour12: false,
-  })
-}
-
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   const router = useRouter()
   const pathname = usePathname()
@@ -108,11 +99,6 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const timeline = useMemo(() => eventsToTimeline(events, locale), [events, locale])
   const waitContext = useMemo(() => findLatestWaitEventContext(events), [events])
   const isWaitingForResume = session?.status === 'waiting'
-  const waitResumeToken = waitContext?.resumeToken ?? undefined
-  const waitTimeoutLabel = useMemo(
-    () => formatWaitTimeoutLabel(waitContext?.timeoutAt ?? null, locale),
-    [locale, waitContext?.timeoutAt],
-  )
 
   const [fileListOpen, setFileListOpen] = useState(false)
   const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null)
@@ -189,14 +175,13 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     async (message: string, uploadedFiles: FileInfo[]) => {
       try {
         const attachmentIds = uploadedFiles.map((f) => f.id)
-        const resumeToken = isWaitingForResume ? waitResumeToken : undefined
-        await sendMessage(message, attachmentIds, resumeToken)
+        await sendMessage(message, attachmentIds, { resume: isWaitingForResume })
       } catch (e) {
         toast.error(getApiErrorMessage(e, 'sessionDetail.sendFailed', t))
         throw e
       }
     },
-    [isWaitingForResume, sendMessage, t, waitResumeToken]
+    [isWaitingForResume, sendMessage, t]
   )
 
   const handleModelChange = useCallback(
@@ -477,12 +462,6 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                   </p>
                   {waitContext?.suggestUserTakeover && (
                     <p className="mt-1 text-xs text-amber-800">{t('sessionDetail.waitCardTakeoverHint')}</p>
-                  )}
-                  {waitTimeoutLabel && (
-                    <div className="mt-1 inline-flex items-center gap-1 text-xs text-amber-800">
-                      <Clock3 className="size-3.5" />
-                      <span>{t('sessionDetail.waitCardTimeout', { time: waitTimeoutLabel })}</span>
-                    </div>
                   )}
                   <p className="mt-1 text-[11px] text-amber-700">{t('sessionDetail.waitCardResumeHint')}</p>
                 </div>

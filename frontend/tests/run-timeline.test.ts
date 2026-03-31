@@ -14,7 +14,7 @@ test('buildRunTimeline should expose all runtime event kinds explicitly', () => 
     eventOf('plan', { steps: [{ id: 's1', description: 'step 1', status: 'pending' }], title: '任务计划' }),
     eventOf('step', { id: 's1', description: 'step 1', status: 'running' }),
     eventOf('tool', { name: 'search', function: 'search_web', args: { query: 'Actus' }, status: 'calling' }),
-    eventOf('wait', { reason: '需要用户确认是否继续' }),
+    eventOf('wait', { payload: { question: '需要用户确认是否继续' } }),
     eventOf('error', { error: 'tool timeout' }),
     eventOf('done', {}),
   ]
@@ -81,9 +81,12 @@ test('buildRunTimeline should carry runtime multimodal context for downstream re
 test('buildRunTimeline should prioritize wait question in summary', () => {
   const events: SSEEventData[] = [
     eventOf('wait', {
-      question: '请确认是否继续执行后续步骤？',
-      reason: '需要用户确认',
-      message: 'fallback message',
+      interrupt_id: 'interrupt-1',
+      payload: {
+        question: '请确认是否继续执行后续步骤？',
+        reason: '需要用户确认',
+        message: 'fallback message',
+      },
     }),
   ]
 
@@ -92,28 +95,30 @@ test('buildRunTimeline should prioritize wait question in summary', () => {
   assert.equal(timeline[0]?.summary, '请确认是否继续执行后续步骤？')
 })
 
-test('findLatestWaitEventContext should parse latest wait payload for resume', () => {
+test('findLatestWaitEventContext should parse latest interrupt wait payload', () => {
   const events: SSEEventData[] = [
     eventOf('wait', {
-      reason: '需要确认',
-      resume_token: 'old-token',
-      timeout_at: '1711111111',
+      interrupt_id: 'interrupt-1',
+      payload: {
+        reason: '需要确认',
+      },
     }),
     eventOf('message', { role: 'assistant', message: '补充说明' }),
     eventOf('wait', {
-      question: '请补充目标网站地址',
-      resume_token: 'new-token',
-      suggest_user_takeover: true,
-      timeout_at: 1712222222,
+      interrupt_id: 'interrupt-2',
+      payload: {
+        question: '请补充目标网站地址',
+        suggest_user_takeover: 'browser',
+      },
     }),
   ]
 
   const context = findLatestWaitEventContext(events)
   assert.ok(context)
+  assert.equal(context?.interruptId, 'interrupt-2')
+  assert.equal(context?.kind, null)
   assert.equal(context?.displayText, '请补充目标网站地址')
-  assert.equal(context?.resumeToken, 'new-token')
   assert.equal(context?.suggestUserTakeover, true)
-  assert.equal(context?.timeoutAt, 1712222222000)
 })
 
 test('buildStepViewState should merge plan snapshot and step updates', () => {

@@ -101,33 +101,22 @@ test("getApiErrorMessage should map new model-related error_key values", () => {
   assert.equal(
     getApiErrorMessageFromPayload(
       {
-        error_key: "error.session.wait_task_not_found",
+        error_key: "error.session.resume_required",
       },
       "sessionDetail.sendFailed",
       translate("zh-CN"),
     ),
-    "未找到可恢复的等待任务，请刷新后重试",
+    "当前会话正在等待恢复，请继续输入后再执行",
   )
 
   assert.equal(
     getApiErrorMessageFromPayload(
       {
-        error_key: "error.session.resume_token_invalid",
+        error_key: "error.session.not_waiting",
       },
       "sessionDetail.sendFailed",
       translate("en-US"),
     ),
-    "The resume token is invalid. Refresh and try again.",
-  )
-
-  assert.equal(
-    getApiErrorMessageFromPayload(
-      {
-        error_key: "error.session.wait_task_timeout",
-      },
-      "sessionDetail.sendFailed",
-      translate("en-US"),
-    ),
-    "The wait task has timed out. Please send a new instruction.",
+    "This session is not waiting, so it cannot be resumed.",
   )
 })

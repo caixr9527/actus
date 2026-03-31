@@ -51,8 +51,10 @@ class ChatRequest(BaseModel):
     def validate_request_shape(self) -> "ChatRequest":
         has_message = bool(str(self.message or "").strip())
         has_resume = self.resume is not None
-        if has_message == has_resume:
-            raise ValueError("chat 请求必须且只能携带 message 或 resume")
+        if has_message and has_resume:
+            raise ValueError("chat 请求不能同时携带 message 和 resume")
+        if not has_message and not has_resume and len(self.attachments or []) > 0:
+            raise ValueError("纯监听请求不允许携带 attachments")
         if has_resume and len(self.attachments or []) > 0:
             raise ValueError("resume 请求不允许携带 attachments")
         return self

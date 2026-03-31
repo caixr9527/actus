@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from langgraph.types import Command
 
-from app.domain.models import Message, WaitEvent
+from app.domain.models import DoneEvent, Message, MessageEvent, WaitEvent
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
@@ -132,3 +132,44 @@ def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> N
     assert isinstance(graph_input, Command)
     assert graph_input.resume == {"approved": True}
     assert config == {"configurable": {"thread_id": "session-1"}}
+
+
+def test_langgraph_run_engine_resume_should_only_emit_incremental_events(monkeypatch) -> None:
+    history_event = MessageEvent(id="evt-history", role="assistant", message="历史消息")
+    new_event = DoneEvent(id="evt-done")
+    fake_graph = _FakeGraph(
+        result={
+            "session_id": "session-1",
+            "graph_metadata": {},
+            "pending_interrupt": {},
+            "emitted_events": [history_event, new_event],
+        },
+        checkpoint_state={
+            "session_id": "session-1",
+            "graph_metadata": {},
+            "pending_interrupt": {"question": "请确认是否继续"},
+            "emitted_events": [history_event],
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+
+    engine = LangGraphRunEngine(
+        session_id="session-1",
+        llm=object(),
+    )
+
+    async def _collect():
+        events = []
+        async for event in engine.resume({"approved": True}):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+
+    assert len(events) == 1
+    assert isinstance(events[0], DoneEvent)
+    assert events[0].id == "evt-done"
