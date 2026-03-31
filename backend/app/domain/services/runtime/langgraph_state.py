@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.domain.models import (
     BaseEvent,
+    normalize_wait_payload,
     DoneEvent,
     ErrorEvent,
     ExecutionStatus,
@@ -257,26 +258,30 @@ class GraphStateContractMapper:
 
     @classmethod
     def _normalize_pending_interrupt(cls, raw: Any) -> Dict[str, Any]:
-        if not isinstance(raw, dict):
+        return normalize_wait_payload(raw)
+
+    @classmethod
+    def get_pending_interrupt(
+            cls,
+            state: Optional[PlannerReActLangGraphState],
+    ) -> Dict[str, Any]:
+        """统一读取并标准化当前 checkpoint 中的等待态。"""
+        if not isinstance(state, dict):
             return {}
-        if len(raw) == 0:
+        pending_interrupt = cls._normalize_pending_interrupt(state.get("pending_interrupt"))
+        if pending_interrupt:
+            return pending_interrupt
+
+        graph_metadata = state.get("graph_metadata")
+        if not isinstance(graph_metadata, dict):
             return {}
-
-        normalized = cls._to_json_safe(raw)
-        normalized["kind"] = str(normalized.get("kind") or "ask_user")
-        normalized["question"] = str(normalized.get("question") or "").strip()
-
-        attachments = normalized.get("attachments")
-        if isinstance(attachments, str):
-            normalized["attachments"] = [attachments] if attachments.strip() else []
-        elif isinstance(attachments, list):
-            normalized["attachments"] = [str(item).strip() for item in attachments if str(item).strip()]
-        else:
-            normalized["attachments"] = []
-
-        takeover = str(normalized.get("suggest_user_takeover") or "none").strip().lower()
-        normalized["suggest_user_takeover"] = takeover if takeover in {"none", "browser"} else "none"
-        return normalized
+        pending_interrupts = graph_metadata.get("pending_interrupts")
+        if not isinstance(pending_interrupts, list) or len(pending_interrupts) == 0:
+            return {}
+        first_interrupt = pending_interrupts[0]
+        if not isinstance(first_interrupt, dict):
+            return {}
+        return cls._normalize_pending_interrupt(first_interrupt.get("payload"))
 
     @classmethod
     def _normalize_tool_invocations(cls, raw: Any) -> Dict[str, ToolInvocationState]:

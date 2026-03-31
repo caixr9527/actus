@@ -78,9 +78,10 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                     },
                     "memory_context_version": "ctx-v1",
                     "pending_interrupt": {
-                        "kind": "ask_user",
-                        "question": "请补充上下文",
+                        "kind": "input_text",
+                        "prompt": "请补充上下文",
                         "attachments": ["/tmp/context.md"],
+                        "response_key": "message",
                     },
                     "tool_invocations": {
                         "call-1": {
@@ -128,7 +129,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
-    assert state["pending_interrupt"]["question"] == "请补充上下文"
+    assert state["pending_interrupt"]["prompt"] == "请补充上下文"
     assert state["tool_invocations"]["call-1"]["tool_name"] == "search"
     assert state["graph_metadata"]["carry_over"] == "yes"
     assert state["artifact_refs"] == ["file-1", "file-2"]
@@ -155,10 +156,12 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     wait_event = WaitEvent.from_interrupt(
         interrupt_id="interrupt-1",
         payload={
-            "kind": "ask_user",
-            "question": "请确认是否继续？",
+            "kind": "confirm",
+            "prompt": "请确认是否继续？",
             "attachments": ["/tmp/reference.md"],
             "suggest_user_takeover": "browser",
+            "confirm_label": "继续",
+            "cancel_label": "取消",
         },
     )
     tool_event = ToolEvent(
@@ -214,7 +217,7 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert reduced_state["current_step_id"] is None
     assert len(reduced_state["audit_events"]) == len(state["emitted_events"])
     assert reduced_state["tool_invocations"]["call-1"]["status"] == ToolEventStatus.CALLED.value
-    assert reduced_state["pending_interrupt"]["question"] == "请确认是否继续？"
+    assert reduced_state["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert reduced_state["pending_interrupt"]["attachments"] == ["/tmp/reference.md"]
     assert reduced_state["pending_interrupt"]["suggest_user_takeover"] == "browser"
 
@@ -232,7 +235,7 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["step_local_memory"]["current_step_id"] == "step-1"
     assert contract["graph_state"]["summary_local_memory"]["answer_outline"] == "最终答复"
     assert contract["graph_state"]["memory_context_version"] == "ctx-v2"
-    assert contract["graph_state"]["pending_interrupt"]["question"] == "请确认是否继续？"
+    assert contract["graph_state"]["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert contract["graph_state"]["metadata"]["pending_interrupts"][0]["interrupt_id"] == "interrupt-1"
     assert contract["planes"]["projection_only_fields"] == ["sessions.title/latest_message/status"]
     assert memory_metadata["recall_count"] == 1
@@ -248,14 +251,15 @@ def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> Non
     state = {
         "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
         "pending_interrupt": {
-            "kind": "ask_user",
-            "question": "还需要确认",
+            "kind": "input_text",
+            "prompt": "还需要确认",
+            "response_key": "message",
         },
         "graph_metadata": {
             "pending_interrupts": [
                 {
                     "interrupt_id": "interrupt-1",
-                    "payload": {"kind": "ask_user", "question": "还需要确认"},
+                    "payload": {"kind": "input_text", "prompt": "还需要确认", "response_key": "message"},
                 }
             ]
         },

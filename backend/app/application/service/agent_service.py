@@ -32,6 +32,7 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
+from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,46 @@ class AgentService:
             # 修复失败不影响当前SSE消息继续下发，避免用户流式体验被阻断。
             logger.warning(f"会话{session_id}输出流事件历史修复失败: {e}")
 
+    async def _inspect_resume_checkpoint(self, session: Session) -> Any:
+        """读取当前等待态对应的 checkpoint，确认恢复点仍然有效。"""
+        llm = await self._resolve_runtime_llm(session)
+        inspector = LangGraphRunEngine(
+            session_id=session.id,
+            llm=llm,
+            user_id=session.user_id,
+            uow_factory=self._uow_factory,
+            checkpointer=get_langgraph_checkpointer().get_checkpointer(),
+        )
+        return await inspector.inspect_resume_checkpoint()
+
+    async def _ensure_resume_checkpoint_available(self, session: Session) -> None:
+        """在接受 resume 前，先确认等待态对应的 checkpoint 仍可恢复。"""
+        try:
+            inspection = await self._inspect_resume_checkpoint(session)
+        except Exception as exc:
+            logger.warning("会话[%s]读取恢复点失败，拒绝 resume: %s", session.id, exc)
+            raise BadRequestError(
+                msg="当前等待点已失效或无法读取，请重新发起任务",
+                error_key=error_keys.SESSION_RESUME_CHECKPOINT_INVALID,
+                error_params={"session_id": session.id},
+            ) from exc
+
+        if inspection.is_resumable:
+            return
+
+        logger.warning(
+            "会话[%s]恢复点不可用: run_id=%s has_checkpoint=%s pending_interrupt=%s",
+            session.id,
+            inspection.run_id,
+            inspection.has_checkpoint,
+            bool(inspection.pending_interrupt),
+        )
+        raise BadRequestError(
+            msg="当前等待点已失效或无法读取，请重新发起任务",
+            error_key=error_keys.SESSION_RESUME_CHECKPOINT_INVALID,
+            error_params={"session_id": session.id},
+        )
+
     async def chat(
             self,
             session_id: str,
@@ -223,6 +264,8 @@ class AgentService:
                     error_key=error_keys.SESSION_NOT_WAITING,
                     error_params={"session_id": session.id},
                 )
+            if is_resume_request:
+                await self._ensure_resume_checkpoint_available(session)
 
             # 处理用户发送的消息
             if is_message_request:

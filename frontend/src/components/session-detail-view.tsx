@@ -11,6 +11,7 @@ import { ChatMessage } from '@/components/chat-message'
 import { FilePreviewPanel } from '@/components/file-preview-panel'
 import { ToolPreviewPanel } from '@/components/tool-preview-panel'
 import { VNCOverlay } from '@/components/vnc-overlay'
+import { WaitResumeCard } from '@/components/wait-resume-card'
 import { Button } from '@/components/ui/button'
 import { useSessionDetail } from '@/hooks/use-session-detail'
 import { getToolKind } from '@/components/tool-use/utils'
@@ -93,6 +94,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     refreshFiles,
     updateSessionModel,
     sendMessage,
+    resumeWaitingRun,
     streaming,
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
@@ -175,13 +177,25 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     async (message: string, uploadedFiles: FileInfo[]) => {
       try {
         const attachmentIds = uploadedFiles.map((f) => f.id)
-        await sendMessage(message, attachmentIds, { resume: isWaitingForResume })
+        await sendMessage(message, attachmentIds)
       } catch (e) {
         toast.error(getApiErrorMessage(e, 'sessionDetail.sendFailed', t))
         throw e
       }
     },
-    [isWaitingForResume, sendMessage, t]
+    [sendMessage, t]
+  )
+
+  const handleResume = useCallback(
+    async (resumeValue: unknown) => {
+      try {
+        await resumeWaitingRun(resumeValue)
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, 'sessionDetail.sendFailed', t))
+        throw error
+      }
+    },
+    [resumeWaitingRun, t]
   )
 
   const handleModelChange = useCallback(
@@ -454,31 +468,29 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
               <RunTimelinePanel className="mb-2" events={events} />
               <RuntimeInputPolicyPanel className="mb-2" events={events} />
               <SkillDebugPanel className="mb-2" events={events} />
-              {isWaitingForResume && (
-                <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
-                  <p className="text-xs font-semibold text-amber-900">{t('sessionDetail.waitCardTitle')}</p>
-                  <p className="mt-1 text-xs text-amber-900">
-                    {waitContext?.displayText ?? t('sessionDetail.waitCardFallback')}
-                  </p>
-                  {waitContext?.suggestUserTakeover && (
-                    <p className="mt-1 text-xs text-amber-800">{t('sessionDetail.waitCardTakeoverHint')}</p>
-                  )}
-                  <p className="mt-1 text-[11px] text-amber-700">{t('sessionDetail.waitCardResumeHint')}</p>
-                </div>
+              {isWaitingForResume && waitContext ? (
+                <WaitResumeCard
+                  className="mb-2"
+                  waitContext={waitContext}
+                  busy={streaming}
+                  onResume={handleResume}
+                  onOpenTakeover={waitContext.suggestUserTakeover ? handleOpenVNC : undefined}
+                />
+              ) : (
+                <ChatInput
+                  onSend={handleSend}
+                  sessionId={sessionId}
+                  isRunning={isSessionRunning}
+                  disabled={streaming || isSessionRunning}
+                  onStop={handleStop}
+                  modelOptions={availableModels}
+                  currentModelId={session.current_model_id}
+                  defaultModelId={defaultModelId}
+                  modelsLoading={modelsLoading}
+                  modelUpdating={modelUpdating}
+                  onModelChange={handleModelChange}
+                />
               )}
-              <ChatInput
-                onSend={handleSend}
-                sessionId={sessionId}
-                isRunning={isSessionRunning}
-                disabled={streaming || isSessionRunning}
-                onStop={handleStop}
-                modelOptions={availableModels}
-                currentModelId={session.current_model_id}
-                defaultModelId={defaultModelId}
-                modelsLoading={modelsLoading}
-                modelUpdating={modelUpdating}
-                onModelChange={handleModelChange}
-              />
             </div>
           </div>
         </div>

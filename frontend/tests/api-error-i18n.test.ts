@@ -119,4 +119,15 @@ test("getApiErrorMessage should map new model-related error_key values", () => {
     ),
     "This session is not waiting, so it cannot be resumed.",
   )
+
+  assert.equal(
+    getApiErrorMessageFromPayload(
+      {
+        error_key: "error.session.resume_checkpoint_invalid",
+      },
+      "sessionDetail.sendFailed",
+      translate("zh-CN"),
+    ),
+    "当前等待点已失效或无法读取，请重新发起任务",
+  )
 })

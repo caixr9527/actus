@@ -270,12 +270,65 @@ export type ToolEvent = {
   [key: string]: unknown;
 };
 
+export type WaitUserTakeover = "none" | "browser";
+
+export type WaitChoice = {
+  label: string;
+  resume_value: unknown;
+  description?: string;
+};
+
+export type WaitInputTextPayload = {
+  kind: "input_text";
+  title?: string;
+  prompt: string;
+  details?: string;
+  attachments?: string[];
+  suggest_user_takeover?: WaitUserTakeover;
+  placeholder?: string;
+  submit_label?: string;
+  response_key?: string;
+  default_value?: string;
+  multiline?: boolean;
+  allow_empty?: boolean;
+};
+
+export type WaitConfirmPayload = {
+  kind: "confirm";
+  title?: string;
+  prompt: string;
+  details?: string;
+  attachments?: string[];
+  suggest_user_takeover?: WaitUserTakeover;
+  confirm_label?: string;
+  cancel_label?: string;
+  confirm_resume_value?: unknown;
+  cancel_resume_value?: unknown;
+  emphasis?: "default" | "destructive";
+};
+
+export type WaitSelectPayload = {
+  kind: "select";
+  title?: string;
+  prompt: string;
+  details?: string;
+  attachments?: string[];
+  suggest_user_takeover?: WaitUserTakeover;
+  options: WaitChoice[];
+  default_resume_value?: unknown;
+};
+
+export type WaitPayload =
+  | WaitInputTextPayload
+  | WaitConfirmPayload
+  | WaitSelectPayload;
+
 /**
  * 等待事件数据
  */
 export type WaitEventData = {
   interrupt_id?: string | null;
-  payload?: Record<string, unknown>;
+  payload?: WaitPayload;
   [key: string]: unknown;
 };
 

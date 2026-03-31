@@ -11,6 +11,7 @@ import json
 import logging
 import mimetypes
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 
 from langgraph.types import Command
@@ -35,6 +36,25 @@ from app.infrastructure.runtime.langgraph_graphs import (
 from app.infrastructure.utils import BaseUtils
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResumeCheckpointInspection:
+    """恢复前对 checkpoint 的只读检查结果。"""
+
+    run_id: Optional[str]
+    invoke_config: Dict[str, Dict[str, str]]
+    checkpoint_state: Optional[PlannerReActLangGraphState]
+    pending_interrupt: Dict[str, Any]
+
+    @property
+    def has_checkpoint(self) -> bool:
+        return self.checkpoint_state is not None
+
+    @property
+    def is_resumable(self) -> bool:
+        return bool(self.run_id) and self.has_checkpoint and len(self.pending_interrupt) > 0
+
 
 class _EventDeduplicator:
     """基于 event_id + payload signature 的事件去重器。"""
@@ -300,6 +320,18 @@ class LangGraphRunEngine(RunEngine):
         if not isinstance(values, dict):
             return None
         return dict(values)
+
+    async def inspect_resume_checkpoint(self) -> ResumeCheckpointInspection:
+        """读取当前恢复点的 checkpoint 状态，不推进图执行。"""
+        invoke_config, run_id = await self._resolve_invoke_context()
+        checkpoint_state = await self._load_checkpoint_state(invoke_config=invoke_config)
+        pending_interrupt = GraphStateContractMapper.get_pending_interrupt(checkpoint_state)
+        return ResumeCheckpointInspection(
+            run_id=run_id,
+            invoke_config=invoke_config,
+            checkpoint_state=checkpoint_state,
+            pending_interrupt=pending_interrupt,
+        )
 
     @staticmethod
     def _build_wait_events(raw_interrupts: Any) -> List[WaitEvent]:

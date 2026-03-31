@@ -14,7 +14,7 @@ test('buildRunTimeline should expose all runtime event kinds explicitly', () => 
     eventOf('plan', { steps: [{ id: 's1', description: 'step 1', status: 'pending' }], title: '任务计划' }),
     eventOf('step', { id: 's1', description: 'step 1', status: 'running' }),
     eventOf('tool', { name: 'search', function: 'search_web', args: { query: 'Actus' }, status: 'calling' }),
-    eventOf('wait', { payload: { question: '需要用户确认是否继续' } }),
+    eventOf('wait', { payload: { kind: 'confirm', prompt: '需要用户确认是否继续' } }),
     eventOf('error', { error: 'tool timeout' }),
     eventOf('done', {}),
   ]
@@ -83,9 +83,9 @@ test('buildRunTimeline should prioritize wait question in summary', () => {
     eventOf('wait', {
       interrupt_id: 'interrupt-1',
       payload: {
-        question: '请确认是否继续执行后续步骤？',
-        reason: '需要用户确认',
-        message: 'fallback message',
+        kind: 'confirm',
+        prompt: '请确认是否继续执行后续步骤？',
+        details: '需要用户确认',
       },
     }),
   ]
@@ -100,14 +100,18 @@ test('findLatestWaitEventContext should parse latest interrupt wait payload', ()
     eventOf('wait', {
       interrupt_id: 'interrupt-1',
       payload: {
-        reason: '需要确认',
+        kind: 'input_text',
+        prompt: '需要确认',
+        response_key: 'message',
       },
     }),
     eventOf('message', { role: 'assistant', message: '补充说明' }),
     eventOf('wait', {
       interrupt_id: 'interrupt-2',
       payload: {
-        question: '请补充目标网站地址',
+        kind: 'input_text',
+        prompt: '请补充目标网站地址',
+        response_key: 'message',
         suggest_user_takeover: 'browser',
       },
     }),
@@ -116,8 +120,8 @@ test('findLatestWaitEventContext should parse latest interrupt wait payload', ()
   const context = findLatestWaitEventContext(events)
   assert.ok(context)
   assert.equal(context?.interruptId, 'interrupt-2')
-  assert.equal(context?.kind, null)
-  assert.equal(context?.displayText, '请补充目标网站地址')
+  assert.equal(context?.payload?.kind, 'input_text')
+  assert.equal(context?.prompt, '请补充目标网站地址')
   assert.equal(context?.suggestUserTakeover, true)
 })
 

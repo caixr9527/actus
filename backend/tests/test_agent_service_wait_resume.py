@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 from app.application.errors import error_keys
 from app.application.service.agent_service import AgentService
@@ -133,6 +134,14 @@ def test_agent_service_chat_should_rollback_resume_input_when_status_update_fail
         return task
 
     service._get_task = _get_task
+    async def _inspect_resume_checkpoint(_session: Session):
+        return SimpleNamespace(
+            is_resumable=True,
+            run_id="run-1",
+            has_checkpoint=True,
+            pending_interrupt={"kind": "input_text", "prompt": "请继续", "response_key": "message"},
+        )
+    service._inspect_resume_checkpoint = _inspect_resume_checkpoint
 
     async def _collect_first_event():
         async for event in service.chat(
@@ -149,3 +158,41 @@ def test_agent_service_chat_should_rollback_resume_input_when_status_update_fail
     assert first_event.error == "update status failed"
     assert task.input_stream.deleted == ["resume-msg-1"]
     assert task.invoked is False
+
+
+def test_agent_service_chat_should_reject_resume_when_checkpoint_invalid() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.WAITING,
+        current_run_id="run-1",
+    )
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(_SessionRepo(session))
+    service._task_cls = _TaskFactory
+
+    async def _inspect_resume_checkpoint(_session: Session):
+        return SimpleNamespace(
+            is_resumable=False,
+            run_id="run-1",
+            has_checkpoint=False,
+            pending_interrupt={},
+        )
+
+    service._inspect_resume_checkpoint = _inspect_resume_checkpoint
+
+    async def _collect_first_event():
+        async for event in service.chat(
+                session_id="session-1",
+                user_id="user-1",
+                resume={"approved": True},
+        ):
+            return event
+        return None
+
+    first_event = asyncio.run(_collect_first_event())
+
+    assert isinstance(first_event, ErrorEvent)
+    assert first_event.error_key == error_keys.SESSION_RESUME_CHECKPOINT_INVALID
+    assert session.status == SessionStatus.WAITING

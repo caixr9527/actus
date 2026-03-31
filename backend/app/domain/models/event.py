@@ -16,6 +16,7 @@ from .file import File
 from .plan import Plan, Step
 from .search import SearchResultItem
 from .tool_result import ToolResult
+from .wait import normalize_wait_payload
 
 
 class PlanEventStatus(str, Enum):
@@ -135,11 +136,11 @@ class WaitEvent(BaseEvent):
             cls,
             *,
             interrupt_id: Optional[str],
-            payload: Optional[Dict[str, Any]] = None,
+            payload: Optional[Any] = None,
     ) -> "WaitEvent":
         return cls(
             interrupt_id=str(interrupt_id) if interrupt_id is not None else None,
-            payload=dict(payload or {}),
+            payload=normalize_wait_payload(payload),
         )
 
 

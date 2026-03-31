@@ -23,6 +23,8 @@ from app.domain.models import (
     StepEventStatus,
     TitleEvent,
     ToolEvent,
+    normalize_wait_payload,
+    resolve_wait_resume_message,
 )
 from app.domain.repositories import LongTermMemoryRepository
 from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, UPDATE_PLAN_PROMPT, SYSTEM_PROMPT, \
@@ -654,34 +656,11 @@ async def _build_message(llm: LLM, user_message_prompt: str, input_parts: List[D
 
 
 def _normalize_interrupt_request(raw: Any) -> Dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {}
-    normalized = dict(raw)
-    normalized["kind"] = str(normalized.get("kind") or "ask_user")
-    normalized["question"] = str(normalized.get("question") or "").strip()
-    attachments = normalized.get("attachments")
-    if isinstance(attachments, str):
-        normalized["attachments"] = [attachments] if attachments.strip() else []
-    elif isinstance(attachments, list):
-        normalized["attachments"] = [str(item).strip() for item in attachments if str(item).strip()]
-    else:
-        normalized["attachments"] = []
-    takeover = str(normalized.get("suggest_user_takeover") or "none").strip().lower()
-    normalized["suggest_user_takeover"] = takeover if takeover in {"none", "browser"} else "none"
-    return normalized
+    return normalize_wait_payload(raw)
 
 
-def _resume_value_to_message(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, dict):
-        for key in ("message", "text", "answer", "input"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate.strip():
-                return candidate.strip()
-    if value is None:
-        return ""
-    return json.dumps(value, ensure_ascii=False, default=str)
+def _resume_value_to_message(payload: Dict[str, Any], value: Any) -> str:
+    return resolve_wait_resume_message(payload, value)
 
 
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
@@ -875,8 +854,8 @@ async def execute_step_node(
         step_local_memory["current_step_id"] = str(step.id)
         step_local_memory["pending_interrupt"] = interrupt_request
         graph_metadata = dict(state.get("graph_metadata") or {})
-        graph_metadata["waiting_interrupt_kind"] = interrupt_request.get("kind") or "ask_user"
-        graph_metadata["waiting_interrupt_question"] = interrupt_request.get("question") or ""
+        graph_metadata["waiting_interrupt_kind"] = interrupt_request.get("kind") or "input_text"
+        graph_metadata["waiting_interrupt_prompt"] = interrupt_request.get("prompt") or ""
         return {
             **state,
             "plan": plan,
@@ -948,7 +927,7 @@ async def wait_for_human_node(
         }
 
     resume_value = interrupt(interrupt_request)
-    resumed_message = _resume_value_to_message(resume_value)
+    resumed_message = _resume_value_to_message(interrupt_request, resume_value)
     message_window = list(state.get("message_window") or [])
     if resumed_message:
         message_window = _append_message_window_entry(
@@ -962,7 +941,7 @@ async def wait_for_human_node(
     graph_metadata["last_resume_value"] = resume_value
     graph_metadata["last_resumed_at"] = datetime.now().isoformat()
     graph_metadata.pop("waiting_interrupt_kind", None)
-    graph_metadata.pop("waiting_interrupt_question", None)
+    graph_metadata.pop("waiting_interrupt_prompt", None)
     graph_metadata.pop("pending_interrupts", None)
 
     step_local_memory = dict(state.get("step_local_memory") or {})

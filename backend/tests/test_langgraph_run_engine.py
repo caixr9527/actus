@@ -52,8 +52,9 @@ def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monke
                 SimpleNamespace(
                     id="interrupt-1",
                     value={
-                        "kind": "ask_user",
-                        "question": "请确认是否继续",
+                        "kind": "input_text",
+                        "prompt": "请确认是否继续",
+                        "response_key": "message",
                     },
                 )
             ]
@@ -87,7 +88,7 @@ def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monke
     assert len(events) == 1
     assert isinstance(events[0], WaitEvent)
     assert events[0].interrupt_id == "interrupt-1"
-    assert events[0].payload["question"] == "请确认是否继续"
+    assert events[0].payload["prompt"] == "请确认是否继续"
 
 
 def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:
@@ -99,11 +100,11 @@ def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> N
                 "pending_interrupts": [
                     {
                         "interrupt_id": "interrupt-1",
-                        "payload": {"question": "请确认是否继续"},
+                        "payload": {"kind": "input_text", "prompt": "请确认是否继续", "response_key": "message"},
                     }
                 ]
             },
-            "pending_interrupt": {"question": "请确认是否继续"},
+            "pending_interrupt": {"kind": "input_text", "prompt": "请确认是否继续", "response_key": "message"},
             "emitted_events": [],
         },
     )
@@ -147,7 +148,7 @@ def test_langgraph_run_engine_resume_should_only_emit_incremental_events(monkeyp
         checkpoint_state={
             "session_id": "session-1",
             "graph_metadata": {},
-            "pending_interrupt": {"question": "请确认是否继续"},
+            "pending_interrupt": {"kind": "input_text", "prompt": "请确认是否继续", "response_key": "message"},
             "emitted_events": [history_event],
         },
     )
@@ -173,3 +174,32 @@ def test_langgraph_run_engine_resume_should_only_emit_incremental_events(monkeyp
     assert len(events) == 1
     assert isinstance(events[0], DoneEvent)
     assert events[0].id == "evt-done"
+
+
+def test_langgraph_run_engine_inspect_resume_checkpoint_should_report_missing_pending_interrupt(monkeypatch) -> None:
+    fake_graph = _FakeGraph(
+        result={"emitted_events": []},
+        checkpoint_state={
+            "session_id": "session-1",
+            "graph_metadata": {},
+            "pending_interrupt": {},
+            "emitted_events": [],
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+
+    engine = LangGraphRunEngine(
+        session_id="session-1",
+        llm=object(),
+    )
+
+    inspection = asyncio.run(engine.inspect_resume_checkpoint())
+
+    assert inspection.run_id is None
+    assert inspection.has_checkpoint is True
+    assert inspection.pending_interrupt == {}
+    assert inspection.is_resumable is False

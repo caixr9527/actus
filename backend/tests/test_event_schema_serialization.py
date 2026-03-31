@@ -149,11 +149,15 @@ def test_wait_sse_event_should_include_interrupt_payload() -> None:
     event = WaitEvent.from_interrupt(
         interrupt_id="interrupt-1",
         payload={
-            "kind": "ask_user",
-            "question": "请确认是否继续",
+            "kind": "select",
+            "title": "需要你的选择",
+            "prompt": "请确认是否继续",
             "attachments": ["/tmp/spec.md"],
             "suggest_user_takeover": "browser",
-            "actions": ["continue", "cancel"],
+            "options": [
+                {"label": "继续", "resume_value": {"approved": True}},
+                {"label": "取消", "resume_value": {"approved": False}},
+            ],
         },
     )
 
@@ -162,8 +166,8 @@ def test_wait_sse_event_should_include_interrupt_payload() -> None:
 
     assert payload["event"] == "wait"
     assert payload["data"]["interrupt_id"] == "interrupt-1"
-    assert payload["data"]["payload"]["kind"] == "ask_user"
-    assert payload["data"]["payload"]["question"] == "请确认是否继续"
+    assert payload["data"]["payload"]["kind"] == "select"
+    assert payload["data"]["payload"]["prompt"] == "请确认是否继续"
     assert payload["data"]["payload"]["attachments"] == ["/tmp/spec.md"]
     assert payload["data"]["payload"]["suggest_user_takeover"] == "browser"
-    assert payload["data"]["payload"]["actions"] == ["continue", "cancel"]
+    assert payload["data"]["payload"]["options"][0]["label"] == "继续"

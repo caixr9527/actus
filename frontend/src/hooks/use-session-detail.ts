@@ -26,7 +26,8 @@ export type UseSessionDetailResult = {
   refresh: () => Promise<void>
   refreshFiles: () => Promise<void>
   updateSessionModel: (modelId: string) => Promise<void>
-  sendMessage: (message: string, attachmentIds: string[], options?: { resume?: boolean }) => Promise<void>
+  sendMessage: (message: string, attachmentIds: string[]) => Promise<void>
+  resumeWaitingRun: (resumeValue: unknown) => Promise<void>
   streaming: boolean
 }
 
@@ -401,17 +402,16 @@ export function useSessionDetail(
     }
   }, [stopEmptyStream, stopMessageStream])
 
-  const sendMessage = useCallback(
-    async (message: string, attachmentIds: string[], options?: { resume?: boolean }) => {
+  const openMessageStream = useCallback(
+    async (
+      chatParams:
+        | { message: string; attachments: string[] }
+        | { resume: { value: unknown } }
+    ) => {
       if (!sessionId || !enabled) return
-      const isResume = options?.resume === true
 
       const streamEpoch = sessionEpochRef.current
       const streamSessionId = sessionId
-
-      if (isResume && attachmentIds.length > 0) {
-        throw new Error(t('sessionDetail.resumeAttachmentUnsupported'))
-      }
 
       stopEmptyStream()
       stopMessageStream()
@@ -422,9 +422,13 @@ export function useSessionDetail(
       isSendMessageRef.current = true
       setStreamingState(true)
 
-      // 立即更新状态为 running，不等待 SSE 事件
-      sessionStatusRef.current = 'running'
-      setSession((prev) => prev ? { ...prev, status: 'running' } : null)
+      // 新消息会立刻启动新一轮执行，可以乐观切到 running。
+      // resume 需要先经过后端 checkpoint 预校验，失败时会保持 waiting，
+      // 因此前端不能在请求发出前抢先改成本地 running。
+      if ('message' in chatParams) {
+        sessionStatusRef.current = 'running'
+        setSession((prev) => prev ? { ...prev, status: 'running' } : null)
+      }
 
       const finalizeMessageStream = () => {
         if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
@@ -445,19 +449,6 @@ export function useSessionDetail(
           setSession((prev) => prev ? { ...prev } : null)
         }
       }
-
-      const chatParams = isResume
-        ? {
-            resume: {
-              value: {
-                message,
-              },
-            },
-          }
-        : {
-            message,
-            attachments: attachmentIds,
-          }
 
       const messageStreamCleanup = sessionApi.chat(
         streamSessionId,
@@ -487,6 +478,27 @@ export function useSessionDetail(
       messageStreamCleanupRef.current = messageStreamCleanup
     },
     [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream, t]
+  )
+
+  const sendMessage = useCallback(
+    async (message: string, attachmentIds: string[]) => {
+      await openMessageStream({
+        message,
+        attachments: attachmentIds,
+      })
+    },
+    [openMessageStream]
+  )
+
+  const resumeWaitingRun = useCallback(
+    async (resumeValue: unknown) => {
+      await openMessageStream({
+        resume: {
+          value: resumeValue,
+        },
+      })
+    },
+    [openMessageStream]
   )
 
   const updateSessionModel = useCallback(
@@ -524,6 +536,7 @@ export function useSessionDetail(
     refreshFiles,
     updateSessionModel,
     sendMessage,
+    resumeWaitingRun,
     streaming,
   }
 }

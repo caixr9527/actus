@@ -52,6 +52,15 @@ from .workflow_run import (
     WorkflowRunEventRecord,
     WorkflowRunStepRecord,
 )
+from .wait import (
+    WaitChoice,
+    BaseWaitPayload,
+    TextInputWaitPayload,
+    ConfirmWaitPayload,
+    SelectWaitPayload,
+    normalize_wait_payload,
+    resolve_wait_resume_message,
+)
 
 __all__ = [
     "AppConfig",
@@ -102,4 +111,11 @@ __all__ = [
     "WorkflowRunStatus",
     "WorkflowRunEventRecord",
     "WorkflowRunStepRecord",
+    "WaitChoice",
+    "BaseWaitPayload",
+    "TextInputWaitPayload",
+    "ConfirmWaitPayload",
+    "SelectWaitPayload",
+    "normalize_wait_payload",
+    "resolve_wait_resume_message",
 ]
