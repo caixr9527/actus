@@ -6,9 +6,9 @@
 @File   : session.py
 """
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models import SessionStatus, File
 from app.interfaces.schemas import AgentSSEEvent
@@ -35,12 +35,27 @@ class ListSessionResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    class ResumePayload(BaseModel):
+        """恢复 LangGraph interrupt 的请求体。"""
+
+        value: Any = None
+
     """聊天请求结构"""
     message: Optional[str] = None  # 人类消息
     attachments: Optional[List[str]] = Field(default_factory=list)  # 附件列表(传递的是文件id列表)
-    resume_token: Optional[str] = None  # 恢复等待任务所需token
+    resume: Optional[ResumePayload] = None  # 恢复 LangGraph interrupt 的载荷
     event_id: Optional[str] = None  # 最新事件id
     timestamp: Optional[int] = None  # 当前时间戳
+
+    @model_validator(mode="after")
+    def validate_request_shape(self) -> "ChatRequest":
+        has_message = bool(str(self.message or "").strip())
+        has_resume = self.resume is not None
+        if has_message == has_resume:
+            raise ValueError("chat 请求必须且只能携带 message 或 resume")
+        if has_resume and len(self.attachments or []) > 0:
+            raise ValueError("resume 请求不允许携带 attachments")
+        return self
 
 
 class GetSessionResponse(BaseModel):

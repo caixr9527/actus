@@ -53,9 +53,8 @@ SESSION_SANDBOX_NOT_BOUND = "error.session.sandbox_not_bound"
 SESSION_SANDBOX_UNAVAILABLE = "error.session.sandbox_unavailable"
 SESSION_FILE_READ_FAILED = "error.session.file_read_failed"
 SESSION_SHELL_READ_FAILED = "error.session.shell_read_failed"
-SESSION_WAIT_TASK_NOT_FOUND = "error.session.wait_task_not_found"
-SESSION_RESUME_TOKEN_INVALID = "error.session.resume_token_invalid"
-SESSION_WAIT_TASK_TIMEOUT = "error.session.wait_task_timeout"
+SESSION_RESUME_REQUIRED = "error.session.resume_required"
+SESSION_NOT_WAITING = "error.session.not_waiting"
 
 # 文件链路
 FILE_NOT_FOUND = "error.file.not_found"

@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : run_engine.py
 """
-from typing import Protocol, AsyncGenerator
+from typing import Protocol, AsyncGenerator, Any
 
 from app.domain.models import BaseEvent, Message
 
@@ -15,4 +15,8 @@ class RunEngine(Protocol):
 
     async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         """执行一次消息驱动的运行时流程。"""
+        ...
+
+    async def resume(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
+        """恢复一次已暂停的 LangGraph interrupt 流程。"""
         ...

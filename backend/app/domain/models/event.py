@@ -13,7 +13,6 @@ from typing import Literal, List, Any, Union, Optional, Dict, Annotated
 from pydantic import BaseModel, Field
 
 from .file import File
-from .human_task import HumanTask
 from .plan import Plan, Step
 from .search import SearchResultItem
 from .tool_result import ToolResult
@@ -128,40 +127,19 @@ class ToolEvent(BaseEvent):
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
-    human_task: Optional[HumanTask] = None
+    interrupt_id: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
-    def build_for_user_input(
+    def from_interrupt(
             cls,
             *,
-            session_id: str,
-            question: str,
-            reason: str = "ask_user",
-            attachments: Optional[Union[str, List[str]]] = None,
-            suggest_user_takeover: Optional[str] = None,
-            timeout_seconds: Optional[int] = None,
-            run_id: Optional[str] = None,
-            thread_id: Optional[str] = None,
-            checkpoint_namespace: Optional[str] = None,
-            checkpoint_id: Optional[str] = None,
-            current_step_id: Optional[str] = None,
-            resume_token: Optional[str] = None,
+            interrupt_id: Optional[str],
+            payload: Optional[Dict[str, Any]] = None,
     ) -> "WaitEvent":
         return cls(
-            human_task=HumanTask.build_wait_for_user_input(
-                session_id=session_id,
-                question=question,
-                reason=reason,
-                attachments=attachments,
-                suggest_user_takeover=suggest_user_takeover,
-                timeout_seconds=timeout_seconds,
-                run_id=run_id,
-                thread_id=thread_id,
-                checkpoint_namespace=checkpoint_namespace,
-                checkpoint_id=checkpoint_id,
-                current_step_id=current_step_id,
-                resume_token=resume_token,
-            )
+            interrupt_id=str(interrupt_id) if interrupt_id is not None else None,
+            payload=dict(payload or {}),
         )
 
 

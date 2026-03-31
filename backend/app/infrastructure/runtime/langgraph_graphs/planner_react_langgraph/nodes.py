@@ -7,6 +7,8 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from langgraph.types import interrupt
+
 from app.domain.external import LLM
 from app.domain.models import (
     DoneEvent,
@@ -651,6 +653,37 @@ async def _build_message(llm: LLM, user_message_prompt: str, input_parts: List[D
     return user_content
 
 
+def _normalize_interrupt_request(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized = dict(raw)
+    normalized["kind"] = str(normalized.get("kind") or "ask_user")
+    normalized["question"] = str(normalized.get("question") or "").strip()
+    attachments = normalized.get("attachments")
+    if isinstance(attachments, str):
+        normalized["attachments"] = [attachments] if attachments.strip() else []
+    elif isinstance(attachments, list):
+        normalized["attachments"] = [str(item).strip() for item in attachments if str(item).strip()]
+    else:
+        normalized["attachments"] = []
+    takeover = str(normalized.get("suggest_user_takeover") or "none").strip().lower()
+    normalized["suggest_user_takeover"] = takeover if takeover in {"none", "browser"} else "none"
+    return normalized
+
+
+def _resume_value_to_message(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("message", "text", "answer", "input"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     plan = state.get("plan")
@@ -821,13 +854,38 @@ async def execute_step_node(
                     "attachments": attachments,
                 },
             )
-            execution_payload = {
+            llm_message = {
                 "success": bool(getattr(skill_result, "success", True)),
                 "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
                 "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
             }
         except Exception as e:
             logger.warning("执行步骤 Skill 运行失败，回退默认执行链路: %s", e)
+
+    if llm_message is None:
+        llm_message = {
+            "success": False,
+            "result": f"步骤执行失败：{step.description}",
+            "attachments": [],
+        }
+
+    interrupt_request = _normalize_interrupt_request(llm_message.get("interrupt_request"))
+    if interrupt_request:
+        step_local_memory = dict(state.get("step_local_memory") or {})
+        step_local_memory["current_step_id"] = str(step.id)
+        step_local_memory["pending_interrupt"] = interrupt_request
+        graph_metadata = dict(state.get("graph_metadata") or {})
+        graph_metadata["waiting_interrupt_kind"] = interrupt_request.get("kind") or "ask_user"
+        graph_metadata["waiting_interrupt_question"] = interrupt_request.get("question") or ""
+        return {
+            **state,
+            "plan": plan,
+            "current_step_id": step.id,
+            "step_local_memory": step_local_memory,
+            "graph_metadata": graph_metadata,
+            "pending_interrupt": interrupt_request,
+            "emitted_events": append_events(state.get("emitted_events"), started_event, *tool_events),
+        }
 
     step.success = bool(llm_message.get("success", True))
     step.result = str(llm_message.get("result"))
@@ -873,7 +931,51 @@ async def execute_step_node(
         "step_local_memory": step_local_memory,
         "graph_metadata": graph_metadata,
         "final_message": step.result or "",
+        "pending_interrupt": {},
         "emitted_events": append_events(state.get("emitted_events"), *events),
+    }
+
+
+async def wait_for_human_node(
+        state: PlannerReActLangGraphState,
+) -> PlannerReActLangGraphState:
+    """在独立节点中触发原生 interrupt，避免重复副作用。"""
+    interrupt_request = _normalize_interrupt_request(state.get("pending_interrupt"))
+    if not interrupt_request:
+        return {
+            **state,
+            "pending_interrupt": {},
+        }
+
+    resume_value = interrupt(interrupt_request)
+    resumed_message = _resume_value_to_message(resume_value)
+    message_window = list(state.get("message_window") or [])
+    if resumed_message:
+        message_window = _append_message_window_entry(
+            message_window,
+            role="user",
+            message=resumed_message,
+            attachments=[],
+        )
+
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata["last_resume_value"] = resume_value
+    graph_metadata["last_resumed_at"] = datetime.now().isoformat()
+    graph_metadata.pop("waiting_interrupt_kind", None)
+    graph_metadata.pop("waiting_interrupt_question", None)
+    graph_metadata.pop("pending_interrupts", None)
+
+    step_local_memory = dict(state.get("step_local_memory") or {})
+    step_local_memory.pop("pending_interrupt", None)
+
+    return {
+        **state,
+        "user_message": resumed_message,
+        "input_parts": [],
+        "message_window": message_window,
+        "graph_metadata": graph_metadata,
+        "step_local_memory": step_local_memory,
+        "pending_interrupt": {},
     }
 
 

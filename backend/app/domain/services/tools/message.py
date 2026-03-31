@@ -62,4 +62,26 @@ class MessageTool(BaseTool):
             suggest_user_takeover: Optional[str] = None,
     ) -> ToolResult:
         """提问用户并等待响应"""
-        return ToolResult(success=True)
+        normalized_attachments: List[str]
+        if attachments is None:
+            normalized_attachments = []
+        elif isinstance(attachments, str):
+            normalized_attachments = [attachments] if attachments.strip() else []
+        else:
+            normalized_attachments = [str(item).strip() for item in attachments if str(item).strip()]
+
+        return ToolResult(
+            success=True,
+            data={
+                "interrupt": {
+                    "kind": "ask_user",
+                    "question": str(text or "").strip(),
+                    "attachments": normalized_attachments,
+                    "suggest_user_takeover": (
+                        suggest_user_takeover
+                        if suggest_user_takeover in {"none", "browser"}
+                        else "none"
+                    ),
+                }
+            },
+        )

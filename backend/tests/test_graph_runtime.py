@@ -157,3 +157,27 @@ def test_default_graph_runtime_destroy_should_delegate_task_factory() -> None:
     asyncio.run(runtime.destroy())
 
     assert _TaskFactory.destroyed is True
+
+
+def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
+    _TaskFactory.registry = {}
+    _TaskFactory.sequence = 0
+    session_repo = _SessionRepo()
+    workflow_run_repo = _WorkflowRunRepo()
+    runtime = _build_runtime(session_repo, workflow_run_repo)
+    session = Session(
+        id="session-a",
+        user_id="user-a",
+        sandbox_id="sandbox-1",
+        current_run_id="run-1",
+        status=SessionStatus.WAITING,
+    )
+
+    task = asyncio.run(runtime.resume_task(session=session, llm=object()))
+
+    assert task.id == "task-1"
+    assert session.current_run_id == "run-1"
+    assert session.status == SessionStatus.RUNNING
+    assert workflow_run_repo.created_for_session_ids == []
+    assert session_repo.saved_sessions[0].current_run_id == "run-1"
+    assert session_repo.saved_sessions[0].status == SessionStatus.RUNNING

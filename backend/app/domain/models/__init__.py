@@ -36,17 +36,11 @@ from .event import (
 )
 from .file import File
 from .health_status import HealthStatus
-from .human_task import (
-    HumanTask,
-    HumanTaskStatus,
-    HumanTaskResumePoint,
-    HumanTaskResumeCommand,
-    HumanTaskTimeoutPolicy,
-)
 from .llm_model_config import LLMModelConfig
 from .long_term_memory import LongTermMemory
 from .message import Message
 from .plan import Plan, Step, ExecutionStatus
+from .runtime_input import ResumeInput, RuntimeInput
 from .runtime_llm_config import RuntimeLLMConfig
 from .search import SearchResults, SearchResultItem
 from .session import Session, SessionStatus
@@ -66,11 +60,6 @@ __all__ = [
     "MCPTransport",
     "MCPServerConfig",
     "HealthStatus",
-    "HumanTask",
-    "HumanTaskStatus",
-    "HumanTaskResumePoint",
-    "HumanTaskResumeCommand",
-    "HumanTaskTimeoutPolicy",
     "LLMModelConfig",
     "LongTermMemory",
     "Plan",
@@ -91,6 +80,8 @@ __all__ = [
     "PlanEventStatus",
     "StepEventStatus",
     "ToolResult",
+    "ResumeInput",
+    "RuntimeInput",
     "File",
     "Message",
     "SearchResults",

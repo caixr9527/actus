@@ -4,11 +4,6 @@ from app.domain.models import (
     DoneEvent,
     ExecutionStatus,
     File,
-    HumanTask,
-    HumanTaskResumeCommand,
-    HumanTaskResumePoint,
-    HumanTaskTimeoutPolicy,
-    MessageEvent,
     Plan,
     PlanEvent,
     PlanEventStatus,
@@ -24,7 +19,6 @@ from app.domain.models import (
 from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
-    HumanTaskStatus,
 )
 
 
@@ -83,16 +77,10 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                         "answer_outline": "总结提纲",
                     },
                     "memory_context_version": "ctx-v1",
-                    "human_tasks": {
-                        "wait:1": {
-                            "task_id": "wait:1",
-                            "status": "waiting",
-                            "reason": "wait_event",
-                            "created_at": "2026-03-21T12:00:00",
-                            "updated_at": "2026-03-21T12:00:00",
-                            "wait_event_id": "evt-wait",
-                            "resume_event_id": None,
-                        }
+                    "pending_interrupt": {
+                        "kind": "ask_user",
+                        "question": "请补充上下文",
+                        "attachments": ["/tmp/context.md"],
                     },
                     "tool_invocations": {
                         "call-1": {
@@ -140,13 +128,13 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
-    assert state["human_tasks"]["wait:1"]["status"] == HumanTaskStatus.WAITING.value
+    assert state["pending_interrupt"]["question"] == "请补充上下文"
     assert state["tool_invocations"]["call-1"]["tool_name"] == "search"
     assert state["graph_metadata"]["carry_over"] == "yes"
     assert state["artifact_refs"] == ["file-1", "file-2"]
 
 
-def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_metadata() -> None:
+def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_metadata() -> None:
     session = Session(id="session-1", current_run_id="run-1")
     run = WorkflowRun(
         id="run-1",
@@ -164,24 +152,14 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
         result="完成第一步",
     )
 
-    wait_event = WaitEvent.build_for_user_input(
-        session_id="session-1",
-        question="请确认是否继续？",
-        reason="ask_user",
-        attachments=["/tmp/reference.md"],
-        suggest_user_takeover="browser",
-        timeout_seconds=300,
-        run_id="run-1",
-        thread_id="thread-1",
-        checkpoint_namespace="",
-        checkpoint_id="cp-1",
-        current_step_id="step-1",
-        resume_token="resume-token-1",
-    )
-    user_reply_event = MessageEvent(
-        role="user",
-        message="我补充一下需求",
-        attachments=[File(id="attachment-1", filename="ctx.txt")],
+    wait_event = WaitEvent.from_interrupt(
+        interrupt_id="interrupt-1",
+        payload={
+            "kind": "ask_user",
+            "question": "请确认是否继续？",
+            "attachments": ["/tmp/reference.md"],
+            "suggest_user_takeover": "browser",
+        },
     )
     tool_event = ToolEvent(
         tool_call_id="call-1",
@@ -203,10 +181,8 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
     state["emitted_events"] = [
         PlanEvent(plan=created_plan, status=PlanEventStatus.CREATED),
         StepEvent(step=completed_step),
-        wait_event,
-        user_reply_event,
         tool_event,
-        DoneEvent(),
+        wait_event,
     ]
     state["message_window"] = [
         {"role": "user", "message": "帮我调研一下", "input_part_count": 0},
@@ -238,16 +214,9 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
     assert reduced_state["current_step_id"] is None
     assert len(reduced_state["audit_events"]) == len(state["emitted_events"])
     assert reduced_state["tool_invocations"]["call-1"]["status"] == ToolEventStatus.CALLED.value
-    assert reduced_state["artifact_refs"] == ["attachment-1"]
-    assert any(
-        task.get("status") == HumanTaskStatus.RESUMED.value
-        for task in reduced_state["human_tasks"].values()
-    )
-    resumed_task = next(iter(reduced_state["human_tasks"].values()))
-    assert resumed_task["question"] == "请确认是否继续？"
-    assert resumed_task["resume_token"] == "resume-token-1"
-    assert resumed_task["suggest_user_takeover"] == "browser"
-    assert resumed_task["resume_point"]["run_id"] == "run-1"
+    assert reduced_state["pending_interrupt"]["question"] == "请确认是否继续？"
+    assert reduced_state["pending_interrupt"]["attachments"] == ["/tmp/reference.md"]
+    assert reduced_state["pending_interrupt"]["suggest_user_takeover"] == "browser"
 
     contract = runtime_metadata["graph_state_contract"]
     memory_metadata = runtime_metadata["memory"]
@@ -263,6 +232,8 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
     assert contract["graph_state"]["step_local_memory"]["current_step_id"] == "step-1"
     assert contract["graph_state"]["summary_local_memory"]["answer_outline"] == "最终答复"
     assert contract["graph_state"]["memory_context_version"] == "ctx-v2"
+    assert contract["graph_state"]["pending_interrupt"]["question"] == "请确认是否继续？"
+    assert contract["graph_state"]["metadata"]["pending_interrupts"][0]["interrupt_id"] == "interrupt-1"
     assert contract["planes"]["projection_only_fields"] == ["sessions.title/latest_message/status"]
     assert memory_metadata["recall_count"] == 1
     assert memory_metadata["recall_ids"] == ["mem-1"]
@@ -273,35 +244,30 @@ def test_graph_state_contract_should_reduce_emitted_events_and_generate_runtime_
     assert memory_metadata["summary_version"] == "ctx-v2"
 
 
-def test_graph_state_contract_should_mark_waiting_task_timeout_when_reference_time_passed() -> None:
-    wait_event = WaitEvent(
-        id="evt-wait-timeout",
-        human_task=HumanTask(
-            id="human-task-timeout",
-            reason="ask_user",
-            question="请补充上下文",
-            resume_token="resume-timeout",
-            resume_command=HumanTaskResumeCommand(
-                session_id="session-1",
-                resume_token="resume-timeout",
-            ),
-            resume_point=HumanTaskResumePoint(
-                session_id="session-1",
-                run_id="run-1",
-                thread_id="thread-1",
-            ),
-            timeout=HumanTaskTimeoutPolicy(
-                timeout_seconds=60,
-                timeout_at=datetime(2026, 3, 22, 12, 0, 0),
-            ),
-        ),
-        created_at=datetime(2026, 3, 22, 11, 59, 0),
-    )
+def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> None:
+    state = {
+        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
+        "pending_interrupt": {
+            "kind": "ask_user",
+            "question": "还需要确认",
+        },
+        "graph_metadata": {
+            "pending_interrupts": [
+                {
+                    "interrupt_id": "interrupt-1",
+                    "payload": {"kind": "ask_user", "question": "还需要确认"},
+                }
+            ]
+        },
+        "step_states": [],
+        "tool_invocations": {},
+        "artifact_refs": [],
+        "audit_events": [],
+        "emitted_events": [DoneEvent(created_at=datetime(2026, 3, 22, 12, 0, 0))],
+    }
 
-    human_tasks = GraphStateContractMapper.reduce_human_tasks_from_events(
-        events=[wait_event],
-        reference_at=datetime(2026, 3, 22, 12, 1, 0),
-    )
+    reduced_state = GraphStateContractMapper.apply_emitted_events(state=state)
+    runtime_metadata = GraphStateContractMapper.build_runtime_metadata(reduced_state)
 
-    assert human_tasks["human-task-timeout"]["status"] == HumanTaskStatus.TIMEOUT.value
-    assert GraphStateContractMapper.find_latest_waiting_human_task(human_tasks) is None
+    assert reduced_state["pending_interrupt"] == {}
+    assert "pending_interrupts" not in runtime_metadata["graph_state_contract"]["graph_state"]["metadata"]

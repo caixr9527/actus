@@ -21,8 +21,9 @@ from .nodes import (
     recall_memory_context_node,
     replan_node,
     summarize_node,
+    wait_for_human_node,
 )
-from .routing import route_after_plan, route_after_replan
+from .routing import route_after_plan, route_after_replan, route_after_execute
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ def build_planner_react_langgraph_graph(
     graph.add_node("recall_memory_context", _recall_memory_context)
     graph.add_node("create_plan_or_reuse", _create_plan_with_llm)
     graph.add_node("execute_step", _execute_step_with_llm)
+    graph.add_node("wait_for_human", wait_for_human_node)
     graph.add_node("replan", _replan_with_llm)
     graph.add_node("summarize", _summarize_with_llm)
     graph.add_node("consolidate_memory", _consolidate_memory)
@@ -92,7 +94,15 @@ def build_planner_react_langgraph_graph(
             "consolidate_memory": "consolidate_memory",
         },
     )
-    graph.add_edge("execute_step", "replan")
+    graph.add_conditional_edges(
+        "execute_step",
+        route_after_execute,
+        {
+            "wait_for_human": "wait_for_human",
+            "replan": "replan",
+        },
+    )
+    graph.add_edge("wait_for_human", "create_plan_or_reuse")
     graph.add_conditional_edges(
         "replan",
         route_after_replan,

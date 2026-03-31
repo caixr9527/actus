@@ -30,7 +30,6 @@ from app.domain.models import (
     MCPConfig,
     A2AConfig,
     ErrorEvent,
-    HumanTask,
     SessionStatus,
     Event,
     MessageEvent,
@@ -42,6 +41,8 @@ from app.domain.models import (
     DoneEvent,
     TitleEvent,
     WaitEvent,
+    ResumeInput,
+    RuntimeInput,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
@@ -181,26 +182,27 @@ class AgentTaskRunner(TaskRunner):
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
 
-    async def _pop_event(self, task: Task) -> Optional[Event]:
+    async def _pop_event(self, task: Task) -> Optional[RuntimeInput]:
         # 从输入流中取出事件数据
         event_id, event_str = await task.input_stream.pop()
         if event_str is None:
             logger.warning(f"接收到空消息")
             return None
 
-        # 解析JSON字符串为Event对象
-        event = TypeAdapter(Event).validate_json(event_str)
-        # 设置事件ID
-        event.id = event_id
+        # 解析JSON字符串为运行时输入对象
+        event = TypeAdapter(RuntimeInput).validate_json(event_str)
 
-        # 输入流消费阶段补写事件历史：
-        # 如果之前发生“入流成功但写库失败/进程中断”，这里会按event_id幂等补齐。
-        try:
-            async with self._uow_factory() as uow:
-                await uow.session.add_event_if_absent(self._session_id, event)
-        except Exception as e:
-            # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
-            logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")
+        if isinstance(event, MessageEvent):
+            # 仅消息事件拥有领域事件ID；恢复输入是运行时内部控制消息，不进入事件历史。
+            event.id = event_id
+            # 输入流消费阶段补写事件历史：
+            # 如果之前发生“入流成功但写库失败/进程中断”，这里会按event_id幂等补齐。
+            try:
+                async with self._uow_factory() as uow:
+                    await uow.session.add_event_if_absent(self._session_id, event)
+            except Exception as e:
+                # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
+                logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")
 
         return event
 
@@ -401,37 +403,6 @@ class AgentTaskRunner(TaskRunner):
             # 记录处理工具事件时发生的异常
             logger.exception(f"处理工具事件失败: {e}")
 
-    async def _enrich_wait_event_human_task(self, event: WaitEvent) -> WaitEvent:
-        """为等待事件补齐可恢复上下文。"""
-        try:
-            async with self._uow_factory() as uow:
-                session = await uow.session.get_by_id(session_id=self._session_id)
-                run = (
-                    await uow.workflow_run.get_by_id(session.current_run_id)
-                    if session is not None and session.current_run_id
-                    else None
-                )
-        except Exception as e:
-            logger.warning(f"补齐等待事件上下文失败，继续按最小语义输出: {e}")
-            session = None
-            run = None
-
-        session_id = session.id if session is not None else self._session_id
-        base_human_task = event.human_task or HumanTask.build_wait_for_user_input(
-            session_id=session_id,
-            question="",
-            reason="wait_event",
-        )
-        event.human_task = base_human_task.with_resume_point(
-            session_id=session_id,
-            run_id=run.id if run is not None else None,
-            thread_id=run.thread_id if run is not None else session_id,
-            checkpoint_namespace=run.checkpoint_namespace if run is not None else None,
-            checkpoint_id=run.checkpoint_id if run is not None else None,
-            current_step_id=run.current_step_id if run is not None else None,
-        )
-        return event
-
     async def _run_flow(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         # 检查消息是否为空，如果为空则记录警告并返回错误事件
         if not message.message:
@@ -449,6 +420,14 @@ class AgentTaskRunner(TaskRunner):
                 await self._sync_message_attachments_to_storage(event)
 
             # 产出事件
+            yield event
+
+    async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
+        async for event in self._run_engine.resume(value):
+            if isinstance(event, ToolEvent):
+                await self._handle_tool_event(event)
+            elif isinstance(event, MessageEvent):
+                await self._sync_message_attachments_to_storage(event)
             yield event
 
     async def _cleanup_tools(self) -> None:
@@ -506,14 +485,21 @@ class AgentTaskRunner(TaskRunner):
                     # 记录接收到的消息日志
                     logger.info(f"收到消息: {message[:50]}...")
 
-                # 创建消息对象，包含消息内容和附件路径列表
-                message_obj = Message(
-                    message=message,
-                    attachments=[attachment.filepath for attachment in event.attachments],
-                )
+                if isinstance(event, MessageEvent):
+                    # 创建消息对象，包含消息内容和附件路径列表
+                    message_obj = Message(
+                        message=message,
+                        attachments=[attachment.filepath for attachment in event.attachments],
+                    )
+                    event_stream = self._run_flow(message_obj)
+                elif isinstance(event, ResumeInput):
+                    event_stream = self._resume_flow(event.value)
+                else:
+                    logger.warning("收到不支持的运行时输入类型: %s", type(event).__name__)
+                    continue
 
                 # 运行流程并处理每个产生的事件
-                async for event in self._run_flow(message_obj):
+                async for event in event_stream:
                     # 将事件写入输出流+数据库，并在同一事务中更新会话投影字段。
                     # 说明：每种事件对应的投影更新在这里统一声明，便于审计事务边界。
                     if isinstance(event, TitleEvent):
@@ -533,7 +519,6 @@ class AgentTaskRunner(TaskRunner):
                             increment_unread=True,
                         )
                     elif isinstance(event, WaitEvent):
-                        event = await self._enrich_wait_event_human_task(event)
                         # 等待事件：事件历史 + 状态切换为WAITING，并立即结束本轮消费。
                         await self._put_and_add_event(
                             task=task,

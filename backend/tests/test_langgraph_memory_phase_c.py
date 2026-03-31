@@ -542,7 +542,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
 
 def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> None:
     state = {
-        "schema_version": "be-lg-04.v3",
+        "schema_version": "be-lg-04.v4",
         "session_id": "session-1",
         "user_id": "user-1",
         "run_id": "run-1",
@@ -560,7 +560,7 @@ def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> No
         "execution_count": 0,
         "max_execution_steps": 20,
         "step_states": [],
-        "human_tasks": {},
+        "pending_interrupt": {},
         "tool_invocations": {},
         "artifact_refs": [],
         "emitted_events": [],

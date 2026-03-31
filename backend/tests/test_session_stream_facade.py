@@ -63,7 +63,6 @@ def test_stream_chat_should_map_events_and_forward_runtime_context() -> None:
     request = ChatRequest(
         message="hello",
         attachments=["file-1"],
-        resume_token="resume-token-1",
         event_id="evt-cursor-1",
         timestamp=1711234567,
     )
@@ -95,5 +94,35 @@ def test_stream_chat_should_map_events_and_forward_runtime_context() -> None:
     assert agent_service.calls[0]["user_id"] == "user-1"
     assert agent_service.calls[0]["message"] == "hello"
     assert agent_service.calls[0]["attachments"] == ["file-1"]
-    assert agent_service.calls[0]["resume_token"] == "resume-token-1"
+    assert agent_service.calls[0]["resume"] is None
     assert agent_service.calls[0]["latest_event_id"] == "evt-cursor-1"
+
+
+def test_stream_chat_should_forward_resume_payload() -> None:
+    facade = SessionStreamFacade()
+    session_service = _SessionServiceForChat()
+    agent_service = _AgentServiceForChat()
+    request = ChatRequest(
+        resume=ChatRequest.ResumePayload(value={"approved": True}),
+        event_id="evt-cursor-2",
+    )
+
+    async def _collect():
+        iterator = await facade.stream_chat(
+            user_id="user-1",
+            session_id="session-1",
+            request=request,
+            session_service=session_service,
+            agent_service=agent_service,
+        )
+        events = []
+        async for event in iterator:
+            events.append(event)
+        return events
+
+    asyncio.run(_collect())
+
+    assert len(agent_service.calls) == 1
+    assert agent_service.calls[0]["message"] is None
+    assert agent_service.calls[0]["attachments"] == []
+    assert agent_service.calls[0]["resume"] == {"approved": True}

@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import AsyncGenerator, Optional, List, Type, Callable
+from typing import AsyncGenerator, Optional, List, Type, Callable, Any
 
 from pydantic import TypeAdapter
 
@@ -18,13 +18,13 @@ from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, Fi
 from app.domain.models import (
     BaseEvent,
     ErrorEvent,
-    HumanTaskStatus,
     SessionStatus,
     AgentConfig,
     MCPConfig,
     A2AConfig,
     Session,
     MessageEvent,
+    ResumeInput,
     Event,
     DoneEvent,
     WaitEvent,
@@ -32,7 +32,6 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
-from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +129,19 @@ class AgentService:
 
         raise RuntimeError("未配置运行时LLM解析能力")
 
-    async def _create_task(self, session: Session) -> Task:
-        """创建会话任务：解析 LLM 后交由 GraphRuntime 统一处理任务生命周期。"""
+    async def _create_task(
+            self,
+            session: Session,
+            *,
+            reuse_current_run: bool = False,
+    ) -> Task:
+        """创建或恢复会话任务。"""
         llm = await self._resolve_runtime_llm(session)
         runtime = getattr(self, "_graph_runtime", None)
         if runtime is None:
             raise RuntimeError("未配置GraphRuntime，无法创建会话任务")
+        if reuse_current_run:
+            return await runtime.resume_task(session=session, llm=llm)
         return await runtime.create_task(session=session, llm=llm)
 
     async def _safe_update_unread_count(self, session_id: str) -> None:
@@ -172,66 +178,13 @@ class AgentService:
             # 修复失败不影响当前SSE消息继续下发，避免用户流式体验被阻断。
             logger.warning(f"会话{session_id}输出流事件历史修复失败: {e}")
 
-    @staticmethod
-    def _get_latest_human_task(session: Session) -> Optional[dict]:
-        human_tasks = GraphStateContractMapper.reduce_human_tasks_from_events(
-            list(session.events or []),
-            reference_at=datetime.now(),
-        )
-        return GraphStateContractMapper.find_latest_human_task(human_tasks)
-
-    def _validate_waiting_resume_request(
-            self,
-            session: Session,
-            resume_token: Optional[str],
-    ) -> None:
-        waiting_task = self._get_latest_human_task(session)
-        if waiting_task is None:
-            raise BadRequestError(
-                msg="当前会话没有可恢复的等待任务",
-                error_key=error_keys.SESSION_WAIT_TASK_NOT_FOUND,
-                error_params={"session_id": session.id},
-            )
-
-        if waiting_task.get("status") == HumanTaskStatus.TIMEOUT.value:
-            raise BadRequestError(
-                msg="当前等待任务已超时，请重新发起请求",
-                error_key=error_keys.SESSION_WAIT_TASK_TIMEOUT,
-                error_params={
-                    "session_id": session.id,
-                    "task_id": waiting_task.get("task_id"),
-                },
-            )
-        if waiting_task.get("status") != HumanTaskStatus.WAITING.value:
-            raise BadRequestError(
-                msg="当前会话没有可恢复的等待任务",
-                error_key=error_keys.SESSION_WAIT_TASK_NOT_FOUND,
-                error_params={"session_id": session.id},
-            )
-
-        token_from_task = str(waiting_task.get("resume_token") or "").strip()
-        token_from_request = str(resume_token or "").strip()
-        if not token_from_request:
-            if token_from_task:
-                logger.info("会话[%s]恢复请求未携带resume_token，按兼容模式继续执行", session.id)
-            return
-        if not token_from_task or token_from_request != token_from_task:
-            raise BadRequestError(
-                msg="resume token 无效或已过期",
-                error_key=error_keys.SESSION_RESUME_TOKEN_INVALID,
-                error_params={
-                    "session_id": session.id,
-                    "task_id": waiting_task.get("task_id"),
-                },
-            )
-
     async def chat(
             self,
             session_id: str,
             user_id: str,
             message: Optional[str] = None,
             attachments: Optional[List[str]] = None,
-            resume_token: Optional[str] = None,
+            resume: Any = None,
             latest_event_id: Optional[str] = None,
             timestamp: Optional[datetime] = None,
     ) -> AsyncGenerator[BaseEvent, None]:
@@ -255,21 +208,40 @@ class AgentService:
 
             # 获取当前会话的任务实例
             task = await self._get_task(session)
+            is_resume_request = resume is not None
+
+            if session.status == SessionStatus.WAITING and not is_resume_request:
+                raise BadRequestError(
+                    msg="当前会话处于等待状态，请使用 resume 恢复执行",
+                    error_key=error_keys.SESSION_RESUME_REQUIRED,
+                    error_params={"session_id": session.id},
+                )
+            if is_resume_request and session.status != SessionStatus.WAITING:
+                raise BadRequestError(
+                    msg="当前会话不处于等待状态，无法恢复执行",
+                    error_key=error_keys.SESSION_NOT_WAITING,
+                    error_params={"session_id": session.id},
+                )
 
             # 处理用户发送的消息
             if message:
                 # 统一归一化可选参数，避免后续列表处理触发None错误。
                 attachments = attachments or []
 
-                if session.status == SessionStatus.WAITING:
-                    self._validate_waiting_resume_request(
-                        session=session,
-                        resume_token=resume_token,
+                # 如果会话未处于运行状态，或者没有任务，则创建/恢复任务。
+                if task is None:
+                    task = await self._create_task(
+                        session,
+                        reuse_current_run=(
+                                session.status == SessionStatus.RUNNING
+                                and bool(str(session.current_run_id or "").strip())
+                        ),
                     )
-
-                # 如果会话未处于运行状态，或者没有任务，则创建新任务
-                if session.status != SessionStatus.RUNNING or task is None:
-                    task = await self._create_task(session)
+                    if not task:
+                        logger.error(f"会话{session_id}的聊天请求失败: 创建任务失败")
+                        raise RuntimeError(f"会话{session_id}的聊天请求失败: 创建任务失败")
+                elif session.status != SessionStatus.RUNNING:
+                    task = await self._create_task(session, reuse_current_run=False)
                     if not task:
                         logger.error(f"会话{session_id}的聊天请求失败: 创建任务失败")
                         raise RuntimeError(f"会话{session_id}的聊天请求失败: 创建任务失败")
@@ -324,6 +296,19 @@ class AgentService:
                 await task.invoke()
 
                 logger.info(f"会话{session_id},输入消息队列写入消息: {message[:50]}...")
+            elif is_resume_request:
+                if task is None:
+                    task = await self._create_task(session, reuse_current_run=True)
+                    if not task:
+                        logger.error(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
+                        raise RuntimeError(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
+
+                await task.input_stream.put(ResumeInput(value=resume).model_dump_json())
+                async with self._uow_factory() as uow:
+                    await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+
+                await task.invoke()
+                logger.info("会话%s, 已写入恢复请求并启动执行", session_id)
 
             logger.info(f"会话{session_id},已启动,任务实例: {task}")
 

@@ -25,6 +25,14 @@ def route_after_plan(state: PlannerReActLangGraphState) -> Literal["execute_step
     return "execute_step" if plan.get_next_step() is not None else "summarize"
 
 
+def route_after_execute(state: PlannerReActLangGraphState) -> Literal["wait_for_human", "replan"]:
+    """步骤执行后，若存在 pending interrupt 则进入等待节点。"""
+    pending_interrupt = state.get("pending_interrupt")
+    if isinstance(pending_interrupt, dict) and len(pending_interrupt) > 0:
+        return "wait_for_human"
+    return "replan"
+
+
 def route_after_replan(state: PlannerReActLangGraphState) -> Literal["execute_step", "summarize", "consolidate_memory"]:
     """重规划阶段后的分支路由，与规划后逻辑保持一致。"""
     return route_after_plan(state)

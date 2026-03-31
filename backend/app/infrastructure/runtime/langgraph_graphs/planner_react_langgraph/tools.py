@@ -253,6 +253,18 @@ async def execute_step_with_prompt(
             status=ToolEventStatus.CALLED,
         )
         await _notify_tool_event(called_event)
+        interrupt_request = (
+            tool_result.data.get("interrupt")
+            if isinstance(tool_result.data, dict)
+            else None
+        )
+        if isinstance(interrupt_request, dict) and interrupt_request:
+            return {
+                "success": True,
+                "interrupt_request": interrupt_request,
+                "result": "",
+                "attachments": [],
+            }, emitted_tool_events
         messages.append(
             {
                 "role": "tool",

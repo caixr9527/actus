@@ -145,32 +145,25 @@ def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
     assert payload["data"]["steps"][0]["event_status"] == "completed"
 
 
-def test_wait_sse_event_should_include_human_task_fields() -> None:
-    event = WaitEvent.build_for_user_input(
-        session_id="session-1",
-        question="请确认是否继续",
-        reason="ask_user",
-        attachments=["/tmp/spec.md"],
-        suggest_user_takeover="browser",
-        timeout_seconds=600,
-        run_id="run-1",
-        thread_id="thread-1",
-        checkpoint_namespace="",
-        checkpoint_id="cp-1",
-        current_step_id="step-1",
-        resume_token="resume-token-1",
+def test_wait_sse_event_should_include_interrupt_payload() -> None:
+    event = WaitEvent.from_interrupt(
+        interrupt_id="interrupt-1",
+        payload={
+            "kind": "ask_user",
+            "question": "请确认是否继续",
+            "attachments": ["/tmp/spec.md"],
+            "suggest_user_takeover": "browser",
+            "actions": ["continue", "cancel"],
+        },
     )
 
     sse_event = EventMapper.event_to_sse_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["event"] == "wait"
-    assert payload["data"]["reason"] == "ask_user"
-    assert payload["data"]["question"] == "请确认是否继续"
-    assert payload["data"]["attachments"] == ["/tmp/spec.md"]
-    assert payload["data"]["suggest_user_takeover"] == "browser"
-    assert payload["data"]["resume_token"] == "resume-token-1"
-    assert payload["data"]["resume_command"]["type"] == "chat_message"
-    assert payload["data"]["resume_point"]["run_id"] == "run-1"
-    assert payload["data"]["timeout_seconds"] == 600
-    assert payload["data"]["status"] == "waiting"
+    assert payload["data"]["interrupt_id"] == "interrupt-1"
+    assert payload["data"]["payload"]["kind"] == "ask_user"
+    assert payload["data"]["payload"]["question"] == "请确认是否继续"
+    assert payload["data"]["payload"]["attachments"] == ["/tmp/spec.md"]
+    assert payload["data"]["payload"]["suggest_user_takeover"] == "browser"
+    assert payload["data"]["payload"]["actions"] == ["continue", "cancel"]

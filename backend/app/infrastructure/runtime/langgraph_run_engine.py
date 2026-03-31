@@ -13,11 +13,17 @@ import mimetypes
 from contextlib import suppress
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 
+from langgraph.types import Command
+
 from app.domain.external import LLM, FileStorage
-from app.domain.models import BaseEvent, Message, File
+from app.domain.models import BaseEvent, Message, File, WaitEvent
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
-from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
+from app.domain.services.runtime.langgraph_state import (
+    GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
+    GraphStateContractMapper,
+    PlannerReActLangGraphState,
+)
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
@@ -204,6 +210,7 @@ class LangGraphRunEngine(RunEngine):
             # 状态构建失败时必须降级，不能阻断主链路执行。
             logger.warning("会话[%s]构建Graph初始状态失败，回退最小输入: %s", self._session_id, e)
             return {
+                "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
                 "session_id": self._session_id,
                 "user_id": self._user_id,
                 "run_id": run_id,
@@ -221,7 +228,20 @@ class LangGraphRunEngine(RunEngine):
                 "step_local_memory": {},
                 "summary_local_memory": {},
                 "memory_context_version": None,
+                "plan": None,
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "step_states": [],
+                "pending_interrupt": {},
+                "tool_invocations": {},
+                "graph_metadata": {},
+                "artifact_refs": [],
+                "audit_events": [],
+                "final_message": "",
                 "emitted_events": [],
+                "error": None,
             }
 
     async def _sync_graph_state_contract(
@@ -252,7 +272,7 @@ class LangGraphRunEngine(RunEngine):
         except Exception as e:
             logger.warning("会话[%s]回写graph_state_contract失败: %s", self._session_id, e)
 
-    async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
+    async def _resolve_invoke_context(self) -> tuple[Dict[str, Dict[str, str]], Optional[str]]:
         invoke_config = {"configurable": {"thread_id": self._session_id}}
         run_id = None
         if self._checkpoint_adapter is not None:
@@ -261,13 +281,77 @@ class LangGraphRunEngine(RunEngine):
             except Exception as e:
                 # 配置解析失败不阻断主流程，降级到 session 级 thread。
                 logger.warning("会话[%s]解析checkpoint配置失败，回退默认thread配置: %s", self._session_id, e)
+        return invoke_config, run_id
 
-        graph_input_state = await self._build_graph_input_state(
-            message=message,
-            run_id=run_id,
-            invoke_config=invoke_config,
-        )
+    async def _load_checkpoint_state(
+            self,
+            invoke_config: Dict[str, Dict[str, str]],
+    ) -> Optional[PlannerReActLangGraphState]:
+        aget_state = getattr(self._graph, "aget_state", None)
+        if callable(aget_state):
+            snapshot = await aget_state(invoke_config)
+        else:
+            get_state = getattr(self._graph, "get_state", None)
+            snapshot = get_state(invoke_config) if callable(get_state) else None
+
+        if snapshot is None:
+            return None
+        values = getattr(snapshot, "values", None)
+        if not isinstance(values, dict):
+            return None
+        return dict(values)
+
+    @staticmethod
+    def _build_wait_events(raw_interrupts: Any) -> List[WaitEvent]:
+        wait_events: List[WaitEvent] = []
+        for item in list(raw_interrupts or []):
+            payload = getattr(item, "value", None)
+            if not isinstance(payload, dict):
+                payload = {"value": payload}
+            wait_events.append(
+                WaitEvent.from_interrupt(
+                    interrupt_id=getattr(item, "id", None),
+                    payload=payload,
+                )
+            )
+        return wait_events
+
+    @staticmethod
+    def _inject_pending_interrupts(
+            state: PlannerReActLangGraphState,
+            wait_events: List[WaitEvent],
+    ) -> PlannerReActLangGraphState:
+        graph_metadata = dict(state.get("graph_metadata") or {})
+        pending_interrupts = [
+            {
+                "interrupt_id": event.interrupt_id,
+                "payload": dict(event.payload or {}),
+            }
+            for event in wait_events
+        ]
+        graph_metadata["pending_interrupts"] = pending_interrupts
+        if len(wait_events) > 0 and wait_events[-1].interrupt_id:
+            graph_metadata["latest_interrupt_id"] = str(wait_events[-1].interrupt_id)
+        return {
+            **state,
+            "pending_interrupt": (
+                dict(wait_events[-1].payload or {})
+                if len(wait_events) > 0
+                else {}
+            ),
+            "graph_metadata": graph_metadata,
+        }
+
+    async def _run_graph(
+            self,
+            *,
+            graph_input: Any,
+            invoke_config: Dict[str, Dict[str, str]],
+            run_id: Optional[str],
+            fallback_state: Optional[PlannerReActLangGraphState],
+    ) -> AsyncGenerator[BaseEvent, None]:
         state: Optional[PlannerReActLangGraphState] = None
+        wait_events: List[WaitEvent] = []
         deduplicator = _EventDeduplicator()
         live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
 
@@ -279,7 +363,7 @@ class LangGraphRunEngine(RunEngine):
         try:
             graph_task = asyncio.create_task(
                 self._graph.ainvoke(
-                    graph_input_state,
+                    graph_input,
                     config=invoke_config,
                 )
             )
@@ -290,8 +374,16 @@ class LangGraphRunEngine(RunEngine):
             ):
                 yield live_event
 
-            state = await graph_task
-            state = GraphStateContractMapper.apply_emitted_events(state=state)
+            raw_result = await graph_task
+            if isinstance(raw_result, dict) and "__interrupt__" in raw_result:
+                wait_events = self._build_wait_events(raw_result.get("__interrupt__"))
+                checkpoint_state = await self._load_checkpoint_state(invoke_config=invoke_config)
+                state = checkpoint_state or fallback_state
+                if state is not None:
+                    state = self._inject_pending_interrupts(state=state, wait_events=wait_events)
+            else:
+                state = raw_result
+                state = GraphStateContractMapper.apply_emitted_events(state=state)
         finally:
             unbind_live_event_sink(sink_token)
             if graph_task is not None and not graph_task.done():
@@ -306,15 +398,45 @@ class LangGraphRunEngine(RunEngine):
                     checkpointer=getattr(self._graph, "checkpointer", None),
                     invoke_config=invoke_config,
                 )
-            # graph 执行失败时，回写当前已知状态（至少包含本次输入上下文）。
+            # graph 执行失败或中断时，回写当前已知状态。
             await self._sync_graph_state_contract(
                 run_id=run_id,
-                state=state or graph_input_state,
+                state=state or fallback_state,
             )
 
         for event in (state or {}).get("emitted_events", []):
             if deduplicator.should_emit(event):
                 yield event.model_copy(deep=True)
+        for event in wait_events:
+            if deduplicator.should_emit(event):
+                yield event
+
+    async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
+        invoke_config, run_id = await self._resolve_invoke_context()
+
+        graph_input_state = await self._build_graph_input_state(
+            message=message,
+            run_id=run_id,
+            invoke_config=invoke_config,
+        )
+        async for event in self._run_graph(
+                graph_input=graph_input_state,
+                invoke_config=invoke_config,
+                run_id=run_id,
+                fallback_state=graph_input_state,
+        ):
+            yield event
+
+    async def resume(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
+        invoke_config, run_id = await self._resolve_invoke_context()
+        checkpoint_state = await self._load_checkpoint_state(invoke_config=invoke_config)
+        async for event in self._run_graph(
+                graph_input=Command(resume=value),
+                invoke_config=invoke_config,
+                run_id=run_id,
+                fallback_state=checkpoint_state,
+        ):
+            yield event
 
     async def _forward_live_events(
             self,

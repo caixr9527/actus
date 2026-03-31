@@ -128,7 +128,7 @@ class SessionStreamFacade:
                     user_id=user_id,
                     message=request.message,
                     attachments=request.attachments,
-                    resume_token=request.resume_token,
+                    resume=request.resume.value if request.resume is not None else None,
                     latest_event_id=request.event_id,
                     timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
             ):

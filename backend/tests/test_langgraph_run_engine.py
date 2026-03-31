@@ -1,9 +1,26 @@
+import asyncio
+from types import SimpleNamespace
+
+from langgraph.types import Command
+
+from app.domain.models import Message, WaitEvent
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
 class _FakeGraph:
-    async def ainvoke(self, _state, config=None):
-        return {"emitted_events": []}
+    def __init__(self, result=None, checkpoint_state=None) -> None:
+        self._result = result or {"emitted_events": []}
+        self._checkpoint_state = checkpoint_state
+        self.calls = []
+
+    async def ainvoke(self, state, config=None):
+        self.calls.append((state, config))
+        return self._result
+
+    async def aget_state(self, config):
+        if self._checkpoint_state is None:
+            return None
+        return SimpleNamespace(values=self._checkpoint_state)
 
 
 def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monkeypatch) -> None:
@@ -26,3 +43,92 @@ def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monk
     )
 
     assert captured["checkpointer"] is checkpointer
+
+
+def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monkeypatch) -> None:
+    fake_graph = _FakeGraph(
+        result={
+            "__interrupt__": [
+                SimpleNamespace(
+                    id="interrupt-1",
+                    value={
+                        "kind": "ask_user",
+                        "question": "请确认是否继续",
+                    },
+                )
+            ]
+        },
+        checkpoint_state={
+            "session_id": "session-1",
+            "graph_metadata": {},
+            "pending_interrupt": {},
+            "emitted_events": [],
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+
+    engine = LangGraphRunEngine(
+        session_id="session-1",
+        llm=object(),
+    )
+
+    async def _collect():
+        events = []
+        async for event in engine.invoke(Message(message="hello")):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+
+    assert len(events) == 1
+    assert isinstance(events[0], WaitEvent)
+    assert events[0].interrupt_id == "interrupt-1"
+    assert events[0].payload["question"] == "请确认是否继续"
+
+
+def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:
+    fake_graph = _FakeGraph(
+        result={"emitted_events": []},
+        checkpoint_state={
+            "session_id": "session-1",
+            "graph_metadata": {
+                "pending_interrupts": [
+                    {
+                        "interrupt_id": "interrupt-1",
+                        "payload": {"question": "请确认是否继续"},
+                    }
+                ]
+            },
+            "pending_interrupt": {"question": "请确认是否继续"},
+            "emitted_events": [],
+        },
+    )
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+
+    engine = LangGraphRunEngine(
+        session_id="session-1",
+        llm=object(),
+    )
+
+    async def _collect():
+        events = []
+        async for event in engine.resume({"approved": True}):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect())
+
+    assert events == []
+    assert len(fake_graph.calls) == 1
+    graph_input, config = fake_graph.calls[0]
+    assert isinstance(graph_input, Command)
+    assert graph_input.resume == {"approved": True}
+    assert config == {"configurable": {"thread_id": "session-1"}}

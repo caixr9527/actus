@@ -41,6 +41,10 @@ class GraphRuntime(Protocol):
         """按会话创建任务实例并完成运行关联写回。"""
         ...
 
+    async def resume_task(self, session: Session, llm: LLM) -> Task:
+        """为已有运行重建任务实例并复用当前 run。"""
+        ...
+
     async def cancel_task(self, session: Session) -> bool:
         """按会话取消任务实例。"""
         ...
@@ -78,8 +82,12 @@ class DefaultGraphRuntime(GraphRuntime):
             return None
         return self._task_cls.get(task_id=task_id)
 
-    async def create_task(self, session: Session, llm: LLM) -> Task:
-        """创建任务并在单一流程内完成会话关联写回与异常补偿。"""
+    async def _build_task_instance(
+            self,
+            session: Session,
+            llm: LLM,
+    ) -> tuple[Task, Sandbox, bool]:
+        """构建任务实例，统一复用创建/恢复场景。"""
         # 先尝试复用已存在沙箱；不存在时再创建新沙箱，减少外部资源抖动。
         sandbox = None
         sandbox_id = session.sandbox_id
@@ -114,6 +122,14 @@ class DefaultGraphRuntime(GraphRuntime):
                 except Exception as destroy_err:
                     logger.error("会话%s任务构造失败后销毁沙箱失败: %s", session.id, destroy_err)
             raise
+        return task, sandbox, created_new_sandbox
+
+    async def create_task(self, session: Session, llm: LLM) -> Task:
+        """创建任务并在单一流程内完成会话关联写回与异常补偿。"""
+        task, sandbox, created_new_sandbox = await self._build_task_instance(
+            session=session,
+            llm=llm,
+        )
 
         # 记录旧值用于补偿回滚，避免数据库写回失败后内存态悬挂。
         previous_sandbox_id = session.sandbox_id
@@ -160,6 +176,50 @@ class DefaultGraphRuntime(GraphRuntime):
                     await uow.session.save(session=session)
             except Exception as rollback_err:
                 logger.error("会话%s补偿回滚关联字段失败: %s", session.id, rollback_err)
+            raise
+
+    async def resume_task(self, session: Session, llm: LLM) -> Task:
+        """为已有 run 重建任务实例，但不新建 workflow_run。"""
+        if not str(session.current_run_id or "").strip():
+            raise RuntimeError(f"会话{session.id}缺少 current_run_id，无法恢复执行")
+
+        task, sandbox, created_new_sandbox = await self._build_task_instance(
+            session=session,
+            llm=llm,
+        )
+        previous_sandbox_id = session.sandbox_id
+        previous_task_id = session.task_id
+        previous_status = session.status
+
+        session.sandbox_id = sandbox.id
+        session.task_id = task.id
+        session.status = SessionStatus.RUNNING
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.save(session=session)
+            return task
+        except Exception as save_err:
+            logger.error("会话%s恢复任务写回失败，开始补偿: %s", session.id, save_err)
+
+            try:
+                task.cancel()
+            except Exception as cancel_err:
+                logger.error("会话%s恢复任务补偿取消失败: %s", session.id, cancel_err)
+
+            if created_new_sandbox:
+                try:
+                    await sandbox.destroy()
+                except Exception as destroy_err:
+                    logger.error("会话%s恢复任务补偿销毁沙箱失败: %s", session.id, destroy_err)
+
+            session.sandbox_id = previous_sandbox_id
+            session.task_id = previous_task_id
+            session.status = previous_status
+            try:
+                async with self._uow_factory() as uow:
+                    await uow.session.save(session=session)
+            except Exception as rollback_err:
+                logger.error("会话%s恢复任务补偿回滚关联字段失败: %s", session.id, rollback_err)
             raise
 
     async def cancel_task(self, session: Session) -> bool:

@@ -7,7 +7,6 @@
 """
 import logging
 from datetime import datetime
-from enum import Enum
 from typing import Any, Dict, List, Optional, TypedDict
 
 from pydantic import BaseModel
@@ -30,18 +29,9 @@ from app.domain.models import (
 
 logger = logging.getLogger(__name__)
 
-# BE-LG-04 约定版本号。
-# 后续契约发生结构化变更时，必须升级该版本并做兼容迁移策略。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v3"
-
-
-class HumanTaskStatus(str, Enum):
-    """人机协作任务状态。"""
-
-    WAITING = "waiting"
-    RESUMED = "resumed"
-    CANCELLED = "cancelled"
-    TIMEOUT = "timeout"
+# BE-LG-04 契约版本。
+# v4 删除 human_tasks 真相源，等待态统一切到 LangGraph 原生 interrupt。
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v4"
 
 
 class StepState(TypedDict, total=False):
@@ -55,26 +45,6 @@ class StepState(TypedDict, total=False):
     error: Optional[str]
     success: bool
     attachments: List[str]
-
-
-class HumanTaskState(TypedDict, total=False):
-    """Graph 内部人机协作任务状态。"""
-
-    task_id: str
-    status: str
-    reason: str
-    question: str
-    attachments: List[str]
-    suggest_user_takeover: str
-    resume_token: Optional[str]
-    resume_command: Dict[str, Any]
-    resume_point: Dict[str, Any]
-    timeout_seconds: Optional[int]
-    timeout_at: Optional[str]
-    created_at: str
-    updated_at: str
-    wait_event_id: Optional[str]
-    resume_event_id: Optional[str]
 
 
 class ToolInvocationState(TypedDict, total=False):
@@ -91,47 +61,47 @@ class ToolInvocationState(TypedDict, total=False):
     created_at: str
     updated_at: str
 
+
 class PlannerReActLangGraphState(TypedDict, total=False):
     """LangGraph 状态对象（BE-LG-04 契约版本）。"""
 
-    schema_version: str  # 状态契约版本号，用于跨版本兼容与迁移判断。
-    session_id: str  # 会话ID，标识当前对话上下文归属。
-    user_id: Optional[str]  # 当前线程归属用户ID，供长期记忆命名空间使用。
-    run_id: Optional[str]  # 运行ID，对应 workflow_runs 主记录，可为空（新建前）。
-    thread_id: str  # LangGraph/checkpoint 线程ID，用于恢复同一执行链路。
-    checkpoint_ref_namespace: str  # checkpoint 命名空间，支持多图/多环境隔离。
-    checkpoint_ref_id: Optional[str]  # 最近一次 checkpoint 引用ID，用于断点续跑。
-    user_message: str  # 本轮用户输入的纯文本主消息。
-    input_parts: List[Dict[str, Any]]  # 本轮统一输入片段（text/image/file/audio/video 等）。
-    message_window: List[Dict[str, Any]]  # 线程级消息窗口，仅保留高价值消息摘要。
-    conversation_summary: str  # 被裁剪历史消息的滚动摘要。
-    working_memory: Dict[str, Any]  # 当前线程共享的结构化工作记忆。
-    retrieved_memories: List[Dict[str, Any]]  # 本轮从长期记忆召回的结果快照。
-    pending_memory_writes: List[Dict[str, Any]]  # 待固化的长期记忆候选。
-    planner_local_memory: Dict[str, Any]  # planner/replan 共用的局部工作区。
-    step_local_memory: Dict[str, Any]  # execute_step 局部工作区。
-    summary_local_memory: Dict[str, Any]  # summarize 局部工作区。
-    memory_context_version: Optional[str]  # 本轮记忆上下文版本/签名。
-    plan: Plan  # 当前执行计划快照（标题、步骤、状态等）。
-    current_step_id: Optional[str]  # 当前正在执行或即将执行的步骤ID。
-    execution_count: int  # 已执行步骤轮次计数，用于循环收敛与保护。
-    max_execution_steps: int  # 最大允许执行步数，防止无限循环。
-    last_executed_step: Optional[Step]  # 最近一次执行完成的步骤快照，供 replan/summarize 使用。
-    step_states: List[StepState]  # 步骤状态平铺快照，便于投影与查询。
-    human_tasks: Dict[str, HumanTaskState]  # 人机协作任务集合（wait/resume/timeout）。
-    tool_invocations: Dict[str, ToolInvocationState]  # 工具调用轨迹集合（参数、结果、状态）。
-    graph_metadata: Dict[str, Any]  # 图运行元信息（如 input_policy、调试扩展字段）。
-    artifact_refs: List[str]  # 产物引用列表（文件ID、URL、附件引用等）。
-    audit_events: List[BaseEvent]  # 审计事件缓存，仅用于追踪/复盘，不参与决策。
-    final_message: str  # 当前已确定的最终回复候选文本。
-    emitted_events: List[BaseEvent]  # 已发射事件序列，供回放/去重/最终落库。
-    error: Optional[str]  # 图执行错误信息（可选），用于失败态透出与诊断。
+    schema_version: str
+    session_id: str
+    user_id: Optional[str]
+    run_id: Optional[str]
+    thread_id: str
+    checkpoint_ref_namespace: str
+    checkpoint_ref_id: Optional[str]
+    user_message: str
+    input_parts: List[Dict[str, Any]]
+    message_window: List[Dict[str, Any]]
+    conversation_summary: str
+    working_memory: Dict[str, Any]
+    retrieved_memories: List[Dict[str, Any]]
+    pending_memory_writes: List[Dict[str, Any]]
+    planner_local_memory: Dict[str, Any]
+    step_local_memory: Dict[str, Any]
+    summary_local_memory: Dict[str, Any]
+    memory_context_version: Optional[str]
+    plan: Optional[Plan]
+    current_step_id: Optional[str]
+    execution_count: int
+    max_execution_steps: int
+    last_executed_step: Optional[Step]
+    step_states: List[StepState]
+    pending_interrupt: Dict[str, Any]
+    tool_invocations: Dict[str, ToolInvocationState]
+    graph_metadata: Dict[str, Any]
+    artifact_refs: List[str]
+    audit_events: List[BaseEvent]
+    final_message: str
+    emitted_events: List[BaseEvent]
+    error: Optional[str]
 
 
 class GraphStateContractMapper:
     """BE-LG-04：Graph State 与领域对象映射器。"""
 
-    # graph state plane：允许进入 LangGraph checkpoint 的字段。
     GRAPH_STATE_FIELDS: tuple[str, ...] = (
         "schema_version",
         "session_id",
@@ -157,18 +127,16 @@ class GraphStateContractMapper:
         "max_execution_steps",
         "last_executed_step",
         "step_states",
-        "human_tasks",
+        "pending_interrupt",
         "tool_invocations",
         "graph_metadata",
         "artifact_refs",
     )
 
-    # projection plane：只作为查询投影，不进入 graph state。
     PROJECTION_ONLY_FIELDS: tuple[str, ...] = (
         "sessions.title/latest_message/status",
     )
 
-    # audit plane：只做审计与追踪，不参与图内决策状态。
     AUDIT_ONLY_FIELDS: tuple[str, ...] = (
         "workflow_run_events.event_payload",
         "workflow_run_events.event_id",
@@ -176,7 +144,6 @@ class GraphStateContractMapper:
         "workflow_run_events.created_at",
     )
 
-    # artifact plane：产物引用，不进入 graph 主状态。
     ARTIFACT_ONLY_FIELDS: tuple[str, ...] = (
         "generated_file_ids",
         "browser_screenshot_urls",
@@ -191,13 +158,10 @@ class GraphStateContractMapper:
 
     @classmethod
     def _to_json_safe(cls, value: Any) -> Any:
-        """递归转换为可落 JSONB 的结构。"""
         if value is None:
             return None
         if isinstance(value, BaseModel):
             return value.model_dump(mode="json")
-        if isinstance(value, Enum):
-            return value.value
         if isinstance(value, datetime):
             return value.isoformat()
         if isinstance(value, dict):
@@ -233,7 +197,6 @@ class GraphStateContractMapper:
             session: Session,
             run: Optional[WorkflowRun],
     ) -> Optional[Plan]:
-        # 优先使用 runtime_metadata 中的 graph_state_contract 计划快照。
         graph_state = cls._extract_contract_graph_state(run=run)
         graph_plan = graph_state.get("plan")
         if isinstance(graph_plan, dict) and graph_plan:
@@ -246,7 +209,6 @@ class GraphStateContractMapper:
                     e,
                 )
 
-        # run 不可用时回退到 session 事件投影。
         latest_plan = session.get_latest_plan()
         return latest_plan.model_copy(deep=True) if latest_plan is not None else None
 
@@ -265,50 +227,55 @@ class GraphStateContractMapper:
             return {}
         return dict(graph_state)
 
+    @staticmethod
+    def _normalize_text(raw: Any) -> str:
+        return str(raw or "")
+
     @classmethod
-    def _normalize_human_tasks(cls, raw: Any) -> Dict[str, HumanTaskState]:
+    def _normalize_dict_memory(cls, raw: Any) -> Dict[str, Any]:
         if not isinstance(raw, dict):
             return {}
-        normalized: Dict[str, HumanTaskState] = {}
-        for task_id, payload in raw.items():
-            if not isinstance(payload, dict):
-                continue
-            raw_attachments = payload.get("attachments")
-            if isinstance(raw_attachments, str):
-                attachments = [raw_attachments] if raw_attachments.strip() else []
-            elif isinstance(raw_attachments, list):
-                attachments = [str(item) for item in raw_attachments if str(item).strip()]
-            else:
-                attachments = []
-            normalized[str(task_id)] = {
-                "task_id": str(payload.get("task_id") or task_id),
-                "status": str(payload.get("status") or HumanTaskStatus.WAITING.value),
-                "reason": str(payload.get("reason") or ""),
-                "question": str(payload.get("question") or ""),
-                "attachments": attachments,
-                "suggest_user_takeover": str(payload.get("suggest_user_takeover") or "none"),
-                "resume_token": str(payload.get("resume_token")) if payload.get("resume_token") else None,
-                "resume_command": (
-                    payload.get("resume_command")
-                    if isinstance(payload.get("resume_command"), dict)
-                    else {}
-                ),
-                "resume_point": (
-                    payload.get("resume_point")
-                    if isinstance(payload.get("resume_point"), dict)
-                    else {}
-                ),
-                "timeout_seconds": (
-                    int(payload.get("timeout_seconds"))
-                    if payload.get("timeout_seconds") is not None
-                    else None
-                ),
-                "timeout_at": str(payload.get("timeout_at")) if payload.get("timeout_at") else None,
-                "created_at": str(payload.get("created_at") or datetime.now().isoformat()),
-                "updated_at": str(payload.get("updated_at") or datetime.now().isoformat()),
-                "wait_event_id": str(payload.get("wait_event_id")) if payload.get("wait_event_id") else None,
-                "resume_event_id": str(payload.get("resume_event_id")) if payload.get("resume_event_id") else None,
-            }
+        return cls._to_json_safe(raw)
+
+    @classmethod
+    def _normalize_list_memory(cls, raw: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        normalized: List[Dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                normalized.append(cls._to_json_safe(item))
+        return normalized
+
+    @classmethod
+    def _normalize_input_parts(cls, raw: Any) -> List[Dict[str, Any]]:
+        return cls._normalize_list_memory(raw)
+
+    @classmethod
+    def _normalize_message_window(cls, raw: Any) -> List[Dict[str, Any]]:
+        return cls._normalize_list_memory(raw)
+
+    @classmethod
+    def _normalize_pending_interrupt(cls, raw: Any) -> Dict[str, Any]:
+        if not isinstance(raw, dict):
+            return {}
+        if len(raw) == 0:
+            return {}
+
+        normalized = cls._to_json_safe(raw)
+        normalized["kind"] = str(normalized.get("kind") or "ask_user")
+        normalized["question"] = str(normalized.get("question") or "").strip()
+
+        attachments = normalized.get("attachments")
+        if isinstance(attachments, str):
+            normalized["attachments"] = [attachments] if attachments.strip() else []
+        elif isinstance(attachments, list):
+            normalized["attachments"] = [str(item).strip() for item in attachments if str(item).strip()]
+        else:
+            normalized["attachments"] = []
+
+        takeover = str(normalized.get("suggest_user_takeover") or "none").strip().lower()
+        normalized["suggest_user_takeover"] = takeover if takeover in {"none", "browser"} else "none"
         return normalized
 
     @classmethod
@@ -341,51 +308,7 @@ class GraphStateContractMapper:
         for item in raw:
             if isinstance(item, str) and item.strip():
                 refs.append(item.strip())
-        # 保持顺序去重，避免重复刷写 runtime_metadata。
         return list(dict.fromkeys(refs))
-
-    @classmethod
-    def _normalize_input_parts(cls, raw: Any) -> List[Dict[str, Any]]:
-        if not isinstance(raw, list):
-            return []
-        normalized: List[Dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            normalized.append(cls._to_json_safe(item))
-        return normalized
-
-    @classmethod
-    def _normalize_message_window(cls, raw: Any) -> List[Dict[str, Any]]:
-        if not isinstance(raw, list):
-            return []
-        normalized: List[Dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            normalized.append(cls._to_json_safe(item))
-        return normalized
-
-    @classmethod
-    def _normalize_dict_memory(cls, raw: Any) -> Dict[str, Any]:
-        if not isinstance(raw, dict):
-            return {}
-        return cls._to_json_safe(raw)
-
-    @classmethod
-    def _normalize_list_memory(cls, raw: Any) -> List[Dict[str, Any]]:
-        if not isinstance(raw, list):
-            return []
-        normalized: List[Dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            normalized.append(cls._to_json_safe(item))
-        return normalized
-
-    @staticmethod
-    def _normalize_text(raw: Any) -> str:
-        return str(raw or "")
 
     @classmethod
     def _normalize_last_executed_step(cls, raw: Any) -> Optional[Step]:
@@ -440,6 +363,27 @@ class GraphStateContractMapper:
         return list(dict.fromkeys(ids))
 
     @classmethod
+    def _extract_pending_interrupt_from_metadata(
+            cls,
+            graph_state_from_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        pending_interrupt = cls._normalize_pending_interrupt(graph_state_from_metadata.get("pending_interrupt"))
+        if pending_interrupt:
+            return pending_interrupt
+
+        metadata = graph_state_from_metadata.get("metadata")
+        if not isinstance(metadata, dict):
+            return {}
+        pending_interrupts = metadata.get("pending_interrupts")
+        if not isinstance(pending_interrupts, list) or len(pending_interrupts) == 0:
+            return {}
+
+        first_interrupt = pending_interrupts[0]
+        if not isinstance(first_interrupt, dict):
+            return {}
+        return cls._normalize_pending_interrupt(first_interrupt.get("payload"))
+
+    @classmethod
     def build_initial_state(
             cls,
             session: Session,
@@ -465,7 +409,7 @@ class GraphStateContractMapper:
             next_step = plan.get_next_step()
             current_step_id = next_step.id if next_step is not None else None
 
-        state: PlannerReActLangGraphState = {
+        return {
             "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
             "session_id": session.id,
             "user_id": (
@@ -504,10 +448,10 @@ class GraphStateContractMapper:
                 graph_state_from_metadata.get("last_executed_step")
             ),
             "step_states": step_states,
-            "human_tasks": cls._normalize_human_tasks(graph_state_from_metadata.get("human_tasks")),
+            "pending_interrupt": cls._extract_pending_interrupt_from_metadata(graph_state_from_metadata),
             "tool_invocations": cls._normalize_tool_invocations(graph_state_from_metadata.get("tool_invocations")),
             "graph_metadata": (
-                graph_state_from_metadata.get("metadata")
+                cls._normalize_dict_memory(graph_state_from_metadata.get("metadata"))
                 if isinstance(graph_state_from_metadata.get("metadata"), dict)
                 else {}
             ),
@@ -519,15 +463,9 @@ class GraphStateContractMapper:
             "final_message": "",
             "error": None,
         }
-        state["human_tasks"] = cls._mark_timeout_tasks(
-            human_tasks=dict(state.get("human_tasks") or {}),
-            reference_at=datetime.now(),
-        )
-        return state
 
     @classmethod
     def _upsert_step_state(cls, step_states: List[StepState], step: Step) -> List[StepState]:
-        """按 step_id 更新步骤状态；不存在时追加。"""
         step_id = str(step.id)
         updated = list(step_states)
         for index, current in enumerate(updated):
@@ -537,54 +475,6 @@ class GraphStateContractMapper:
                 return updated
 
         updated.append(cls._step_to_state(step=step, step_index=len(updated)))
-        return updated
-
-    @classmethod
-    def _mark_latest_waiting_task_resumed(
-            cls,
-            human_tasks: Dict[str, HumanTaskState],
-            resume_event_id: str,
-            updated_at: str,
-    ) -> Dict[str, HumanTaskState]:
-        # 采用“最近等待任务优先恢复”的策略，兼容当前 wait/resume 线性语义。
-        for task_id in reversed(list(human_tasks.keys())):
-            task = dict(human_tasks[task_id])
-            if task.get("status") == HumanTaskStatus.WAITING.value:
-                task["status"] = HumanTaskStatus.RESUMED.value
-                task["resume_event_id"] = resume_event_id
-                task["updated_at"] = updated_at
-                human_tasks[task_id] = task
-                break
-        return human_tasks
-
-    @staticmethod
-    def _parse_iso_datetime(raw: Any) -> Optional[datetime]:
-        if not raw:
-            return None
-        if isinstance(raw, datetime):
-            return raw
-        try:
-            return datetime.fromisoformat(str(raw))
-        except Exception:
-            return None
-
-    @classmethod
-    def _mark_timeout_tasks(
-            cls,
-            human_tasks: Dict[str, HumanTaskState],
-            reference_at: datetime,
-    ) -> Dict[str, HumanTaskState]:
-        updated = dict(human_tasks)
-        for task_id, payload in list(updated.items()):
-            task = dict(payload)
-            if task.get("status") != HumanTaskStatus.WAITING.value:
-                continue
-            timeout_at = cls._parse_iso_datetime(task.get("timeout_at"))
-            if timeout_at is None or timeout_at > reference_at:
-                continue
-            task["status"] = HumanTaskStatus.TIMEOUT.value
-            task["updated_at"] = reference_at.isoformat()
-            updated[task_id] = task
         return updated
 
     @classmethod
@@ -608,14 +498,14 @@ class GraphStateContractMapper:
 
     @classmethod
     def apply_emitted_events(cls, state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        """根据 emitted events 收敛 step/human/tool/audit 状态。"""
+        """根据 emitted events 收敛 step/tool/audit 状态。"""
         events = list(state.get("emitted_events") or [])
         next_state: PlannerReActLangGraphState = dict(state)
         step_states = list(next_state.get("step_states") or [])
-        human_tasks = dict(next_state.get("human_tasks") or {})
         tool_invocations = dict(next_state.get("tool_invocations") or {})
         graph_metadata = dict(next_state.get("graph_metadata") or {})
         artifact_refs = list(next_state.get("artifact_refs") or [])
+        pending_interrupt = cls._normalize_pending_interrupt(next_state.get("pending_interrupt"))
 
         audit_events = list(next_state.get("audit_events") or [])
         seen_event_ids = {str(event.id) for event in audit_events}
@@ -666,57 +556,16 @@ class GraphStateContractMapper:
                 continue
 
             if isinstance(event, WaitEvent):
-                task = event.human_task
-                task_id = str(task.id) if task is not None else f"wait:{event.id}"
-                human_tasks[task_id] = {
-                    "task_id": task_id,
-                    "status": HumanTaskStatus.WAITING.value,
-                    "reason": task.reason if task is not None else "wait_event",
-                    "question": task.question if task is not None else "",
-                    "attachments": list(task.attachments or []) if task is not None else [],
-                    "suggest_user_takeover": (
-                        task.suggest_user_takeover if task is not None else "none"
-                    ),
-                    "resume_token": task.resume_token if task is not None else None,
-                    "resume_command": (
-                        task.resume_command.model_dump(mode="json")
-                        if task is not None and task.resume_command is not None
-                        else {}
-                    ),
-                    "resume_point": (
-                        task.resume_point.model_dump(mode="json")
-                        if task is not None and task.resume_point is not None
-                        else {}
-                    ),
-                    "timeout_seconds": (
-                        task.timeout.timeout_seconds
-                        if task is not None
-                        else None
-                    ),
-                    "timeout_at": (
-                        cls._to_iso(task.timeout.timeout_at)
-                        if task is not None and task.timeout.timeout_at is not None
-                        else None
-                    ),
-                    "created_at": cls._to_iso(event.created_at),
-                    "updated_at": cls._to_iso(event.created_at),
-                    "wait_event_id": str(event.id),
-                    "resume_event_id": None,
-                }
+                pending_interrupt = cls._normalize_pending_interrupt(event.payload)
                 graph_metadata["latest_wait_event_id"] = str(event.id)
-                graph_metadata["latest_human_task_id"] = task_id
-                continue
-
-            if isinstance(event, MessageEvent) and event.role == "user":
-                human_tasks = cls._mark_timeout_tasks(
-                    human_tasks=human_tasks,
-                    reference_at=event.created_at,
-                )
-                human_tasks = cls._mark_latest_waiting_task_resumed(
-                    human_tasks=human_tasks,
-                    resume_event_id=str(event.id),
-                    updated_at=cls._to_iso(event.created_at),
-                )
+                graph_metadata["pending_interrupts"] = [
+                    {
+                        "interrupt_id": event.interrupt_id,
+                        "payload": cls._to_json_safe(pending_interrupt),
+                    }
+                ]
+                if event.interrupt_id:
+                    graph_metadata["latest_interrupt_id"] = str(event.interrupt_id)
                 continue
 
             if isinstance(event, ErrorEvent):
@@ -728,12 +577,7 @@ class GraphStateContractMapper:
             if isinstance(event, DoneEvent):
                 graph_metadata["run_status"] = "completed"
                 graph_metadata["last_done_event_id"] = str(event.id)
-
-        reference_at = events[-1].created_at if events else datetime.now()
-        human_tasks = cls._mark_timeout_tasks(
-            human_tasks=human_tasks,
-            reference_at=reference_at,
-        )
+                pending_interrupt = {}
 
         if not next_state.get("current_step_id"):
             for step_state in step_states:
@@ -747,7 +591,7 @@ class GraphStateContractMapper:
                         break
 
         next_state["step_states"] = step_states
-        next_state["human_tasks"] = human_tasks
+        next_state["pending_interrupt"] = pending_interrupt
         next_state["tool_invocations"] = tool_invocations
         next_state["graph_metadata"] = graph_metadata
         next_state["artifact_refs"] = list(dict.fromkeys(artifact_refs))
@@ -755,53 +599,22 @@ class GraphStateContractMapper:
         return next_state
 
     @classmethod
-    def reduce_human_tasks_from_events(
-            cls,
-            events: List[BaseEvent],
-            reference_at: Optional[datetime] = None,
-    ) -> Dict[str, HumanTaskState]:
-        reduced = cls.apply_emitted_events(
-            state={
-                "emitted_events": list(events or []),
-                "human_tasks": {},
-                "step_states": [],
-                "tool_invocations": {},
-                "graph_metadata": {},
-                "artifact_refs": [],
-                "audit_events": [],
-            }
-        )
-        human_tasks = dict(reduced.get("human_tasks") or {})
-        if reference_at is not None:
-            human_tasks = cls._mark_timeout_tasks(
-                human_tasks=human_tasks,
-                reference_at=reference_at,
-            )
-        return human_tasks
-
-    @staticmethod
-    def find_latest_waiting_human_task(
-            human_tasks: Dict[str, HumanTaskState],
-    ) -> Optional[HumanTaskState]:
-        for task_id in reversed(list(human_tasks.keys())):
-            task = dict(human_tasks[task_id])
-            if task.get("status") == HumanTaskStatus.WAITING.value:
-                return task
-        return None
-
-    @staticmethod
-    def find_latest_human_task(
-            human_tasks: Dict[str, HumanTaskState],
-    ) -> Optional[HumanTaskState]:
-        for task_id in reversed(list(human_tasks.keys())):
-            return dict(human_tasks[task_id])
-        return None
-
-    @classmethod
     def build_runtime_metadata(cls, state: PlannerReActLangGraphState) -> Dict[str, Any]:
         """将 graph state 收敛为 WorkflowRun.runtime_metadata。"""
         events = list(state.get("emitted_events") or [])
         last_event = events[-1] if events else None
+        pending_interrupt = cls._normalize_pending_interrupt(state.get("pending_interrupt"))
+        graph_metadata = cls._normalize_dict_memory(state.get("graph_metadata"))
+
+        if pending_interrupt:
+            graph_metadata["pending_interrupts"] = [
+                {
+                    "interrupt_id": graph_metadata.get("latest_interrupt_id"),
+                    "payload": cls._to_json_safe(pending_interrupt),
+                }
+            ]
+        else:
+            graph_metadata.pop("pending_interrupts", None)
 
         return {
             "memory": {
@@ -809,13 +622,11 @@ class GraphStateContractMapper:
                 "recall_ids": cls._extract_memory_ids(list(state.get("retrieved_memories") or [])),
                 "write_count": len(state.get("pending_memory_writes") or []),
                 "write_ids": cls._extract_memory_ids(list(state.get("pending_memory_writes") or [])),
-                "compacted": bool((state.get("graph_metadata") or {}).get("memory_compacted", False)),
-                "last_compaction_at": (state.get("graph_metadata") or {}).get("memory_last_compaction_at"),
+                "compacted": bool(graph_metadata.get("memory_compacted", False)),
+                "last_compaction_at": graph_metadata.get("memory_last_compaction_at"),
                 "summary_version": state.get("memory_context_version"),
-                "persisted_write_count": int((state.get("graph_metadata") or {}).get("memory_write_count") or 0),
-                "persisted_write_ids": cls._to_json_safe(
-                    (state.get("graph_metadata") or {}).get("memory_write_ids") or []
-                ),
+                "persisted_write_count": int(graph_metadata.get("memory_write_count") or 0),
+                "persisted_write_ids": cls._to_json_safe(graph_metadata.get("memory_write_ids") or []),
             },
             "graph_state_contract": {
                 "schema_version": str(
@@ -850,9 +661,9 @@ class GraphStateContractMapper:
                     "max_execution_steps": int(state.get("max_execution_steps") or 20),
                     "last_executed_step": cls._to_json_safe(state.get("last_executed_step")),
                     "step_states": cls._to_json_safe(state.get("step_states") or []),
-                    "human_tasks": cls._to_json_safe(state.get("human_tasks") or {}),
+                    "pending_interrupt": cls._to_json_safe(pending_interrupt),
                     "tool_invocations": cls._to_json_safe(state.get("tool_invocations") or {}),
-                    "metadata": cls._to_json_safe(state.get("graph_metadata") or {}),
+                    "metadata": cls._to_json_safe(graph_metadata),
                 },
                 "audit": {
                     "event_count": len(events),

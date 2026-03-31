@@ -1,9 +1,8 @@
 import asyncio
-from datetime import datetime
 
 from app.application.errors import error_keys
 from app.application.service.agent_service import AgentService
-from app.domain.models import ErrorEvent, Session, SessionStatus, WaitEvent
+from app.domain.models import ErrorEvent, Session, SessionStatus
 
 
 class _TaskFactory:
@@ -37,22 +36,12 @@ class _UoW:
         return False
 
 
-def _build_waiting_session(wait_event: WaitEvent) -> Session:
-    return Session(
+def test_agent_service_chat_should_require_resume_when_session_waiting() -> None:
+    session = Session(
         id="session-1",
         user_id="user-1",
         status=SessionStatus.WAITING,
-        events=[wait_event],
     )
-
-
-def test_agent_service_chat_should_reject_invalid_resume_token() -> None:
-    wait_event = WaitEvent.build_for_user_input(
-        session_id="session-1",
-        question="请确认是否继续",
-        resume_token="resume-token-1",
-    )
-    session = _build_waiting_session(wait_event=wait_event)
 
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
@@ -63,7 +52,6 @@ def test_agent_service_chat_should_reject_invalid_resume_token() -> None:
                 session_id="session-1",
                 user_id="user-1",
                 message="继续执行",
-                resume_token="resume-token-invalid",
         ):
             return event
         return None
@@ -71,19 +59,15 @@ def test_agent_service_chat_should_reject_invalid_resume_token() -> None:
     first_event = asyncio.run(_collect_first_event())
 
     assert isinstance(first_event, ErrorEvent)
-    assert first_event.error_key == error_keys.SESSION_RESUME_TOKEN_INVALID
+    assert first_event.error_key == error_keys.SESSION_RESUME_REQUIRED
 
 
-def test_agent_service_chat_should_reject_timeout_waiting_task() -> None:
-    wait_event = WaitEvent.build_for_user_input(
-        session_id="session-1",
-        question="请确认是否继续",
-        resume_token="resume-token-timeout",
+def test_agent_service_chat_should_reject_resume_when_session_not_waiting() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.RUNNING,
     )
-    assert wait_event.human_task is not None
-    wait_event.human_task.timeout.timeout_at = datetime(2000, 1, 1, 0, 0, 0)
-    wait_event.human_task.timeout.timeout_seconds = 60
-    session = _build_waiting_session(wait_event=wait_event)
 
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
@@ -93,8 +77,7 @@ def test_agent_service_chat_should_reject_timeout_waiting_task() -> None:
         async for event in service.chat(
                 session_id="session-1",
                 user_id="user-1",
-                message="继续执行",
-                resume_token="resume-token-timeout",
+                resume={"approved": True},
         ):
             return event
         return None
@@ -102,4 +85,4 @@ def test_agent_service_chat_should_reject_timeout_waiting_task() -> None:
     first_event = asyncio.run(_collect_first_event())
 
     assert isinstance(first_event, ErrorEvent)
-    assert first_event.error_key == error_keys.SESSION_WAIT_TASK_TIMEOUT
+    assert first_event.error_key == error_keys.SESSION_NOT_WAITING
