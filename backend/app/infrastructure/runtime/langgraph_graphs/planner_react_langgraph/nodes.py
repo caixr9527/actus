@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.external import LLM
 from app.domain.models import (
@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 PLANNER_EXECUTE_STEP_SKILL_ID = "planner_react.execute_step"
 MESSAGE_WINDOW_MAX_ITEMS = 100
+MESSAGE_WINDOW_MAX_MESSAGE_CHARS = 500
+MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS = 8
+MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
+CONVERSATION_SUMMARY_MAX_PARTS = 4
 
 
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -63,6 +67,58 @@ def _append_unique_text_item(items: List[Any], value: str) -> List[str]:
     if normalized_value and normalized_value not in normalized_items:
         normalized_items.append(normalized_value)
     return normalized_items
+
+
+def _truncate_text(value: Any, *, max_chars: int) -> str:
+    normalized_value = str(value or "").strip()
+    if len(normalized_value) <= max_chars:
+        return normalized_value
+    return normalized_value[:max_chars]
+
+
+def _normalize_attachment_paths(raw: Any) -> List[str]:
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = []
+    normalized_items = [str(item).strip() for item in items if str(item).strip()]
+    return list(dict.fromkeys(normalized_items))[:MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS]
+
+
+def _normalize_message_window_entry(
+        raw_entry: Dict[str, Any],
+        *,
+        default_role: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_entry, dict):
+        return None
+
+    normalized_role = str(raw_entry.get("role") or default_role).strip() or default_role
+    normalized_message = _truncate_text(
+        raw_entry.get("message"),
+        max_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+    )
+    normalized_attachments = _normalize_attachment_paths(raw_entry.get("attachment_paths"))
+    input_part_count_raw = raw_entry.get("input_part_count")
+    try:
+        input_part_count = max(int(input_part_count_raw or 0), 0)
+    except Exception:
+        input_part_count = 0
+
+    if not normalized_message and len(normalized_attachments) == 0 and input_part_count == 0:
+        return None
+
+    normalized_entry: Dict[str, Any] = {
+        "role": normalized_role,
+        "message": normalized_message,
+    }
+    if len(normalized_attachments) > 0:
+        normalized_entry["attachment_paths"] = normalized_attachments
+    if input_part_count > 0:
+        normalized_entry["input_part_count"] = input_part_count
+    return normalized_entry
 
 
 def _build_memory_context_version(state: PlannerReActLangGraphState) -> str:
@@ -217,6 +273,140 @@ def _merge_memory_candidates(
     return merged
 
 
+def _normalize_memory_candidate(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+
+    namespace = str(item.get("namespace") or "").strip()
+    memory_type = str(item.get("memory_type") or "").strip().lower()
+    if not namespace or memory_type not in {"profile", "fact", "instruction"}:
+        return None
+
+    content = item.get("content") if isinstance(item.get("content"), dict) else {}
+    summary = _truncate_text(item.get("summary"), max_chars=120)
+    if not summary and isinstance(content.get("text"), str):
+        summary = _truncate_text(content.get("text"), max_chars=120)
+    if not summary and len(content) == 0:
+        return None
+
+    try:
+        confidence = float(item.get("confidence")) if item.get("confidence") is not None else 0.6
+    except Exception:
+        confidence = 0.6
+    confidence = max(0.0, min(confidence, 1.0))
+
+    tags = [str(tag).strip() for tag in list(item.get("tags") or []) if str(tag).strip()]
+    normalized_tags = list(dict.fromkeys(tags))[:8]
+    source = item.get("source") if isinstance(item.get("source"), dict) else {}
+
+    dedupe_key = str(item.get("dedupe_key") or "").strip()
+    if not dedupe_key:
+        dedupe_key = _build_memory_dedupe_key(
+            namespace=namespace,
+            memory_type=memory_type,
+            content=content or {"summary": summary},
+        )
+
+    normalized_candidate = {
+        "namespace": namespace,
+        "memory_type": memory_type,
+        "summary": summary,
+        "content": content,
+        "tags": normalized_tags,
+        "source": source,
+        "confidence": confidence,
+        "dedupe_key": dedupe_key,
+    }
+    if item.get("id"):
+        normalized_candidate["id"] = str(item.get("id"))
+    return normalized_candidate
+
+
+def _merge_profile_candidates(base_item: Dict[str, Any], incoming_item: Dict[str, Any]) -> Dict[str, Any]:
+    merged_content = {
+        **dict(base_item.get("content") or {}),
+        **dict(incoming_item.get("content") or {}),
+    }
+    merged_tags = list(
+        dict.fromkeys(
+            [
+                *list(base_item.get("tags") or []),
+                *list(incoming_item.get("tags") or []),
+            ]
+        )
+    )[:8]
+    merged_source = {
+        **dict(base_item.get("source") or {}),
+        **dict(incoming_item.get("source") or {}),
+    }
+    merged_summary = str(incoming_item.get("summary") or base_item.get("summary") or "用户偏好")
+    merged_confidence = max(
+        float(base_item.get("confidence") or 0.0),
+        float(incoming_item.get("confidence") or 0.0),
+    )
+    merged_item = {
+        **base_item,
+        "summary": _truncate_text(merged_summary or "用户偏好", max_chars=120),
+        "content": merged_content,
+        "tags": merged_tags,
+        "source": merged_source,
+        "confidence": merged_confidence,
+        "dedupe_key": _build_memory_dedupe_key(
+            namespace=str(base_item.get("namespace") or ""),
+            memory_type="profile",
+            content=merged_content,
+        ),
+    }
+    return merged_item
+
+
+def _govern_memory_candidates(
+        candidates: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    stats = {
+        "input_count": len(list(candidates or [])),
+        "kept_count": 0,
+        "dropped_invalid_count": 0,
+        "dropped_low_confidence_count": 0,
+        "deduped_count": 0,
+        "merged_profile_count": 0,
+    }
+    governed: List[Dict[str, Any]] = []
+    dedupe_keys: set[str] = set()
+    profile_index_by_namespace: Dict[str, int] = {}
+
+    for raw_item in list(candidates or []):
+        normalized_item = _normalize_memory_candidate(raw_item)
+        if normalized_item is None:
+            stats["dropped_invalid_count"] += 1
+            continue
+        if float(normalized_item.get("confidence") or 0.0) < MEMORY_CANDIDATE_MIN_CONFIDENCE:
+            stats["dropped_low_confidence_count"] += 1
+            continue
+
+        if normalized_item["memory_type"] == "profile":
+            namespace = normalized_item["namespace"]
+            existing_index = profile_index_by_namespace.get(namespace)
+            if existing_index is not None:
+                governed[existing_index] = _merge_profile_candidates(
+                    governed[existing_index],
+                    normalized_item,
+                )
+                stats["merged_profile_count"] += 1
+                continue
+            profile_index_by_namespace[namespace] = len(governed)
+
+        dedupe_key = str(normalized_item.get("dedupe_key") or "")
+        if dedupe_key in dedupe_keys:
+            stats["deduped_count"] += 1
+            continue
+        dedupe_keys.add(dedupe_key)
+        governed.append(normalized_item)
+
+    stats["kept_count"] = len(governed)
+    return governed, stats
+
+
 def _build_memory_candidates(state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
     working_memory = _ensure_working_memory(state)
     user_id = str(state.get("user_id") or "").strip()
@@ -349,32 +539,27 @@ def _append_message_window_entry(
         message: str,
         attachments: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    # 标准化消息内容和附件路径，去除首尾空白字符
-    normalized_message = str(message or "").strip()
-    normalized_attachments = [str(item).strip() for item in list(attachments or []) if str(item).strip()]
-
-    # 如果消息和附件均为空，则直接返回原始消息窗口，不做任何修改
-    if not normalized_message and len(normalized_attachments) == 0:
+    next_entry = _normalize_message_window_entry(
+        {
+            "role": role,
+            "message": message,
+            "attachment_paths": list(attachments or []),
+        },
+        default_role=role,
+    )
+    if next_entry is None:
         return list(message_window)
-
-    # 构建新的消息条目
-    next_entry = {
-        "role": role,
-        "message": message,
-        "attachment_paths": normalized_attachments,
-    }
 
     # 创建消息窗口的副本以避免直接修改原列表
     updated_window = list(message_window)
 
     # 检查是否与最后一条消息完全重复（角色、内容、附件均一致），若是则避免重复添加
     if updated_window:
-        latest_entry = dict(updated_window[-1])
-        if (
-                str(latest_entry.get("role") or "") == role
-                and str(latest_entry.get("message") or "") == str(message or "")
-                and list(latest_entry.get("attachment_paths") or []) == normalized_attachments
-        ):
+        latest_entry = _normalize_message_window_entry(
+            dict(updated_window[-1]),
+            default_role=role,
+        )
+        if latest_entry == next_entry:
             return updated_window
 
     # 将新条目添加到消息窗口末尾
@@ -382,10 +567,23 @@ def _append_message_window_entry(
     return updated_window
 
 
-def _compact_message_window(message_window: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if len(message_window) <= MESSAGE_WINDOW_MAX_ITEMS:
-        return list(message_window)
-    return list(message_window[-MESSAGE_WINDOW_MAX_ITEMS:])
+def _compact_message_window(
+        message_window: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    normalized_window: List[Dict[str, Any]] = []
+    for item in list(message_window or []):
+        normalized_item = _normalize_message_window_entry(item, default_role="assistant")
+        if normalized_item is None:
+            continue
+        if normalized_window and normalized_window[-1] == normalized_item:
+            continue
+        normalized_window.append(normalized_item)
+
+    if len(normalized_window) <= MESSAGE_WINDOW_MAX_ITEMS:
+        return list(normalized_window), 0
+
+    trimmed_count = len(normalized_window) - MESSAGE_WINDOW_MAX_ITEMS
+    return list(normalized_window[-MESSAGE_WINDOW_MAX_ITEMS:]), trimmed_count
 
 
 def _build_conversation_summary(state: PlannerReActLangGraphState) -> str:
@@ -415,13 +613,17 @@ def _build_conversation_summary(state: PlannerReActLangGraphState) -> str:
     if total_steps > 0:
         parts.append(f"进度:{completed_steps}/{total_steps}")
 
+    trimmed_message_count = int((state.get("graph_metadata") or {}).get("memory_trimmed_message_count") or 0)
+    if trimmed_message_count > 0:
+        parts.append(f"裁剪:{trimmed_message_count}条消息")
+
     # 获取最终消息并截断至 120 字符
     final_message = str(state.get("final_message") or "").strip()
     if final_message:
         parts.append(f"结果:{final_message[:120]}")
 
-    # 返回最近 3 个部分，用 " | " 连接
-    return " | ".join(parts[-3:])
+    # 返回最近若干个部分，用 " | " 连接，避免摘要无限膨胀
+    return " | ".join(parts[-CONVERSATION_SUMMARY_MAX_PARTS:])
 
 
 def _extract_profile_preferences(retrieved_memories: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -878,16 +1080,25 @@ async def consolidate_memory_node(
     )
     
     # 压缩消息窗口，防止超出最大长度限制
-    compacted_message_window = _compact_message_window(message_window)
+    compacted_message_window, trimmed_message_count = _compact_message_window(message_window)
     
     # 更新图元数据，记录记忆压缩相关信息
     graph_metadata = dict(state.get("graph_metadata") or {})
     graph_metadata["memory_compacted"] = True
     graph_metadata["memory_last_compaction_at"] = datetime.now().isoformat()
     graph_metadata["memory_message_window_size"] = len(compacted_message_window)
+    graph_metadata["memory_trimmed_message_count"] = trimmed_message_count
 
     # 处理待写入的长期记忆候选项
-    pending_memory_writes = list(state.get("pending_memory_writes") or [])
+    pending_memory_writes, candidate_stats = _govern_memory_candidates(
+        list(state.get("pending_memory_writes") or [])
+    )
+    graph_metadata["memory_candidate_input_count"] = candidate_stats["input_count"]
+    graph_metadata["memory_candidate_kept_count"] = candidate_stats["kept_count"]
+    graph_metadata["memory_candidate_dropped_invalid_count"] = candidate_stats["dropped_invalid_count"]
+    graph_metadata["memory_candidate_dropped_low_confidence_count"] = candidate_stats["dropped_low_confidence_count"]
+    graph_metadata["memory_candidate_deduped_count"] = candidate_stats["deduped_count"]
+    graph_metadata["memory_candidate_profile_merge_count"] = candidate_stats["merged_profile_count"]
     remaining_memory_writes: List[Dict[str, Any]] = []
     persisted_memory_ids: List[str] = []
     
@@ -917,6 +1128,7 @@ async def consolidate_memory_node(
             {
                 **state,
                 "message_window": compacted_message_window,
+                "graph_metadata": graph_metadata,
             }
         ),
         "pending_memory_writes": remaining_memory_writes,

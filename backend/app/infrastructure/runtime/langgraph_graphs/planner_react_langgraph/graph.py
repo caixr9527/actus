@@ -5,7 +5,6 @@
 import logging
 from typing import Any, List, Optional
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.domain.external import LLM
@@ -106,6 +105,6 @@ def build_planner_react_langgraph_graph(
     graph.add_edge("summarize", "consolidate_memory")
     graph.add_edge("consolidate_memory", "finalize")
     graph.add_edge("finalize", END)
-    # 默认保留 InMemorySaver 作为测试/开发兜底，生产环境由运行时注入持久化 checkpointer。
-    resolved_checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
-    return graph.compile(checkpointer=resolved_checkpointer)
+    if checkpointer is None:
+        return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

@@ -16,6 +16,14 @@ class _DummyTool:
     pass
 
 
+class _FakeCheckpointerProvider:
+    def __init__(self, checkpointer) -> None:
+        self._checkpointer = checkpointer
+
+    def get_checkpointer(self):
+        return self._checkpointer
+
+
 class _FakeLangGraph:
     async def ainvoke(self, _state, config=None):
         return {"emitted_events": [DoneEvent()]}
@@ -26,9 +34,14 @@ def _raise_langgraph_init_error(**kwargs):
 
 
 def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
+    checkpointer = object()
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.get_settings",
         lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
+    )
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_langgraph_checkpointer",
+        lambda: _FakeCheckpointerProvider(checkpointer),
     )
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
@@ -59,10 +72,52 @@ def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
     assert isinstance(events[0], DoneEvent)
 
 
+def test_build_run_engine_should_pass_persistent_checkpointer(monkeypatch) -> None:
+    checkpointer = object()
+    captured = {}
+
+    class _FakeEngine:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_settings",
+        lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
+    )
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_langgraph_checkpointer",
+        lambda: _FakeCheckpointerProvider(checkpointer),
+    )
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.LangGraphRunEngine",
+        _FakeEngine,
+    )
+
+    build_run_engine(
+        llm=_DummyLLM(),
+        agent_config=AgentConfig(),
+        session_id="session-1",
+        file_storage=object(),
+        uow_factory=lambda: None,
+        json_parser=object(),
+        browser=object(),
+        sandbox=object(),
+        search_engine=object(),
+        mcp_tool=_DummyTool(),
+        a2a_tool=_DummyTool(),
+    )
+
+    assert captured["checkpointer"] is checkpointer
+
+
 def test_build_run_engine_should_raise_when_langgraph_init_fails(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.get_settings",
         lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
+    )
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_langgraph_checkpointer",
+        lambda: _FakeCheckpointerProvider(object()),
     )
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.LangGraphRunEngine",

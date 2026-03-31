@@ -466,7 +466,12 @@ langgraph-checkpoint==4.0.1 \
     --hash=sha256:e3adcd7a0e0166f3b48b8cf508ce0ea366e7420b5a73aa81289888727769b034
     # via
     #   langgraph
+    #   langgraph-checkpoint-postgres
     #   langgraph-prebuilt
+langgraph-checkpoint-postgres==3.0.5 \
+    --hash=sha256:86d7040a88fd70087eaafb72251d796696a0a2d856168f5c11ef620771411552 \
+    --hash=sha256:a8fd7278a63f4f849b5cbc7884a15ca8f41e7d5f7467d0a66b31e8c24492f7eb
+    # via backend
 langgraph-prebuilt==1.0.8 \
     --hash=sha256:0cd3cf5473ced8a6cd687cc5294e08d3de57529d8dd14fdc6ae4899549efcf69 \
     --hash=sha256:d16a731e591ba4470f3e313a319c7eee7dbc40895bcf15c821f985a3522a7ce0
@@ -601,6 +606,7 @@ orjson==3.11.7 \
     --hash=sha256:f50979824bde13d32b4320eedd513431c921102796d86be3eee0b58e58a3ecd1 \
     --hash=sha256:f904c24bdeabd4298f7a977ef14ca2a022ca921ed670b92ecd16ab6f3d01f867
     # via
+    #   langgraph-checkpoint-postgres
     #   langgraph-sdk
     #   langsmith
 ormsgpack==1.12.2 \
@@ -653,6 +659,14 @@ playwright==1.56.0 \
     --hash=sha256:b33eb89c516cbc6723f2e3523bada4a4eb0984a9c411325c02d7016a5d625e9c \
     --hash=sha256:d87b79bcb082092d916a332c27ec9732e0418c319755d235d93cc6be13bdd721
     # via backend
+psycopg==3.3.3 \
+    --hash=sha256:5e9a47458b3c1583326513b2556a2a9473a1001a56c9efe9e587245b43148dd9 \
+    --hash=sha256:f96525a72bcfade6584ab17e89de415ff360748c766f0106959144dcbb38c698
+    # via langgraph-checkpoint-postgres
+psycopg-pool==3.3.0 \
+    --hash=sha256:2e44329155c410b5e8666372db44276a8b1ebd8c90f1c3026ebba40d4bc81063 \
+    --hash=sha256:fa115eb2860bd88fce1717d75611f41490dec6135efb619611142b24da3f6db5
+    # via langgraph-checkpoint-postgres
 psycopg2-binary==2.9.11 \
     --hash=sha256:04195548662fa544626c8ea0f06561eb6203f1984ba5b4562764fbeb4c3d14b1 \
     --hash=sha256:31b32c457a6025e74d233957cc9736742ac5a6cb196c6b68499f6bb51390bd6a \
@@ -1042,6 +1056,8 @@ typing-extensions==4.15.0 \
     #   langchain-core
     #   mcp
     #   openai
+    #   psycopg
+    #   psycopg-pool
     #   pydantic
     #   pydantic-core
     #   pyee
@@ -1056,6 +1072,10 @@ typing-inspection==0.4.2 \
     #   mcp
     #   pydantic
     #   pydantic-settings
+tzdata==2025.3 ; sys_platform == 'win32' \
+    --hash=sha256:06a47e5700f3081aab02b2e513160914ff0694bce9947d6b76ebd6bf57cfc5d1 \
+    --hash=sha256:de39c2ca5dc7b0344f2eba86f49d614019d29f060fc4ebc8a417896a620b56a7
+    # via psycopg
 urllib3==2.5.0 \
     --hash=sha256:3fc47733c7e419d4bc3f6b3dc2b4f890bb743906a30d56ba4a5bfa4bbff92760 \
     --hash=sha256:e6b01673c0fa6a13e374b50871808eb3bf7046c4b125b216f6bf1cc604cff0dc

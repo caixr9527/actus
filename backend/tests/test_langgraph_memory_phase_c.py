@@ -202,6 +202,143 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
     assert consolidated_state["summary_local_memory"] == {}
 
 
+def test_consolidate_memory_should_trim_message_window_and_update_summary() -> None:
+    long_final_message = "最终总结" + ("x" * 700)
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请整理上下文",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证消息压缩策略",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {
+            "selected_artifacts": [f"/tmp/artifact-{index}.md" for index in range(12)],
+        },
+        "pending_memory_writes": [],
+        "message_window": [
+            {"role": "user", "message": f"历史消息 {index}", "attachment_paths": []}
+            for index in range(105)
+        ],
+        "conversation_summary": "已有历史摘要",
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": long_final_message,
+    }
+
+    consolidated_state = asyncio.run(consolidate_memory_node(state))
+
+    assert len(consolidated_state["message_window"]) == 100
+    assert consolidated_state["graph_metadata"]["memory_trimmed_message_count"] == 6
+    assert "裁剪:6条消息" in consolidated_state["conversation_summary"]
+    assert consolidated_state["message_window"][-1]["message"] == long_final_message[:500]
+    assert len(consolidated_state["message_window"][-1]["attachment_paths"]) == 8
+
+
+def test_consolidate_memory_should_govern_candidates_before_persisting() -> None:
+    repository = _FakeLongTermMemoryRepository()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请整理记忆",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证候选治理",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [
+            {
+                "namespace": "user/user-1/profile",
+                "memory_type": "profile",
+                "summary": "用户偏好",
+                "content": {"language": "zh"},
+                "tags": ["language"],
+                "confidence": 0.9,
+            },
+            {
+                "namespace": "user/user-1/profile",
+                "memory_type": "profile",
+                "summary": "用户偏好补充",
+                "content": {"response_style": "concise"},
+                "tags": ["response_style"],
+                "confidence": 0.7,
+            },
+            {
+                "namespace": "agent/planner_react/instruction",
+                "memory_type": "instruction",
+                "summary": "低置信度候选",
+                "content": {"text": "仅供参考"},
+                "tags": ["low-confidence"],
+                "confidence": 0.1,
+            },
+            {
+                "namespace": "session/session-1/fact",
+                "memory_type": "fact",
+                "summary": "",
+                "content": {},
+                "confidence": 0.8,
+            },
+            {
+                "namespace": "session/session-1/fact",
+                "memory_type": "fact",
+                "summary": "当前任务只关注 backend",
+                "content": {"text": "当前任务只关注 backend"},
+                "tags": ["fact"],
+                "confidence": 0.6,
+            },
+        ],
+        "message_window": [],
+        "conversation_summary": "",
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最终总结",
+    }
+
+    consolidated_state = asyncio.run(
+        consolidate_memory_node(
+            state,
+            long_term_memory_repository=repository,
+        )
+    )
+
+    assert len(repository.upserted) == 2
+    persisted_profile = next(item for item in repository.upserted if item.memory_type == "profile")
+    persisted_fact = next(item for item in repository.upserted if item.memory_type == "fact")
+    assert persisted_profile.content == {
+        "language": "zh",
+        "response_style": "concise",
+    }
+    assert persisted_fact.content == {"text": "当前任务只关注 backend"}
+    assert consolidated_state["pending_memory_writes"] == []
+    assert consolidated_state["graph_metadata"]["memory_candidate_input_count"] == 5
+    assert consolidated_state["graph_metadata"]["memory_candidate_kept_count"] == 2
+    assert consolidated_state["graph_metadata"]["memory_candidate_dropped_invalid_count"] == 1
+    assert consolidated_state["graph_metadata"]["memory_candidate_dropped_low_confidence_count"] == 1
+    assert consolidated_state["graph_metadata"]["memory_candidate_profile_merge_count"] == 1
+
+
 def test_summarize_should_generate_candidates_from_structured_extraction_when_working_memory_empty() -> None:
     llm = _FakeStructuredMemoryLLM()
     state = {

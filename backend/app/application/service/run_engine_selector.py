@@ -13,7 +13,7 @@ from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, CapabilityBuildContext
-from app.infrastructure.runtime import LangGraphRunEngine
+from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -69,4 +69,5 @@ def build_run_engine(
         uow_factory=uow_factory,
         runtime_tools=runtime_tools,
         max_tool_iterations=max_tool_iterations,
+        checkpointer=get_langgraph_checkpointer().get_checkpointer(),
     )

@@ -30,12 +30,6 @@ from app.infrastructure.utils import BaseUtils
 
 logger = logging.getLogger(__name__)
 
-try:
-    from langgraph.checkpoint.memory import InMemorySaver
-except ImportError:  # pragma: no cover - 运行时依赖缺失时的保护逻辑
-    InMemorySaver = None
-
-
 class _EventDeduplicator:
     """基于 event_id + payload signature 的事件去重器。"""
 
@@ -82,12 +76,13 @@ class LangGraphRunEngine(RunEngine):
             uow_factory: Optional[Callable[[], IUnitOfWork]] = None,
             runtime_tools: Optional[List[BaseTool]] = None,
             max_tool_iterations: Optional[int] = None,
+            checkpointer: Any | None = None,
     ) -> None:
         self._session_id = session_id
         self._file_storage = file_storage
         self._user_id = user_id
         self._uow_factory = uow_factory
-        self._checkpointer = self._build_default_checkpointer()
+        self._checkpointer = checkpointer
         self._long_term_memory_repository = (
             LangGraphLongTermMemoryRepository(uow_factory=uow_factory)
             if uow_factory is not None
@@ -105,13 +100,6 @@ class LangGraphRunEngine(RunEngine):
             if uow_factory is not None
             else None
         )
-
-    @staticmethod
-    def _build_default_checkpointer() -> Any:
-        """构建默认 checkpointer；后续可替换为 PostgresSaver 等持久化实现。"""
-        if InMemorySaver is None:
-            return None
-        return InMemorySaver()
 
     @staticmethod
     def _build_graph(

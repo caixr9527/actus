@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 from app.infrastructure.logging import setup_logging
+from app.infrastructure.runtime import get_langgraph_checkpointer
 from app.infrastructure.storage import get_redis_client, get_postgres, get_cos
 from app.interfaces.endpoints.routes import router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
@@ -104,6 +105,11 @@ async def lifespan(app: FastAPI):
     await get_redis_client().init()
     await get_postgres().init()
     await get_cos().init()
+    checkpointer = get_langgraph_checkpointer()
+    await checkpointer.init()
+    # 启动阶段显式执行 checkpoint schema 初始化，避免把 DDL 隐藏在 init() 内部。
+    # 这里要求应用数据库账号具备相应权限；同样逻辑也保留在独立 bootstrap 脚本中，便于部署前单独执行。
+    await checkpointer.ensure_schema()
     app_state = _get_app_state(app)
     app_state.agent_service = get_agent_service_for_lifespan()
 
@@ -131,6 +137,7 @@ async def lifespan(app: FastAPI):
             clear_agent_service_for_lifespan_cache()
 
         # 关闭其他应用
+        await checkpointer.close()
         await get_redis_client().close()
         await get_postgres().close()
         await get_cos().close()
