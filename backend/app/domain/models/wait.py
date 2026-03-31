@@ -205,6 +205,41 @@ def resolve_wait_resume_message(payload_raw: Any, resume_value: Any) -> str:
     return _fallback_resume_message(resume_value)
 
 
+def validate_wait_resume_value(payload_raw: Any, resume_value: Any) -> bool:
+    """校验 resume 值是否符合等待态契约。"""
+    payload = normalize_wait_payload(payload_raw)
+    if not payload:
+        return False
+
+    kind = payload.get("kind")
+    if kind == "confirm":
+        return (
+            resume_value == payload.get("confirm_resume_value")
+            or resume_value == payload.get("cancel_resume_value")
+        )
+
+    if kind == "select":
+        for option in list(payload.get("options") or []):
+            if not isinstance(option, dict):
+                continue
+            if resume_value == option.get("resume_value"):
+                return True
+        return False
+
+    if kind == "input_text":
+        if not isinstance(resume_value, dict):
+            return False
+        response_key = str(payload.get("response_key") or "message").strip()
+        candidate = resume_value.get(response_key)
+        if not isinstance(candidate, str):
+            return False
+        if candidate.strip():
+            return True
+        return bool(payload.get("allow_empty"))
+
+    return False
+
+
 def _fallback_resume_message(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()

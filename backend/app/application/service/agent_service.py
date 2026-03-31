@@ -28,6 +28,7 @@ from app.domain.models import (
     Event,
     DoneEvent,
     WaitEvent,
+    validate_wait_resume_value,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
@@ -191,7 +192,7 @@ class AgentService:
         )
         return await inspector.inspect_resume_checkpoint()
 
-    async def _ensure_resume_checkpoint_available(self, session: Session) -> None:
+    async def _ensure_resume_checkpoint_available(self, session: Session) -> Any:
         """在接受 resume 前，先确认等待态对应的 checkpoint 仍可恢复。"""
         try:
             inspection = await self._inspect_resume_checkpoint(session)
@@ -204,7 +205,7 @@ class AgentService:
             ) from exc
 
         if inspection.is_resumable:
-            return
+            return inspection
 
         logger.warning(
             "会话[%s]恢复点不可用: run_id=%s has_checkpoint=%s pending_interrupt=%s",
@@ -216,6 +217,18 @@ class AgentService:
         raise BadRequestError(
             msg="当前等待点已失效或无法读取，请重新发起任务",
             error_key=error_keys.SESSION_RESUME_CHECKPOINT_INVALID,
+            error_params={"session_id": session.id},
+        )
+
+    @staticmethod
+    def _ensure_resume_value_valid(*, session: Session, pending_interrupt: Any, resume_value: Any) -> None:
+        """resume 值必须符合等待态契约，避免非法恢复值清掉等待点后继续执行。"""
+        if validate_wait_resume_value(pending_interrupt, resume_value):
+            return
+
+        raise BadRequestError(
+            msg="当前恢复输入与等待态要求不匹配，请按界面提示重新提交",
+            error_key=error_keys.SESSION_RESUME_VALUE_INVALID,
             error_params={"session_id": session.id},
         )
 
@@ -265,7 +278,12 @@ class AgentService:
                     error_params={"session_id": session.id},
                 )
             if is_resume_request:
-                await self._ensure_resume_checkpoint_available(session)
+                inspection = await self._ensure_resume_checkpoint_available(session)
+                self._ensure_resume_value_valid(
+                    session=session,
+                    pending_interrupt=inspection.pending_interrupt,
+                    resume_value=resume,
+                )
 
             # 处理用户发送的消息
             if is_message_request:

@@ -308,6 +308,7 @@ export const zhCNMessages: MessageDictionary = {
   "apiErrors.session.resumeRequired": "当前会话正在等待恢复，请继续输入后再执行",
   "apiErrors.session.notWaiting": "当前会话不处于等待状态，无法恢复执行",
   "apiErrors.session.resumeCheckpointInvalid": "当前等待点已失效或无法读取，请重新发起任务",
+  "apiErrors.session.resumeValueInvalid": "当前恢复输入与等待态要求不匹配，请按界面提示重新提交",
   "sessionDetail.resumeAttachmentUnsupported": "等待恢复阶段暂不支持上传附件",
   "apiErrors.file.notFound": "文件不存在或已被删除",
   "apiErrors.appConfig.loadFailed": "加载配置失败，请稍后重试",

@@ -60,6 +60,7 @@ from .wait import (
     SelectWaitPayload,
     normalize_wait_payload,
     resolve_wait_resume_message,
+    validate_wait_resume_value,
 )
 
 __all__ = [
@@ -118,4 +119,5 @@ __all__ = [
     "SelectWaitPayload",
     "normalize_wait_payload",
     "resolve_wait_resume_message",
+    "validate_wait_resume_value",
 ]

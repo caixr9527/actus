@@ -48,6 +48,7 @@ const API_ERROR_MESSAGE_KEY_BY_ERROR_KEY: Record<string, string> = {
   "error.session.resume_required": "apiErrors.session.resumeRequired",
   "error.session.not_waiting": "apiErrors.session.notWaiting",
   "error.session.resume_checkpoint_invalid": "apiErrors.session.resumeCheckpointInvalid",
+  "error.session.resume_value_invalid": "apiErrors.session.resumeValueInvalid",
   "error.file.not_found": "apiErrors.file.notFound",
   "error.app_config.load_failed": "apiErrors.appConfig.loadFailed",
   "error.app_config.save_failed": "apiErrors.appConfig.saveFailed",

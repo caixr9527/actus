@@ -56,6 +56,7 @@ SESSION_SHELL_READ_FAILED = "error.session.shell_read_failed"
 SESSION_RESUME_REQUIRED = "error.session.resume_required"
 SESSION_NOT_WAITING = "error.session.not_waiting"
 SESSION_RESUME_CHECKPOINT_INVALID = "error.session.resume_checkpoint_invalid"
+SESSION_RESUME_VALUE_INVALID = "error.session.resume_value_invalid"
 
 # 文件链路
 FILE_NOT_FOUND = "error.file.not_found"

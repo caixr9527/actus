@@ -308,6 +308,7 @@ export const enUSMessages: MessageDictionary = {
   "apiErrors.session.resumeRequired": "This session is waiting to be resumed. Continue with a follow-up instruction.",
   "apiErrors.session.notWaiting": "This session is not waiting, so it cannot be resumed.",
   "apiErrors.session.resumeCheckpointInvalid": "The current wait point is no longer available. Start a new run instead.",
+  "apiErrors.session.resumeValueInvalid": "The resume input does not match the current wait request. Submit a valid response instead.",
   "sessionDetail.resumeAttachmentUnsupported": "Attachments are not supported while resuming a waiting run.",
   "apiErrors.file.notFound": "The file does not exist or has been deleted",
   "apiErrors.appConfig.loadFailed": "Failed to load configuration. Please try again later.",

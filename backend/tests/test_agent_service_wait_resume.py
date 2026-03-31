@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.application.errors import error_keys
 from app.application.service.agent_service import AgentService
 from app.domain.models import ErrorEvent, Session, SessionStatus
@@ -106,7 +108,7 @@ def test_agent_service_chat_should_reject_resume_when_session_not_waiting() -> N
         async for event in service.chat(
                 session_id="session-1",
                 user_id="user-1",
-                resume={"approved": True},
+                resume={"message": "继续执行"},
         ):
             return event
         return None
@@ -147,7 +149,7 @@ def test_agent_service_chat_should_rollback_resume_input_when_status_update_fail
         async for event in service.chat(
                 session_id="session-1",
                 user_id="user-1",
-                resume={"approved": True},
+                resume={"message": "继续执行"},
         ):
             return event
         return None
@@ -196,3 +198,85 @@ def test_agent_service_chat_should_reject_resume_when_checkpoint_invalid() -> No
     assert isinstance(first_event, ErrorEvent)
     assert first_event.error_key == error_keys.SESSION_RESUME_CHECKPOINT_INVALID
     assert session.status == SessionStatus.WAITING
+
+
+@pytest.mark.parametrize(
+    ("pending_interrupt", "resume_value"),
+    [
+        (
+            {
+                "kind": "input_text",
+                "prompt": "请输入目标网址",
+                "response_key": "website",
+                "allow_empty": False,
+            },
+            {"message": "https://example.com"},
+        ),
+        (
+            {
+                "kind": "confirm",
+                "prompt": "确认继续执行？",
+                "confirm_resume_value": True,
+                "cancel_resume_value": False,
+            },
+            {"approved": True},
+        ),
+        (
+            {
+                "kind": "select",
+                "prompt": "请选择执行方式",
+                "options": [
+                    {"label": "方案A", "resume_value": "a"},
+                    {"label": "方案B", "resume_value": "b"},
+                ],
+            },
+            "c",
+        ),
+    ],
+)
+def test_agent_service_chat_should_reject_resume_when_value_invalid(
+    pending_interrupt,
+    resume_value,
+) -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.WAITING,
+        current_run_id="run-1",
+    )
+    task = _Task()
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(_SessionRepo(session))
+    service._task_cls = _TaskFactory
+
+    async def _get_task(_session: Session):
+        return task
+
+    async def _inspect_resume_checkpoint(_session: Session):
+        return SimpleNamespace(
+            is_resumable=True,
+            run_id="run-1",
+            has_checkpoint=True,
+            pending_interrupt=pending_interrupt,
+        )
+
+    service._get_task = _get_task
+    service._inspect_resume_checkpoint = _inspect_resume_checkpoint
+
+    async def _collect_first_event():
+        async for event in service.chat(
+                session_id="session-1",
+                user_id="user-1",
+                resume=resume_value,
+        ):
+            return event
+        return None
+
+    first_event = asyncio.run(_collect_first_event())
+
+    assert isinstance(first_event, ErrorEvent)
+    assert first_event.error_key == error_keys.SESSION_RESUME_VALUE_INVALID
+    assert session.status == SessionStatus.WAITING
+    assert task.input_stream.messages == []
+    assert task.invoked is False
