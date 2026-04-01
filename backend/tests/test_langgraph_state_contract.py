@@ -16,6 +16,9 @@ from app.domain.models import (
     ToolResult,
     WaitEvent,
     WorkflowRun,
+    WorkflowRunStatus,
+    WorkflowRunSummary,
+    SessionContextSnapshot,
 )
 from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
@@ -110,6 +113,42 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     state = GraphStateContractMapper.build_initial_state(
         session=session,
         run=run,
+        completed_run_summaries=[
+            WorkflowRunSummary(
+                run_id="run-completed",
+                session_id="session-1",
+                status=WorkflowRunStatus.COMPLETED,
+                title="已完成运行",
+                final_answer_summary="已经输出过结论",
+                open_questions=["已完成运行待确认"],
+                artifacts=["history-artifact"],
+            )
+        ],
+        recent_attempt_summaries=[
+            WorkflowRunSummary(
+                run_id="run-failed",
+                session_id="session-1",
+                status=WorkflowRunStatus.FAILED,
+                title="失败运行",
+                final_answer_summary="上一次执行失败",
+                open_questions=["失败运行待确认"],
+                blockers=["远端接口不可用"],
+                artifacts=["failed-artifact"],
+            )
+        ],
+        session_context_snapshot=SessionContextSnapshot(
+            session_id="session-1",
+            summary_text="会话级摘要",
+            recent_run_briefs=[
+                {
+                    "run_id": "run-prev",
+                    "title": "前序运行",
+                    "final_answer_summary": "已经做过调研",
+                }
+            ],
+            open_questions=["还需确认范围"],
+            artifact_refs=["artifact-from-snapshot"],
+        ),
         user_message="你好",
         thread_id="thread-1",
         checkpoint_namespace="",
@@ -130,6 +169,14 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["step_local_memory"]["current_step_id"] == "step-1"
     assert state["summary_local_memory"]["answer_outline"] == "总结提纲"
     assert state["memory_context_version"] == "ctx-v1"
+    assert state["recent_run_briefs"][0]["run_id"] == "run-completed"
+    assert state["recent_run_briefs"][0]["final_answer_summary"] == "已经输出过结论"
+    assert state["recent_attempt_briefs"][0]["run_id"] == "run-failed"
+    assert state["recent_attempt_briefs"][0]["status"] == WorkflowRunStatus.FAILED.value
+    assert state["session_open_questions"] == ["已完成运行待确认", "失败运行待确认", "还需确认范围"]
+    assert state["session_blockers"] == ["远端接口不可用"]
+    assert state["selected_artifacts"] == []
+    assert state["historical_artifact_refs"] == ["artifact-from-snapshot", "history-artifact", "failed-artifact"]
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
     assert state["step_states"][0]["objective_key"] == "objective-step-1"
@@ -187,6 +234,29 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     state = GraphStateContractMapper.build_initial_state(
         session=session,
         run=run,
+        completed_run_summaries=[
+            WorkflowRunSummary(
+                run_id="run-prev",
+                session_id="session-1",
+                status=WorkflowRunStatus.COMPLETED,
+                title="前序运行",
+                final_answer_summary="已完成前置分析",
+                open_questions=["上一轮遗留问题"],
+                artifacts=["artifact-prev"],
+            )
+        ],
+        recent_attempt_summaries=[
+            WorkflowRunSummary(
+                run_id="run-failed",
+                session_id="session-1",
+                status=WorkflowRunStatus.FAILED,
+                title="失败尝试",
+                final_answer_summary="卡在权限校验",
+                open_questions=["是否放宽权限"],
+                blockers=["缺少凭证"],
+            )
+        ],
+        session_context_snapshot=None,
         user_message="帮我调研一下",
         thread_id="thread-1",
         checkpoint_namespace="",
@@ -247,6 +317,9 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["step_local_memory"]["current_step_id"] == "step-1"
     assert contract["graph_state"]["summary_local_memory"]["answer_outline"] == "最终答复"
     assert contract["graph_state"]["memory_context_version"] == "ctx-v2"
+    assert contract["graph_state"]["recent_attempt_briefs"][0]["run_id"] == "run-failed"
+    assert contract["graph_state"]["session_blockers"] == ["缺少凭证"]
+    assert contract["graph_state"]["historical_artifact_refs"] == ["artifact-prev"]
     assert contract["graph_state"]["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert contract["graph_state"]["metadata"]["pending_interrupts"][0]["interrupt_id"] == "interrupt-1"
     assert contract["planes"]["projection_only_fields"] == ["sessions.title/latest_message/status"]

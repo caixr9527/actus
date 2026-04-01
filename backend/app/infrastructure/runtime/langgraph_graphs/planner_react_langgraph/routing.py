@@ -11,7 +11,7 @@ from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphSta
 logger = logging.getLogger(__name__)
 
 
-def route_after_plan(state: PlannerReActLangGraphState) -> Literal["execute_step", "summarize", "consolidate_memory"]:
+def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:
     """规划阶段后的分支路由。"""
     plan = state.get("plan")
 
@@ -21,6 +21,19 @@ def route_after_plan(state: PlannerReActLangGraphState) -> Literal["execute_step
     if state.get("execution_count", 0) >= state.get("max_execution_steps", 20):
         logger.warning("执行次数达到上限，提前进入总结阶段")
         return "summarize"
+
+    return "guard_step_reuse" if plan.get_next_step() is not None else "summarize"
+
+
+def route_after_guard(state: PlannerReActLangGraphState) -> Literal["execute_step", "replan", "summarize"]:
+    """复用防护后的分支路由。"""
+    plan = state.get("plan")
+    if plan is None:
+        return "summarize"
+
+    graph_metadata = state.get("graph_metadata")
+    if isinstance(graph_metadata, dict) and bool(graph_metadata.get("step_reuse_hit")):
+        return "replan" if plan.get_next_step() is not None else "summarize"
 
     return "execute_step" if plan.get_next_step() is not None else "summarize"
 
@@ -33,6 +46,6 @@ def route_after_execute(state: PlannerReActLangGraphState) -> Literal["wait_for_
     return "replan"
 
 
-def route_after_replan(state: PlannerReActLangGraphState) -> Literal["execute_step", "summarize", "consolidate_memory"]:
+def route_after_replan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:
     """重规划阶段后的分支路由，与规划后逻辑保持一致。"""
     return route_after_plan(state)

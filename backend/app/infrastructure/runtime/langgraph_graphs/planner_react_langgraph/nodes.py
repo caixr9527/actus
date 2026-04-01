@@ -34,7 +34,7 @@ from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, UP
     PLANNER_SYSTEM_PROMPT, SUMMARIZE_PROMPT
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_events import append_events
-from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
+from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
 from .live_events import emit_live_events
 from .parsers import (
@@ -55,6 +55,8 @@ MESSAGE_WINDOW_MAX_MESSAGE_CHARS = 500
 MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS = 8
 MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
 CONVERSATION_SUMMARY_MAX_PARTS = 4
+PROMPT_CONTEXT_BRIEF_LIMIT = 5
+PROMPT_CONTEXT_ARTIFACT_LIMIT = 10
 
 
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -106,6 +108,17 @@ def _normalize_text_items(raw: Any) -> List[str]:
     return normalized_items
 
 
+def _normalize_context_artifact_refs(raw: Any) -> List[str]:
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = []
+    normalized_items = [str(item).strip() for item in items if str(item).strip()]
+    return list(dict.fromkeys(normalized_items))
+
+
 def _get_step_outcome_summary(step: Optional[Step]) -> str:
     """读取步骤结果摘要。"""
     if step is None or step.outcome is None:
@@ -118,6 +131,272 @@ def _get_step_artifacts(step: Optional[Step]) -> List[str]:
     if step is None or step.outcome is None:
         return []
     return _normalize_attachment_paths(step.outcome.produced_artifacts)
+
+
+def _reduce_state_with_events(
+        state: PlannerReActLangGraphState,
+        *,
+        updates: Dict[str, Any],
+        events: Optional[List[Any]] = None,
+) -> PlannerReActLangGraphState:
+    """把新增事件立即收敛回 graph state，避免图内后续节点读到过期 step 状态。"""
+    new_events = list(events or [])
+    next_state: PlannerReActLangGraphState = {
+        **state,
+        **updates,
+        "emitted_events": append_events(state.get("emitted_events"), *new_events),
+    }
+    if len(new_events) == 0:
+        return next_state
+    return GraphStateContractMapper.apply_emitted_events(state=next_state)
+
+
+def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
+    """把 dict/领域对象统一规整为 StepOutcome。"""
+    if raw is None:
+        return None
+    if isinstance(raw, StepOutcome):
+        return raw
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return StepOutcome.model_validate(raw)
+    except Exception:
+        return None
+
+
+def _outcome_is_reusable(outcome: Optional[StepOutcome]) -> bool:
+    if outcome is None or not outcome.done:
+        return False
+    if _normalize_step_result_text(outcome.summary):
+        return True
+    return len(_normalize_attachment_paths(outcome.produced_artifacts)) > 0
+
+
+def _merge_step_outcome_into_working_memory(
+        working_memory: Dict[str, Any],
+        outcome: StepOutcome,
+) -> Dict[str, Any]:
+    """将步骤结果沉淀到工作记忆，供后续 step / replan 使用。"""
+    updated_working_memory = dict(working_memory or {})
+    updated_working_memory.setdefault("decisions", [])
+    updated_working_memory.setdefault("open_questions", [])
+    updated_working_memory.setdefault("facts_in_session", [])
+
+    summary = _normalize_step_result_text(outcome.summary)
+    if summary:
+        updated_working_memory["decisions"] = _append_unique_text_item(
+            list(updated_working_memory.get("decisions") or []),
+            summary,
+        )
+
+    for open_question in list(outcome.open_questions or []):
+        updated_working_memory["open_questions"] = _append_unique_text_item(
+            list(updated_working_memory.get("open_questions") or []),
+            open_question,
+        )
+
+    for fact in list(outcome.facts_learned or []):
+        updated_working_memory["facts_in_session"] = _append_unique_text_item(
+            list(updated_working_memory.get("facts_in_session") or []),
+            fact,
+        )
+    return updated_working_memory
+
+
+def _build_reused_step_outcome(
+        source_outcome: StepOutcome,
+        *,
+        reused_from_run_id: str,
+        reused_from_step_id: str,
+) -> StepOutcome:
+    """为复用场景生成带来源标记的 outcome。"""
+    return StepOutcome(
+        done=True,
+        summary=_normalize_step_result_text(source_outcome.summary),
+        produced_artifacts=_normalize_attachment_paths(source_outcome.produced_artifacts),
+        blockers=_normalize_text_items(list(source_outcome.blockers or [])),
+        facts_learned=_normalize_text_items(list(source_outcome.facts_learned or [])),
+        open_questions=_normalize_text_items(list(source_outcome.open_questions or [])),
+        next_hint=_normalize_step_result_text(source_outcome.next_hint),
+        reused_from_run_id=reused_from_run_id,
+        reused_from_step_id=reused_from_step_id,
+    )
+
+
+def _find_reusable_step_outcome(
+        state: PlannerReActLangGraphState,
+        step: Step,
+        plan: Plan,
+) -> Optional[Tuple[StepOutcome, str, str]]:
+    """仅在当前 run 内按 objective_key 查找可复用的步骤结果。"""
+    if not str(step.objective_key or "").strip():
+        return None
+
+    current_run_id = str(state.get("run_id") or "").strip()
+
+    # 先检查当前 run 已完成的步骤，避免同一轮里重复执行等价目标。
+    for candidate in list(plan.steps or []):
+        if str(candidate.id or "").strip() == str(step.id or "").strip():
+            continue
+        if str(candidate.objective_key or "").strip() != step.objective_key:
+            continue
+        if candidate.status != ExecutionStatus.COMPLETED:
+            continue
+        candidate_outcome = _hydrate_step_outcome(candidate.outcome)
+        if not _outcome_is_reusable(candidate_outcome):
+            continue
+        if not current_run_id:
+            continue
+        return candidate_outcome, current_run_id, str(candidate.id)
+
+    return None
+
+
+async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+    """在真实执行前做当前 run 内复用，命中时直接跳过执行节点。"""
+    plan = state.get("plan")
+    if plan is None:
+        return state
+
+    step = plan.get_next_step()
+    if step is None:
+        return state
+
+    reusable_step = _find_reusable_step_outcome(state=state, step=step, plan=plan)
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata["step_reuse_hit"] = False
+    graph_metadata.pop("step_reuse_source_run_id", None)
+    graph_metadata.pop("step_reuse_source_step_id", None)
+
+    if reusable_step is None:
+        return {
+            **state,
+            "graph_metadata": graph_metadata,
+        }
+
+    source_outcome, reused_from_run_id, reused_from_step_id = reusable_step
+    step.outcome = _build_reused_step_outcome(
+        source_outcome,
+        reused_from_run_id=reused_from_run_id,
+        reused_from_step_id=reused_from_step_id,
+    )
+    step.status = ExecutionStatus.COMPLETED
+
+    completed_event = StepEvent(
+        step=step.model_copy(deep=True),
+        status=StepEventStatus.COMPLETED,
+    )
+
+    await emit_live_events(completed_event)
+
+    next_step = plan.get_next_step()
+    working_memory = _merge_step_outcome_into_working_memory(
+        _ensure_working_memory(state),
+        step.outcome,
+    )
+    step_local_memory = dict(state.get("step_local_memory") or {})
+    step_local_memory["current_step_id"] = str(step.id)
+    step_local_memory["observation_summary"] = _normalize_step_result_text(step.outcome.summary)
+    step_local_memory["pending_findings"] = list(step.outcome.produced_artifacts or [])
+    graph_metadata["step_reuse_hit"] = True
+    graph_metadata["step_reuse_source_run_id"] = reused_from_run_id
+    graph_metadata["step_reuse_source_step_id"] = reused_from_step_id
+    graph_metadata["last_step_execution_mode"] = "reused"
+
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "last_executed_step": step.model_copy(deep=True),
+            "execution_count": int(state.get("execution_count", 0)) + 1,
+            "current_step_id": next_step.id if next_step is not None else None,
+            "working_memory": working_memory,
+            "step_local_memory": step_local_memory,
+            "graph_metadata": graph_metadata,
+            "final_message": _normalize_step_result_text(step.outcome.summary),
+            "selected_artifacts": list(
+                dict.fromkeys(
+                    list(state.get("selected_artifacts") or [])
+                    + list(step.outcome.produced_artifacts or [])
+                )
+            ),
+            "pending_interrupt": {},
+        },
+        events=[completed_event],
+    )
+
+
+def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[str, Any]:
+    """统一构造 planner / execute_step / replan 的结构化上下文块。"""
+    # 提取并过滤有效的步骤状态列表
+    step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
+    # 筛选出所有状态为“已完成”的步骤
+    completed_steps = [
+        item for item in step_states
+        if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
+    ]
+    # 获取最后执行的步骤对象
+    last_step = state.get("last_executed_step")
+    # 确保工作记忆已初始化
+    working_memory = _ensure_working_memory(state)
+    
+    # 收集所有待解决的开放性问题，来源包括会话级、工作记忆及最后一步的执行结果
+    open_questions = _normalize_text_items(state.get("session_open_questions"))
+    open_questions.extend(_normalize_text_items(working_memory.get("open_questions")))
+    if last_step is not None and last_step.outcome is not None:
+        open_questions.extend(_normalize_text_items(last_step.outcome.open_questions))
+
+    blockers = _normalize_text_items(state.get("session_blockers"))
+    if last_step is not None and last_step.outcome is not None:
+        blockers.extend(_normalize_text_items(last_step.outcome.blockers))
+
+    selected_artifacts = _normalize_context_artifact_refs(state.get("selected_artifacts"))
+    historical_artifact_refs = _normalize_context_artifact_refs(state.get("historical_artifact_refs"))
+
+    recent_run_briefs = [
+        {
+            "run_id": str(item.get("run_id") or "").strip(),
+            "title": str(item.get("title") or "").strip(),
+            "goal": str(item.get("goal") or "").strip(),
+            "status": str(item.get("status") or "").strip(),
+            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=200),
+        }
+        for item in list(state.get("recent_run_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
+        if isinstance(item, dict) and str(item.get("run_id") or "").strip()
+    ]
+    recent_attempt_briefs = [
+        {
+            "run_id": str(item.get("run_id") or "").strip(),
+            "title": str(item.get("title") or "").strip(),
+            "goal": str(item.get("goal") or "").strip(),
+            "status": str(item.get("status") or "").strip(),
+            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=200),
+        }
+        for item in list(state.get("recent_attempt_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
+        if isinstance(item, dict) and str(item.get("run_id") or "").strip()
+    ]
+
+    # 构建并返回统一的执行上下文块
+    return {
+        "conversation_summary": str(state.get("conversation_summary") or "").strip(),
+        "completed_steps": completed_steps,
+        "last_step_result": _get_step_outcome_summary(last_step),
+        "retrieved_memories": list(state.get("retrieved_memories") or []),
+        "open_questions": list(dict.fromkeys(open_questions)),
+        "blockers": list(dict.fromkeys(blockers)),
+        "selected_artifacts": list(dict.fromkeys(selected_artifacts))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
+        "historical_artifact_refs": list(dict.fromkeys(historical_artifact_refs))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
+        "recent_run_briefs": recent_run_briefs,
+        "recent_attempt_briefs": recent_attempt_briefs,
+    }
+
+
+def _append_execution_context_to_prompt(prompt: str, state: PlannerReActLangGraphState) -> str:
+    """将统一上下文块追加到 prompt，避免各节点各自拼装 ad hoc 文本。"""
+    context_block = _build_execution_context_block(state)
+    context_json = json.dumps(context_block, ensure_ascii=False, indent=2)
+    return f"{prompt}\n\n已知上下文:\n```json\n{context_json}\n```"
 
 
 def _dedupe_replanned_steps(existing_steps: List[Step], new_steps: List[Step]) -> List[Step]:
@@ -746,6 +1025,7 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
         message=user_message,
         attachments=format_attachments_for_prompt(attachments),
     )
+    user_message_prompt = _append_execution_context_to_prompt(user_message_prompt, state)
 
     user_content = await _build_message(llm, user_message_prompt, input_parts)
 
@@ -787,18 +1067,21 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             MessageEvent(role="assistant", message=planner_message)
         ]
         await emit_live_events(*planner_events)
-        return {
-            **state,
-            "plan": plan,
-            "working_memory": working_memory,
-            "planner_local_memory": planner_local_memory,
-            "current_step_id": None,
-            "final_message": planner_message,
-            "graph_metadata": {
-                **dict(state.get("graph_metadata") or {}),
+        return _reduce_state_with_events(
+            state,
+            updates={
+                "plan": plan,
+                "working_memory": working_memory,
+                "planner_local_memory": planner_local_memory,
+                "current_step_id": None,
+                "final_message": planner_message,
+                "graph_metadata": {
+                    **dict(state.get("graph_metadata") or {}),
+                },
+                "step_states": [],
             },
-            "emitted_events": append_events(state.get("emitted_events"), *planner_events),
-        }
+            events=planner_events,
+        )
     else:
         steps = [build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
         plan = Plan(
@@ -817,18 +1100,19 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             MessageEvent(role="assistant", message=planner_message)
         ]
         await emit_live_events(*planner_events)
-
-        return {
-            **state,
-            "plan": plan,
-            "working_memory": working_memory,
-            "planner_local_memory": planner_local_memory,
-            "current_step_id": next_step.id if next_step is not None else None,
-            "graph_metadata": {
-                **dict(state.get("graph_metadata") or {}),
+        return _reduce_state_with_events(
+            state,
+            updates={
+                "plan": plan,
+                "working_memory": working_memory,
+                "planner_local_memory": planner_local_memory,
+                "current_step_id": next_step.id if next_step is not None else None,
+                "graph_metadata": {
+                    **dict(state.get("graph_metadata") or {}),
+                },
             },
-            "emitted_events": append_events(state.get("emitted_events"), *planner_events),
-        }
+            events=planner_events,
+        )
 
 
 async def execute_step_node(
@@ -862,6 +1146,7 @@ async def execute_step_node(
         language=language,
         step=step.description,
     )
+    user_message_prompt = _append_execution_context_to_prompt(user_message_prompt, state)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
 
     llm_message: Optional[Dict[str, Any]] = None
@@ -889,6 +1174,7 @@ async def execute_step_node(
                     "step_description": step.description,
                     "language": language,
                     "attachments": attachments,
+                    "execution_context": _build_execution_context_block(state),
                 },
             )
             llm_message = {
@@ -914,15 +1200,19 @@ async def execute_step_node(
         graph_metadata = dict(state.get("graph_metadata") or {})
         graph_metadata["waiting_interrupt_kind"] = interrupt_request.get("kind") or "input_text"
         graph_metadata["waiting_interrupt_prompt"] = interrupt_request.get("prompt") or ""
-        return {
-            **state,
-            "plan": plan,
-            "current_step_id": step.id,
-            "step_local_memory": step_local_memory,
-            "graph_metadata": graph_metadata,
-            "pending_interrupt": interrupt_request,
-            "emitted_events": append_events(state.get("emitted_events"), started_event, *tool_events),
-        }
+        graph_metadata["step_reuse_hit"] = False
+        graph_metadata["last_step_execution_mode"] = "executed"
+        return _reduce_state_with_events(
+            state,
+            updates={
+                "plan": plan,
+                "current_step_id": step.id,
+                "step_local_memory": step_local_memory,
+                "graph_metadata": graph_metadata,
+                "pending_interrupt": interrupt_request,
+            },
+            events=[started_event, *tool_events],
+        )
 
     step_success = bool(llm_message.get("success", True))
     step_summary = _normalize_step_result_text(
@@ -960,28 +1250,37 @@ async def execute_step_node(
     events: List[Any] = [started_event, *tool_events, *final_step_events]
     next_step = plan.get_next_step()
     graph_metadata = dict(state.get("graph_metadata") or {})
-    working_memory = _ensure_working_memory(state)
-    working_memory["decisions"] = _append_unique_text_item(
-        list(working_memory.get("decisions") or []),
-        step_summary,
+    graph_metadata["step_reuse_hit"] = False
+    graph_metadata["last_step_execution_mode"] = "executed"
+    working_memory = _merge_step_outcome_into_working_memory(
+        _ensure_working_memory(state),
+        step.outcome,
     )
     step_local_memory = dict(state.get("step_local_memory") or {})
     step_local_memory["current_step_id"] = str(step.id)
     step_local_memory["observation_summary"] = step_summary
     step_local_memory["pending_findings"] = list(step.outcome.produced_artifacts or [])
-    return {
-        **state,
-        "plan": plan,
-        "last_executed_step": step.model_copy(deep=True),
-        "execution_count": int(state.get("execution_count", 0)) + 1,
-        "current_step_id": next_step.id if next_step is not None else None,
-        "working_memory": working_memory,
-        "step_local_memory": step_local_memory,
-        "graph_metadata": graph_metadata,
-        "final_message": step_summary,
-        "pending_interrupt": {},
-        "emitted_events": append_events(state.get("emitted_events"), *events),
-    }
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "last_executed_step": step.model_copy(deep=True),
+            "execution_count": int(state.get("execution_count", 0)) + 1,
+            "current_step_id": next_step.id if next_step is not None else None,
+            "working_memory": working_memory,
+            "step_local_memory": step_local_memory,
+            "graph_metadata": graph_metadata,
+            "final_message": step_summary,
+            "selected_artifacts": list(
+                dict.fromkeys(
+                    list(state.get("selected_artifacts") or [])
+                    + list(step.outcome.produced_artifacts or [])
+                )
+            ),
+            "pending_interrupt": {},
+        },
+        events=events,
+    )
 
 
 async def wait_for_human_node(
@@ -1036,6 +1335,8 @@ async def recall_memory_context_node(
     working_memory = _ensure_working_memory(state)
     if not str(working_memory.get("goal") or "").strip():
         working_memory["goal"] = str(getattr(plan, "goal", "") or state.get("user_message") or "")
+    if not list(working_memory.get("open_questions") or []):
+        working_memory["open_questions"] = _normalize_text_items(state.get("session_open_questions"))
 
     retrieved_memories = list(state.get("retrieved_memories") or [])
     if long_term_memory_repository is not None:
@@ -1055,6 +1356,10 @@ async def recall_memory_context_node(
     graph_metadata["memory_recall_prepared_at"] = datetime.now().isoformat()
     graph_metadata["memory_recall_count"] = len(retrieved_memories)
     graph_metadata["memory_recall_namespaces"] = _build_memory_namespace_prefixes(state)
+    graph_metadata["context_recent_run_brief_count"] = len(state.get("recent_run_briefs") or [])
+    graph_metadata["context_recent_attempt_brief_count"] = len(state.get("recent_attempt_briefs") or [])
+    graph_metadata["context_selected_artifact_count"] = len(state.get("selected_artifacts") or [])
+    graph_metadata["context_historical_artifact_count"] = len(state.get("historical_artifact_refs") or [])
 
     return {
         **state,
@@ -1076,6 +1381,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         return state
 
     prompt = UPDATE_PLAN_PROMPT.format(step=last_step.model_dump_json(), plan=plan.model_dump_json())
+    prompt = _append_execution_context_to_prompt(prompt, state)
     logger.info("replan 计划")
     llm_message = await llm.invoke(
         messages=[{"role": "user", "content": prompt}],
@@ -1106,14 +1412,16 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     await emit_live_events(updated_event)
     planner_local_memory = dict(state.get("planner_local_memory") or {})
     planner_local_memory["replan_rationale"] = _get_step_outcome_summary(last_step)
-    return {
-        **state,
-        "plan": plan,
-        "planner_local_memory": planner_local_memory,
-        "step_local_memory": {},
-        "current_step_id": next_step.id if next_step is not None else None,
-        "emitted_events": append_events(state.get("emitted_events"), updated_event),
-    }
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "planner_local_memory": planner_local_memory,
+            "step_local_memory": {},
+            "current_step_id": next_step.id if next_step is not None else None,
+        },
+        events=[updated_event],
+    )
 
 
 async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
@@ -1191,19 +1499,27 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         summary_local_memory["memory_candidates_reason"] = "使用本轮任务结果生成保守的会话级长期记忆候选"
     else:
         summary_local_memory["memory_candidates_reason"] = ""
-    return {
-        **state,
-        "plan": plan,
-        "current_step_id": None,
-        "final_message": summary_message,
-        "working_memory": working_memory,
-        "pending_memory_writes": _merge_memory_candidates(
-            list(state.get("pending_memory_writes") or []),
-            memory_candidates,
-        ),
-        "summary_local_memory": summary_local_memory,
-        "emitted_events": append_events(state.get("emitted_events"), *final_events),
-    }
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "current_step_id": None,
+            "final_message": summary_message,
+            "working_memory": working_memory,
+            "selected_artifacts": list(
+                dict.fromkeys(
+                    list(state.get("selected_artifacts") or [])
+                    + summary_attachment_refs
+                )
+            ),
+            "pending_memory_writes": _merge_memory_candidates(
+                list(state.get("pending_memory_writes") or []),
+                memory_candidates,
+            ),
+            "summary_local_memory": summary_local_memory,
+        },
+        events=final_events,
+    )
 
 
 async def consolidate_memory_node(
@@ -1278,6 +1594,7 @@ async def consolidate_memory_node(
         "planner_local_memory": {},
         "step_local_memory": {},
         "summary_local_memory": {},
+        "selected_artifacts": list(dict.fromkeys(list(state.get("selected_artifacts") or []) + list(summary_local_memory.get("selected_artifacts") or []))),
         "graph_metadata": graph_metadata,
     }
     return next_state
@@ -1291,7 +1608,8 @@ async def finalize_node(state: PlannerReActLangGraphState) -> PlannerReActLangGr
 
     done_event = DoneEvent()
     await emit_live_events(done_event)
-    return {
-        **state,
-        "emitted_events": append_events(state.get("emitted_events"), done_event),
-    }
+    return _reduce_state_with_events(
+        state,
+        updates={},
+        events=[done_event],
+    )

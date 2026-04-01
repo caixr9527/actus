@@ -7,8 +7,10 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph i
     build_planner_react_langgraph_graph,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+    _build_execution_context_block,
     consolidate_memory_node,
     execute_step_node,
+    guard_step_reuse_node,
     recall_memory_context_node,
     replan_node,
     summarize_node,
@@ -229,6 +231,150 @@ def test_execute_step_node_should_not_write_string_none_when_skill_result_missin
     assert next_state["plan"].steps[0].outcome.summary == "已完成步骤：执行阶段"
     assert next_state["final_message"] == "已完成步骤：执行阶段"
     assert next_state["working_memory"]["decisions"] == ["已完成步骤：执行阶段"]
+    assert next_state["step_states"][0]["step_id"] == "step-1"
+    assert next_state["step_states"][0]["status"] == ExecutionStatus.COMPLETED.value
+    assert next_state["graph_metadata"]["last_step_execution_mode"] == "executed"
+
+
+def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> None:
+    completed_step = Step(
+        id="step-1",
+        title="生成报告",
+        description="生成报告",
+        objective_key="objective-report",
+        success_criteria=["产出报告"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="报告已经生成",
+            produced_artifacts=["/tmp/report.md"],
+            facts_learned=["报告结构已确定"],
+        ),
+    )
+    pending_duplicate_step = Step(
+        id="step-2",
+        title="再次生成报告",
+        description="再次生成报告",
+        objective_key="objective-report",
+        success_criteria=["产出报告"],
+        status=ExecutionStatus.PENDING,
+    )
+    state = {
+        "run_id": "run-1",
+        "plan": Plan(
+            title="复用测试",
+            goal="避免重复执行",
+            language="zh",
+            steps=[completed_step, pending_duplicate_step],
+        ),
+        "working_memory": {},
+        "step_local_memory": {},
+        "graph_metadata": {},
+        "selected_artifacts": [],
+        "emitted_events": [],
+        "execution_count": 0,
+    }
+
+    next_state = asyncio.run(guard_step_reuse_node(state))
+
+    reused_step = next_state["plan"].steps[1]
+    assert reused_step.status == ExecutionStatus.COMPLETED
+    assert reused_step.outcome is not None
+    assert reused_step.outcome.reused_from_run_id == "run-1"
+    assert reused_step.outcome.reused_from_step_id == "step-1"
+    assert reused_step.outcome.produced_artifacts == ["/tmp/report.md"]
+    assert next_state["step_states"][-1]["step_id"] == "step-2"
+    assert next_state["step_states"][-1]["status"] == ExecutionStatus.COMPLETED.value
+    assert next_state["graph_metadata"]["step_reuse_hit"] is True
+    assert next_state["graph_metadata"]["last_step_execution_mode"] == "reused"
+    assert next_state["selected_artifacts"] == ["/tmp/report.md"]
+    assert next_state["working_memory"]["facts_in_session"] == ["报告结构已确定"]
+
+
+def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
+    pending_step = Step(
+        id="step-2",
+        title="整理结论",
+        description="整理结论",
+        objective_key="objective-summary",
+        success_criteria=["输出结论"],
+        status=ExecutionStatus.PENDING,
+    )
+    state = {
+        "run_id": "run-current",
+        "plan": Plan(
+            title="跨 run 复用测试",
+            goal="避免重复执行",
+            language="zh",
+            steps=[pending_step],
+        ),
+        "working_memory": {},
+        "step_local_memory": {},
+        "graph_metadata": {},
+        "selected_artifacts": [],
+        "recent_run_briefs": [
+            {
+                "run_id": "run-history",
+                "title": "整理结论",
+                "goal": "避免重复执行",
+                "status": "completed",
+                "final_answer_summary": "历史结论已经整理完成",
+            }
+        ],
+        "emitted_events": [],
+        "execution_count": 1,
+    }
+
+    next_state = asyncio.run(guard_step_reuse_node(state))
+
+    guarded_step = next_state["plan"].steps[0]
+    assert guarded_step.status == ExecutionStatus.PENDING
+    assert guarded_step.outcome is None
+    assert next_state["graph_metadata"]["step_reuse_hit"] is False
+
+
+def test_execution_context_block_should_separate_current_and_historical_context() -> None:
+    state = {
+        "conversation_summary": "会话摘要",
+        "retrieved_memories": [{"id": "mem-1", "summary": "偏好中文"}],
+        "session_open_questions": ["问题1", "问题2"],
+        "session_blockers": ["阻塞1"],
+        "selected_artifacts": [f"/tmp/current-{index}.md" for index in range(12)],
+        "historical_artifact_refs": [f"/tmp/history-{index}.md" for index in range(12)],
+        "recent_run_briefs": [
+            {
+                "run_id": f"run-{index}",
+                "title": f"完成运行{index}",
+                "goal": "整理上下文",
+                "status": "completed",
+                "final_answer_summary": f"总结{index}" * 60,
+            }
+            for index in range(6)
+        ],
+        "recent_attempt_briefs": [
+            {
+                "run_id": f"attempt-{index}",
+                "title": f"失败运行{index}",
+                "goal": "尝试执行",
+                "status": "failed",
+                "final_answer_summary": f"失败总结{index}" * 60,
+            }
+            for index in range(6)
+        ],
+        "working_memory": {"open_questions": ["问题2", "问题3"]},
+        "step_states": [],
+    }
+
+    context_block = _build_execution_context_block(state)
+
+    assert context_block["selected_artifacts"] == [f"/tmp/current-{index}.md" for index in range(10)]
+    assert context_block["historical_artifact_refs"] == [f"/tmp/history-{index}.md" for index in range(10)]
+    assert len(context_block["recent_run_briefs"]) == 5
+    assert len(context_block["recent_attempt_briefs"]) == 5
+    assert "总结0总结0" in context_block["recent_run_briefs"][0]["final_answer_summary"]
+    assert len(context_block["recent_run_briefs"][0]["final_answer_summary"]) <= 200
+    assert context_block["blockers"] == ["阻塞1"]
+    assert context_block["open_questions"] == ["问题1", "问题2", "问题3"]
 
 
 def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assumption() -> None:
@@ -599,6 +745,9 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
             "current_step_id": None,
         }
 
+    async def _guard(state):
+        return _append_trace(state, "guard")
+
     async def _replan(state, _llm):
         next_state = _append_trace(state, "replan")
         return {
@@ -632,6 +781,10 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.execute_step_node",
         _execute,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.guard_step_reuse_node",
+        _guard,
     )
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.replan_node",
@@ -670,6 +823,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     assert state["graph_metadata"]["trace"] == [
         "recall",
         "plan",
+        "guard",
         "execute",
         "replan",
         "summarize",
@@ -680,7 +834,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
 
 def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> None:
     state = {
-        "schema_version": "be-lg-04.v4",
+        "schema_version": "be-lg-04.v5",
         "session_id": "session-1",
         "user_id": "user-1",
         "run_id": "run-1",

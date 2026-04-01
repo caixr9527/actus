@@ -18,12 +18,13 @@ from .nodes import (
     create_or_reuse_plan_node,
     execute_step_node,
     finalize_node,
+    guard_step_reuse_node,
     recall_memory_context_node,
     replan_node,
     summarize_node,
     wait_for_human_node,
 )
-from .routing import route_after_plan, route_after_replan, route_after_execute
+from .routing import route_after_execute, route_after_guard, route_after_plan, route_after_replan
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ def build_planner_react_langgraph_graph(
     graph = StateGraph(PlannerReActLangGraphState)
     graph.add_node("recall_memory_context", _recall_memory_context)
     graph.add_node("create_plan_or_reuse", _create_plan_with_llm)
+    graph.add_node("guard_step_reuse", guard_step_reuse_node)
     graph.add_node("execute_step", _execute_step_with_llm)
     graph.add_node("wait_for_human", wait_for_human_node)
     graph.add_node("replan", _replan_with_llm)
@@ -89,9 +91,18 @@ def build_planner_react_langgraph_graph(
         "create_plan_or_reuse",
         route_after_plan,
         {
-            "execute_step": "execute_step",
+            "guard_step_reuse": "guard_step_reuse",
             "summarize": "summarize",
             "consolidate_memory": "consolidate_memory",
+        },
+    )
+    graph.add_conditional_edges(
+        "guard_step_reuse",
+        route_after_guard,
+        {
+            "execute_step": "execute_step",
+            "replan": "replan",
+            "summarize": "summarize",
         },
     )
     graph.add_conditional_edges(
@@ -107,7 +118,7 @@ def build_planner_react_langgraph_graph(
         "replan",
         route_after_replan,
         {
-            "execute_step": "execute_step",
+            "guard_step_reuse": "guard_step_reuse",
             "summarize": "summarize",
             "consolidate_memory": "consolidate_memory",
         },

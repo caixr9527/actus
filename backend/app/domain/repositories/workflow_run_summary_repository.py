@@ -3,7 +3,7 @@
 """运行摘要仓储协议。"""
 from typing import List, Optional, Protocol
 
-from app.domain.models import WorkflowRunSummary
+from app.domain.models import WorkflowRunSummary, WorkflowRunStatus
 
 
 class WorkflowRunSummaryRepository(Protocol):
@@ -17,6 +17,7 @@ class WorkflowRunSummaryRepository(Protocol):
             self,
             session_id: str,
             limit: int = 10,
+            statuses: Optional[List[WorkflowRunStatus]] = None,
     ) -> List[WorkflowRunSummary]:
         """按 session 读取最近的运行摘要列表。"""
         ...

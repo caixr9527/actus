@@ -26,13 +26,15 @@ from app.domain.models import (
     ToolEvent,
     WaitEvent,
     WorkflowRun,
+    WorkflowRunSummary,
+    SessionContextSnapshot,
 )
 
 logger = logging.getLogger(__name__)
 
 # BE-LG-04 契约版本。
-# v4 删除 human_tasks 真相源，等待态统一切到 LangGraph 原生 interrupt。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v4"
+# v5 收紧跨轮上下文边界，删除历史步骤复用字段并拆分当前/历史产物上下文。
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v5"
 
 
 class StepState(TypedDict, total=False):
@@ -84,6 +86,12 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     planner_local_memory: Dict[str, Any]
     step_local_memory: Dict[str, Any]
     summary_local_memory: Dict[str, Any]
+    recent_run_briefs: List[Dict[str, Any]]
+    recent_attempt_briefs: List[Dict[str, Any]]
+    session_open_questions: List[str]
+    session_blockers: List[str]
+    selected_artifacts: List[str]
+    historical_artifact_refs: List[str]
     memory_context_version: Optional[str]
     plan: Optional[Plan]
     current_step_id: Optional[str]
@@ -122,6 +130,12 @@ class GraphStateContractMapper:
         "planner_local_memory",
         "step_local_memory",
         "summary_local_memory",
+        "recent_run_briefs",
+        "recent_attempt_briefs",
+        "session_open_questions",
+        "session_blockers",
+        "selected_artifacts",
+        "historical_artifact_refs",
         "memory_context_version",
         "plan",
         "current_step_id",
@@ -257,6 +271,113 @@ class GraphStateContractMapper:
     @classmethod
     def _normalize_message_window(cls, raw: Any) -> List[Dict[str, Any]]:
         return cls._normalize_list_memory(raw)
+
+    @staticmethod
+    def _normalize_string_list(raw: Any) -> List[str]:
+        if not isinstance(raw, list):
+            return []
+        normalized_items: List[str] = []
+        for item in raw:
+            normalized_item = str(item or "").strip()
+            if normalized_item and normalized_item not in normalized_items:
+                normalized_items.append(normalized_item)
+        return normalized_items
+
+    @classmethod
+    def _normalize_recent_run_briefs(cls, raw: Any) -> List[Dict[str, Any]]:
+        normalized_briefs: List[Dict[str, Any]] = []
+        for item in cls._normalize_list_memory(raw):
+            run_id = str(item.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            normalized_briefs.append(
+                {
+                    "run_id": run_id,
+                    "title": str(item.get("title") or "").strip(),
+                    "goal": str(item.get("goal") or "").strip(),
+                    "status": str(item.get("status") or "").strip(),
+                    "final_answer_summary": str(item.get("final_answer_summary") or "").strip(),
+                }
+            )
+        return normalized_briefs
+
+    @classmethod
+    def _normalize_recent_attempt_briefs(cls, raw: Any) -> List[Dict[str, Any]]:
+        return cls._normalize_recent_run_briefs(raw)
+
+    @staticmethod
+    def _merge_unique_strings(*groups: Any) -> List[str]:
+        merged_items: List[str] = []
+        for group in groups:
+            for item in list(group or []):
+                normalized_item = str(item or "").strip()
+                if normalized_item and normalized_item not in merged_items:
+                    merged_items.append(normalized_item)
+        return merged_items
+
+    @staticmethod
+    def _truncate_brief_summary(raw: Any, *, max_chars: int = 200) -> str:
+        normalized = str(raw or "").strip()
+        if len(normalized) <= max_chars:
+            return normalized
+        return f"{normalized[:max_chars].rstrip()}..."
+
+    @classmethod
+    def _build_briefs_from_summaries(
+            cls,
+            summaries: Optional[List[WorkflowRunSummary]],
+    ) -> List[Dict[str, Any]]:
+        briefs: List[Dict[str, Any]] = []
+        for summary in list(summaries or []):
+            if summary is None:
+                continue
+            briefs.append(
+                {
+                    "run_id": summary.run_id,
+                    "title": summary.title,
+                    "goal": summary.goal,
+                    "status": summary.status.value,
+                    "final_answer_summary": cls._truncate_brief_summary(summary.final_answer_summary),
+                }
+            )
+        return briefs
+
+    @classmethod
+    def _build_open_questions_from_summaries(
+            cls,
+            summaries: Optional[List[WorkflowRunSummary]],
+    ) -> List[str]:
+        questions: List[str] = []
+        for summary in list(summaries or []):
+            for item in list(getattr(summary, "open_questions", []) or []):
+                normalized_item = str(item or "").strip()
+                if normalized_item and normalized_item not in questions:
+                    questions.append(normalized_item)
+        return questions
+
+    @classmethod
+    def _build_blockers_from_summaries(
+            cls,
+            summaries: Optional[List[WorkflowRunSummary]],
+    ) -> List[str]:
+        blockers: List[str] = []
+        for summary in list(summaries or []):
+            if summary is None:
+                continue
+            blockers = cls._merge_unique_strings(blockers, getattr(summary, "blockers", []))
+        return blockers
+
+    @classmethod
+    def _build_artifact_refs_from_summaries(
+            cls,
+            summaries: Optional[List[WorkflowRunSummary]],
+    ) -> List[str]:
+        artifact_refs: List[str] = []
+        for summary in list(summaries or []):
+            if summary is None:
+                continue
+            artifact_refs = cls._merge_unique_strings(artifact_refs, getattr(summary, "artifacts", []))
+        return artifact_refs
 
     @classmethod
     def _normalize_pending_interrupt(cls, raw: Any) -> Dict[str, Any]:
@@ -395,6 +516,9 @@ class GraphStateContractMapper:
             cls,
             session: Session,
             run: Optional[WorkflowRun],
+            completed_run_summaries: Optional[List[WorkflowRunSummary]],
+            recent_attempt_summaries: Optional[List[WorkflowRunSummary]],
+            session_context_snapshot: Optional[SessionContextSnapshot],
             user_message: str,
             input_parts: Optional[List[Dict[str, Any]]] = None,
             thread_id: str = "",
@@ -416,6 +540,46 @@ class GraphStateContractMapper:
             next_step = plan.get_next_step()
             current_step_id = next_step.id if next_step is not None else None
 
+        recent_run_briefs = cls._normalize_recent_run_briefs(graph_state_from_metadata.get("recent_run_briefs"))
+        if not recent_run_briefs:
+            recent_run_briefs = cls._build_briefs_from_summaries(completed_run_summaries)
+        if not recent_run_briefs:
+            recent_run_briefs = cls._normalize_recent_run_briefs(
+                getattr(session_context_snapshot, "recent_run_briefs", None)
+            )
+
+        recent_attempt_briefs = cls._normalize_recent_attempt_briefs(
+            graph_state_from_metadata.get("recent_attempt_briefs")
+        )
+        if not recent_attempt_briefs:
+            recent_attempt_briefs = cls._build_briefs_from_summaries(recent_attempt_summaries)
+
+        session_open_questions = cls._normalize_string_list(graph_state_from_metadata.get("session_open_questions"))
+        if not session_open_questions:
+            session_open_questions = cls._merge_unique_strings(
+                cls._build_open_questions_from_summaries(completed_run_summaries),
+                cls._build_open_questions_from_summaries(recent_attempt_summaries),
+                cls._normalize_string_list(getattr(session_context_snapshot, "open_questions", None)),
+            )
+
+        session_blockers = cls._normalize_string_list(graph_state_from_metadata.get("session_blockers"))
+        if not session_blockers:
+            session_blockers = cls._build_blockers_from_summaries(recent_attempt_summaries)
+
+        selected_artifacts = cls._normalize_string_list(graph_state_from_metadata.get("selected_artifacts"))
+
+        historical_artifact_refs = cls._normalize_string_list(graph_state_from_metadata.get("historical_artifact_refs"))
+        if not historical_artifact_refs:
+            historical_artifact_refs = cls._merge_unique_strings(
+                cls._normalize_string_list(getattr(session_context_snapshot, "artifact_refs", None)),
+                cls._build_artifact_refs_from_summaries(completed_run_summaries),
+                cls._build_artifact_refs_from_summaries(recent_attempt_summaries),
+            )
+
+        conversation_summary = cls._normalize_text(graph_state_from_metadata.get("conversation_summary"))
+        if not conversation_summary and session_context_snapshot is not None:
+            conversation_summary = cls._normalize_text(session_context_snapshot.summary_text)
+
         return {
             "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
             "session_id": session.id,
@@ -435,13 +599,19 @@ class GraphStateContractMapper:
                 user_message=user_message,
                 input_parts=cls._normalize_input_parts(input_parts),
             ),
-            "conversation_summary": cls._normalize_text(graph_state_from_metadata.get("conversation_summary")),
+            "conversation_summary": conversation_summary,
             "working_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("working_memory")),
             "retrieved_memories": cls._normalize_list_memory(graph_state_from_metadata.get("retrieved_memories")),
             "pending_memory_writes": cls._normalize_list_memory(graph_state_from_metadata.get("pending_memory_writes")),
             "planner_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("planner_local_memory")),
             "step_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("step_local_memory")),
             "summary_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("summary_local_memory")),
+            "recent_run_briefs": recent_run_briefs,
+            "recent_attempt_briefs": recent_attempt_briefs,
+            "session_open_questions": session_open_questions,
+            "session_blockers": session_blockers,
+            "selected_artifacts": selected_artifacts,
+            "historical_artifact_refs": historical_artifact_refs,
             "memory_context_version": (
                 str(graph_state_from_metadata.get("memory_context_version"))
                 if graph_state_from_metadata.get("memory_context_version") is not None
@@ -669,6 +839,12 @@ class GraphStateContractMapper:
                     "planner_local_memory": cls._to_json_safe(state.get("planner_local_memory") or {}),
                     "step_local_memory": cls._to_json_safe(state.get("step_local_memory") or {}),
                     "summary_local_memory": cls._to_json_safe(state.get("summary_local_memory") or {}),
+                    "recent_run_briefs": cls._to_json_safe(state.get("recent_run_briefs") or []),
+                    "recent_attempt_briefs": cls._to_json_safe(state.get("recent_attempt_briefs") or []),
+                    "session_open_questions": cls._to_json_safe(state.get("session_open_questions") or []),
+                    "session_blockers": cls._to_json_safe(state.get("session_blockers") or []),
+                    "selected_artifacts": cls._to_json_safe(state.get("selected_artifacts") or []),
+                    "historical_artifact_refs": cls._to_json_safe(state.get("historical_artifact_refs") or []),
                     "memory_context_version": state.get("memory_context_version"),
                     "plan": cls._to_json_safe(state.get("plan")),
                     "current_step_id": state.get("current_step_id"),

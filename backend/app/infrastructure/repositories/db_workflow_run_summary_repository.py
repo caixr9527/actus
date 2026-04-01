@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import WorkflowRunSummary
+from app.domain.models import WorkflowRunSummary, WorkflowRunStatus
 from app.domain.repositories import WorkflowRunSummaryRepository
 from app.infrastructure.models import WorkflowRunSummaryModel
 
@@ -53,10 +53,17 @@ class DBWorkflowRunSummaryRepository(WorkflowRunSummaryRepository):
             self,
             session_id: str,
             limit: int = 10,
+            statuses: Optional[List[WorkflowRunStatus]] = None,
     ) -> List[WorkflowRunSummary]:
         stmt = (
             select(WorkflowRunSummaryModel)
             .where(WorkflowRunSummaryModel.session_id == session_id)
+        )
+        normalized_statuses = [status.value for status in list(statuses or []) if isinstance(status, WorkflowRunStatus)]
+        if len(normalized_statuses) > 0:
+            stmt = stmt.where(WorkflowRunSummaryModel.status.in_(normalized_statuses))
+        stmt = (
+            stmt
             .order_by(WorkflowRunSummaryModel.created_at.desc(), WorkflowRunSummaryModel.id.desc())
             .limit(max(int(limit or 10), 1))
         )

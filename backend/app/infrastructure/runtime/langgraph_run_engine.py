@@ -17,7 +17,15 @@ from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 from langgraph.types import Command
 
 from app.domain.external import LLM, FileStorage
-from app.domain.models import BaseEvent, Message, File, WaitEvent
+from app.domain.models import (
+    BaseEvent,
+    Message,
+    File,
+    WaitEvent,
+    WorkflowRunSummary,
+    SessionContextSnapshot,
+    WorkflowRunStatus,
+)
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.langgraph_state import (
@@ -27,15 +35,17 @@ from app.domain.services.runtime.langgraph_state import (
 )
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
-from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.runtime.langgraph_graphs import (
     bind_live_event_sink,
     build_planner_react_langgraph_graph,
     unbind_live_event_sink,
 )
+from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.utils import BaseUtils
 
 logger = logging.getLogger(__name__)
+
+SESSION_CONTEXT_SUMMARY_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -145,11 +155,7 @@ class LangGraphRunEngine(RunEngine):
             graph_kwargs["runtime_tools"] = runtime_tools
             graph_kwargs["max_tool_iterations"] = max_tool_iterations or 5
 
-        try:
-            return build_planner_react_langgraph_graph(**graph_kwargs)
-        except TypeError:
-            # 兼容测试/历史 monkeypatch 场景：回退到仅传 llm 的构图签名。
-            return build_planner_react_langgraph_graph(llm=llm)
+        return build_planner_react_langgraph_graph(**graph_kwargs)
 
     async def _build_input_parts(
             self,
@@ -215,11 +221,27 @@ class LangGraphRunEngine(RunEngine):
                     if resolved_run_id
                     else None
                 )
+                completed_run_summaries = await uow.workflow_run_summary.list_by_session_id(
+                    session_id=session.id,
+                    limit=SESSION_CONTEXT_SUMMARY_LIMIT,
+                    statuses=[WorkflowRunStatus.COMPLETED],
+                )
+                recent_attempt_summaries = await uow.workflow_run_summary.list_by_session_id(
+                    session_id=session.id,
+                    limit=SESSION_CONTEXT_SUMMARY_LIMIT,
+                    statuses=[WorkflowRunStatus.FAILED, WorkflowRunStatus.CANCELLED],
+                )
+                session_context_snapshot = await uow.session_context_snapshot.get_by_session_id(
+                    session_id=session.id,
+                )
                 input_parts = await self._build_input_parts(message=message, uow=uow)
 
                 return GraphStateContractMapper.build_initial_state(
                     session=session,
                     run=run,
+                    completed_run_summaries=completed_run_summaries,
+                    recent_attempt_summaries=recent_attempt_summaries,
+                    session_context_snapshot=session_context_snapshot,
                     user_message=message.message,
                     input_parts=input_parts,
                     thread_id=thread_id,
@@ -247,6 +269,12 @@ class LangGraphRunEngine(RunEngine):
                 "planner_local_memory": {},
                 "step_local_memory": {},
                 "summary_local_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_refs": [],
                 "memory_context_version": None,
                 "plan": None,
                 "current_step_id": None,
@@ -263,6 +291,194 @@ class LangGraphRunEngine(RunEngine):
                 "emitted_events": [],
                 "error": None,
             }
+
+    @staticmethod
+    def _dedupe_text_items(items: List[str]) -> List[str]:
+        deduped_items: List[str] = []
+        for item in items:
+            normalized_item = str(item or "").strip()
+            if normalized_item and normalized_item not in deduped_items:
+                deduped_items.append(normalized_item)
+        return deduped_items
+
+    @staticmethod
+    def _build_step_ledger(state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
+        return [
+            dict(item)
+            for item in list(state.get("step_states") or [])
+            if isinstance(item, dict)
+        ]
+
+    @staticmethod
+    def _build_context_brief(summary: WorkflowRunSummary) -> Dict[str, Any]:
+        return {
+            "run_id": summary.run_id,
+            "title": summary.title,
+            "goal": summary.goal,
+            "status": summary.status.value,
+            "final_answer_summary": str(summary.final_answer_summary or "").strip()[:200],
+        }
+
+    @classmethod
+    def _resolve_run_status_for_projection(
+            cls,
+            *,
+            run: Any,
+            state: PlannerReActLangGraphState,
+    ) -> WorkflowRunStatus:
+        pending_interrupt = GraphStateContractMapper.get_pending_interrupt(state)
+        if pending_interrupt:
+            return WorkflowRunStatus.WAITING
+
+        raw_status = str((state.get("graph_metadata") or {}).get("run_status") or "").strip()
+        if raw_status:
+            try:
+                return WorkflowRunStatus(raw_status)
+            except ValueError:
+                logger.warning("运行[%s]存在未知 run_status[%s]，回退数据库状态", getattr(run, "id", ""), raw_status)
+
+        if str(state.get("error") or "").strip():
+            return WorkflowRunStatus.FAILED
+        return run.status
+
+    @classmethod
+    def _build_run_summary_projection(
+            cls,
+            *,
+            run: Any,
+            state: PlannerReActLangGraphState,
+    ) -> WorkflowRunSummary:
+        # 提取计划对象和步骤记录
+        plan = state.get("plan")
+        step_ledger = cls._build_step_ledger(state)
+
+        # 统计已完成的步骤数量
+        completed_steps = sum(
+            1 for item in step_ledger if str(item.get("status") or "") == "completed"
+        )
+
+        # 初始化收集列表
+        blockers: List[str] = []
+        facts_learned: List[str] = []
+        open_questions: List[str] = []
+
+        # 从步骤记录的结果中提取阻碍项、习得事实和待解决问题
+        for item in step_ledger:
+            outcome = item.get("outcome")
+            if not isinstance(outcome, dict):
+                continue
+            blockers.extend([str(value) for value in list(outcome.get("blockers") or [])])
+            facts_learned.extend([str(value) for value in list(outcome.get("facts_learned") or [])])
+            open_questions.extend([str(value) for value in list(outcome.get("open_questions") or [])])
+
+        # 补充工作记忆中的会话事实和待解决问题
+        facts_learned.extend(
+            [str(item) for item in list((state.get("working_memory") or {}).get("facts_in_session") or [])])
+        open_questions.extend(
+            [str(item) for item in list((state.get("working_memory") or {}).get("open_questions") or [])])
+
+        # 获取最终消息并清洗
+        final_message = str(state.get("final_message") or "").strip()
+
+        # 运行摘要状态必须从当前 graph state 真实语义推导，不能依赖外部事件是否已先落库。
+        run_status = cls._resolve_run_status_for_projection(run=run, state=state)
+
+        return WorkflowRunSummary(
+            run_id=run.id,
+            session_id=run.session_id,
+            user_id=run.user_id,
+            thread_id=run.thread_id,
+            # 目标：优先取自计划对象，其次取自工作记忆
+            goal=str(getattr(plan, "goal", "") or (state.get("working_memory") or {}).get("goal") or ""),
+            # 标题：优先取自计划对象，其次取自最终消息前 80 字符，最后兜底
+            title=str(getattr(plan, "title", "") or final_message[:80] or "未命名运行"),
+            final_answer_summary=final_message[:500],
+            final_answer_text=final_message,
+            status=run_status,
+            completed_steps=completed_steps,
+            total_steps=len(getattr(plan, "steps", []) or []),
+            step_ledger=step_ledger,
+            # 仅保留当前 run 明确选择/确认过的产物，避免把事件层噪音引用投影到历史上下文。
+            artifacts=cls._dedupe_text_items(
+                [str(item) for item in list(state.get("selected_artifacts") or [])]
+            ),
+            open_questions=cls._dedupe_text_items(open_questions),
+            blockers=cls._dedupe_text_items(blockers),
+            facts_learned=cls._dedupe_text_items(facts_learned),
+        )
+
+    @classmethod
+    def _build_session_context_snapshot_projection(
+            cls,
+            *,
+            session_id: str,
+            user_id: Optional[str],
+            summaries: List[WorkflowRunSummary],
+    ) -> SessionContextSnapshot:
+        recent_summaries = list(summaries or [])[:SESSION_CONTEXT_SUMMARY_LIMIT]
+
+        # 提取非空的摘要文本或标题，用于构建简短的上下文概览
+        summary_text_parts = [
+            str(item.final_answer_summary or item.title or "").strip()
+            for item in recent_summaries
+            if str(item.final_answer_summary or item.title or "").strip()
+        ]
+
+        return SessionContextSnapshot(
+            session_id=session_id,
+            user_id=user_id,
+            # 设置最近一次运行的 ID，若无运行记录则为 None
+            last_run_id=recent_summaries[0].run_id if recent_summaries else None,
+            # 将前三个摘要片段拼接成简要文本
+            summary_text=" | ".join(summary_text_parts[:3]),
+            # 构建详细的近期运行简报列表
+            recent_run_briefs=[
+                cls._build_context_brief(item)
+                for item in recent_summaries
+            ],
+            # 收集并去重所有运行中的待解决问题
+            open_questions=cls._dedupe_text_items(
+                [question for item in recent_summaries for question in list(item.open_questions or [])]
+            ),
+            # 收集并去重所有运行中产生的工件引用
+            artifact_refs=cls._dedupe_text_items(
+                [artifact for item in recent_summaries for artifact in list(item.artifacts or [])]
+            ),
+        )
+
+    async def _sync_context_projections(
+            self,
+            *,
+            run: Any,
+            state: PlannerReActLangGraphState,
+            uow: IUnitOfWork,
+    ) -> None:
+        run_status = self._resolve_run_status_for_projection(run=run, state=state)
+        if run_status in {
+            WorkflowRunStatus.PENDING,
+            WorkflowRunStatus.RUNNING,
+            WorkflowRunStatus.WAITING,
+        }:
+            return
+
+        # 构建当前运行的摘要投影并持久化
+        summary = self._build_run_summary_projection(run=run, state=state)
+        await uow.workflow_run_summary.upsert(summary)
+
+        # 获取会话最近的运行摘要列表，用于构建上下文快照
+        recent_summaries = await uow.workflow_run_summary.list_by_session_id(
+            session_id=run.session_id,
+            limit=SESSION_CONTEXT_SUMMARY_LIMIT,
+            statuses=[WorkflowRunStatus.COMPLETED],
+        )
+
+        # 基于最新摘要列表构建会话上下文快照并持久化
+        snapshot = self._build_session_context_snapshot_projection(
+            session_id=run.session_id,
+            user_id=run.user_id,
+            summaries=recent_summaries,
+        )
+        await uow.session_context_snapshot.upsert(snapshot)
 
     async def _sync_graph_state_contract(
             self,
@@ -288,6 +504,11 @@ class LangGraphRunEngine(RunEngine):
                     run_id=resolved_run_id,
                     runtime_metadata=runtime_metadata,
                     current_step_id=state.get("current_step_id"),
+                )
+                await self._sync_context_projections(
+                    run=run,
+                    state=state,
+                    uow=uow,
                 )
         except Exception as e:
             logger.warning("会话[%s]回写graph_state_contract失败: %s", self._session_id, e)
@@ -364,6 +585,8 @@ class LangGraphRunEngine(RunEngine):
         graph_metadata["pending_interrupts"] = pending_interrupts
         if len(wait_events) > 0 and wait_events[-1].interrupt_id:
             graph_metadata["latest_interrupt_id"] = str(wait_events[-1].interrupt_id)
+        if len(wait_events) > 0:
+            graph_metadata["run_status"] = WorkflowRunStatus.WAITING.value
         return {
             **state,
             "pending_interrupt": (
@@ -377,8 +600,8 @@ class LangGraphRunEngine(RunEngine):
     @staticmethod
     def _same_event(left: BaseEvent, right: BaseEvent) -> bool:
         return (
-            str(left.id or "") == str(right.id or "")
-            and _EventDeduplicator._build_signature(left) == _EventDeduplicator._build_signature(right)
+                str(left.id or "") == str(right.id or "")
+                and _EventDeduplicator._build_signature(left) == _EventDeduplicator._build_signature(right)
         )
 
     @classmethod
@@ -390,7 +613,7 @@ class LangGraphRunEngine(RunEngine):
         # 获取当前状态和基准状态中已发射的事件列表
         current_events = list((state or {}).get("emitted_events") or [])
         baseline_events = list((baseline_state or {}).get("emitted_events") or [])
-        
+
         # 如果基准事件为空，说明没有需要过滤的历史事件，直接返回当前所有事件
         if not baseline_events:
             return current_events
@@ -407,11 +630,11 @@ class LangGraphRunEngine(RunEngine):
 
         # 构建基准事件 ID 集合，用于快速查找
         baseline_event_ids = {str(event.id or "") for event in baseline_events if str(event.id or "").strip()}
-        
+
         # 如果基准事件没有有效 ID，则无法通过 ID 去重，保守返回所有当前事件
         if not baseline_event_ids:
             return current_events
-            
+
         # 返回当前事件中那些不在基准事件 ID 集合中的事件（处理乱序或非前缀重复场景）
         return [event for event in current_events if str(event.id or "") not in baseline_event_ids]
 
@@ -428,8 +651,8 @@ class LangGraphRunEngine(RunEngine):
         deduplicator = _EventDeduplicator()
         live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
 
-        async def _enqueue_live_event(event: BaseEvent) -> None:
-            await live_event_queue.put(event)
+        async def _enqueue_live_event(base_event: BaseEvent) -> None:
+            await live_event_queue.put(base_event)
 
         sink_token = bind_live_event_sink(_enqueue_live_event)
         graph_task: asyncio.Task | None = None
