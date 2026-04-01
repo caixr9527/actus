@@ -51,6 +51,8 @@ from .workflow_run import (
     WorkflowRunStatus,
     WorkflowRunEventRecord,
     WorkflowRunStepRecord,
+    WorkflowRunSummary,
+    SessionContextSnapshot,
 )
 from .wait import (
     WaitChoice,
@@ -112,6 +114,8 @@ __all__ = [
     "WorkflowRunStatus",
     "WorkflowRunEventRecord",
     "WorkflowRunStepRecord",
+    "WorkflowRunSummary",
+    "SessionContextSnapshot",
     "WaitChoice",
     "BaseWaitPayload",
     "TextInputWaitPayload",

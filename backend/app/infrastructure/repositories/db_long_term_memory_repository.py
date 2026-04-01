@@ -4,7 +4,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Text, cast, or_, select
+from sqlalchemy import Text, case, cast, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import LongTermMemory
@@ -17,6 +17,18 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
 
     def __init__(self, db_session: AsyncSession) -> None:
         self.db_session = db_session
+
+    @staticmethod
+    def _split_query_tokens(query: str) -> List[str]:
+        normalized = str(query or "").strip()
+        if not normalized:
+            return []
+        raw_tokens = [token.strip() for token in normalized.replace("|", " ").split() if token.strip()]
+        deduped_tokens: List[str] = []
+        for token in raw_tokens:
+            if token not in deduped_tokens:
+                deduped_tokens.append(token)
+        return deduped_tokens[:12]
 
     async def search(
             self,
@@ -46,23 +58,50 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
         if len(normalized_tags) > 0:
             stmt = stmt.where(LongTermMemoryModel.tags.contains(normalized_tags))
 
-        # 处理全文模糊搜索：在 summary 和 content 字段中执行不区分大小写的模糊匹配
+        # 处理检索查询：按词元拆分后做 OR 检索，避免整串 query 导致召回率过低。
         normalized_query = str(query or "").strip()
-        if normalized_query:
-            query_like = f"%{normalized_query}%"
-            stmt = stmt.where(
-                or_(
-                    LongTermMemoryModel.summary.ilike(query_like),
-                    cast(LongTermMemoryModel.content, Text).ilike(query_like),
+        query_tokens = self._split_query_tokens(normalized_query)
+        if len(query_tokens) > 0:
+            token_conditions = []
+            for token in query_tokens:
+                token_like = f"%{token}%"
+                token_conditions.append(
+                    or_(
+                        LongTermMemoryModel.summary.ilike(token_like),
+                        LongTermMemoryModel.content_text.ilike(token_like),
+                        cast(LongTermMemoryModel.content, Text).ilike(token_like),
+                    )
                 )
-            )
+            stmt = stmt.where(or_(*token_conditions))
 
-        # 设置排序规则：优先按最后访问时间降序（空值排后），其次按更新时间、创建时间降序；限制返回数量
-        stmt = stmt.order_by(
-            LongTermMemoryModel.last_accessed_at.desc().nullslast(),
-            LongTermMemoryModel.updated_at.desc(),
-            LongTermMemoryModel.created_at.desc(),
-        ).limit(max(int(limit or 10), 1))
+        # 设置排序规则：先按查询匹配词元数排序，再按访问热度和新鲜度排序。
+        if len(query_tokens) > 0:
+            match_score = 0
+            for token in query_tokens:
+                token_like = f"%{token}%"
+                match_score += case(
+                    (
+                        or_(
+                            LongTermMemoryModel.summary.ilike(token_like),
+                            LongTermMemoryModel.content_text.ilike(token_like),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            stmt = stmt.order_by(
+                match_score.desc(),
+                LongTermMemoryModel.last_accessed_at.desc().nullslast(),
+                LongTermMemoryModel.updated_at.desc(),
+                LongTermMemoryModel.created_at.desc(),
+            )
+        else:
+            stmt = stmt.order_by(
+                LongTermMemoryModel.last_accessed_at.desc().nullslast(),
+                LongTermMemoryModel.updated_at.desc(),
+                LongTermMemoryModel.created_at.desc(),
+            )
+        stmt = stmt.limit(max(int(limit or 10), 1))
 
         # 执行查询并获取结果
         result = await self.db_session.execute(stmt)

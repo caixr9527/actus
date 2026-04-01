@@ -181,17 +181,16 @@ async def get_session(
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[GetSessionResponse]:
     """传递指定会话id获取该会话的对话详情"""
-    session = await session_service.get_session(user_id=current_user.id, session_id=session_id)
+    session, event_records, runtime_extensions_by_run_id = await session_service.get_session_detail(
+        user_id=current_user.id,
+        session_id=session_id,
+    )
     if not session:
         raise NotFoundError(
             msg="该会话不存在，请核实后重试",
             error_key=error_keys.SESSION_NOT_FOUND,
             error_params={"session_id": session_id},
         )
-    runtime_run_id, runtime_extensions = await session_service.get_runtime_extensions(
-        user_id=current_user.id,
-        session_id=session.id,
-    )
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(
@@ -199,15 +198,18 @@ async def get_session(
             title=session.title,
             status=session.status,
             current_model_id=session.current_model_id,
-            events=EventMapper.events_to_sse_events(
-                session.events,
-                context=EventCompatContext(
-                    session_id=session.id,
-                    run_id=runtime_run_id or session.current_run_id,
-                    channel="session_detail",
-                    runtime_extensions=runtime_extensions,
-                ),
-            ),
+            events=[
+                EventMapper.event_to_sse_event(
+                    event_record.event_payload,
+                    context=EventCompatContext(
+                        session_id=session.id,
+                        run_id=event_record.run_id,
+                        channel="session_detail",
+                        runtime_extensions=runtime_extensions_by_run_id.get(event_record.run_id, {}),
+                    ),
+                )
+                for event_record in event_records
+            ],
         )
     )
 

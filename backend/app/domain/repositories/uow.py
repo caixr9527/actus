@@ -12,8 +12,10 @@ from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .long_term_memory_repository import LongTermMemoryRepository
 from .session_repository import SessionRepository
+from .session_context_snapshot_repository import SessionContextSnapshotRepository
 from .user_repository import UserRepository
 from .workflow_run_repository import WorkflowRunRepository
+from .workflow_run_summary_repository import WorkflowRunSummaryRepository
 
 T = TypeVar("T", bound="IUnitOfWork")
 
@@ -26,6 +28,8 @@ class IUnitOfWork(ABC):
     llm_model_config: LLMModelConfigRepository
     long_term_memory: LongTermMemoryRepository
     workflow_run: WorkflowRunRepository
+    workflow_run_summary: WorkflowRunSummaryRepository
+    session_context_snapshot: SessionContextSnapshotRepository
 
     @abstractmethod
     async def commit(self):

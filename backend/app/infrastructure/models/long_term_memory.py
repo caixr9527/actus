@@ -5,8 +5,9 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, Index, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.models import LongTermMemory
@@ -23,6 +24,7 @@ class LongTermMemoryModel(Base):
         Index("ix_long_term_memories_namespace", "namespace"),
         Index("ix_long_term_memories_memory_type", "memory_type"),
         Index("ix_long_term_memories_updated_at", "updated_at"),
+        Index("ix_long_term_memories_search_tsv", "search_tsv", postgresql_using="gin"),
     )
 
     # 长期记忆主键，默认使用 UUID，供跨线程稳定引用。
@@ -52,6 +54,12 @@ class LongTermMemoryModel(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
     )
+    # 面向全文检索与向量化检索的归一化文本。
+    content_text: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("''::text"),
+    )
     # 标签集合，用于补充记忆分类并支持结构化过滤。
     tags: Mapped[List[str]] = mapped_column(
         JSONB,
@@ -70,8 +78,12 @@ class LongTermMemoryModel(Base):
         nullable=False,
         server_default=text("0"),
     )
+    # PostgreSQL FTS 索引字段，由数据库表达式或写入前同步维护。
+    search_tsv: Mapped[Optional[str]] = mapped_column(TSVECTOR, nullable=True)
     # 命名空间内的幂等去重键，配合唯一约束避免重复固化相同记忆。
     dedupe_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # pgvector 语义检索字段。
+    embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(1536), nullable=True)
     # 最近一次被召回或访问的时间，用于搜索结果排序与热度判断。
     last_accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # 最近一次更新的时间戳，用于排序与审计记忆的新鲜度。
@@ -90,21 +102,24 @@ class LongTermMemoryModel(Base):
 
     @classmethod
     def from_domain(cls, memory: LongTermMemory) -> "LongTermMemoryModel":
+        normalized_content_text = str(memory.content_text or "").strip() or cls._build_content_text(memory)
         return cls(
             **memory.model_dump(
                 mode="python",
-                exclude={"content", "tags", "source"},
+                exclude={"content", "tags", "source", "content_text"},
             ),
             **memory.model_dump(
                 mode="json",
                 include={"content", "tags", "source"},
             ),
+            content_text=normalized_content_text,
         )
 
     def to_domain(self) -> LongTermMemory:
         return LongTermMemory.model_validate(self, from_attributes=True)
 
     def update_from_domain(self, memory: LongTermMemory) -> None:
+        normalized_content_text = str(memory.content_text or "").strip() or self._build_content_text(memory)
         base_data = memory.model_dump(
             mode="python",
             exclude={"content", "tags", "source"},
@@ -113,5 +128,19 @@ class LongTermMemoryModel(Base):
             mode="json",
             include={"content", "tags", "source"},
         )
-        for field, value in {**base_data, **json_data}.items():
+        for field, value in {**base_data, **json_data, "content_text": normalized_content_text}.items():
             setattr(self, field, value)
+
+    @staticmethod
+    def _build_content_text(memory: LongTermMemory) -> str:
+        content_parts: List[str] = [str(memory.summary or "").strip()]
+        for key, value in dict(memory.content or {}).items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key:
+                continue
+            normalized_value = value if isinstance(value, str) else str(value)
+            normalized_value = normalized_value.strip()
+            if normalized_value:
+                content_parts.append(f"{normalized_key}: {normalized_value}")
+        content_parts.extend([str(tag).strip() for tag in list(memory.tags or []) if str(tag).strip()])
+        return "\n".join([part for part in content_parts if part]).strip()

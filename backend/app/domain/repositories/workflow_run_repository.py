@@ -14,6 +14,7 @@ from app.domain.models import (
     Session,
     StepEvent,
     WorkflowRun,
+    WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
 
@@ -71,4 +72,12 @@ class WorkflowRunRepository(Protocol):
 
     async def list_events(self, run_id: Optional[str]) -> List[Event]:
         """按运行ID读取事件列表；缺少运行ID时返回空列表"""
+        ...
+
+    async def list_events_by_session(self, session_id: str) -> List[Event]:
+        """按 session_id 聚合同会话下全部运行事件。"""
+        ...
+
+    async def list_event_records_by_session(self, session_id: str) -> List[WorkflowRunEventRecord]:
+        """按 session_id 读取同会话下全部运行事件记录。"""
         ...

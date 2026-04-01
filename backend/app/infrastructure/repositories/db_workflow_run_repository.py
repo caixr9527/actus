@@ -23,6 +23,7 @@ from app.domain.models import (
     WaitEvent,
     Session,
     WorkflowRun,
+    WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
 from app.domain.repositories import WorkflowRunRepository
@@ -247,3 +248,17 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         if not run_id:
             return []
         return await self._list_events_by_run_id(run_id)
+
+    async def list_event_records_by_session(self, session_id: str) -> List[WorkflowRunEventRecord]:
+        stmt = (
+            select(WorkflowRunEventModel)
+            .where(WorkflowRunEventModel.session_id == session_id)
+            .order_by(WorkflowRunEventModel.created_at.asc(), WorkflowRunEventModel.id.asc())
+        )
+        result = await self.db_session.execute(stmt)
+        records = result.scalars().all()
+        return [record.to_domain() for record in records]
+
+    async def list_events_by_session(self, session_id: str) -> List[Event]:
+        records = await self.list_event_records_by_session(session_id=session_id)
+        return [record.event_payload for record in records]

@@ -12,6 +12,7 @@ from app.domain.models import (
     Step,
     StepEvent,
     StepEventStatus,
+    WorkflowRunEventRecord,
 )
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 
@@ -180,3 +181,60 @@ def test_list_events_should_return_workflow_run_events() -> None:
     assert len(events) == 1
     assert events[0].id == "runtime-event-1"
     repo._list_events_by_run_id.assert_awaited_once_with("run-2")
+
+
+def test_list_events_by_session_should_query_all_workflow_run_events() -> None:
+    event_one = MessageEvent(id="evt-1", role="assistant", message="first")
+    event_two = MessageEvent(id="evt-2", role="assistant", message="second")
+    execute_result = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(to_domain=lambda: SimpleNamespace(event_payload=event_one)),
+                SimpleNamespace(to_domain=lambda: SimpleNamespace(event_payload=event_two)),
+            ]
+        )
+    )
+    repo = _build_repo(execute_result)
+
+    events = asyncio.run(repo.list_events_by_session(session_id="session-1"))
+
+    assert [event.id for event in events] == ["evt-1", "evt-2"]
+
+
+def test_list_event_records_by_session_should_return_full_event_records() -> None:
+    event_one = MessageEvent(id="evt-1", role="assistant", message="first")
+    event_two = MessageEvent(id="evt-2", role="assistant", message="second")
+    execute_result = SimpleNamespace(
+        scalars=lambda: SimpleNamespace(
+            all=lambda: [
+                SimpleNamespace(
+                    to_domain=lambda: WorkflowRunEventRecord(
+                        id="record-1",
+                        run_id="run-1",
+                        session_id="session-1",
+                        event_id="evt-1",
+                        event_type="message",
+                        event_payload=event_one,
+                    )
+                ),
+                SimpleNamespace(
+                    to_domain=lambda: WorkflowRunEventRecord(
+                        id="record-2",
+                        run_id="run-2",
+                        session_id="session-1",
+                        event_id="evt-2",
+                        event_type="message",
+                        event_payload=event_two,
+                    )
+                ),
+            ]
+        )
+    )
+    repo = _build_repo(execute_result)
+
+    records = asyncio.run(repo.list_event_records_by_session(session_id="session-1"))
+
+    assert [(record.run_id, record.event_payload.id) for record in records] == [
+        ("run-1", "evt-1"),
+        ("run-2", "evt-2"),
+    ]

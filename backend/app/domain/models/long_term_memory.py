@@ -21,6 +21,8 @@ class LongTermMemory(BaseModel):
     summary: str = ""
     # 长期记忆的规范化正文载荷，保存可跨线程复用的事实、偏好或约束。
     content: Dict[str, Any] = Field(default_factory=dict)
+    # 面向全文检索与向量嵌入的归一化纯文本。
+    content_text: str = ""
     # 标签集合，用于补充记忆分类并支持结构化过滤。
     tags: List[str] = Field(default_factory=list)
     # 来源元数据，记录提炼来源与写入上下文，便于追踪记忆出处。
@@ -29,6 +31,8 @@ class LongTermMemory(BaseModel):
     confidence: float = 0.0
     # 命名空间内的幂等去重键，配合唯一语义避免重复固化相同记忆。
     dedupe_key: Optional[str] = None
+    # 语义检索向量；生成失败时允许为空。
+    embedding: Optional[List[float]] = None
     # 最近一次被召回或访问的时间，用于搜索结果排序与热度判断。
     last_accessed_at: Optional[datetime] = None
     # 最近一次更新的时间戳，用于排序与审计记忆的新鲜度。

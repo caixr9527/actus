@@ -69,3 +69,41 @@ class WorkflowRunStepRecord(BaseModel):
     attachments: List[str] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=datetime.now)
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class WorkflowRunSummary(BaseModel):
+    """单次运行完成后的情节记忆摘要。"""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    session_id: str
+    user_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    goal: str = ""
+    title: str = ""
+    final_answer_summary: str = ""
+    final_answer_text: str = ""
+    status: WorkflowRunStatus = WorkflowRunStatus.COMPLETED
+    completed_steps: int = 0
+    total_steps: int = 0
+    step_ledger: List[Dict[str, Any]] = Field(default_factory=list)
+    artifacts: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    facts_learned: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class SessionContextSnapshot(BaseModel):
+    """会话级上下文聚合快照。"""
+
+    session_id: str
+    user_id: Optional[str] = None
+    last_run_id: Optional[str] = None
+    summary_text: str = ""
+    recent_run_briefs: List[Dict[str, Any]] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+    artifact_refs: List[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)

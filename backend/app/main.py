@@ -19,13 +19,13 @@ from starlette.datastructures import State
 from app.infrastructure.logging import setup_logging
 from app.infrastructure.runtime import get_langgraph_checkpointer
 from app.infrastructure.storage import get_redis_client, get_postgres, get_cos
-from app.interfaces.endpoints.routes import router
-from app.interfaces.errors.exception_handlers import register_exception_handlers
 from app.interfaces.dependencies.auth_guard import validate_api_auth_coverage
 from app.interfaces.dependencies.services import (
     get_agent_service_for_lifespan,
     clear_agent_service_for_lifespan_cache,
 )
+from app.interfaces.endpoints.routes import router
+from app.interfaces.errors.exception_handlers import register_exception_handlers
 from core.config import get_settings
 
 settings = get_settings()

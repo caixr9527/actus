@@ -13,7 +13,7 @@ from app.application.errors import NotFoundError, ServerError, ValidationError
 from app.application.errors import error_keys
 from app.application.service.model_config_service import ModelConfigService
 from app.domain.external import Sandbox
-from app.domain.models import Session, File
+from app.domain.models import File, Session, WorkflowRunEventRecord
 from app.domain.repositories import IUnitOfWork
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,34 @@ class SessionService:
     async def get_session(self, user_id: str, session_id: str) -> Session | None:
         async with self._uow_factory() as uow:
             return await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+
+    async def get_session_detail(
+            self,
+            user_id: str,
+            session_id: str,
+    ) -> tuple[Session | None, list[WorkflowRunEventRecord], Dict[str, Dict[str, Any]]]:
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+            if session is None:
+                return None, [], {}
+
+            event_records = await uow.workflow_run.list_event_records_by_session(session_id=session.id)
+            runtime_extensions_by_run_id: Dict[str, Dict[str, Any]] = {}
+            run_ids = [
+                normalized_run_id
+                for normalized_run_id in dict.fromkeys(
+                    str(record.run_id or "").strip()
+                    for record in event_records
+                )
+                if normalized_run_id
+            ]
+            for run_id in run_ids:
+                run = await uow.workflow_run.get_by_id(run_id)
+                if run is None:
+                    continue
+                runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
+                runtime_extensions_by_run_id[run_id] = self._extract_runtime_extensions_from_metadata(runtime_metadata)
+            return session, event_records, runtime_extensions_by_run_id
 
     @staticmethod
     def _summarize_input_parts(input_parts: list[dict[str, Any]]) -> Dict[str, Any]:

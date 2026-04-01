@@ -10,9 +10,11 @@ from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .long_term_memory_repository import LongTermMemoryRepository
 from .session_repository import SessionRepository
+from .session_context_snapshot_repository import SessionContextSnapshotRepository
 from .uow import IUnitOfWork
 from .user_repository import UserRepository
 from .workflow_run_repository import WorkflowRunRepository
+from .workflow_run_summary_repository import WorkflowRunSummaryRepository
 
 __all__ = [
     "AppConfigRepository",
@@ -20,7 +22,9 @@ __all__ = [
     "FileRepository",
     "LLMModelConfigRepository",
     "LongTermMemoryRepository",
+    "SessionContextSnapshotRepository",
     "UserRepository",
     "WorkflowRunRepository",
+    "WorkflowRunSummaryRepository",
     "IUnitOfWork",
 ]

@@ -9,7 +9,8 @@ import logging
 from functools import lru_cache
 from typing import Optional
 
-from sqlalchemy import text
+from pgvector.asyncpg import register_vector
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.domain.repositories import IUnitOfWork
@@ -17,6 +18,11 @@ from app.infrastructure.repositories.db_uow import DBUnitOfWork
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _register_pgvector_codec(dbapi_connection, _) -> None:
+    """为 asyncpg 连接注册 pgvector 编解码。"""
+    dbapi_connection.run_async(register_vector)
 
 
 class Postgres:
@@ -50,6 +56,7 @@ class Postgres:
                 echo=enable_engine_echo,
                 pool_pre_ping=True,  # 启用连接池预检，检查数据库连接是否正常
             )
+            event.listen(self._engine.sync_engine, "connect", _register_pgvector_codec)
 
             # 创建会话工厂
             self._session_factory = async_sessionmaker(
@@ -63,7 +70,7 @@ class Postgres:
             async with self._engine.begin() as async_conn:
                 # 检查是否安装了uuid扩展，如果没有的话则安装
                 await async_conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'))
-                logger.info("成功连接Postgres并安装uuid-ossp扩展")
+                logger.info("成功连接Postgres并安装 uuid-ossp 扩展")
         except Exception as e:
             logger.error(f"连接Postgres失败: {e}")
             raise

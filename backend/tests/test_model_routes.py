@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.application.service import ModelConfigService
-from app.domain.models import LLMModelConfig, Session, SessionStatus, User
+from app.domain.models import LLMModelConfig, MessageEvent, Session, SessionStatus, User, WorkflowRunEventRecord
 from app.interfaces.dependencies.auth import get_current_user
 from app.interfaces.dependencies.services import get_model_config_service, get_session_service
 from app.interfaces.endpoints.app_config_routes import router as app_config_router
@@ -62,6 +62,30 @@ class _RouteSessionService:
             current_model_id="auto",
         )
 
+    async def get_session_detail(self, user_id: str, session_id: str):
+        session = await self.get_session(user_id=user_id, session_id=session_id)
+        return session, [
+            WorkflowRunEventRecord(
+                id="record-1",
+                run_id="run-1",
+                session_id=session_id,
+                event_id="evt-1",
+                event_type="message",
+                event_payload=MessageEvent(id="evt-1", role="assistant", message="first"),
+            ),
+            WorkflowRunEventRecord(
+                id="record-2",
+                run_id="run-2",
+                session_id=session_id,
+                event_id="evt-2",
+                event_type="message",
+                event_payload=MessageEvent(id="evt-2", role="assistant", message="second"),
+            ),
+        ], {
+            "run-1": {"downgrade_reason": "reason-a"},
+            "run-2": {"downgrade_reason": "reason-b"},
+        }
+
     async def get_runtime_extensions(self, user_id: str, session_id: str):
         return None, {}
 
@@ -103,3 +127,8 @@ def test_session_model_routes_should_update_and_return_current_model_id() -> Non
 
     assert detail_response.status_code == 200
     assert detail_response.json()["data"]["current_model_id"] == "auto"
+    detail_events = detail_response.json()["data"]["events"]
+    assert detail_events[0]["data"]["extensions"]["runtime"]["run_id"] == "run-1"
+    assert detail_events[0]["data"]["extensions"]["runtime"]["downgrade_reason"] == "reason-a"
+    assert detail_events[1]["data"]["extensions"]["runtime"]["run_id"] == "run-2"
+    assert detail_events[1]["data"]["extensions"]["runtime"]["downgrade_reason"] == "reason-b"

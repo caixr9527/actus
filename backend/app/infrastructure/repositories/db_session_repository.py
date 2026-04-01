@@ -62,7 +62,7 @@ class DBSessionRepository(SessionRepository):
         return run_id
 
     async def _hydrate_session_events(self, session: Session) -> Session:
-        session.events = await self._workflow_run_repository.list_events(session.current_run_id)
+        session.events = await self._workflow_run_repository.list_events_by_session(session.id)
         return session
 
     def _register_session_list_changed(self, session_id: str) -> None:

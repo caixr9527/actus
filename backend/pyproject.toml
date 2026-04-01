@@ -21,6 +21,7 @@ dependencies = [
     "mcp>=1.23.1",
     "openai>=2.7.2",
     "playwright>=1.56.0",
+    "pgvector>=0.4.1",
     "psycopg2-binary>=2.9.11",
     "pyjwt[crypto]>=2.10.1",
     "pydantic>=2.12.4",
