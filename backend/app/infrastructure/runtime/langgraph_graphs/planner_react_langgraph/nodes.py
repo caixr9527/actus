@@ -4,6 +4,7 @@
 import hashlib
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +20,7 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     PlanEventStatus,
+    Step,
     StepEvent,
     StepEventStatus,
     TitleEvent,
@@ -78,6 +80,36 @@ def _truncate_text(value: Any, *, max_chars: int) -> str:
     if len(normalized_value) <= max_chars:
         return normalized_value
     return normalized_value[:max_chars]
+
+
+def _normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
+    """统一规整步骤结果，避免把 None 写成字符串 'None'。"""
+    if value is None:
+        return str(fallback or "").strip()
+
+    normalized_value = str(value).strip()
+    if not normalized_value or normalized_value.lower() == "none":
+        return str(fallback or "").strip()
+    return normalized_value
+
+
+def _dedupe_replanned_steps(existing_steps: List[Step], new_steps: List[Step]) -> List[Step]:
+    """重规划时确保新步骤 ID 不与已保留步骤冲突。"""
+    seen_step_ids = {
+        str(step.id).strip()
+        for step in existing_steps
+        if str(step.id).strip()
+    }
+    deduped_steps: List[Step] = []
+    for step in new_steps:
+        normalized_step = step.model_copy(deep=True)
+        step_id = str(normalized_step.id).strip()
+        if not step_id or step_id in seen_step_ids:
+            normalized_step.id = str(uuid.uuid4())
+            step_id = normalized_step.id
+        seen_step_ids.add(step_id)
+        deduped_steps.append(normalized_step)
+    return deduped_steps
 
 
 def _normalize_attachment_paths(raw: Any) -> List[str]:
@@ -867,7 +899,10 @@ async def execute_step_node(
         }
 
     step.success = bool(llm_message.get("success", True))
-    step.result = str(llm_message.get("result"))
+    step.result = _normalize_step_result_text(
+        llm_message.get("result"),
+        fallback=f"已完成步骤：{step.description}" if step.success else f"步骤执行失败：{step.description}",
+    )
     model_attachment_paths = normalize_attachments(llm_message.get("attachments"))
     step.attachments = model_attachment_paths
     step.status = ExecutionStatus.COMPLETED if step.success else ExecutionStatus.FAILED
@@ -1028,22 +1063,15 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
 
     if first_pending_index is not None:
         updated_steps = plan.steps[:first_pending_index]
-        # 对new_steps中对步骤进行修正
-        if len(new_steps) > 0 and updated_steps[0].id == new_steps[0].id:
-            logger.warning("修正步骤id")
-            # 修正步骤id
-            max_step = max(updated_steps, key=lambda step: int(step.id))
-            for new_step in new_steps:
-                new_step.id = str(int(max_step.id) + 1)
-                max_step = new_step
-        updated_steps.extend(new_steps)
+        # 重规划返回的步骤可能复用了历史 step_id，需要统一做去重，避免覆盖已完成步骤。
+        updated_steps.extend(_dedupe_replanned_steps(updated_steps, new_steps))
         plan.steps = updated_steps
 
     next_step = plan.get_next_step()
     updated_event = PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.UPDATED)
     await emit_live_events(updated_event)
     planner_local_memory = dict(state.get("planner_local_memory") or {})
-    planner_local_memory["replan_rationale"] = str(last_step.result or "")
+    planner_local_memory["replan_rationale"] = _normalize_step_result_text(last_step.result)
     return {
         **state,
         "plan": plan,

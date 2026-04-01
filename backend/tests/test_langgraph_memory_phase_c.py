@@ -8,7 +8,9 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph i
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
     consolidate_memory_node,
+    execute_step_node,
     recall_memory_context_node,
+    replan_node,
     summarize_node,
 )
 
@@ -89,6 +91,34 @@ class _FakeStructuredMemoryLLM:
         }
 
 
+class _FakeReplanLLM:
+    def __init__(self, steps) -> None:
+        self.steps = list(steps)
+
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "steps": self.steps,
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _FakeSkillRuntime:
+    async def execute_skill(self, skill_id, payload):
+        return type(
+            "SkillResult",
+            (),
+            {
+                "success": True,
+                "result": None,
+                "attachments": [],
+            },
+        )()
+
+
 def _build_plan(*, step_status: ExecutionStatus = ExecutionStatus.COMPLETED) -> Plan:
     return Plan(
         title="记忆阶段测试",
@@ -149,6 +179,94 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
         "style": "concise",
     }
     assert next_state["graph_metadata"]["memory_recall_count"] == 1
+
+
+def test_execute_step_node_should_not_write_string_none_when_skill_result_missing() -> None:
+    state = {
+        "session_id": "session-1",
+        "user_message": "继续执行",
+        "plan": Plan(
+            title="执行测试",
+            goal="验证结果归一化",
+            language="zh",
+            message="执行当前步骤",
+            steps=[
+                Step(
+                    id="step-1",
+                    description="执行阶段",
+                    status=ExecutionStatus.PENDING,
+                )
+            ],
+        ),
+        "input_parts": [],
+        "working_memory": {},
+        "step_local_memory": {},
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm=object(),
+            skill_runtime=_FakeSkillRuntime(),
+        )
+    )
+
+    assert next_state["plan"].steps[0].result == "已完成步骤：执行阶段"
+    assert next_state["final_message"] == "已完成步骤：执行阶段"
+    assert next_state["working_memory"]["decisions"] == ["已完成步骤：执行阶段"]
+
+
+def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assumption() -> None:
+    completed_step = Step(
+        id="step-a",
+        description="完成已有步骤",
+        status=ExecutionStatus.COMPLETED,
+        success=True,
+        result="已完成",
+    )
+    pending_step = Step(
+        id="step-b",
+        description="待执行步骤",
+        status=ExecutionStatus.PENDING,
+    )
+    plan = Plan(
+        title="重规划测试",
+        goal="验证 step_id 去重",
+        language="zh",
+        message="开始重规划",
+        steps=[completed_step, pending_step],
+    )
+    state = {
+        "plan": plan,
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "planner_local_memory": {},
+        "emitted_events": [],
+    }
+
+    next_state = asyncio.run(
+        replan_node(
+            state,
+            _FakeReplanLLM(
+                steps=[
+                    {"id": "step-a", "description": "新的分析步骤"},
+                    {"id": "step-c", "description": "新的交付步骤"},
+                ]
+            ),
+        )
+    )
+
+    replanned_steps = next_state["plan"].steps
+    step_ids = [step.id for step in replanned_steps]
+
+    assert len(replanned_steps) == 3
+    assert step_ids[0] == "step-a"
+    assert step_ids[1] != "step-a"
+    assert len(set(step_ids)) == 3
+    assert replanned_steps[1].description == "新的分析步骤"
+    assert replanned_steps[2].id == "step-c"
+    assert next_state["planner_local_memory"]["replan_rationale"] == "已完成"
 
 
 def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates() -> None:
