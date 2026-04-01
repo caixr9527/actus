@@ -4,10 +4,10 @@
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Text, case, cast, or_, select
+from sqlalchemy import Text, case, cast, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import LongTermMemory
+from app.domain.models import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
 from app.domain.repositories import LongTermMemoryRepository
 from app.infrastructure.models import LongTermMemoryModel
 
@@ -30,89 +30,145 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
                 deduped_tokens.append(token)
         return deduped_tokens[:12]
 
+    @staticmethod
+    def _build_keyword_conditions(query_tokens: List[str]) -> List[object]:
+        conditions: List[object] = []
+        for token in query_tokens:
+            token_like = f"%{token}%"
+            conditions.append(
+                or_(
+                    LongTermMemoryModel.summary.ilike(token_like),
+                    LongTermMemoryModel.content_text.ilike(token_like),
+                    cast(LongTermMemoryModel.content, Text).ilike(token_like),
+                )
+            )
+        return conditions
+
+    @classmethod
+    def _build_keyword_score(cls, query_tokens: List[str]):
+        if len(query_tokens) == 0:
+            return literal(0.0)
+
+        keyword_score = literal(0.0)
+        for condition in cls._build_keyword_conditions(query_tokens):
+            keyword_score = keyword_score + case((condition, 1.0), else_=0.0)
+        return keyword_score / float(len(query_tokens))
+
+    @staticmethod
+    def _build_full_text_score(query_text: str):
+        normalized_query_text = str(query_text or "").strip()
+        if not normalized_query_text:
+            return literal(0.0)
+        ts_query = func.websearch_to_tsquery("simple", normalized_query_text)
+        return func.coalesce(func.ts_rank_cd(LongTermMemoryModel.search_tsv, ts_query), 0.0)
+
+    @staticmethod
+    def _build_semantic_score(query_embedding: Optional[List[float]]):
+        if not query_embedding:
+            return literal(0.0)
+        return case(
+            (
+                LongTermMemoryModel.embedding.is_not(None),
+                1.0 / (1.0 + LongTermMemoryModel.embedding.cosine_distance(query_embedding)),
+            ),
+            else_=0.0,
+        )
+
+    @staticmethod
+    def _build_recency_score():
+        recency_source = func.coalesce(
+            LongTermMemoryModel.last_accessed_at,
+            LongTermMemoryModel.updated_at,
+            LongTermMemoryModel.created_at,
+        )
+        age_days = func.extract("epoch", func.now() - recency_source) / 86400.0
+        return 1.0 / (1.0 + age_days)
+
+    @staticmethod
+    def _build_semantic_candidate_condition():
+        """语义检索只能在已有 embedding 的候选集上排序。"""
+        return LongTermMemoryModel.embedding.is_not(None)
+
+    @classmethod
+    def _build_total_score(
+            cls,
+            query: LongTermMemorySearchQuery,
+            query_tokens: List[str],
+    ):
+        keyword_score = cls._build_keyword_score(query_tokens)
+        full_text_score = cls._build_full_text_score(query.query_text)
+        semantic_score = cls._build_semantic_score(query.query_embedding)
+        recency_score = cls._build_recency_score()
+        confidence_score = func.coalesce(LongTermMemoryModel.confidence, 0.0)
+
+        if query.mode == LongTermMemorySearchMode.RECENT:
+            return (
+                recency_score * 0.85
+                + confidence_score * 0.15
+            )
+        if query.mode == LongTermMemorySearchMode.KEYWORD:
+            return (
+                keyword_score * 0.45
+                + full_text_score * 0.35
+                + recency_score * 0.15
+                + confidence_score * 0.05
+            )
+        if query.mode == LongTermMemorySearchMode.SEMANTIC:
+            return (
+                semantic_score * 0.75
+                + recency_score * 0.15
+                + confidence_score * 0.10
+            )
+        return (
+            semantic_score * 0.40
+            + full_text_score * 0.25
+            + keyword_score * 0.20
+            + recency_score * 0.10
+            + confidence_score * 0.05
+        )
+
     async def search(
             self,
-            namespace_prefixes: List[str],
-            query: str = "",
-            limit: int = 10,
-            memory_types: Optional[List[str]] = None,
-            tags: Optional[List[str]] = None,
+            query: LongTermMemorySearchQuery,
     ) -> List[LongTermMemory]:
-        # 构建基础查询语句
+        query_tokens = self._split_query_tokens(query.query_text)
         stmt = select(LongTermMemoryModel)
 
-        # 处理命名空间前缀过滤：对非空且去空格后的前缀列表，使用 LIKE 'prefix%' 进行匹配
-        normalized_prefixes = [str(item).strip() for item in namespace_prefixes if str(item).strip()]
+        normalized_prefixes = [str(item).strip() for item in list(query.namespace_prefixes or []) if str(item).strip()]
         if len(normalized_prefixes) > 0:
             stmt = stmt.where(
                 or_(*[LongTermMemoryModel.namespace.like(f"{prefix}%") for prefix in normalized_prefixes])
             )
 
-        # 处理记忆类型过滤：对非空且去空格后的类型列表，使用 IN 条件匹配
-        normalized_memory_types = [str(item).strip() for item in list(memory_types or []) if str(item).strip()]
+        normalized_memory_types = [str(item).strip() for item in list(query.memory_types or []) if str(item).strip()]
         if len(normalized_memory_types) > 0:
             stmt = stmt.where(LongTermMemoryModel.memory_type.in_(normalized_memory_types))
 
-        # 处理标签过滤：对非空且去空格后的标签列表，使用包含关系匹配（假设 tags 为数组类型字段）
-        normalized_tags = [str(item).strip() for item in list(tags or []) if str(item).strip()]
+        normalized_tags = [str(item).strip() for item in list(query.tags or []) if str(item).strip()]
         if len(normalized_tags) > 0:
             stmt = stmt.where(LongTermMemoryModel.tags.contains(normalized_tags))
 
-        # 处理检索查询：按词元拆分后做 OR 检索，避免整串 query 导致召回率过低。
-        normalized_query = str(query or "").strip()
-        query_tokens = self._split_query_tokens(normalized_query)
-        if len(query_tokens) > 0:
-            token_conditions = []
-            for token in query_tokens:
-                token_like = f"%{token}%"
-                token_conditions.append(
-                    or_(
-                        LongTermMemoryModel.summary.ilike(token_like),
-                        LongTermMemoryModel.content_text.ilike(token_like),
-                        cast(LongTermMemoryModel.content, Text).ilike(token_like),
-                    )
-                )
-            stmt = stmt.where(or_(*token_conditions))
+        if query.mode == LongTermMemorySearchMode.SEMANTIC:
+            stmt = stmt.where(self._build_semantic_candidate_condition())
 
-        # 设置排序规则：先按查询匹配词元数排序，再按访问热度和新鲜度排序。
-        if len(query_tokens) > 0:
-            match_score = 0
-            for token in query_tokens:
-                token_like = f"%{token}%"
-                match_score += case(
-                    (
-                        or_(
-                            LongTermMemoryModel.summary.ilike(token_like),
-                            LongTermMemoryModel.content_text.ilike(token_like),
-                        ),
-                        1,
-                    ),
-                    else_=0,
-                )
-            stmt = stmt.order_by(
-                match_score.desc(),
-                LongTermMemoryModel.last_accessed_at.desc().nullslast(),
-                LongTermMemoryModel.updated_at.desc(),
-                LongTermMemoryModel.created_at.desc(),
-            )
-        else:
-            stmt = stmt.order_by(
-                LongTermMemoryModel.last_accessed_at.desc().nullslast(),
-                LongTermMemoryModel.updated_at.desc(),
-                LongTermMemoryModel.created_at.desc(),
-            )
-        stmt = stmt.limit(max(int(limit or 10), 1))
+        if query.mode in {LongTermMemorySearchMode.KEYWORD, LongTermMemorySearchMode.HYBRID} and len(query_tokens) > 0:
+            stmt = stmt.where(or_(*self._build_keyword_conditions(query_tokens)))
 
-        # 执行查询并获取结果
+        total_score = self._build_total_score(query=query, query_tokens=query_tokens)
+        stmt = stmt.order_by(
+            total_score.desc(),
+            LongTermMemoryModel.last_accessed_at.desc().nullslast(),
+            LongTermMemoryModel.updated_at.desc(),
+            LongTermMemoryModel.created_at.desc(),
+        ).limit(max(int(query.limit or 10), 1))
+
         result = await self.db_session.execute(stmt)
         records = list(result.scalars().all())
-        
-        # 批量更新最后访问时间
+
         accessed_at = datetime.now()
         for record in records:
             record.last_accessed_at = accessed_at
-        
-        # 转换为领域模型并返回
+
         return [record.to_domain() for record in records]
 
     async def upsert(self, memory: LongTermMemory) -> LongTermMemory:

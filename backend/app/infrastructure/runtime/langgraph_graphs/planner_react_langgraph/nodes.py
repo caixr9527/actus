@@ -16,6 +16,8 @@ from app.domain.models import (
     ExecutionStatus,
     File,
     LongTermMemory,
+    LongTermMemorySearchMode,
+    LongTermMemorySearchQuery,
     MessageEvent,
     Plan,
     PlanEvent,
@@ -494,6 +496,48 @@ def _build_memory_namespace_prefixes(state: PlannerReActLangGraphState) -> List[
         prefixes.append(f"session/{session_id}/")
     prefixes.append("agent/planner_react/")
     return prefixes
+
+
+def _dedupe_recalled_memories(memories: List[LongTermMemory]) -> List[LongTermMemory]:
+    """按 id/dedupe_key 去重不同召回策略返回的记忆。"""
+    deduped_memories: List[LongTermMemory] = []
+    seen_keys: set[str] = set()
+    for memory in memories:
+        dedupe_key = str(memory.id or "").strip() or str(memory.dedupe_key or "").strip()
+        if not dedupe_key:
+            dedupe_key = hashlib.sha1(memory.model_dump_json().encode("utf-8")).hexdigest()
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        deduped_memories.append(memory)
+    return deduped_memories
+
+
+def _build_memory_recall_queries(state: PlannerReActLangGraphState) -> List[LongTermMemorySearchQuery]:
+    """按记忆类型拆分召回策略，避免一个 search 兜底所有长期记忆。"""
+    namespace_prefixes = _build_memory_namespace_prefixes(state)
+    recall_query = _build_memory_query(state)
+    return [
+        LongTermMemorySearchQuery(
+            namespace_prefixes=namespace_prefixes,
+            limit=3,
+            memory_types=["profile"],
+            mode=LongTermMemorySearchMode.RECENT,
+        ),
+        LongTermMemorySearchQuery(
+            namespace_prefixes=namespace_prefixes,
+            limit=3,
+            memory_types=["instruction"],
+            mode=LongTermMemorySearchMode.RECENT,
+        ),
+        LongTermMemorySearchQuery(
+            namespace_prefixes=namespace_prefixes,
+            query_text=recall_query,
+            limit=4,
+            memory_types=["fact"],
+            mode=LongTermMemorySearchMode.KEYWORD,
+        ),
+    ]
 
 
 def _build_memory_dedupe_key(*, namespace: str, memory_type: str, content: Dict[str, Any]) -> str:
@@ -1341,11 +1385,10 @@ async def recall_memory_context_node(
     retrieved_memories = list(state.get("retrieved_memories") or [])
     if long_term_memory_repository is not None:
         try:
-            recalled_memories = await long_term_memory_repository.search(
-                namespace_prefixes=_build_memory_namespace_prefixes(state),
-                query=_build_memory_query(state),
-                limit=8,
-            )
+            recalled_memories: List[LongTermMemory] = []
+            for query in _build_memory_recall_queries(state):
+                recalled_memories.extend(await long_term_memory_repository.search(query))
+            recalled_memories = _dedupe_recalled_memories(recalled_memories)
             retrieved_memories = [memory.model_dump(mode="json") for memory in recalled_memories]
         except Exception as e:
             logger.warning("长期记忆召回失败，回退已有线程态记忆快照: %s", e)

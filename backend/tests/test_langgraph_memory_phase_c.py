@@ -1,7 +1,15 @@
 import asyncio
 import json
 
-from app.domain.models import ExecutionStatus, LongTermMemory, Plan, Step, StepOutcome
+from app.domain.models import (
+    ExecutionStatus,
+    LongTermMemory,
+    LongTermMemorySearchMode,
+    LongTermMemorySearchQuery,
+    Plan,
+    Step,
+    StepOutcome,
+)
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import (
     build_planner_react_langgraph_graph,
@@ -18,30 +26,27 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes i
 
 
 class _FakeLongTermMemoryRepository:
-    def __init__(self, search_results=None) -> None:
+    def __init__(self, search_results=None, search_results_by_type=None) -> None:
         self.search_results = list(search_results or [])
+        self.search_results_by_type = {
+            str(memory_type): list(results)
+            for memory_type, results in dict(search_results_by_type or {}).items()
+        }
         self.search_calls = []
         self.upserted = []
 
     async def search(
             self,
-            *,
-            namespace_prefixes,
-            query="",
-            limit=10,
-            memory_types=None,
-            tags=None,
+            query: LongTermMemorySearchQuery,
     ):
-        self.search_calls.append(
-            {
-                "namespace_prefixes": list(namespace_prefixes),
-                "query": query,
-                "limit": limit,
-                "memory_types": list(memory_types or []),
-                "tags": list(tags or []),
-            }
-        )
-        return list(self.search_results)
+        self.search_calls.append(query.model_dump(mode="json"))
+        if len(self.search_results_by_type) == 0:
+            return list(self.search_results)[:query.limit]
+
+        recalled_memories: list[LongTermMemory] = []
+        for memory_type in list(query.memory_types or []):
+            recalled_memories.extend(self.search_results_by_type.get(str(memory_type), []))
+        return recalled_memories[:query.limit]
 
     async def upsert(self, memory: LongTermMemory) -> LongTermMemory:
         persisted = memory.model_copy(
@@ -151,15 +156,26 @@ def _build_plan(*, step_status: ExecutionStatus = ExecutionStatus.COMPLETED) -> 
 
 def test_recall_memory_context_node_should_search_long_term_memory() -> None:
     repository = _FakeLongTermMemoryRepository(
-        search_results=[
-            LongTermMemory(
-                id="mem-1",
-                namespace="user/user-1/profile",
-                memory_type="profile",
-                summary="用户偏好中文",
-                content={"language": "zh", "style": "concise"},
-            )
-        ]
+        search_results_by_type={
+            "profile": [
+                LongTermMemory(
+                    id="mem-1",
+                    namespace="user/user-1/profile",
+                    memory_type="profile",
+                    summary="用户偏好中文",
+                    content={"language": "zh", "style": "concise"},
+                )
+            ],
+            "instruction": [
+                LongTermMemory(
+                    id="mem-2",
+                    namespace="agent/planner_react/instruction",
+                    memory_type="instruction",
+                    summary="保持中文回复",
+                    content={"text": "保持中文回复"},
+                )
+            ],
+        }
     )
     state = {
         "session_id": "session-1",
@@ -178,18 +194,28 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
         )
     )
 
+    assert len(repository.search_calls) == 3
     assert repository.search_calls[0]["namespace_prefixes"] == [
         "user/user-1/",
         "session/session-1/",
         "agent/planner_react/",
     ]
-    assert "帮我整理长期记忆" in repository.search_calls[0]["query"]
+    assert repository.search_calls[0]["query_text"] == ""
+    assert repository.search_calls[0]["memory_types"] == ["profile"]
+    assert repository.search_calls[0]["mode"] == LongTermMemorySearchMode.RECENT.value
+    assert repository.search_calls[1]["memory_types"] == ["instruction"]
+    assert repository.search_calls[1]["query_text"] == ""
+    assert repository.search_calls[1]["mode"] == LongTermMemorySearchMode.RECENT.value
+    assert repository.search_calls[2]["memory_types"] == ["fact"]
+    assert "帮我整理长期记忆" in repository.search_calls[2]["query_text"]
+    assert repository.search_calls[2]["mode"] == LongTermMemorySearchMode.KEYWORD.value
     assert next_state["retrieved_memories"][0]["id"] == "mem-1"
+    assert next_state["retrieved_memories"][1]["id"] == "mem-2"
     assert next_state["working_memory"]["user_preferences"] == {
         "language": "zh",
         "style": "concise",
     }
-    assert next_state["graph_metadata"]["memory_recall_count"] == 1
+    assert next_state["graph_metadata"]["memory_recall_count"] == 2
 
 
 def test_execute_step_node_should_not_write_string_none_when_skill_result_missing() -> None:

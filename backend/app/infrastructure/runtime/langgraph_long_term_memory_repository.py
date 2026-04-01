@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """LangGraph 运行时长期记忆仓储适配器。"""
-from typing import Callable, List, Optional
+from typing import Callable, List
 
-from app.domain.models import LongTermMemory
+from app.domain.models import LongTermMemory, LongTermMemorySearchQuery
 from app.domain.repositories import IUnitOfWork, LongTermMemoryRepository
 
 
@@ -15,20 +15,10 @@ class LangGraphLongTermMemoryRepository(LongTermMemoryRepository):
 
     async def search(
             self,
-            namespace_prefixes: List[str],
-            query: str = "",
-            limit: int = 10,
-            memory_types: Optional[List[str]] = None,
-            tags: Optional[List[str]] = None,
+            query: LongTermMemorySearchQuery,
     ) -> List[LongTermMemory]:
         async with self._uow_factory() as uow:
-            return await uow.long_term_memory.search(
-                namespace_prefixes=namespace_prefixes,
-                query=query,
-                limit=limit,
-                memory_types=memory_types,
-                tags=tags,
-            )
+            return await uow.long_term_memory.search(query)
 
     async def upsert(self, memory: LongTermMemory) -> LongTermMemory:
         async with self._uow_factory() as uow:

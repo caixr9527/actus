@@ -3,9 +3,61 @@
 """长期记忆领域模型。"""
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class LongTermMemorySearchMode(str, Enum):
+    """长期记忆检索模式。"""
+
+    RECENT = "recent"
+    KEYWORD = "keyword"
+    SEMANTIC = "semantic"
+    HYBRID = "hybrid"
+
+
+class LongTermMemorySearchQuery(BaseModel):
+    """长期记忆检索请求。"""
+
+    namespace_prefixes: List[str] = Field(default_factory=list)
+    query_text: str = ""
+    query_embedding: Optional[List[float]] = None
+    limit: int = 10
+    memory_types: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+    mode: LongTermMemorySearchMode
+
+    @model_validator(mode="after")
+    def validate_query_shape(self) -> "LongTermMemorySearchQuery":
+        normalized_query_text = str(self.query_text or "").strip()
+        has_embedding = bool(self.query_embedding)
+
+        if self.mode == LongTermMemorySearchMode.RECENT:
+            if normalized_query_text:
+                raise ValueError("recent 检索模式不接受 query_text")
+            if has_embedding:
+                raise ValueError("recent 检索模式不接受 query_embedding")
+            return self
+
+        if self.mode == LongTermMemorySearchMode.KEYWORD:
+            if not normalized_query_text:
+                raise ValueError("keyword 检索模式要求提供 query_text")
+            if has_embedding:
+                raise ValueError("keyword 检索模式不接受 query_embedding")
+            return self
+
+        if self.mode == LongTermMemorySearchMode.SEMANTIC:
+            if not has_embedding:
+                raise ValueError("semantic 检索模式要求提供 query_embedding")
+            return self
+
+        if not normalized_query_text:
+            raise ValueError("hybrid 检索模式要求提供 query_text")
+        if not has_embedding:
+            raise ValueError("hybrid 检索模式要求提供 query_embedding")
+        return self
 
 
 class LongTermMemory(BaseModel):

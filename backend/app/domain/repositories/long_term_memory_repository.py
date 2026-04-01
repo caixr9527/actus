@@ -3,7 +3,7 @@
 """长期记忆仓储协议。"""
 from typing import List, Optional, Protocol
 
-from app.domain.models import LongTermMemory
+from app.domain.models import LongTermMemory, LongTermMemorySearchQuery
 
 
 class LongTermMemoryRepository(Protocol):
@@ -11,13 +11,9 @@ class LongTermMemoryRepository(Protocol):
 
     async def search(
             self,
-            namespace_prefixes: List[str],
-            query: str = "",
-            limit: int = 10,
-            memory_types: Optional[List[str]] = None,
-            tags: Optional[List[str]] = None,
+            query: LongTermMemorySearchQuery,
     ) -> List[LongTermMemory]:
-        """按命名空间前缀与简单过滤条件检索长期记忆。"""
+        """按结构化检索请求召回长期记忆。"""
         ...
 
     async def upsert(self, memory: LongTermMemory) -> LongTermMemory:

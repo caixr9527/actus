@@ -37,7 +37,7 @@ from .event import (
 from .file import File
 from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
-from .long_term_memory import LongTermMemory
+from .long_term_memory import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
 from .message import Message
 from .plan import (
     Plan,
@@ -81,6 +81,8 @@ __all__ = [
     "HealthStatus",
     "LLMModelConfig",
     "LongTermMemory",
+    "LongTermMemorySearchMode",
+    "LongTermMemorySearchQuery",
     "Plan",
     "Step",
     "StepOutcome",
