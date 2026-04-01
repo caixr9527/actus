@@ -13,9 +13,21 @@ from app.domain.models import (
     ToolEvent,
     ToolEventStatus,
     ExecutionStatus,
+    build_step_objective_key,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_text_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    normalized_items: List[str] = []
+    for item in raw:
+        normalized_item = str(item or "").strip()
+        if normalized_item and normalized_item not in normalized_items:
+            normalized_items.append(normalized_item)
+    return normalized_items
 
 
 def safe_parse_json(content: str | None) -> Dict[str, Any]:
@@ -112,16 +124,27 @@ def build_step_from_payload(payload: Any, fallback_index: int) -> Step:
     """将模型返回的步骤片段规范化为领域 Step。"""
     if isinstance(payload, dict):
         step_id = str(payload.get("id") or str(uuid.uuid4()))
-        description = str(payload.get("description") or f"步骤{fallback_index + 1}")
+        raw_description = str(payload.get("description") or "").strip()
+        raw_title = str(payload.get("title") or "").strip()
+        description = raw_description or raw_title or f"步骤{fallback_index + 1}"
+        title = raw_title or description
+        success_criteria = _normalize_text_list(payload.get("success_criteria"))
         return Step(
             id=step_id,
+            title=title,
             description=description,
+            objective_key=str(payload.get("objective_key") or build_step_objective_key(title, description)),
+            success_criteria=success_criteria or [description],
             status=ExecutionStatus.PENDING,
         )
 
+    description = str(payload).strip() or f"步骤{fallback_index + 1}"
     return Step(
         id=str(uuid.uuid4()),
-        description=str(payload).strip() or f"步骤{fallback_index + 1}",
+        title=description,
+        description=description,
+        objective_key=build_step_objective_key(description, description),
+        success_criteria=[description],
         status=ExecutionStatus.PENDING,
     )
 

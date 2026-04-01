@@ -40,12 +40,13 @@ class StepState(TypedDict, total=False):
 
     step_id: str
     step_index: int
+    title: str
     description: str
+    objective_key: str
+    success_criteria: List[str]
     status: str
-    result: Optional[str]
+    outcome: Optional[Dict[str, Any]]
     error: Optional[str]
-    success: bool
-    attachments: List[str]
 
 
 class ToolInvocationState(TypedDict, total=False):
@@ -173,17 +174,18 @@ class GraphStateContractMapper:
             return [cls._to_json_safe(item) for item in value]
         return value
 
-    @staticmethod
-    def _step_to_state(step: Step, step_index: int) -> StepState:
+    @classmethod
+    def _step_to_state(cls, step: Step, step_index: int) -> StepState:
         return {
             "step_id": step.id,
             "step_index": step_index,
+            "title": step.title,
             "description": step.description,
+            "objective_key": step.objective_key,
+            "success_criteria": list(step.success_criteria or []),
             "status": step.status.value,
-            "result": step.result,
+            "outcome": cls._to_json_safe(step.outcome),
             "error": step.error,
-            "success": step.success,
-            "attachments": list(step.attachments or []),
         }
 
     @classmethod
@@ -492,7 +494,15 @@ class GraphStateContractMapper:
                     refs.append(str(attachment.id))
 
         if isinstance(event, StepEvent):
-            refs.extend([str(item) for item in list(event.step.attachments or []) if str(item).strip()])
+            step_outcome = event.step.outcome
+            if step_outcome is not None:
+                refs.extend(
+                    [
+                        str(item)
+                        for item in list(step_outcome.produced_artifacts or [])
+                        if str(item).strip()
+                    ]
+                )
 
         if isinstance(event, ToolEvent) and event.tool_content is not None:
             screenshot = getattr(event.tool_content, "screenshot", None)

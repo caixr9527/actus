@@ -10,6 +10,7 @@ from app.domain.models import (
     Session,
     Step,
     StepEvent,
+    StepOutcome,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
@@ -31,7 +32,10 @@ def _build_plan(step_status: ExecutionStatus = ExecutionStatus.PENDING) -> Plan:
         steps=[
             Step(
                 id="step-1",
+                title="执行第一步",
                 description="执行第一步",
+                objective_key="objective-step-1",
+                success_criteria=["执行第一步完成"],
                 status=step_status,
             )
         ],
@@ -128,6 +132,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["memory_context_version"] == "ctx-v1"
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
+    assert state["step_states"][0]["objective_key"] == "objective-step-1"
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
     assert state["pending_interrupt"]["prompt"] == "请补充上下文"
     assert state["tool_invocations"]["call-1"]["tool_name"] == "search"
@@ -147,10 +152,16 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     created_plan = _build_plan(step_status=ExecutionStatus.PENDING)
     completed_step = Step(
         id="step-1",
+        title="执行第一步",
         description="执行第一步",
+        objective_key="objective-step-1",
+        success_criteria=["执行第一步完成"],
         status=ExecutionStatus.COMPLETED,
-        success=True,
-        result="完成第一步",
+        outcome=StepOutcome(
+            done=True,
+            summary="完成第一步",
+            produced_artifacts=["file-1"],
+        ),
     )
 
     wait_event = WaitEvent.from_interrupt(
@@ -217,6 +228,7 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert reduced_state["current_step_id"] is None
     assert len(reduced_state["audit_events"]) == len(state["emitted_events"])
     assert reduced_state["tool_invocations"]["call-1"]["status"] == ToolEventStatus.CALLED.value
+    assert reduced_state["artifact_refs"] == ["file-1"]
     assert reduced_state["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert reduced_state["pending_interrupt"]["attachments"] == ["/tmp/reference.md"]
     assert reduced_state["pending_interrupt"]["suggest_user_takeover"] == "browser"

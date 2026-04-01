@@ -8,6 +8,7 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     Step,
+    StepOutcome,
     WaitEvent,
 )
 from app.interfaces.schemas.event import (
@@ -124,9 +125,12 @@ def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
             steps=[
                 Step(
                     id="step-1",
+                    title="执行步骤1",
                     description="执行步骤1",
+                    objective_key="objective-step-1",
+                    success_criteria=["执行步骤1完成"],
                     status=ExecutionStatus.COMPLETED,
-                    success=True,
+                    outcome=StepOutcome(done=True, summary="执行步骤1完成"),
                 )
             ],
         ),

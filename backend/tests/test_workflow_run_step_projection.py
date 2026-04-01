@@ -12,6 +12,7 @@ from app.domain.models import (
     Step,
     StepEvent,
     StepEventStatus,
+    StepOutcome,
     WorkflowRunEventRecord,
 )
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
@@ -35,7 +36,10 @@ def test_add_event_if_absent_should_sync_step_projection_for_step_event() -> Non
         id="evt-step-1",
         step=Step(
             id="step-1",
+            title="执行步骤",
             description="执行步骤",
+            objective_key="objective-step-1",
+            success_criteria=["执行步骤完成"],
             status=ExecutionStatus.RUNNING,
         ),
         status=StepEventStatus.STARTED,
@@ -68,7 +72,15 @@ def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> Non
             goal="目标",
             language="zh",
             message="说明",
-            steps=[Step(id="step-1", description="步骤1")],
+            steps=[
+                Step(
+                    id="step-1",
+                    title="步骤1",
+                    description="步骤1",
+                    objective_key="objective-step-1",
+                    success_criteria=["步骤1完成"],
+                )
+            ],
             status=ExecutionStatus.PENDING,
         ),
     )
@@ -100,9 +112,11 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
         id="evt-step-2",
         step=Step(
             id="step-2",
+            title="增量步骤",
             description="增量步骤",
+            objective_key="objective-step-2",
+            success_criteria=["增量步骤完成"],
             status=ExecutionStatus.RUNNING,
-            success=False,
         ),
         status=StepEventStatus.STARTED,
     )
@@ -115,6 +129,7 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
     assert step_record.run_id == "run-1"
     assert step_record.step_id == "step-2"
     assert step_record.step_index == 2
+    assert step_record.objective_key == "objective-step-2"
     assert step_record.status == ExecutionStatus.RUNNING.value
 
 
@@ -127,12 +142,13 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     )
     existing_step_record = SimpleNamespace(
         step_index=0,
+        title="旧标题",
         description="旧描述",
+        objective_key="objective-old",
+        success_criteria=[],
         status=ExecutionStatus.RUNNING.value,
-        result=None,
+        outcome=None,
         error=None,
-        success=False,
-        attachments=[],
     )
     repo._get_record_with_lock = AsyncMock(return_value=run_record)
     repo._get_step_record_with_lock = AsyncMock(return_value=existing_step_record)
@@ -140,11 +156,16 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         id="evt-step-3",
         step=Step(
             id="step-3",
+            title="新描述",
             description="新描述",
+            objective_key="objective-step-3",
+            success_criteria=["新描述完成"],
             status=ExecutionStatus.COMPLETED,
-            result="完成",
-            success=True,
-            attachments=["file-1"],
+            outcome=StepOutcome(
+                done=True,
+                summary="完成",
+                produced_artifacts=["file-1"],
+            ),
         ),
         status=StepEventStatus.COMPLETED,
     )
@@ -152,11 +173,21 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     asyncio.run(repo.upsert_step_from_event(run_id="run-1", event=event))
 
     assert run_record.current_step_id is None
+    assert existing_step_record.title == "新描述"
     assert existing_step_record.description == "新描述"
+    assert existing_step_record.objective_key == "objective-step-3"
     assert existing_step_record.status == ExecutionStatus.COMPLETED.value
-    assert existing_step_record.result == "完成"
-    assert existing_step_record.success is True
-    assert existing_step_record.attachments == ["file-1"]
+    assert existing_step_record.outcome == {
+        "done": True,
+        "summary": "完成",
+        "produced_artifacts": ["file-1"],
+        "blockers": [],
+        "facts_learned": [],
+        "open_questions": [],
+        "next_hint": None,
+        "reused_from_run_id": None,
+        "reused_from_step_id": None,
+    }
 
 
 def test_list_events_should_return_empty_when_run_id_missing() -> None:

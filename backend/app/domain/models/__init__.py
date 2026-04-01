@@ -39,7 +39,14 @@ from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
 from .long_term_memory import LongTermMemory
 from .message import Message
-from .plan import Plan, Step, ExecutionStatus
+from .plan import (
+    Plan,
+    Step,
+    StepOutcome,
+    ExecutionStatus,
+    build_step_objective_key,
+    build_step_objective_source,
+)
 from .runtime_input import ResumeInput, RuntimeInput
 from .runtime_llm_config import RuntimeLLMConfig
 from .search import SearchResults, SearchResultItem
@@ -76,6 +83,9 @@ __all__ = [
     "LongTermMemory",
     "Plan",
     "Step",
+    "StepOutcome",
+    "build_step_objective_key",
+    "build_step_objective_source",
     "RuntimeLLMConfig",
     "ExecutionStatus",
     "BaseEvent",

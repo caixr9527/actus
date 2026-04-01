@@ -128,22 +128,24 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                 run_id=run_id,
                 step_id=step.id,
                 step_index=await self._resolve_step_index(run_record=run_record, step_id=step.id),
+                title=step.title,
                 description=step.description,
+                objective_key=step.objective_key,
+                success_criteria=list(step.success_criteria or []),
                 status=step.status.value,
-                result=step.result,
+                outcome=step.outcome.model_dump(mode="json") if step.outcome is not None else None,
                 error=step.error,
-                success=step.success,
-                attachments=list(step.attachments or []),
             )
             self.db_session.add(step_record)
         else:
             # 步骤已存在时仅做字段收敛，避免覆盖既有顺序。
+            step_record.title = step.title
             step_record.description = step.description
+            step_record.objective_key = step.objective_key
+            step_record.success_criteria = list(step.success_criteria or [])
             step_record.status = step.status.value
-            step_record.result = step.result
+            step_record.outcome = step.outcome.model_dump(mode="json") if step.outcome is not None else None
             step_record.error = step.error
-            step_record.success = step.success
-            step_record.attachments = list(step.attachments or [])
 
         if step.status in {ExecutionStatus.RUNNING, ExecutionStatus.PENDING}:
             run_record.current_step_id = step.id
@@ -225,12 +227,13 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                     run_id=run_id,
                     step_id=step.id,
                     step_index=index,
+                    title=step.title,
                     description=step.description,
+                    objective_key=step.objective_key,
+                    success_criteria=list(step.success_criteria or []),
                     status=step.status.value,
-                    result=step.result,
+                    outcome=step.outcome.model_dump(mode="json") if step.outcome is not None else None,
                     error=step.error,
-                    success=step.success,
-                    attachments=list(step.attachments or []),
                 )
             )
 

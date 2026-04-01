@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from app.domain.models import ExecutionStatus, LongTermMemory, Plan, Step
+from app.domain.models import ExecutionStatus, LongTermMemory, Plan, Step, StepOutcome
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import (
     build_planner_react_langgraph_graph,
@@ -128,10 +128,19 @@ def _build_plan(*, step_status: ExecutionStatus = ExecutionStatus.COMPLETED) -> 
         steps=[
             Step(
                 id="step-1",
+                title="执行阶段",
                 description="执行阶段",
+                objective_key="objective-step-1",
+                success_criteria=["执行阶段完成"],
                 status=step_status,
-                success=step_status == ExecutionStatus.COMPLETED,
-                result="步骤完成" if step_status == ExecutionStatus.COMPLETED else None,
+                outcome=(
+                    StepOutcome(
+                        done=True,
+                        summary="步骤完成",
+                    )
+                    if step_status == ExecutionStatus.COMPLETED
+                    else None
+                ),
             )
         ],
         status=ExecutionStatus.PENDING,
@@ -193,7 +202,10 @@ def test_execute_step_node_should_not_write_string_none_when_skill_result_missin
             steps=[
                 Step(
                     id="step-1",
+                    title="执行阶段",
                     description="执行阶段",
+                    objective_key="objective-step-1",
+                    success_criteria=["执行阶段完成"],
                     status=ExecutionStatus.PENDING,
                 )
             ],
@@ -213,7 +225,8 @@ def test_execute_step_node_should_not_write_string_none_when_skill_result_missin
         )
     )
 
-    assert next_state["plan"].steps[0].result == "已完成步骤：执行阶段"
+    assert next_state["plan"].steps[0].outcome is not None
+    assert next_state["plan"].steps[0].outcome.summary == "已完成步骤：执行阶段"
     assert next_state["final_message"] == "已完成步骤：执行阶段"
     assert next_state["working_memory"]["decisions"] == ["已完成步骤：执行阶段"]
 
@@ -221,14 +234,19 @@ def test_execute_step_node_should_not_write_string_none_when_skill_result_missin
 def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assumption() -> None:
     completed_step = Step(
         id="step-a",
+        title="完成已有步骤",
         description="完成已有步骤",
+        objective_key="objective-step-a",
+        success_criteria=["完成已有步骤"],
         status=ExecutionStatus.COMPLETED,
-        success=True,
-        result="已完成",
+        outcome=StepOutcome(done=True, summary="已完成"),
     )
     pending_step = Step(
         id="step-b",
+        title="待执行步骤",
         description="待执行步骤",
+        objective_key="objective-step-b",
+        success_criteria=["待执行步骤完成"],
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(
@@ -569,8 +587,10 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     async def _execute(state, _llm, skill_runtime=None, runtime_tools=None, max_tool_iterations=5):
         plan = state["plan"].model_copy(deep=True)
         plan.steps[0].status = ExecutionStatus.COMPLETED
-        plan.steps[0].success = True
-        plan.steps[0].result = "步骤执行完成"
+        plan.steps[0].outcome = StepOutcome(
+            done=True,
+            summary="步骤执行完成",
+        )
         next_state = _append_trace(state, "execute")
         return {
             **next_state,

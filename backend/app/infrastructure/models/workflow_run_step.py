@@ -14,7 +14,6 @@ from sqlalchemy import (
     DateTime,
     Text,
     Integer,
-    Boolean,
     Index,
     text,
     PrimaryKeyConstraint,
@@ -24,7 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.domain.models import WorkflowRunStepRecord, ExecutionStatus
+from app.domain.models import WorkflowRunStepRecord, ExecutionStatus, StepOutcome
 from .base import Base
 
 
@@ -55,28 +54,33 @@ class WorkflowRunStepModel(Base):
         nullable=False,
         server_default=text("0"),
     )
+    title: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("''::text"),
+    )
     description: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         server_default=text("''::text"),
+    )
+    objective_key: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        server_default=text("''::character varying"),
+    )
+    success_criteria: Mapped[List[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
     )
     status: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
         server_default=text("'pending'::character varying"),
     )
-    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    outcome: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    success: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("false"),
-    )
-    attachments: Mapped[List[str]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'[]'::jsonb"),
-    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
@@ -96,12 +100,13 @@ class WorkflowRunStepModel(Base):
             run_id=record.run_id,
             step_id=record.step_id,
             step_index=record.step_index,
+            title=record.title,
             description=record.description,
+            objective_key=record.objective_key,
+            success_criteria=list(record.success_criteria or []),
             status=record.status.value,
-            result=record.result,
+            outcome=record.outcome.model_dump(mode="json") if record.outcome is not None else None,
             error=record.error,
-            success=record.success,
-            attachments=record.attachments,
             updated_at=record.updated_at,
             created_at=record.created_at,
         )
@@ -112,13 +117,13 @@ class WorkflowRunStepModel(Base):
             run_id=self.run_id,
             step_id=self.step_id,
             step_index=self.step_index,
+            title=self.title,
             description=self.description,
+            objective_key=self.objective_key,
+            success_criteria=list(self.success_criteria or []),
             status=ExecutionStatus(self.status),
-            result=self.result,
+            outcome=StepOutcome.model_validate(self.outcome) if isinstance(self.outcome, dict) else None,
             error=self.error,
-            success=self.success,
-            attachments=list(self.attachments or []),
             updated_at=self.updated_at,
             created_at=self.created_at,
         )
-

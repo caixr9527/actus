@@ -21,6 +21,7 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     Step,
+    StepOutcome,
     StepEvent,
     StepEventStatus,
     TitleEvent,
@@ -91,6 +92,32 @@ def _normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
     if not normalized_value or normalized_value.lower() == "none":
         return str(fallback or "").strip()
     return normalized_value
+
+
+def _normalize_text_items(raw: Any) -> List[str]:
+    """统一规整 LLM/工具返回的字符串列表。"""
+    if not isinstance(raw, list):
+        return []
+    normalized_items: List[str] = []
+    for item in raw:
+        normalized_item = str(item or "").strip()
+        if normalized_item and normalized_item not in normalized_items:
+            normalized_items.append(normalized_item)
+    return normalized_items
+
+
+def _get_step_outcome_summary(step: Optional[Step]) -> str:
+    """读取步骤结果摘要。"""
+    if step is None or step.outcome is None:
+        return ""
+    return _normalize_step_result_text(step.outcome.summary)
+
+
+def _get_step_artifacts(step: Optional[Step]) -> List[str]:
+    """读取步骤产物列表。"""
+    if step is None or step.outcome is None:
+        return []
+    return _normalize_attachment_paths(step.outcome.produced_artifacts)
 
 
 def _dedupe_replanned_steps(existing_steps: List[Step], new_steps: List[Step]) -> List[Step]:
@@ -247,8 +274,7 @@ def _build_outcome_fact_text(
         return decisions[-1]
 
     last_step = state.get("last_executed_step")
-    last_step_result = str(getattr(last_step, "result", "") or "").strip()
-    return last_step_result
+    return _get_step_outcome_summary(last_step)
 
 
 def _build_outcome_memory_candidate(
@@ -898,26 +924,34 @@ async def execute_step_node(
             "emitted_events": append_events(state.get("emitted_events"), started_event, *tool_events),
         }
 
-    step.success = bool(llm_message.get("success", True))
-    step.result = _normalize_step_result_text(
+    step_success = bool(llm_message.get("success", True))
+    step_summary = _normalize_step_result_text(
         llm_message.get("result"),
-        fallback=f"已完成步骤：{step.description}" if step.success else f"步骤执行失败：{step.description}",
+        fallback=f"已完成步骤：{step.description}" if step_success else f"步骤执行失败：{step.description}",
     )
     model_attachment_paths = normalize_attachments(llm_message.get("attachments"))
-    step.attachments = model_attachment_paths
-    step.status = ExecutionStatus.COMPLETED if step.success else ExecutionStatus.FAILED
+    step.outcome = StepOutcome(
+        done=step_success,
+        summary=step_summary,
+        produced_artifacts=model_attachment_paths,
+        blockers=_normalize_text_items(llm_message.get("blockers")),
+        facts_learned=_normalize_text_items(llm_message.get("facts_learned")),
+        open_questions=_normalize_text_items(llm_message.get("open_questions")),
+        next_hint=_normalize_step_result_text(llm_message.get("next_hint")),
+    )
+    step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
 
     completed_event = StepEvent(
         step=step.model_copy(deep=True),
         status=step.status,
     )
     final_step_events: List[Any] = [completed_event]
-    # if step.result:
+    # if step.outcome is not None and step.outcome.summary:
     #     final_step_events.append(
     #         MessageEvent(
     #             role="assistant",
-    #             message=step.result,
-    #             attachments=[File(filepath=filepath) for filepath in step.attachments],
+    #             message=step.outcome.summary,
+    #             attachments=[File(filepath=filepath) for filepath in step.outcome.produced_artifacts],
     #         )
     #     )
 
@@ -929,12 +963,12 @@ async def execute_step_node(
     working_memory = _ensure_working_memory(state)
     working_memory["decisions"] = _append_unique_text_item(
         list(working_memory.get("decisions") or []),
-        str(step.result or ""),
+        step_summary,
     )
     step_local_memory = dict(state.get("step_local_memory") or {})
     step_local_memory["current_step_id"] = str(step.id)
-    step_local_memory["observation_summary"] = str(step.result or "")
-    step_local_memory["pending_findings"] = list(step.attachments or [])
+    step_local_memory["observation_summary"] = step_summary
+    step_local_memory["pending_findings"] = list(step.outcome.produced_artifacts or [])
     return {
         **state,
         "plan": plan,
@@ -944,7 +978,7 @@ async def execute_step_node(
         "working_memory": working_memory,
         "step_local_memory": step_local_memory,
         "graph_metadata": graph_metadata,
-        "final_message": step.result or "",
+        "final_message": step_summary,
         "pending_interrupt": {},
         "emitted_events": append_events(state.get("emitted_events"), *events),
     }
@@ -1071,7 +1105,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     updated_event = PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.UPDATED)
     await emit_live_events(updated_event)
     planner_local_memory = dict(state.get("planner_local_memory") or {})
-    planner_local_memory["replan_rationale"] = _normalize_step_result_text(last_step.result)
+    planner_local_memory["replan_rationale"] = _get_step_outcome_summary(last_step)
     return {
         **state,
         "plan": plan,

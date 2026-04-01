@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from .event import Event
-from .plan import ExecutionStatus
+from .plan import ExecutionStatus, StepOutcome
 
 
 class WorkflowRunStatus(str, Enum):
@@ -61,12 +61,13 @@ class WorkflowRunStepRecord(BaseModel):
     run_id: str
     step_id: str
     step_index: int = 0
+    title: str = ""
     description: str = ""
+    objective_key: str = ""
+    success_criteria: List[str] = Field(default_factory=list)
     status: ExecutionStatus = ExecutionStatus.PENDING
-    result: Optional[str] = None
+    outcome: Optional[StepOutcome] = None
     error: Optional[str] = None
-    success: bool = False
-    attachments: List[str] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=datetime.now)
     created_at: datetime = Field(default_factory=datetime.now)
 
