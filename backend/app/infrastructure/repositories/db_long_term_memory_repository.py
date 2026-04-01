@@ -7,16 +7,93 @@ from typing import List, Optional
 from sqlalchemy import Text, case, cast, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.external import EmbeddingService
 from app.domain.models import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
+from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
 from app.domain.repositories import LongTermMemoryRepository
+from app.infrastructure.external.embedding import OpenAIEmbeddingService
 from app.infrastructure.models import LongTermMemoryModel
+from core.config import get_settings
 
 
 class DBLongTermMemoryRepository(LongTermMemoryRepository):
     """长期记忆仓储 DB 实现。"""
 
-    def __init__(self, db_session: AsyncSession) -> None:
+    def __init__(
+            self,
+            db_session: AsyncSession,
+            embedding_service: EmbeddingService | None = None,
+    ) -> None:
         self.db_session = db_session
+        self._embedding_service = embedding_service or self._build_embedding_service()
+
+    @staticmethod
+    def _build_embedding_service() -> EmbeddingService:
+        settings = get_settings()
+        return OpenAIEmbeddingService(
+            base_url=settings.embedding_base_url,
+            api_key=settings.embedding_api_key,
+            embedding_model=settings.embedding_model,
+            dimensions=settings.resolved_embedding_dimensions,
+        )
+
+    @staticmethod
+    def _validate_embedding_dimensions(embedding: List[float], *, context: str) -> List[float]:
+        normalized_embedding = [float(item) for item in list(embedding or [])]
+        if len(normalized_embedding) != LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"{context} 向量维度必须为 {LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS}，"
+                f"实际为 {len(normalized_embedding)}"
+            )
+        return normalized_embedding
+
+    async def _embed_text(self, text: str, *, context: str) -> List[float]:
+        normalized_text = str(text or "").strip()
+        if not normalized_text:
+            raise ValueError(f"{context} 缺少可嵌入文本")
+
+        embeddings = await self._embedding_service.embed_texts([normalized_text])
+        if len(embeddings) == 0:
+            raise RuntimeError(f"{context} 生成 embedding 失败")
+        return self._validate_embedding_dimensions(embeddings[0], context=context)
+
+    async def _prepare_query(self, query: LongTermMemorySearchQuery) -> LongTermMemorySearchQuery:
+        if query.mode not in {LongTermMemorySearchMode.SEMANTIC, LongTermMemorySearchMode.HYBRID}:
+            return query
+        if query.query_embedding:
+            return query.model_copy(
+                update={
+                    "query_embedding": self._validate_embedding_dimensions(
+                        query.query_embedding,
+                        context=f"{query.mode.value} query",
+                    )
+                }
+            )
+        return query.model_copy(
+            update={
+                "query_embedding": await self._embed_text(
+                    query.query_text,
+                    context=f"{query.mode.value} query",
+                )
+            }
+        )
+
+    async def _prepare_memory(self, memory: LongTermMemory) -> LongTermMemory:
+        normalized_content_text = str(memory.content_text or "").strip() or memory.build_content_text()
+        if not normalized_content_text:
+            return memory.model_copy(update={"content_text": "", "embedding": None})
+
+        normalized_embedding = (
+            self._validate_embedding_dimensions(memory.embedding, context="memory")
+            if memory.embedding
+            else await self._embed_text(normalized_content_text, context="memory")
+        )
+        return memory.model_copy(
+            update={
+                "content_text": normalized_content_text,
+                "embedding": normalized_embedding,
+            }
+        )
 
     @staticmethod
     def _split_query_tokens(query: str) -> List[str]:
@@ -131,30 +208,31 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
             self,
             query: LongTermMemorySearchQuery,
     ) -> List[LongTermMemory]:
-        query_tokens = self._split_query_tokens(query.query_text)
+        prepared_query = await self._prepare_query(query)
+        query_tokens = self._split_query_tokens(prepared_query.query_text)
         stmt = select(LongTermMemoryModel)
 
-        normalized_prefixes = [str(item).strip() for item in list(query.namespace_prefixes or []) if str(item).strip()]
+        normalized_prefixes = [str(item).strip() for item in list(prepared_query.namespace_prefixes or []) if str(item).strip()]
         if len(normalized_prefixes) > 0:
             stmt = stmt.where(
                 or_(*[LongTermMemoryModel.namespace.like(f"{prefix}%") for prefix in normalized_prefixes])
             )
 
-        normalized_memory_types = [str(item).strip() for item in list(query.memory_types or []) if str(item).strip()]
+        normalized_memory_types = [str(item).strip() for item in list(prepared_query.memory_types or []) if str(item).strip()]
         if len(normalized_memory_types) > 0:
             stmt = stmt.where(LongTermMemoryModel.memory_type.in_(normalized_memory_types))
 
-        normalized_tags = [str(item).strip() for item in list(query.tags or []) if str(item).strip()]
+        normalized_tags = [str(item).strip() for item in list(prepared_query.tags or []) if str(item).strip()]
         if len(normalized_tags) > 0:
             stmt = stmt.where(LongTermMemoryModel.tags.contains(normalized_tags))
 
-        if query.mode == LongTermMemorySearchMode.SEMANTIC:
+        if prepared_query.mode == LongTermMemorySearchMode.SEMANTIC:
             stmt = stmt.where(self._build_semantic_candidate_condition())
 
-        if query.mode in {LongTermMemorySearchMode.KEYWORD, LongTermMemorySearchMode.HYBRID} and len(query_tokens) > 0:
+        if prepared_query.mode in {LongTermMemorySearchMode.KEYWORD, LongTermMemorySearchMode.HYBRID} and len(query_tokens) > 0:
             stmt = stmt.where(or_(*self._build_keyword_conditions(query_tokens)))
 
-        total_score = self._build_total_score(query=query, query_tokens=query_tokens)
+        total_score = self._build_total_score(query=prepared_query, query_tokens=query_tokens)
         stmt = stmt.order_by(
             total_score.desc(),
             LongTermMemoryModel.last_accessed_at.desc().nullslast(),
@@ -172,21 +250,22 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
         return [record.to_domain() for record in records]
 
     async def upsert(self, memory: LongTermMemory) -> LongTermMemory:
+        prepared_memory = await self._prepare_memory(memory)
         # 尝试根据 ID 查找现有记录（加锁以防止并发冲突）
         record: Optional[LongTermMemoryModel] = None
-        if str(memory.id or "").strip():
+        if str(prepared_memory.id or "").strip():
             result = await self.db_session.execute(
-                select(LongTermMemoryModel).where(LongTermMemoryModel.id == memory.id).with_for_update()
+                select(LongTermMemoryModel).where(LongTermMemoryModel.id == prepared_memory.id).with_for_update()
             )
             record = result.scalar_one_or_none()
 
         # 若未找到且存在去重键，则根据命名空间和去重键查找现有记录（加锁）
-        if record is None and str(memory.dedupe_key or "").strip():
+        if record is None and str(prepared_memory.dedupe_key or "").strip():
             result = await self.db_session.execute(
                 select(LongTermMemoryModel)
                 .where(
-                    LongTermMemoryModel.namespace == memory.namespace,
-                    LongTermMemoryModel.dedupe_key == memory.dedupe_key,
+                    LongTermMemoryModel.namespace == prepared_memory.namespace,
+                    LongTermMemoryModel.dedupe_key == prepared_memory.dedupe_key,
                 )
                 .with_for_update()
             )
@@ -194,11 +273,11 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
 
         # 若仍未找到记录，则创建新记录；否则合并更新现有记录
         if record is None:
-            record = LongTermMemoryModel.from_domain(memory)
+            record = LongTermMemoryModel.from_domain(prepared_memory)
             self.db_session.add(record)
         else:
             existing = record.to_domain()
-            merged_memory = memory.model_copy(
+            merged_memory = prepared_memory.model_copy(
                 update={
                     "id": existing.id,
                     "created_at": existing.created_at,

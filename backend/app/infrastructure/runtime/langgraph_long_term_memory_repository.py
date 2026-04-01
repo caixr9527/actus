@@ -10,7 +10,10 @@ from app.domain.repositories import IUnitOfWork, LongTermMemoryRepository
 class LangGraphLongTermMemoryRepository(LongTermMemoryRepository):
     """基于 UoW 工厂的 LangGraph 长期记忆仓储适配器。"""
 
-    def __init__(self, uow_factory: Callable[[], IUnitOfWork]) -> None:
+    def __init__(
+            self,
+            uow_factory: Callable[[], IUnitOfWork],
+    ) -> None:
         self._uow_factory = uow_factory
 
     async def search(

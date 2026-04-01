@@ -6,7 +6,6 @@ from typing import List
 from openai import AsyncOpenAI
 
 from app.domain.external import EmbeddingService
-from app.domain.models import RuntimeLLMConfig
 
 
 class OpenAIEmbeddingService(EmbeddingService):
@@ -14,15 +13,16 @@ class OpenAIEmbeddingService(EmbeddingService):
 
     def __init__(
             self,
-            llm_config: RuntimeLLMConfig,
             *,
+            base_url: str,
+            api_key: str,
             embedding_model: str,
             dimensions: int | None = None,
             **kwargs,
     ) -> None:
         self._client = AsyncOpenAI(
-            base_url=str(llm_config.base_url),
-            api_key=llm_config.api_key,
+            base_url=base_url,
+            api_key=api_key,
             **kwargs,
         )
         self._embedding_model = embedding_model

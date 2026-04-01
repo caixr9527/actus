@@ -55,9 +55,11 @@ class _DummyLLMFactory:
     def __init__(self) -> None:
         self.calls = 0
         self.last_llm = object()
+        self.last_config = None
 
     def create(self, llm_config):
         self.calls += 1
+        self.last_config = llm_config
         return self.last_llm
 
 

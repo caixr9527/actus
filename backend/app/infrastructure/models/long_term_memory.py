@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.models import LongTermMemory
+from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
 from .base import Base
 
 
@@ -83,7 +84,10 @@ class LongTermMemoryModel(Base):
     # 命名空间内的幂等去重键，配合唯一约束避免重复固化相同记忆。
     dedupe_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # pgvector 语义检索字段。
-    embedding: Mapped[Optional[List[float]]] = mapped_column(Vector(1536), nullable=True)
+    embedding: Mapped[Optional[List[float]]] = mapped_column(
+        Vector(LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS),
+        nullable=True,
+    )
     # 最近一次被召回或访问的时间，用于搜索结果排序与热度判断。
     last_accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # 最近一次更新的时间戳，用于排序与审计记忆的新鲜度。
@@ -102,7 +106,7 @@ class LongTermMemoryModel(Base):
 
     @classmethod
     def from_domain(cls, memory: LongTermMemory) -> "LongTermMemoryModel":
-        normalized_content_text = str(memory.content_text or "").strip() or cls._build_content_text(memory)
+        normalized_content_text = str(memory.content_text or "").strip() or memory.build_content_text()
         return cls(
             **memory.model_dump(
                 mode="python",
@@ -119,7 +123,7 @@ class LongTermMemoryModel(Base):
         return LongTermMemory.model_validate(self, from_attributes=True)
 
     def update_from_domain(self, memory: LongTermMemory) -> None:
-        normalized_content_text = str(memory.content_text or "").strip() or self._build_content_text(memory)
+        normalized_content_text = str(memory.content_text or "").strip() or memory.build_content_text()
         base_data = memory.model_dump(
             mode="python",
             exclude={"content", "tags", "source"},
@@ -130,17 +134,3 @@ class LongTermMemoryModel(Base):
         )
         for field, value in {**base_data, **json_data, "content_text": normalized_content_text}.items():
             setattr(self, field, value)
-
-    @staticmethod
-    def _build_content_text(memory: LongTermMemory) -> str:
-        content_parts: List[str] = [str(memory.summary or "").strip()]
-        for key, value in dict(memory.content or {}).items():
-            normalized_key = str(key or "").strip()
-            if not normalized_key:
-                continue
-            normalized_value = value if isinstance(value, str) else str(value)
-            normalized_value = normalized_value.strip()
-            if normalized_value:
-                content_parts.append(f"{normalized_key}: {normalized_value}")
-        content_parts.extend([str(tag).strip() for tag in list(memory.tags or []) if str(tag).strip()])
-        return "\n".join([part for part in content_parts if part]).strip()

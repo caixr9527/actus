@@ -157,13 +157,11 @@ class OpenAILLM(LLM):
                      ) -> Dict[str, Any]:
         """调用模型"""
         try:
-            requested_tool_names = []
             if tools:
                 logger.info(
-                    "调用模型: model=%s tools_enabled=%s request_tools=%s",
+                    "调用模型: model=%s tools_enabled=%s",
                     self._model_name,
                     True,
-                    requested_tool_names,
                 )
                 response = await self._client.chat.completions.create(
                     model=self._model_name,
@@ -178,10 +176,9 @@ class OpenAILLM(LLM):
                 )
             else:
                 logger.info(
-                    "调用模型: model=%s tools_enabled=%s request_tools=%s",
+                    "调用模型: model=%s tools_enabled=%s",
                     self._model_name,
                     False,
-                    requested_tool_names,
                 )
                 response = await self._client.chat.completions.create(
                     model=self._model_name,

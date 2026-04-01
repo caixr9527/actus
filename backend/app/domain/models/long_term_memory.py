@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS = 1536
+
 
 class LongTermMemorySearchMode(str, Enum):
     """长期记忆检索模式。"""
@@ -23,6 +25,7 @@ class LongTermMemorySearchQuery(BaseModel):
 
     namespace_prefixes: List[str] = Field(default_factory=list)
     query_text: str = ""
+    # semantic / hybrid 查询允许只提供 query_text，由底层仓储统一补齐 query_embedding。
     query_embedding: Optional[List[float]] = None
     limit: int = 10
     memory_types: List[str] = Field(default_factory=list)
@@ -49,14 +52,12 @@ class LongTermMemorySearchQuery(BaseModel):
             return self
 
         if self.mode == LongTermMemorySearchMode.SEMANTIC:
-            if not has_embedding:
-                raise ValueError("semantic 检索模式要求提供 query_embedding")
+            if not normalized_query_text and not has_embedding:
+                raise ValueError("semantic 检索模式要求提供 query_text 或 query_embedding")
             return self
 
         if not normalized_query_text:
             raise ValueError("hybrid 检索模式要求提供 query_text")
-        if not has_embedding:
-            raise ValueError("hybrid 检索模式要求提供 query_embedding")
         return self
 
 
@@ -91,3 +92,17 @@ class LongTermMemory(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.now)
     # 记忆首次创建时间，用于保留长期记忆的初始落库时间。
     created_at: datetime = Field(default_factory=datetime.now)
+
+    def build_content_text(self) -> str:
+        """构建面向全文检索与向量嵌入的归一化文本。"""
+        content_parts: List[str] = [str(self.summary or "").strip()]
+        for key, value in dict(self.content or {}).items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key:
+                continue
+            normalized_value = value if isinstance(value, str) else str(value)
+            normalized_value = normalized_value.strip()
+            if normalized_value:
+                content_parts.append(f"{normalized_key}: {normalized_value}")
+        content_parts.extend([str(tag).strip() for tag in list(self.tags or []) if str(tag).strip()])
+        return "\n".join([part for part in content_parts if part]).strip()

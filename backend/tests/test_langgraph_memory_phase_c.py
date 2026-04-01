@@ -208,7 +208,7 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
     assert repository.search_calls[1]["mode"] == LongTermMemorySearchMode.RECENT.value
     assert repository.search_calls[2]["memory_types"] == ["fact"]
     assert "帮我整理长期记忆" in repository.search_calls[2]["query_text"]
-    assert repository.search_calls[2]["mode"] == LongTermMemorySearchMode.KEYWORD.value
+    assert repository.search_calls[2]["mode"] == LongTermMemorySearchMode.HYBRID.value
     assert next_state["retrieved_memories"][0]["id"] == "mem-1"
     assert next_state["retrieved_memories"][1]["id"] == "mem-2"
     assert next_state["working_memory"]["user_preferences"] == {

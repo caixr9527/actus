@@ -535,7 +535,7 @@ def _build_memory_recall_queries(state: PlannerReActLangGraphState) -> List[Long
             query_text=recall_query,
             limit=4,
             memory_types=["fact"],
-            mode=LongTermMemorySearchMode.KEYWORD,
+            mode=LongTermMemorySearchMode.HYBRID,
         ),
     ]
 

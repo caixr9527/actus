@@ -45,7 +45,7 @@ def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
-        lambda llm: _FakeLangGraph(),
+        lambda **kwargs: _FakeLangGraph(),
     )
 
     engine = build_run_engine(

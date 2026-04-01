@@ -26,7 +26,10 @@ def _build_model(
         max_tokens: int = 8192,
         capabilities: dict | None = None,
 ) -> LLMModelConfig:
-    config = {"temperature": temperature, "max_tokens": max_tokens}
+    config = {
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
     if capabilities is not None:
         config["capabilities"] = capabilities
     return LLMModelConfig(
