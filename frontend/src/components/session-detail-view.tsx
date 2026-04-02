@@ -289,7 +289,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const shouldShowThinking = shouldShowSessionThinking({
     streaming,
     sessionStatus: session?.status,
-    hasInitialMessage,
+    hasInitialMessage: Boolean(hasInitialMessage),
     timelineLength: timeline.length,
     hasError: Boolean(error),
     hasRunningStep,
