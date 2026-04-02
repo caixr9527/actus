@@ -1,0 +1,79 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+  resolveStepExpandedState,
+  shouldAutoCloseTaskPreview,
+  shouldAutoExpandStep,
+  shouldAutoScrollToLatest,
+} from '../src/lib/session-detail-view-state'
+
+test('shouldAutoExpandStep should only expand running steps by default', () => {
+  assert.equal(shouldAutoExpandStep('running'), true)
+  assert.equal(shouldAutoExpandStep('completed'), false)
+  assert.equal(shouldAutoExpandStep('failed'), false)
+  assert.equal(shouldAutoExpandStep('pending'), false)
+})
+
+test('resolveStepExpandedState should auto expand running step and collapse when it finishes', () => {
+  assert.equal(resolveStepExpandedState({
+    currentExpanded: false,
+    previousStatus: null,
+    nextStatus: 'running',
+  }), true)
+
+  assert.equal(resolveStepExpandedState({
+    currentExpanded: true,
+    previousStatus: 'running',
+    nextStatus: 'completed',
+  }), false)
+
+  assert.equal(resolveStepExpandedState({
+    currentExpanded: true,
+    previousStatus: 'running',
+    nextStatus: 'failed',
+  }), false)
+
+  assert.equal(resolveStepExpandedState({
+    currentExpanded: true,
+    previousStatus: 'completed',
+    nextStatus: 'completed',
+  }), true)
+})
+
+test('shouldAutoCloseTaskPreview should only close preview when running task completes', () => {
+  assert.equal(shouldAutoCloseTaskPreview('running', 'completed'), true)
+  assert.equal(shouldAutoCloseTaskPreview('running', 'waiting'), false)
+  assert.equal(shouldAutoCloseTaskPreview('completed', 'completed'), false)
+  assert.equal(shouldAutoCloseTaskPreview(null, 'completed'), false)
+})
+
+test('shouldAutoScrollToLatest should auto scroll once per session when content exists', () => {
+  assert.equal(shouldAutoScrollToLatest({
+    lastAutoScrolledSessionId: null,
+    sessionId: 'session-1',
+    timelineLength: 3,
+    shouldShowThinking: false,
+  }), true)
+
+  assert.equal(shouldAutoScrollToLatest({
+    lastAutoScrolledSessionId: 'session-1',
+    sessionId: 'session-1',
+    timelineLength: 3,
+    shouldShowThinking: true,
+  }), false)
+
+  assert.equal(shouldAutoScrollToLatest({
+    lastAutoScrolledSessionId: null,
+    sessionId: 'session-2',
+    timelineLength: 0,
+    shouldShowThinking: true,
+  }), true)
+
+  assert.equal(shouldAutoScrollToLatest({
+    lastAutoScrolledSessionId: null,
+    sessionId: 'session-3',
+    timelineLength: 0,
+    shouldShowThinking: false,
+  }), false)
+})

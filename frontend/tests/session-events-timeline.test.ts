@@ -37,7 +37,20 @@ test('eventsToTimeline should merge tool updates and reset step context across u
     }),
     eventOf('step', { id: 'step-1', status: 'completed', description: 'phase 1' }),
     eventOf('message', { role: 'user', message: 'second question' }),
-    eventOf('step', { id: 'step-1', status: 'running', description: 'phase 2' }),
+    eventOf('step', {
+      id: 'step-1',
+      status: 'running',
+      description: 'phase 2',
+      outcome: {
+        done: false,
+        summary: '上一步搜索任务超时，准备重试',
+        produced_artifacts: [],
+        blockers: ['当前步骤超过 180 秒未完成'],
+        facts_learned: [],
+        open_questions: [],
+        next_hint: '请缩小当前步骤范围后重试',
+      },
+    }),
     eventOf('error', {
       error: 'broken',
       error_key: 'error.session.not_found',
@@ -63,6 +76,7 @@ test('eventsToTimeline should merge tool updates and reset step context across u
   if (secondStep.kind === 'step') {
     assert.equal(secondStep.tools.length, 0)
     assert.equal(secondStep.data.description, 'phase 2')
+    assert.equal(secondStep.data.outcome?.summary, '上一步搜索任务超时，准备重试')
   }
 
   const attachmentItems = timeline.filter((item) => item.kind === 'attachments')

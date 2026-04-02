@@ -124,6 +124,9 @@ export function RunTimelinePanel({ className, events }: RunTimelinePanelProps) {
                     {statusIcon(step.status)}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-gray-700">{step.description}</p>
+                      {step.detail && (
+                        <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-500">{step.detail}</p>
+                      )}
                     </div>
                     <span className="shrink-0 text-[11px] text-gray-500">{statusLabel(step.status, t)}</span>
                   </div>

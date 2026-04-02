@@ -1,4 +1,4 @@
-import type { SSEEventData, PlanEvent, StepEvent, ToolEvent, WaitEventData } from './api/types'
+import type { SSEEventData, PlanEvent, StepEvent, StepOutcome, ToolEvent, WaitEventData } from './api/types'
 import type { AppLocale } from './i18n'
 import { getFriendlyToolLabel } from '../components/tool-use/utils'
 import { adaptSessionEvent, type EventRuntimeContext, visitSessionEvent } from './session-event-adapter'
@@ -23,6 +23,7 @@ export type StepViewItem = {
   description: string
   status: StepViewStatus
   stepIndex: number
+  detail: string | null
 }
 
 export type StepViewState = {
@@ -95,9 +96,22 @@ function planSummary(data: PlanEvent, locale: AppLocale): string {
 }
 
 function stepSummary(data: StepEvent, locale: AppLocale): string {
+  const detail = resolveStepDetail(data.outcome)
+  if (detail) return truncate(detail, 80)
   const description = typeof data.description === 'string' ? data.description.trim() : ''
   if (description) return truncate(description, 80)
   return locale === 'en-US' ? `Step ${data.id}` : `步骤 ${data.id}`
+}
+
+export function resolveStepDetail(outcome: StepOutcome | null | undefined): string | null {
+  if (!outcome) return null
+  const summary = toNonEmptyText(outcome.summary)
+  if (summary) return summary
+  if (Array.isArray(outcome.blockers)) {
+    const blocker = outcome.blockers.find((item) => typeof item === 'string' && item.trim().length > 0)
+    if (blocker) return blocker.trim()
+  }
+  return toNonEmptyText(outcome.next_hint)
 }
 
 function waitSummary(data: WaitEventData, locale: AppLocale): string {
@@ -218,6 +232,7 @@ export function buildStepViewState(events: SSEEventData[]): StepViewState {
             description: step.description ?? step.id,
             status: normalizeStepStatus(step.status),
             stepIndex: i,
+            detail: resolveStepDetail(step.outcome),
           })
           orderedStepIds.push(step.id)
         }
@@ -231,6 +246,7 @@ export function buildStepViewState(events: SSEEventData[]): StepViewState {
             ...existing,
             description: step.description || existing.description,
             status: normalizeStepStatus(step.status),
+            detail: resolveStepDetail(step.outcome) ?? existing.detail,
           })
           return
         }
@@ -239,6 +255,7 @@ export function buildStepViewState(events: SSEEventData[]): StepViewState {
           description: step.description || step.id,
           status: normalizeStepStatus(step.status),
           stepIndex: orderedStepIds.length,
+          detail: resolveStepDetail(step.outcome),
         })
         orderedStepIds.push(step.id)
       },

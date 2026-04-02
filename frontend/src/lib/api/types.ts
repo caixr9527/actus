@@ -237,6 +237,7 @@ export type PlanStep = {
   id: string;
   description: string;
   status: ExecutionStatus;
+  outcome?: StepOutcome | null;
   [key: string]: unknown;
 };
 
@@ -248,6 +249,19 @@ export type PlanEvent = {
   [key: string]: unknown;
 };
 
+export type StepOutcome = {
+  done: boolean;
+  summary: string;
+  produced_artifacts: string[];
+  blockers: string[];
+  facts_learned: string[];
+  open_questions: string[];
+  next_hint?: string | null;
+  reused_from_run_id?: string | null;
+  reused_from_step_id?: string | null;
+  [key: string]: unknown;
+};
+
 /**
  * 步骤事件
  */
@@ -255,6 +269,7 @@ export type StepEvent = {
   id: string;
   status: ExecutionStatus;
   description: string;
+  outcome?: StepOutcome | null;
   [key: string]: unknown;
 };
 

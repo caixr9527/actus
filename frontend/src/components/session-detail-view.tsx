@@ -5,8 +5,6 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
 import { RunTimelinePanel } from '@/components/run-timeline-panel'
-import { SkillDebugPanel } from '@/components/skill-debug-panel'
-import { RuntimeInputPolicyPanel } from '@/components/runtime-input-policy-panel'
 import { ChatMessage } from '@/components/chat-message'
 import { FilePreviewPanel } from '@/components/file-preview-panel'
 import { ToolPreviewPanel } from '@/components/tool-preview-panel'
@@ -20,6 +18,7 @@ import {
 } from '@/lib/session-events'
 import { findLatestWaitEventContext } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
+import { shouldAutoCloseTaskPreview, shouldAutoScrollToLatest } from '@/lib/session-detail-view-state'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useAuth } from '@/hooks/use-auth'
@@ -110,6 +109,8 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const initialMessageSentRef = useRef(false)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const prevToolCountRef = useRef(0)
+  const autoScrolledSessionIdRef = useRef<string | null>(null)
+  const previousSessionStatusRef = useRef(session?.status ?? null)
 
   useEffect(() => {
     if (!isHydrated || isLoggedIn) {
@@ -280,6 +281,34 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
   const shouldShowThinking =
     streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
+
+  useEffect(() => {
+    if (!shouldAutoScrollToLatest({
+      lastAutoScrolledSessionId: autoScrolledSessionIdRef.current,
+      sessionId,
+      timelineLength: timeline.length,
+      shouldShowThinking,
+    })) {
+      return
+    }
+
+    const container = scrollContainerRef.current
+    if (!container) return
+    autoScrolledSessionIdRef.current = sessionId
+    requestAnimationFrame(() => {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'auto' })
+    })
+  }, [sessionId, timeline.length, shouldShowThinking])
+
+  useEffect(() => {
+    const previousStatus = previousSessionStatusRef.current
+    const nextStatus = session?.status ?? null
+    if (shouldAutoCloseTaskPreview(previousStatus, nextStatus)) {
+      setPreviewFile(null)
+      setPreviewTool(null)
+    }
+    previousSessionStatusRef.current = nextStatus
+  }, [session?.status])
 
   if (!isHydrated) {
     return (
@@ -466,8 +495,6 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">
               <RunTimelinePanel className="mb-2" events={events} />
-              <RuntimeInputPolicyPanel className="mb-2" events={events} />
-              <SkillDebugPanel className="mb-2" events={events} />
               {isWaitingForResume && waitContext ? (
                 <WaitResumeCard
                   className="mb-2"

@@ -150,3 +150,28 @@ test('buildStepViewState should merge plan snapshot and step updates', () => {
     ],
   )
 })
+
+test('buildRunTimeline and buildStepViewState should surface step outcome detail', () => {
+  const events: SSEEventData[] = [
+    eventOf('step', {
+      id: 's1',
+      description: 'search course page',
+      status: 'failed',
+      outcome: {
+        done: false,
+        summary: '步骤执行超时：搜索课程页面',
+        produced_artifacts: [],
+        blockers: ['当前步骤超过 180 秒未完成'],
+        facts_learned: [],
+        open_questions: [],
+        next_hint: '请缩小当前步骤范围后重试',
+      },
+    }),
+  ]
+
+  const timeline = buildRunTimeline(events, 'zh-CN')
+  const stepView = buildStepViewState(events)
+
+  assert.equal(timeline[0]?.summary, '步骤执行超时：搜索课程页面')
+  assert.equal(stepView.steps[0]?.detail, '步骤执行超时：搜索课程页面')
+})

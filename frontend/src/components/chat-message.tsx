@@ -1,16 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { CheckIcon, ChevronDown, Languages } from 'lucide-react'
+import { CheckCircle2, ChevronDown, Clock3, Languages, Loader2, XCircle } from 'lucide-react'
 import { ManusIcon } from '@/components/manus-icon'
 import { ToolUse } from '@/components/tool-use'
 import { AttachmentsMessage } from '@/components/attachments-message'
 import { MarkdownContent } from '@/components/markdown-content'
 import { useI18n } from '@/lib/i18n'
 import type { AppLocale } from '@/lib/i18n'
-import type { ToolEvent } from '@/lib/api/types'
+import type { StepEvent, ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
+import { resolveStepDetail } from '@/lib/run-timeline'
+import { resolveStepExpandedState, shouldAutoExpandStep } from '@/lib/session-detail-view-state'
 
 export interface ChatMessageProps {
   className?: string
@@ -18,6 +20,13 @@ export interface ChatMessageProps {
   onViewAllFiles?: () => void
   onFileClick?: (file: AttachmentFile) => void
   onToolClick?: (tool: ToolEvent) => void
+}
+
+function getStepStatusIcon(status: StepEvent['status']) {
+  if (status === 'completed') return <CheckCircle2 className="size-4 text-emerald-600" />
+  if (status === 'failed') return <XCircle className="size-4 text-red-600" />
+  if (status === 'running') return <Loader2 className="size-4 animate-spin text-blue-600" />
+  return <Clock3 className="size-4 text-amber-600" />
 }
 
 function ToolRow({
@@ -165,9 +174,21 @@ function StepBlock({
   onToolClick?: (tool: ToolEvent) => void
   locale: AppLocale
 }) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(() => shouldAutoExpandStep(stepItem.data.status))
   const { t } = useI18n()
   const { data, tools } = stepItem
+  const detail = resolveStepDetail(data.outcome)
+  const shouldShowBody = Boolean(detail) || tools.length > 0
+  const previousStatusRef = useRef<StepEvent['status'] | null>(null)
+
+  useEffect(() => {
+    setExpanded((currentExpanded) => resolveStepExpandedState({
+      currentExpanded,
+      previousStatus: previousStatusRef.current,
+      nextStatus: data.status,
+    }))
+    previousStatusRef.current = data.status
+  }, [data.status])
 
   return (
     <div className={cn('flex flex-col mt-3', className)}>
@@ -184,27 +205,35 @@ function StepBlock({
         className="text-sm w-full cursor-pointer flex gap-2 justify-between group/header truncate text-gray-700 rounded-md hover:bg-gray-50/80 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-gray-300"
       >
         <div className="flex flex-row gap-2 justify-start items-center truncate min-w-0 flex-1">
-          <div
-            className={cn(
-              'w-4 h-4 flex-shrink-0 flex items-center justify-center border rounded-[15px] bg-gray-300'
-            )}
-          >
-            <CheckIcon className="text-white" size={10} />
+          <div className="flex-shrink-0">
+            {getStepStatusIcon(data.status)}
           </div>
-          <div className="truncate font-medium markdown-content min-w-0">
-            {data.description}
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium markdown-content">
+              {data.description}
+            </div>
+            {detail && (
+              <div className="mt-0.5 line-clamp-2 text-xs text-gray-500">
+                {detail}
+              </div>
+            )}
           </div>
           <ChevronDown
             className={cn('flex-shrink-0 transition-transform text-gray-500', expanded && 'rotate-180')}
           />
         </div>
       </div>
-      {expanded && tools.length > 0 && (
+      {expanded && shouldShowBody && (
         <div className="flex">
           <div className="w-6 relative flex-shrink-0">
             <div className="absolute left-[7px] top-2 bottom-0 w-[1px] border-l border-dashed border-gray-300" />
           </div>
           <div className="flex flex-col gap-3 flex-1 min-w-0 overflow-hidden pt-2 transition-[max-height,opacity] duration-150 ease-in-out">
+            {detail && (
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                {detail}
+              </div>
+            )}
             {tools.map((tool, idx) => (
               <ToolRow
                 key={`${data.id}-tool-${idx}`}
