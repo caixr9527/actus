@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Float, Index, PrimaryKeyConstraint, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.domain.models import LongTermMemory
 from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
 from .base import Base
+from .vector_types import AsyncpgVector
 
 
 class LongTermMemoryModel(Base):
@@ -85,7 +85,7 @@ class LongTermMemoryModel(Base):
     dedupe_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # pgvector 语义检索字段。
     embedding: Mapped[Optional[List[float]]] = mapped_column(
-        Vector(LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS),
+        AsyncpgVector(LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS),
         nullable=True,
     )
     # 最近一次被召回或访问的时间，用于搜索结果排序与热度判断。

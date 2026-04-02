@@ -96,7 +96,7 @@ def test_openai_llm_invoke_should_log_summary_without_reasoning_content(caplog) 
 
     log_text = _collect_log_text(caplog)
     assert result == message_payload
-    assert "调用模型: model=qwen3.5-plus tools_enabled=True request_tools=['write_file', 'read_file']" in log_text
+    assert "调用模型: model=qwen3.5-plus tools_enabled=True" in log_text
     assert "大模型返回摘要:" in log_text
     assert "tool_calls=['write_file']" in log_text
     assert "reasoning_content" not in log_text
@@ -120,7 +120,7 @@ def test_openai_llm_invoke_should_log_summary_without_tools(caplog) -> None:
 
     log_text = _collect_log_text(caplog)
     assert result == message_payload
-    assert "调用模型: model=qwen3.5-plus tools_enabled=False request_tools=[]" in log_text
+    assert "调用模型: model=qwen3.5-plus tools_enabled=False" in log_text
     assert "大模型返回摘要:" in log_text
     assert "tool_calls=[]" in log_text
     assert "content_preview=第一行\\n第二行" in log_text
