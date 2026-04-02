@@ -9,7 +9,10 @@ from app.domain.models import (
     Plan,
     Step,
     StepOutcome,
+    ToolResult,
 )
+from app.domain.services.tools import BaseTool, MessageTool
+from app.domain.services.tools.base import tool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import (
     build_planner_react_langgraph_graph,
@@ -124,6 +127,83 @@ class _FakeSkillRuntime:
                 "attachments": [],
             },
         )()
+
+
+class _FakeWriteFileTool(BaseTool):
+    name = "file"
+
+    @tool(
+        name="write_file",
+        description="写入文件",
+        parameters={
+            "filepath": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        required=["filepath", "content"],
+    )
+    async def write_file(self, filepath: str, content: str) -> ToolResult:
+        return ToolResult(
+            success=True,
+            data={
+                "filepath": filepath,
+                "content_length": len(content),
+            },
+        )
+
+
+class _FakeToolLoopLLM:
+    def __init__(self) -> None:
+        self.tool_name_snapshots: list[list[str]] = []
+
+    async def invoke(self, messages, tools, tool_choice=None, response_format=None):
+        tool_names = [str((tool.get("function") or {}).get("name") or "") for tool in list(tools or [])]
+        self.tool_name_snapshots.append(tool_names)
+        call_index = len(self.tool_name_snapshots) - 1
+        if call_index == 0:
+            assert "message_notify_user" in tool_names
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-notify",
+                        "function": {
+                            "name": "message_notify_user",
+                            "arguments": json.dumps({"text": "开始生成报告"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        if call_index == 1:
+            assert "message_notify_user" not in tool_names
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-write",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps(
+                                {
+                                    "filepath": "/home/ubuntu/report.md",
+                                    "content": "# 报告\n\n已生成。",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "result": "报告已生成",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            ),
+            "tool_calls": [],
+        }
 
 
 def _build_plan(*, step_status: ExecutionStatus = ExecutionStatus.COMPLETED) -> Plan:
@@ -258,6 +338,54 @@ def test_execute_step_node_should_not_write_string_none_when_skill_result_missin
     assert next_state["final_message"] == "已完成步骤：执行阶段"
     assert next_state["working_memory"]["decisions"] == ["已完成步骤：执行阶段"]
     assert next_state["step_states"][0]["step_id"] == "step-1"
+
+
+def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_tool() -> None:
+    llm = _FakeToolLoopLLM()
+    state = {
+        "session_id": "session-1",
+        "user_message": "继续执行",
+        "plan": Plan(
+            title="执行测试",
+            goal="验证工具循环治理",
+            language="zh",
+            message="执行当前步骤",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="生成报告",
+                    description="生成报告",
+                    objective_key="objective-step-1",
+                    success_criteria=["报告生成完成"],
+                    status=ExecutionStatus.PENDING,
+                )
+            ],
+        ),
+        "input_parts": [],
+        "working_memory": {},
+        "step_local_memory": {},
+        "graph_metadata": {},
+        "selected_artifacts": [],
+        "artifact_refs": [],
+        "emitted_events": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm=llm,
+            runtime_tools=[MessageTool(), _FakeWriteFileTool()],
+            max_tool_iterations=5,
+        )
+    )
+
+    executed_step = next_state["plan"].steps[0]
+    assert executed_step.outcome is not None
+    assert executed_step.outcome.produced_artifacts == ["/home/ubuntu/report.md"]
+    assert next_state["step_local_memory"]["pending_findings"] == ["/home/ubuntu/report.md"]
+    assert next_state["selected_artifacts"] == []
+    assert llm.tool_name_snapshots[0].count("message_notify_user") == 1
+    assert "message_notify_user" not in llm.tool_name_snapshots[1]
     assert next_state["step_states"][0]["status"] == ExecutionStatus.COMPLETED.value
     assert next_state["graph_metadata"]["last_step_execution_mode"] == "executed"
 
@@ -313,7 +441,8 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
     assert next_state["step_states"][-1]["status"] == ExecutionStatus.COMPLETED.value
     assert next_state["graph_metadata"]["step_reuse_hit"] is True
     assert next_state["graph_metadata"]["last_step_execution_mode"] == "reused"
-    assert next_state["selected_artifacts"] == ["/tmp/report.md"]
+    assert next_state["selected_artifacts"] == []
+    assert next_state["step_local_memory"]["pending_findings"] == ["/tmp/report.md"]
     assert next_state["working_memory"]["facts_in_session"] == ["报告结构已确定"]
 
 
@@ -379,6 +508,15 @@ def test_execution_context_block_should_separate_current_and_historical_context(
         "session_blockers": ["阻塞1"],
         "selected_artifacts": [f"/tmp/current-{index}.md" for index in range(12)],
         "historical_artifact_refs": [f"/tmp/history-{index}.md" for index in range(12)],
+        "step_states": [
+            {
+                "step_id": "step-a",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "produced_artifacts": [f"/tmp/generated-{index}.md" for index in range(8)],
+                },
+            }
+        ],
         "recent_run_briefs": [
             {
                 "run_id": f"run-{index}",
@@ -400,7 +538,6 @@ def test_execution_context_block_should_separate_current_and_historical_context(
             for index in range(6)
         ],
         "working_memory": {"open_questions": ["问题2", "问题3"]},
-        "step_states": [],
         "message_window": [
             {"role": "user", "message": "第一轮问题"},
             {"role": "assistant", "message": "第一轮回答"},
@@ -410,6 +547,7 @@ def test_execution_context_block_should_separate_current_and_historical_context(
     context_block = _build_execution_context_block(state)
 
     assert context_block["selected_artifacts"] == [f"/tmp/current-{index}.md" for index in range(6)]
+    assert context_block["current_run_artifacts"] == [f"/tmp/generated-{index}.md" for index in range(2, 8)]
     assert context_block["historical_artifact_refs"] == [f"/tmp/history-{index}.md" for index in range(6)]
     assert len(context_block["recent_run_briefs"]) == 3
     assert len(context_block["recent_attempt_briefs"]) == 3
@@ -800,7 +938,7 @@ def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_emp
     summarized_state = asyncio.run(summarize_node(state, llm))
 
     assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/course_directory.md"]
-    assert summarized_state["selected_artifacts"] == ["artifact-id-1", "/home/ubuntu/course_directory.md"]
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/course_directory.md"]
     message_event = summarized_state["emitted_events"][0]
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/course_directory.md"]
 
@@ -866,6 +1004,7 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
     summarized_state = asyncio.run(summarize_node(state, llm))
 
     assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
     message_event = summarized_state["emitted_events"][0]
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
 

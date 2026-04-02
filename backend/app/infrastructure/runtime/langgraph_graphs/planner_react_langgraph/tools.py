@@ -17,6 +17,12 @@ from .runtime_logging import elapsed_ms, log_runtime, now_perf
 
 logger = logging.getLogger(__name__)
 
+NOTIFY_USER_FUNCTION_NAME = "message_notify_user"
+ASK_USER_FUNCTION_NAME = "message_ask_user"
+TOOL_RESULT_MAX_TEXT_CHARS = 2400
+TOOL_RESULT_MAX_LIST_ITEMS = 12
+TOOL_RESULT_MAX_DICT_ITEMS = 12
+
 WAIT_STEP_KEYWORDS: tuple[str, ...] = (
     "等待",
     "选择",
@@ -84,6 +90,10 @@ def _tool_call_priority(function_name: str) -> int:
     normalized_name = function_name.strip().lower()
     if "search" in normalized_name:
         return 0
+    if normalized_name == NOTIFY_USER_FUNCTION_NAME:
+        return 90
+    if normalized_name == ASK_USER_FUNCTION_NAME:
+        return 95
     if normalized_name.startswith("browser_"):
         return 80
     return 20
@@ -182,6 +192,111 @@ def _step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
     return any(keyword in candidate_text for keyword in WAIT_STEP_KEYWORDS)
 
 
+def _filter_available_tools(
+        available_tools: List[Dict[str, Any]],
+        *,
+        allow_notify_user: bool,
+        allow_ask_user: bool,
+) -> List[Dict[str, Any]]:
+    filtered_tools: List[Dict[str, Any]] = []
+    for tool_schema in available_tools:
+        function_name = _extract_function_name(tool_schema)
+        if function_name == NOTIFY_USER_FUNCTION_NAME and not allow_notify_user:
+            continue
+        if function_name == ASK_USER_FUNCTION_NAME and not allow_ask_user:
+            continue
+        filtered_tools.append(tool_schema)
+    return filtered_tools
+
+
+def _truncate_tool_text(value: Any, *, max_chars: int = TOOL_RESULT_MAX_TEXT_CHARS) -> str:
+    normalized_value = str(value or "").strip()
+    if len(normalized_value) <= max_chars:
+        return normalized_value
+    return normalized_value[:max_chars]
+
+
+def _compact_tool_value(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_tool_text(value)
+    if depth >= 2:
+        return _truncate_tool_text(value, max_chars=400)
+    if isinstance(value, list):
+        return [
+            _compact_tool_value(item, depth=depth + 1)
+            for item in value[:TOOL_RESULT_MAX_LIST_ITEMS]
+        ]
+    if isinstance(value, dict):
+        compacted: Dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= TOOL_RESULT_MAX_DICT_ITEMS:
+                break
+            compacted[str(key)] = _compact_tool_value(item, depth=depth + 1)
+        return compacted
+    return _truncate_tool_text(value, max_chars=400)
+
+
+def _summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
+    normalized_name = function_name.strip().lower()
+    result_data = tool_result.data
+    if normalized_name == NOTIFY_USER_FUNCTION_NAME:
+        return {
+            "notified": True,
+            "message": "当前步骤进度通知已发送，请继续执行实际工具步骤，不要再次调用进度通知。",
+        }
+    if normalized_name == ASK_USER_FUNCTION_NAME:
+        interrupt_payload = result_data.get("interrupt") if isinstance(result_data, dict) else None
+        if isinstance(interrupt_payload, dict):
+            return {
+                "interrupt": {
+                    "kind": str(interrupt_payload.get("kind") or "").strip(),
+                    "prompt": _truncate_tool_text(interrupt_payload.get("prompt"), max_chars=200),
+                    "title": _truncate_tool_text(interrupt_payload.get("title"), max_chars=120),
+                }
+            }
+        return {"interrupt": True}
+    if normalized_name == "write_file" and isinstance(result_data, dict):
+        return {
+            "filepath": str(
+                result_data.get("filepath")
+                or result_data.get("file_path")
+                or result_data.get("path")
+                or ""
+            ).strip(),
+            "message": _truncate_tool_text(tool_result.message, max_chars=200),
+        }
+    if normalized_name == "read_file" and isinstance(result_data, dict):
+        return {
+            "filepath": str(
+                result_data.get("filepath")
+                or result_data.get("file_path")
+                or result_data.get("path")
+                or ""
+            ).strip(),
+            "content": _truncate_tool_text(result_data.get("content"), max_chars=1800),
+        }
+    if normalized_name in {"list_files", "find_files"} and isinstance(result_data, dict):
+        files = result_data.get("files") or result_data.get("results") or []
+        if not isinstance(files, list):
+            files = []
+        return {
+            "dir_path": str(result_data.get("dir_path") or "").strip(),
+            "files": [_truncate_tool_text(item, max_chars=200) for item in files[:TOOL_RESULT_MAX_LIST_ITEMS]],
+        }
+    return {"data": _compact_tool_value(result_data)}
+
+
+def _build_tool_feedback_content(function_name: str, tool_result: ToolResult) -> str:
+    payload = {
+        "success": bool(tool_result.success),
+        "message": _truncate_tool_text(tool_result.message, max_chars=240),
+        "data": _summarize_tool_result_data(function_name, tool_result),
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 async def execute_step_with_prompt(
         *,
         llm: LLM,
@@ -265,19 +380,27 @@ async def execute_step_with_prompt(
     ]
 
     llm_message: Dict[str, Any] = {}
+    notify_user_sent = False
+    allow_ask_user = _step_allows_user_wait(step, {})
 
     for index in range(max(1, int(max_tool_iterations))):
+        iteration_tools = _filter_available_tools(
+            available_tools,
+            allow_notify_user=not notify_user_sent,
+            allow_ask_user=allow_ask_user,
+        )
         log_runtime(
             logger,
             logging.INFO,
             "开始工具决策轮次",
             step_id=str(step.id or ""),
             iteration=index,
+            available_tool_count=len(iteration_tools),
         )
         llm_started_at = now_perf()
         llm_message = await llm.invoke(
             messages=messages,
-            tools=available_tools,
+            tools=iteration_tools,
             tool_choice="auto",
         )
         llm_cost_ms = elapsed_ms(llm_started_at)
@@ -315,7 +438,7 @@ async def execute_step_with_prompt(
 
         selected_tool_call = pick_preferred_tool_call(
             tool_calls=[item for item in tool_calls if isinstance(item, dict)],
-            available_tools=available_tools,
+            available_tools=iteration_tools,
         )
         if selected_tool_call is None:
             continue
@@ -369,7 +492,20 @@ async def execute_step_with_prompt(
                 function_name=function_name,
             )
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
-        elif function_name == "message_ask_user" and not _step_allows_user_wait(step, function_args):
+        elif function_name == NOTIFY_USER_FUNCTION_NAME and notify_user_sent:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "重复进度通知已收敛",
+                step_id=str(step.id or ""),
+                function_name=function_name,
+            )
+            tool_result = ToolResult(
+                success=True,
+                message="当前步骤已发送过进度通知，请继续调用实际工具或直接完成当前步骤。",
+                data="Continue",
+            )
+        elif function_name == ASK_USER_FUNCTION_NAME and not _step_allows_user_wait(step, function_args):
             log_runtime(
                 logger,
                 logging.WARNING,
@@ -451,12 +587,14 @@ async def execute_step_with_prompt(
                 "result": "",
                 "attachments": [],
             }, emitted_tool_events
+        if function_name == NOTIFY_USER_FUNCTION_NAME and bool(tool_result.success):
+            notify_user_sent = True
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "function_name": function_name,
-                "content": tool_result.model_dump_json(),
+                "content": _build_tool_feedback_content(function_name, tool_result),
             }
         )
 

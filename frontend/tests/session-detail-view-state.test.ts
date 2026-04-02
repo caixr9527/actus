@@ -6,6 +6,7 @@ import {
   shouldAutoCloseTaskPreview,
   shouldAutoExpandStep,
   shouldAutoScrollToLatest,
+  shouldShowSessionThinking,
 } from '../src/lib/session-detail-view-state'
 
 test('shouldAutoExpandStep should only expand running steps by default', () => {
@@ -76,4 +77,33 @@ test('shouldAutoScrollToLatest should auto scroll once per session when content 
     timelineLength: 0,
     shouldShowThinking: false,
   }), false)
+})
+
+test('shouldShowSessionThinking should hide thinking while any step is running', () => {
+  assert.equal(shouldShowSessionThinking({
+    streaming: true,
+    sessionStatus: 'running',
+    hasInitialMessage: false,
+    timelineLength: 5,
+    hasError: false,
+    hasRunningStep: true,
+  }), false)
+
+  assert.equal(shouldShowSessionThinking({
+    streaming: false,
+    sessionStatus: 'running',
+    hasInitialMessage: false,
+    timelineLength: 5,
+    hasError: false,
+    hasRunningStep: false,
+  }), true)
+
+  assert.equal(shouldShowSessionThinking({
+    streaming: false,
+    sessionStatus: 'completed',
+    hasInitialMessage: true,
+    timelineLength: 0,
+    hasError: false,
+    hasRunningStep: false,
+  }), true)
 })

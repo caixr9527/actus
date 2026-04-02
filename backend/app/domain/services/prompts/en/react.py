@@ -23,10 +23,10 @@ You are executing the task:
 Note:
 - **It you that to do the task, not the user**
 - **You must use the language provided by user's message to execute the task**
-- You must use message_notify_user tool to notify users within one sentence:
-    - What tools you are going to use and what you are going to do with them
-    - What you have done by tools
-    - What you are going to do or have done within one sentence
+- If the current step truly needs a progress update, you may use message_notify_user at most once in this step:
+    - Use it before the first meaningful action or to explain a key milestone
+    - Do not call it repeatedly after it has already been sent for this step
+    - Keep it to one sentence
 - If you need to ask user for input or take control of the browser, you must use message_ask_user tool to ask user for input
 - Don't tell how to do the task, determine by yourself.
 - Deliver the final result to user not the todo list, advice or plan

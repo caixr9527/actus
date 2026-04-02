@@ -1,39 +1,21 @@
 'use client'
 
-import { useMemo, useState } from 'react'
-import { CheckCircle2, ChevronDown, ChevronUp, Circle, Clock3, Loader2, XCircle } from 'lucide-react'
+import { useState } from 'react'
+import { CheckCircle2, ChevronDown, Circle, Clock3, Loader2, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { buildRunTimeline, buildStepViewState, type RunTimelineItem, type StepViewStatus } from '@/lib/run-timeline'
-import type { SSEEventData } from '@/lib/api/types'
+import { type StepViewState, type StepViewStatus } from '@/lib/run-timeline'
 import { useI18n } from '@/lib/i18n'
 import type { Translate } from '@/lib/i18n'
 
 export interface RunTimelinePanelProps {
   className?: string
-  events: SSEEventData[]
+  stepView: StepViewState
 }
 
-const TIMELINE_PREVIEW_COUNT = 12
-
-function formatRelativeTime(ts: number | null, locale: 'zh-CN' | 'en-US'): string {
-  if (ts == null) return locale === 'en-US' ? 'No timestamp' : '无时间戳'
-  const now = Date.now()
-  const diff = now - ts
-  if (diff < 60_000) return locale === 'en-US' ? 'Just now' : '刚刚'
-  if (diff < 3_600_000) {
-    const m = Math.floor(diff / 60_000)
-    return locale === 'en-US' ? `${m}m ago` : `${m}分钟前`
-  }
-  if (diff < 86_400_000) {
-    const h = Math.floor(diff / 3_600_000)
-    return locale === 'en-US' ? `${h}h ago` : `${h}小时前`
-  }
-  const d = Math.floor(diff / 86_400_000)
-  return locale === 'en-US' ? `${d}d ago` : `${d}天前`
-}
-
-function kindLabel(item: RunTimelineItem, t: Translate): string {
-  return t(`sessionDetail.runTimelineKind.${item.kind}`)
+type StepTone = {
+  badgeClassName: string
+  markerClassName: string
+  titleClassName: string
 }
 
 function statusLabel(status: StepViewStatus, t: Translate): string {
@@ -42,127 +24,141 @@ function statusLabel(status: StepViewStatus, t: Translate): string {
 
 function statusIcon(status: StepViewStatus) {
   if (status === 'completed') return <CheckCircle2 className="size-4 text-emerald-600" />
-  if (status === 'failed') return <XCircle className="size-4 text-red-600" />
-  if (status === 'running') return <Loader2 className="size-4 animate-spin text-blue-600" />
+  if (status === 'failed') return <XCircle className="size-4 text-rose-600" />
+  if (status === 'running') return <Loader2 className="size-4 animate-spin text-sky-600" />
   if (status === 'waiting') return <Clock3 className="size-4 text-amber-600" />
-  return <Circle className="size-4 text-gray-400" />
+  return <Circle className="size-4 text-stone-400" />
 }
 
-function kindBadgeClass(kind: RunTimelineItem['kind']): string {
-  if (kind === 'error') return 'bg-red-50 text-red-700 border-red-200'
-  if (kind === 'done') return 'bg-emerald-50 text-emerald-700 border-emerald-200'
-  if (kind === 'wait') return 'bg-amber-50 text-amber-700 border-amber-200'
-  if (kind === 'tool') return 'bg-blue-50 text-blue-700 border-blue-200'
-  if (kind === 'step') return 'bg-cyan-50 text-cyan-700 border-cyan-200'
-  if (kind === 'plan') return 'bg-purple-50 text-purple-700 border-purple-200'
-  return 'bg-gray-50 text-gray-700 border-gray-200'
+function getStepTone(status: StepViewStatus): StepTone {
+  if (status === 'completed') {
+    return {
+      badgeClassName: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+      markerClassName: 'bg-emerald-500',
+      titleClassName: 'text-stone-700',
+    }
+  }
+  if (status === 'failed') {
+    return {
+      badgeClassName: 'border-rose-200 bg-rose-50 text-rose-700',
+      markerClassName: 'bg-rose-500',
+      titleClassName: 'text-stone-700',
+    }
+  }
+  if (status === 'running') {
+    return {
+      badgeClassName: 'border-sky-200 bg-sky-50 text-sky-700',
+      markerClassName: 'bg-sky-500',
+      titleClassName: 'text-stone-900',
+    }
+  }
+  if (status === 'waiting') {
+    return {
+      badgeClassName: 'border-amber-200 bg-amber-50 text-amber-700',
+      markerClassName: 'bg-amber-500',
+      titleClassName: 'text-stone-800',
+    }
+  }
+  return {
+    badgeClassName: 'border-stone-200 bg-stone-50 text-stone-600',
+    markerClassName: 'bg-stone-300',
+    titleClassName: 'text-stone-500',
+  }
 }
 
-export function RunTimelinePanel({ className, events }: RunTimelinePanelProps) {
-  const { locale, t } = useI18n()
+export function RunTimelinePanel({ className, stepView }: RunTimelinePanelProps) {
+  const { t } = useI18n()
   const [expanded, setExpanded] = useState(false)
-  const timelineItems = useMemo(() => buildRunTimeline(events, locale), [events, locale])
-  const stepView = useMemo(() => buildStepViewState(events), [events])
-  const visibleTimelineItems = expanded ? timelineItems : timelineItems.slice(-TIMELINE_PREVIEW_COUNT)
-  const hiddenCount = timelineItems.length - visibleTimelineItems.length
-  const latestTimelineItem = timelineItems.length > 0 ? timelineItems[timelineItems.length - 1] : null
+
+  const totalCount = stepView.totalCount
+  const completedCount = stepView.completedCount
+  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0
 
   return (
-    <div className={cn('rounded-xl border bg-white p-3', className)}>
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-gray-800">{t('sessionDetail.runTimelineTitle')}</h3>
+    <div className={cn('px-1', className)}>
+      <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white/92">
         <button
           type="button"
-          className="inline-flex cursor-pointer items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
+          className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-stone-50/70 cursor-pointer sm:px-4"
           onClick={() => setExpanded((prev) => !prev)}
         >
-          {expanded ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
-          <span>{expanded ? t('sessionDetail.runTimelineCollapse') : t('sessionDetail.runTimelineExpand')}</span>
-        </button>
-      </div>
+          <span className="shrink-0 text-xs font-medium tracking-[0.14em] text-stone-500 uppercase">
+            {t('sessionDetail.runTimelineTitle')}
+          </span>
 
-      {!expanded ? (
-        <div className="mt-2 rounded-lg border bg-gray-50 px-3 py-2">
-          {latestTimelineItem ? (
-            <>
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0 flex items-center gap-2">
-                  <span className={cn('rounded-full border px-2 py-0.5 text-[11px]', kindBadgeClass(latestTimelineItem.kind))}>
-                    {kindLabel(latestTimelineItem, t)}
-                  </span>
-                  <p className="truncate text-xs text-gray-700">{latestTimelineItem.summary}</p>
-                </div>
-                <span className="shrink-0 text-[11px] text-gray-500">
-                  {formatRelativeTime(latestTimelineItem.timestamp, locale)}
-                </span>
-              </div>
-              <div className="mt-1 flex items-center gap-2 text-[11px] text-gray-500">
-                <span>{t('sessionDetail.runTimelineCompactSteps', { completed: stepView.completedCount, total: stepView.totalCount })}</span>
-                <span>·</span>
-                <span>{t('sessionDetail.runTimelineCompactEvents', { count: timelineItems.length })}</span>
-              </div>
-            </>
-          ) : (
-            <div className="text-xs text-gray-500">{t('sessionDetail.runTimelineEmpty')}</div>
-          )}
-        </div>
-      ) : (
-        <>
-          <div className="mt-3 rounded-lg border bg-gray-50 px-3 py-2">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-medium text-gray-600">{t('sessionDetail.stepViewTitle')}</span>
-              <span className="text-xs text-gray-500">
-                {stepView.completedCount}/{stepView.totalCount}
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-3">
+              <span className="shrink-0 text-xs text-stone-500">
+                {completedCount}/{totalCount || 0}
               </span>
-            </div>
-            {stepView.steps.length === 0 ? (
-              <div className="text-xs text-gray-500">{t('sessionDetail.stepViewEmpty')}</div>
-            ) : (
-              <div className="flex max-h-32 flex-col gap-1 overflow-y-auto pr-1">
-                {stepView.steps.map((step) => (
-                  <div key={step.id} className="flex items-center gap-2 rounded-md bg-white px-2 py-1.5 text-xs">
-                    {statusIcon(step.status)}
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-gray-700">{step.description}</p>
-                      {step.detail && (
-                        <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-500">{step.detail}</p>
-                      )}
-                    </div>
-                    <span className="shrink-0 text-[11px] text-gray-500">{statusLabel(step.status, t)}</span>
+              <div className="min-w-0 flex-1">
+                {!expanded ? (
+                  <div className="h-1 rounded-full bg-stone-200">
+                    <div
+                      className="h-full rounded-full bg-stone-900 transition-[width] duration-300"
+                      style={{ width: `${progressPercent}%` }}
+                    />
                   </div>
-                ))}
+                ) : (
+                  <div className="h-px bg-transparent" />
+                )}
               </div>
-            )}
+            </div>
           </div>
 
-          <div className="mt-3">
-            {timelineItems.length === 0 ? (
-              <div className="rounded-lg border border-dashed px-3 py-4 text-xs text-gray-500">
-                {t('sessionDetail.runTimelineEmpty')}
+          <div className="grid size-7 shrink-0 place-items-center rounded-full border border-stone-200 bg-white text-stone-500">
+            <ChevronDown className={cn('size-4 transition-transform duration-200', expanded && 'rotate-180')} />
+          </div>
+        </button>
+
+        {expanded ? (
+          <div className="border-t border-stone-200/80 px-3 py-2.5 sm:px-4">
+            {stepView.steps.length === 0 ? (
+              <div className="py-3 text-sm text-stone-500">
+                {t('sessionDetail.stepViewEmpty')}
               </div>
             ) : (
-              <div className="flex max-h-56 flex-col gap-1 overflow-y-auto pr-1">
-                {hiddenCount > 0 && (
-                  <div className="text-center text-[11px] text-gray-500">
-                    {t('sessionDetail.runTimelineHiddenCount', { count: hiddenCount })}
-                  </div>
-                )}
-                {visibleTimelineItems.map((item) => (
-                  <div key={item.id} className="rounded-lg border bg-white px-2.5 py-2">
-                    <div className="mb-1 flex items-center gap-2">
-                      <span className={cn('rounded-full border px-2 py-0.5 text-[11px]', kindBadgeClass(item.kind))}>
-                        {kindLabel(item, t)}
-                      </span>
-                      <span className="text-[11px] text-gray-500">{formatRelativeTime(item.timestamp, locale)}</span>
+              <div className="relative">
+                <div className="absolute bottom-4 left-[11px] top-4 w-px bg-stone-200" />
+                <div className="space-y-1">
+                {stepView.steps.map((step) => {
+                  const tone = getStepTone(step.status)
+                  return (
+                    <div
+                      key={step.id}
+                      className="relative pl-8"
+                    >
+                      <span className={cn('absolute left-0 top-3 size-[7px] rounded-full', tone.markerClassName)} />
+                      <div className="flex min-h-8 items-center justify-between gap-3 py-1">
+                        <div className="min-w-0 flex items-center gap-3">
+                          <span className="w-6 shrink-0 text-xs font-medium tabular-nums text-stone-400">
+                            {String(step.stepIndex + 1).padStart(2, '0')}
+                          </span>
+                          <p className={cn('truncate text-sm', tone.titleClassName)}>
+                            {step.description}
+                          </p>
+                        </div>
+                        <span
+                          className={cn(
+                            'shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                            tone.badgeClassName,
+                          )}
+                        >
+                          <span className="inline-flex items-center gap-1.5">
+                            {statusIcon(step.status)}
+                            <span>{statusLabel(step.status, t)}</span>
+                          </span>
+                        </span>
+                      </div>
                     </div>
-                    <p className="text-xs text-gray-700">{item.summary}</p>
-                  </div>
-                ))}
+                  )
+                })}
+                </div>
               </div>
             )}
           </div>
-        </>
-      )}
+        ) : null}
+      </div>
     </div>
   )
 }

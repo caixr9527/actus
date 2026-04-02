@@ -16,9 +16,13 @@ import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
 } from '@/lib/session-events'
-import { findLatestWaitEventContext } from '@/lib/run-timeline'
+import { buildStepViewState, findLatestWaitEventContext } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
-import { shouldAutoCloseTaskPreview, shouldAutoScrollToLatest } from '@/lib/session-detail-view-state'
+import {
+  shouldAutoCloseTaskPreview,
+  shouldAutoScrollToLatest,
+  shouldShowSessionThinking,
+} from '@/lib/session-detail-view-state'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { useAuth } from '@/hooks/use-auth'
@@ -98,6 +102,10 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
   const timeline = useMemo(() => eventsToTimeline(events, locale), [events, locale])
+  const stepView = useMemo(() => buildStepViewState(events), [events])
+  const hasRunningStep = useMemo(() => {
+    return stepView.steps.some((step) => step.status === 'running')
+  }, [stepView.steps])
   const waitContext = useMemo(() => findLatestWaitEventContext(events), [events])
   const isWaitingForResume = session?.status === 'waiting'
 
@@ -136,18 +144,19 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const resolvedPreviewTool = useMemo(() => {
     return resolvePreviewToolFromTimeline(previewTool, timeline)
   }, [previewTool, timeline])
+  const latestTool = useMemo(() => findLatestTool(timeline), [timeline])
+  const toolCount = useMemo(() => {
+    return timeline.reduce((count, item) => {
+      if (item.kind === 'tool') return count + 1
+      if (item.kind === 'step') return count + item.tools.length
+      return count
+    }, 0)
+  }, [timeline])
 
   // 任务运行中自动追踪最新工具预览（VNC 打开时暂停）
   // 该副作用职责是将流式事件同步到预览 UI。
   useEffect(() => {
     if (session?.status !== 'running' || vncOpen) return
-
-    const latestTool = findLatestTool(timeline)
-    const toolCount = timeline.reduce((n, item) => {
-      if (item.kind === 'tool') return n + 1
-      if (item.kind === 'step') return n + item.tools.length
-      return n
-    }, 0)
 
     if (toolCount > prevToolCountRef.current && latestTool) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -156,7 +165,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
       scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
     }
     prevToolCountRef.current = toolCount
-  }, [timeline, session?.status, vncOpen])
+  }, [latestTool, session?.status, toolCount, vncOpen])
 
   useEffect(() => {
     if (!initialMessage || initialMessageSentRef.current || !session || loading || streaming) {
@@ -229,13 +238,12 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }, [])
 
   const handleJumpToLatest = useCallback(() => {
-    const latest = findLatestTool(timeline)
-    if (latest) {
-      setPreviewTool(latest)
+    if (latestTool) {
+      setPreviewTool(latestTool)
       setPreviewFile(null)
     }
     scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
-  }, [timeline])
+  }, [latestTool])
 
   const handleOpenVNC = useCallback(() => {
     setVncOpen(true)
@@ -244,15 +252,14 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const handleCloseVNC = useCallback(() => {
     setVncOpen(false)
     // 关闭 VNC 后跳转到最新工具
-    const latest = findLatestTool(timeline)
-    if (latest && session?.status === 'running') {
-      setPreviewTool(latest)
+    if (latestTool && session?.status === 'running') {
+      setPreviewTool(latestTool)
       setPreviewFile(null)
       setTimeout(() => {
         scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
       }, 100)
     }
-  }, [timeline, session?.status])
+  }, [latestTool, session?.status])
 
   const handleStop = useCallback(async () => {
     if (!session) return
@@ -279,8 +286,14 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   )
   const errorMessage = error ? getApiErrorMessage(error, 'sessionDetail.loadFailed', t) : null
 
-  const shouldShowThinking =
-    streaming || session?.status === 'running' || (hasInitialMessage && timeline.length === 0 && !error)
+  const shouldShowThinking = shouldShowSessionThinking({
+    streaming,
+    sessionStatus: session?.status,
+    hasInitialMessage,
+    timelineLength: timeline.length,
+    hasError: Boolean(error),
+    hasRunningStep,
+  })
 
   useEffect(() => {
     if (!shouldAutoScrollToLatest({
@@ -494,7 +507,10 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
             </div>
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">
-              <RunTimelinePanel className="mb-2" events={events} />
+              <RunTimelinePanel
+                className="mb-2"
+                stepView={stepView}
+              />
               {isWaitingForResume && waitContext ? (
                 <WaitResumeCard
                   className="mb-2"

@@ -44,6 +44,7 @@ from .parsers import (
     build_fallback_plan_title,
     format_attachments_for_prompt,
     build_step_from_payload,
+    extract_write_file_paths_from_tool_events,
     merge_attachment_paths,
     normalize_attachments,
     safe_parse_json,
@@ -181,23 +182,61 @@ def _is_attachment_filepath(ref: Any) -> bool:
     return raw_ref.startswith("/")
 
 
+def _merge_known_attachment_refs(*path_groups: Any) -> List[str]:
+    normalized_groups = [_normalize_attachment_paths(group) for group in path_groups]
+    return _normalize_attachment_paths(merge_attachment_paths(*normalized_groups))
+
+
+def _extract_step_state_artifacts(step_state: Any) -> List[str]:
+    if not isinstance(step_state, dict):
+        return []
+    outcome = step_state.get("outcome")
+    if not isinstance(outcome, dict):
+        return []
+    return _normalize_attachment_paths(outcome.get("produced_artifacts"))
+
+
+def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
+    artifact_groups: List[List[str]] = [
+        _extract_step_state_artifacts(step_state)
+        for step_state in list(state.get("step_states") or [])
+    ]
+    artifact_groups.append(_get_step_artifacts(state.get("last_executed_step")))
+    artifact_groups.append(
+        [
+            str(ref).strip()
+            for ref in list(state.get("artifact_refs") or [])
+            if _is_attachment_filepath(ref)
+        ]
+    )
+    return _merge_known_attachment_refs(*artifact_groups)
+
+
 def _resolve_summary_attachment_refs(
         state: PlannerReActLangGraphState,
         parsed_attachments: Any,
 ) -> List[str]:
     explicit_attachment_refs = normalize_attachments(parsed_attachments)
     if len(explicit_attachment_refs) > 0:
-        return explicit_attachment_refs
+        return _normalize_attachment_paths(explicit_attachment_refs)
 
     last_step_attachment_refs = _get_step_artifacts(state.get("last_executed_step"))
     if len(last_step_attachment_refs) > 0:
         return last_step_attachment_refs
 
-    return [
+    selected_attachment_refs = [
         ref
         for ref in list(state.get("selected_artifacts") or [])
         if _is_attachment_filepath(ref)
     ]
+    if len(selected_attachment_refs) > 0:
+        return _normalize_attachment_paths(selected_attachment_refs)
+
+    current_run_artifacts = _collect_current_run_artifacts(state)
+    if len(current_run_artifacts) > 0:
+        return current_run_artifacts[-1:]
+
+    return []
 
 
 def _reduce_state_with_events(
@@ -408,12 +447,7 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
             "step_local_memory": step_local_memory,
             "graph_metadata": graph_metadata,
             "final_message": _normalize_step_result_text(step.outcome.summary),
-            "selected_artifacts": list(
-                dict.fromkeys(
-                    list(state.get("selected_artifacts") or [])
-                    + list(step.outcome.produced_artifacts or [])
-                )
-            ),
+            "selected_artifacts": list(state.get("selected_artifacts") or []),
             "pending_interrupt": {},
         },
         events=[completed_event],
@@ -440,6 +474,7 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
         blockers.extend(_normalize_text_items(last_step.outcome.blockers))
 
     selected_artifacts = _normalize_context_artifact_refs(state.get("selected_artifacts"))
+    current_run_artifacts = _collect_current_run_artifacts(state)
     historical_artifact_refs = _normalize_context_artifact_refs(state.get("historical_artifact_refs"))
 
     recent_run_briefs = [
@@ -567,6 +602,7 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
             max_chars=120,
         ),
         "selected_artifacts": list(dict.fromkeys(selected_artifacts))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
+        "current_run_artifacts": current_run_artifacts[-PROMPT_CONTEXT_ARTIFACT_LIMIT:],
         "historical_artifact_refs": list(dict.fromkeys(historical_artifact_refs))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
         "recent_run_briefs": recent_run_briefs,
         "recent_attempt_briefs": recent_attempt_briefs,
@@ -1565,10 +1601,15 @@ async def execute_step_node(
         fallback=f"已完成步骤：{step.description}" if step_success else f"步骤执行失败：{step.description}",
     )
     model_attachment_paths = normalize_attachments(llm_message.get("attachments"))
+    tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
+    step_attachment_paths = _merge_known_attachment_refs(
+        model_attachment_paths,
+        tool_attachment_paths,
+    )
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
-        produced_artifacts=model_attachment_paths,
+        produced_artifacts=step_attachment_paths,
         blockers=_normalize_text_items(llm_message.get("blockers")),
         facts_learned=_normalize_text_items(llm_message.get("facts_learned")),
         open_questions=_normalize_text_items(llm_message.get("open_questions")),
@@ -1604,7 +1645,7 @@ async def execute_step_node(
     step_local_memory = dict(state.get("step_local_memory") or {})
     step_local_memory["current_step_id"] = str(step.id)
     step_local_memory["observation_summary"] = step_summary
-    step_local_memory["pending_findings"] = list(step.outcome.produced_artifacts or [])
+    step_local_memory["pending_findings"] = list(step_attachment_paths)
     log_runtime(
         logger,
         logging.INFO,
@@ -1613,7 +1654,7 @@ async def execute_step_node(
         step_id=str(step.id or ""),
         status=step.status.value,
         success=step_success,
-        artifact_count=len(model_attachment_paths),
+        artifact_count=len(step_attachment_paths),
         blocker_count=len(list(step.outcome.blockers or [])),
         open_question_count=len(list(step.outcome.open_questions or [])),
         next_step_id=str(next_step.id or "") if next_step is not None else "",
@@ -1632,12 +1673,7 @@ async def execute_step_node(
             "step_local_memory": step_local_memory,
             "graph_metadata": graph_metadata,
             "final_message": step_summary,
-            "selected_artifacts": list(
-                dict.fromkeys(
-                    list(state.get("selected_artifacts") or [])
-                    + list(step.outcome.produced_artifacts or [])
-                )
-            ),
+            "selected_artifacts": list(state.get("selected_artifacts") or []),
             "pending_interrupt": {},
         },
         events=events,
@@ -2058,12 +2094,7 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
             "current_step_id": None,
             "final_message": summary_message,
             "working_memory": working_memory,
-            "selected_artifacts": list(
-                dict.fromkeys(
-                    list(state.get("selected_artifacts") or [])
-                    + summary_attachment_refs
-                )
-            ),
+            "selected_artifacts": list(summary_attachment_refs),
             "pending_memory_writes": _merge_memory_candidates(
                 list(state.get("pending_memory_writes") or []),
                 memory_candidates,
@@ -2164,7 +2195,9 @@ async def consolidate_memory_node(
         "planner_local_memory": {},
         "step_local_memory": {},
         "summary_local_memory": {},
-        "selected_artifacts": list(dict.fromkeys(list(state.get("selected_artifacts") or []) + list(summary_local_memory.get("selected_artifacts") or []))),
+        "selected_artifacts": _normalize_context_artifact_refs(
+            summary_local_memory.get("selected_artifacts") or state.get("selected_artifacts")
+        ),
         "graph_metadata": graph_metadata,
     }
     log_runtime(

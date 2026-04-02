@@ -22,6 +22,32 @@ export function shouldAutoCloseTaskPreview(
   return previousStatus === 'running' && nextStatus === 'completed'
 }
 
+export function shouldShowSessionThinking(params: {
+  streaming: boolean
+  sessionStatus: SessionStatus | null | undefined
+  hasInitialMessage: boolean
+  timelineLength: number
+  hasError: boolean
+  hasRunningStep: boolean
+}): boolean {
+  const {
+    streaming,
+    sessionStatus,
+    hasInitialMessage,
+    timelineLength,
+    hasError,
+    hasRunningStep,
+  } = params
+
+  if (hasRunningStep) return false
+
+  return (
+    streaming
+    || sessionStatus === 'running'
+    || (hasInitialMessage && timelineLength === 0 && !hasError)
+  )
+}
+
 export function shouldAutoScrollToLatest(params: {
   lastAutoScrolledSessionId: string | null
   sessionId: string
