@@ -13,6 +13,7 @@ from app.domain.models import Step, ToolEvent, ToolEventStatus, ToolResult
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.tools import BaseTool
 from .parsers import normalize_attachments, safe_parse_json
+from .runtime_logging import elapsed_ms, log_runtime, now_perf
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,13 @@ def collect_available_tools(runtime_tools: List[BaseTool]) -> List[Dict[str, Any
         try:
             available_tools.extend(tool.get_tools())
         except Exception as e:
-            logger.warning("读取工具[%s] schema 失败，已跳过: %s", getattr(tool, "name", "unknown"), e)
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "工具Schema读取失败",
+                tool_name=getattr(tool, "name", "unknown"),
+                error=str(e),
+            )
 
     def _tool_priority(tool_schema: Dict[str, Any]) -> Tuple[int, str]:
         function_name = str(
@@ -121,10 +128,12 @@ def pick_preferred_tool_call(
     ranked_candidates.sort(key=lambda item: (item[0], item[1]))
     selected_call = ranked_candidates[0][2]
     selected_function = str((selected_call.get("function") or {}).get("name") or "")
-    logger.info(
-        "LangGraph 多工具候选仲裁: total=%s, selected=%s",
-        len(tool_calls),
-        selected_function,
+    log_runtime(
+        logger,
+        logging.INFO,
+        "工具候选仲裁完成",
+        candidate_count=len(tool_calls),
+        selected_function=selected_function,
     )
     return selected_call
 
@@ -147,7 +156,12 @@ def _parse_tool_call_args(raw_arguments: Any) -> Dict[str, Any]:
             parsed = json.loads(raw_arguments)
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
-            logger.warning("LangGraph tool_call 参数解析失败，按空参数处理")
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "工具参数解析失败",
+                raw_length=len(raw_arguments),
+            )
             return {}
     return {}
 
@@ -178,6 +192,7 @@ async def execute_step_with_prompt(
         user_content: List[Dict[str, Any]]
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。"""
+    started_at = now_perf()
 
     emitted_tool_events: List[ToolEvent] = []
 
@@ -190,12 +205,35 @@ async def execute_step_with_prompt(
             if inspect.isawaitable(maybe_awaitable):
                 await maybe_awaitable
         except Exception as e:
-            logger.warning("LangGraph 投递实时工具事件失败，继续主流程: %s", e)
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "工具事件投递失败",
+                tool_name=event.tool_name,
+                function_name=event.function_name,
+                status=event.status.value,
+                error=str(e),
+            )
 
     available_tools = collect_available_tools(runtime_tools)
+    log_runtime(
+        logger,
+        logging.INFO,
+        "工具执行循环准备完成",
+        step_id=str(step.id or ""),
+        step_title=str(step.title or step.description or ""),
+        available_tool_count=len(available_tools),
+        max_tool_iterations=max(1, int(max_tool_iterations)),
+    )
 
     if len(available_tools) == 0:
-        logger.info("模型无可用工具，直接返回结果")
+        log_runtime(
+            logger,
+            logging.INFO,
+            "当前步骤无可用工具",
+            step_id=str(step.id or ""),
+        )
+        llm_started_at = now_perf()
         llm_message = await llm.invoke(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT + REACT_SYSTEM_PROMPT},
@@ -204,7 +242,17 @@ async def execute_step_with_prompt(
             tools=[],
             response_format={"type": "json_object"},
         )
+        llm_cost_ms = elapsed_ms(llm_started_at)
         parsed = safe_parse_json(llm_message.get("content"))
+        log_runtime(
+            logger,
+            logging.INFO,
+            "无工具模式执行完成",
+            step_id=str(step.id or ""),
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+            attachment_count=len(normalize_attachments(parsed.get("attachments"))),
+        )
         return {
             "success": bool(parsed.get("success", True)),
             "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
@@ -219,19 +267,46 @@ async def execute_step_with_prompt(
     llm_message: Dict[str, Any] = {}
 
     for index in range(max(1, int(max_tool_iterations))):
-        logger.info("模型执行第 %s 轮工具决策", index)
+        log_runtime(
+            logger,
+            logging.INFO,
+            "开始工具决策轮次",
+            step_id=str(step.id or ""),
+            iteration=index,
+        )
+        llm_started_at = now_perf()
         llm_message = await llm.invoke(
             messages=messages,
             tools=available_tools,
             tool_choice="auto",
         )
+        llm_cost_ms = elapsed_ms(llm_started_at)
         tool_calls = llm_message.get("tool_calls") or []
         if len(tool_calls) == 0:
             parsed = safe_parse_json(llm_message.get("content"))
             # 如果模型返回结果为空，则尝试重新执行
             if parsed.get("success", True) and str(parsed.get("result", "")).strip() == '':
-                logger.warning("模型返回结果为空，尝试重新执行")
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "模型结果为空，准备重试",
+                    step_id=str(step.id or ""),
+                    iteration=index,
+                    llm_elapsed_ms=llm_cost_ms,
+                    elapsed_ms=elapsed_ms(started_at),
+                )
                 continue
+            log_runtime(
+                logger,
+                logging.INFO,
+                "未调用工具直接完成当前轮次",
+                step_id=str(step.id or ""),
+                iteration=index,
+                success=bool(parsed.get("success", True)),
+                attachment_count=len(normalize_attachments(parsed.get("attachments"))),
+                llm_elapsed_ms=llm_cost_ms,
+                elapsed_ms=elapsed_ms(started_at),
+            )
             return {
                 "success": bool(parsed.get("success", True)),
                 "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
@@ -262,9 +337,20 @@ async def execute_step_with_prompt(
             continue
         tool_call_id = str(selected_tool_call.get("id") or uuid.uuid4())
         function_args = _parse_tool_call_args(function.get("arguments"))
+        log_runtime(
+            logger,
+            logging.INFO,
+            "已选择工具调用",
+            step_id=str(step.id or ""),
+            iteration=index,
+            tool_call_id=tool_call_id,
+            function_name=function_name,
+            arg_keys=sorted(function_args.keys()),
+        )
 
         matched_tool = _resolve_tool_by_function_name(function_name=function_name, runtime_tools=runtime_tools)
         tool_name = matched_tool.name if matched_tool is not None else "unknown"
+        tool_cost_ms = 0
         calling_event = ToolEvent(
             tool_call_id=tool_call_id,
             tool_name=tool_name,
@@ -275,12 +361,22 @@ async def execute_step_with_prompt(
         await _notify_tool_event(calling_event)
 
         if matched_tool is None:
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "工具调用无效",
+                step_id=str(step.id or ""),
+                function_name=function_name,
+            )
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
         elif function_name == "message_ask_user" and not _step_allows_user_wait(step, function_args):
-            logger.warning(
-                "步骤[%s]尝试提前向用户提问，已拦截: %s",
-                str(step.id or ""),
-                str(step.description or ""),
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "提前请求用户交互，已拦截",
+                step_id=str(step.id or ""),
+                function_name=function_name,
+                step_description=str(step.description or ""),
             )
             tool_result = ToolResult(
                 success=False,
@@ -288,12 +384,26 @@ async def execute_step_with_prompt(
             )
         else:
             try:
+                tool_started_at = now_perf()
                 tool_result = await matched_tool.invoke(function_name, **function_args)
+                tool_cost_ms = elapsed_ms(tool_started_at)
                 if not isinstance(tool_result, ToolResult):
                     # 兼容少数工具返回 dict/str 的历史实现，统一收敛为 ToolResult。
                     tool_result = ToolResult(success=True, data=tool_result)
             except Exception as e:
-                logger.exception("LangGraph 调用工具[%s]失败: %s", function_name, e)
+                tool_cost_ms = elapsed_ms(tool_started_at)
+                log_runtime(
+                    logger,
+                    logging.ERROR,
+                    "工具调用失败",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    tool_name=tool_name,
+                    error=str(e),
+                    tool_elapsed_ms=tool_cost_ms,
+                    elapsed_ms=elapsed_ms(started_at),
+                    exc_info=True,
+                )
                 tool_result = ToolResult(success=False, message=f"调用工具失败: {function_name}")
 
         called_event = ToolEvent(
@@ -310,7 +420,31 @@ async def execute_step_with_prompt(
             if isinstance(tool_result.data, dict)
             else None
         )
+        log_runtime(
+            logger,
+            logging.INFO,
+            "工具调用完成",
+            step_id=str(step.id or ""),
+            tool_call_id=tool_call_id,
+            function_name=function_name,
+            tool_name=tool_name,
+            success=bool(tool_result.success),
+            has_interrupt=bool(isinstance(interrupt_request, dict) and interrupt_request),
+            llm_elapsed_ms=llm_cost_ms,
+            tool_elapsed_ms=tool_cost_ms if matched_tool is not None else 0,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         if isinstance(interrupt_request, dict) and interrupt_request:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "工具请求进入等待",
+                step_id=str(step.id or ""),
+                tool_call_id=tool_call_id,
+                function_name=function_name,
+                interrupt_kind=str(interrupt_request.get("kind") or ""),
+                elapsed_ms=elapsed_ms(started_at),
+            )
             return {
                 "success": True,
                 "interrupt_request": interrupt_request,
@@ -327,6 +461,16 @@ async def execute_step_with_prompt(
         )
 
     parsed = safe_parse_json(llm_message.get("content"))
+    log_runtime(
+        logger,
+        logging.INFO,
+        "达到最大工具轮次，返回当前结果",
+        step_id=str(step.id or ""),
+        iteration_count=max(1, int(max_tool_iterations)),
+        success=bool(parsed.get("success", True)),
+        attachment_count=len(normalize_attachments(parsed.get("attachments"))),
+        elapsed_ms=elapsed_ms(started_at),
+    )
     return {
         "success": bool(parsed.get("success", True)),
         "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),

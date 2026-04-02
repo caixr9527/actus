@@ -8,6 +8,7 @@ from contextvars import ContextVar, Token
 from typing import Awaitable, Callable, Optional
 
 from app.domain.models import BaseEvent
+from .runtime_logging import log_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -40,4 +41,10 @@ async def emit_live_events(*events: BaseEvent) -> None:
             if inspect.isawaitable(emitted):
                 await emitted
         except Exception as e:
-            logger.warning("LangGraph 实时事件投递失败，继续主流程: %s", e)
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "实时事件投递失败",
+                event_type=event.type,
+                error=str(e),
+            )

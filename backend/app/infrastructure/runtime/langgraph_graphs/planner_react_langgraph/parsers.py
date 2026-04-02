@@ -15,6 +15,7 @@ from app.domain.models import (
     ExecutionStatus,
     build_step_objective_key,
 )
+from .runtime_logging import log_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,12 @@ def safe_parse_json(content: str | None) -> Dict[str, Any]:
         except Exception:
             continue
 
-    logger.warning("LangGraph 解析JSON失败，使用回退逻辑")
+    log_runtime(
+        logger,
+        logging.WARNING,
+        "模型结果JSON解析失败",
+        content_length=len(content or ""),
+    )
     return {}
 
 

@@ -7,6 +7,7 @@ from typing import Literal
 
 from app.domain.models import ExecutionStatus
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
+from .runtime_logging import log_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,13 @@ def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_r
         return "consolidate_memory"
 
     if state.get("execution_count", 0) >= state.get("max_execution_steps", 20):
-        logger.warning("执行次数达到上限，提前进入总结阶段")
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "达到执行上限，转入总结",
+            state=state,
+            max_execution_steps=state.get("max_execution_steps", 20),
+        )
         return "summarize"
 
     return "guard_step_reuse" if plan.get_next_step() is not None else "summarize"

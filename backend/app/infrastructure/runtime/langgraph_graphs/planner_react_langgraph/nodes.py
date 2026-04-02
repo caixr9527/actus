@@ -48,27 +48,51 @@ from .parsers import (
     normalize_attachments,
     safe_parse_json,
 )
+from .runtime_logging import elapsed_ms, log_runtime, now_perf
 from .tools import execute_step_with_prompt
 
 logger = logging.getLogger(__name__)
 
+# 规划器执行步骤的技能 ID
 PLANNER_EXECUTE_STEP_SKILL_ID = "planner_react.execute_step"
+
+# 消息窗口最大条目数
 MESSAGE_WINDOW_MAX_ITEMS = 100
+# 单条消息最大字符数
 MESSAGE_WINDOW_MAX_MESSAGE_CHARS = 500
+# 消息中附件路径的最大数量
 MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS = 8
+
+# 记忆候选项的最小置信度阈值
 MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
+
+# 对话摘要的最大部分数
 CONVERSATION_SUMMARY_MAX_PARTS = 4
+
+# Prompt 上下文中最近运行简报的最大数量
 PROMPT_CONTEXT_BRIEF_LIMIT = 3
+# Prompt 上下文中产物引用的最大数量
 PROMPT_CONTEXT_ARTIFACT_LIMIT = 6
+# Prompt 上下文中检索记忆的最大数量
 PROMPT_CONTEXT_MEMORY_LIMIT = 6
+# Prompt 上下文中最近消息的最大数量
 PROMPT_CONTEXT_MESSAGE_LIMIT = 6
+# Prompt 上下文中已完成步骤的最大数量
 PROMPT_CONTEXT_COMPLETED_STEP_LIMIT = 5
+
+# Prompt 上下文中对话摘要的最大字符数
 PROMPT_CONTEXT_SUMMARY_MAX_CHARS = 400
+# Prompt 上下文中单条消息的最大字符数
 PROMPT_CONTEXT_MESSAGE_MAX_CHARS = 200
+# Prompt 上下文中记忆摘要的最大字符数
 PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS = 160
+# Prompt 上下文中记忆内容预览的最大字符数
 PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS = 240
+# Prompt 上下文中开放问题/阻碍项的最大数量
 PROMPT_CONTEXT_OPEN_ITEM_LIMIT = 8
-STEP_EXECUTION_TIMEOUT_SECONDS = 180
+
+# 步骤执行的超时时间（秒）
+STEP_EXECUTION_TIMEOUT_SECONDS = 180 * 3
 
 
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -306,6 +330,15 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
     if step is None:
         return state
 
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始检查步骤复用",
+        state=state,
+        step_id=str(step.id or ""),
+        objective_key=str(step.objective_key or ""),
+    )
+
     reusable_step = _find_reusable_step_outcome(state=state, step=step, plan=plan)
     graph_metadata = dict(state.get("graph_metadata") or {})
     graph_metadata["step_reuse_hit"] = False
@@ -313,6 +346,13 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
     graph_metadata.pop("step_reuse_source_step_id", None)
 
     if reusable_step is None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "步骤复用未命中",
+            state=state,
+            step_id=str(step.id or ""),
+        )
         return {
             **state,
             "graph_metadata": graph_metadata,
@@ -346,6 +386,16 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
     graph_metadata["step_reuse_source_run_id"] = reused_from_run_id
     graph_metadata["step_reuse_source_step_id"] = reused_from_step_id
     graph_metadata["last_step_execution_mode"] = "reused"
+    log_runtime(
+        logger,
+        logging.INFO,
+        "步骤复用命中",
+        state=state,
+        step_id=str(step.id or ""),
+        source_run_id=reused_from_run_id,
+        source_step_id=reused_from_step_id,
+        artifact_count=len(list(step.outcome.produced_artifacts or [])),
+    )
 
     return _reduce_state_with_events(
         state,
@@ -1183,6 +1233,7 @@ def _build_wait_resume_step_summary(step: Step, resumed_message: str) -> str:
 
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
+    started_at = now_perf()
     plan = state.get("plan")
     if plan is not None and len(plan.steps) > 0 and not plan.done:
         next_step = plan.get_next_step()
@@ -1191,6 +1242,16 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             working_memory["goal"] = str(plan.goal or state.get("user_message") or "")
         planner_local_memory = dict(state.get("planner_local_memory") or {})
         planner_local_memory["plan_brief"] = str(plan.message or plan.title or "")
+        log_runtime(
+            logger,
+            logging.INFO,
+            "复用已有计划",
+            state=state,
+            plan_title=str(plan.title or ""),
+            step_count=len(list(plan.steps or [])),
+            next_step_id=str(next_step.id or "") if next_step is not None else "",
+            elapsed_ms=elapsed_ms(started_at),
+        )
         return {
             **state,
             "working_memory": working_memory,
@@ -1210,7 +1271,17 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
 
     user_content = await _build_message(llm, user_message_prompt, input_parts)
 
-    logger.info("planner 计划")
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始创建计划",
+        state=state,
+        attachment_count=len(attachments),
+        context_memory_count=len(list(state.get("retrieved_memories") or [])),
+        context_recent_run_count=len(list(state.get("recent_run_briefs") or [])),
+        context_recent_attempt_count=len(list(state.get("recent_attempt_briefs") or [])),
+    )
+    llm_started_at = now_perf()
     llm_message = await llm.invoke(
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT + PLANNER_SYSTEM_PROMPT},
@@ -1219,6 +1290,7 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
         tools=[],
         response_format={"type": "json_object"},
     )
+    llm_cost_ms = elapsed_ms(llm_started_at)
     parsed = safe_parse_json(llm_message.get("content"))
 
     title = str(parsed.get("title") or build_fallback_plan_title(user_message))
@@ -1235,6 +1307,17 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
     )
     raw_steps = parsed.get("steps")
     if not isinstance(raw_steps, list) or raw_steps is None or len(raw_steps) == 0:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "计划创建完成，无需步骤",
+            state=state,
+            plan_title=title,
+            language=language,
+            message_length=len(planner_message),
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         plan = Plan(
             title=title,
             goal=goal,
@@ -1265,6 +1348,18 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
         )
     else:
         steps = [build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
+        log_runtime(
+            logger,
+            logging.INFO,
+            "计划创建完成",
+            state=state,
+            plan_title=title,
+            language=language,
+            step_count=len(steps),
+            next_step_id=str(steps[0].id or "") if len(steps) > 0 else "",
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         plan = Plan(
             title=title,
             goal=goal,
@@ -1304,6 +1399,7 @@ async def execute_step_node(
         max_tool_iterations: int = 5,
 ) -> PlannerReActLangGraphState:
     """执行单个步骤，完成后交给 replan 节点更新后续计划。"""
+    started_at = now_perf()
     plan = state.get("plan")
     if plan is None:
         return state
@@ -1315,6 +1411,17 @@ async def execute_step_node(
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     await emit_live_events(started_event)
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始执行步骤",
+        state=state,
+        step_id=str(step.id or ""),
+        step_title=str(step.title or step.description or ""),
+        attachment_count=len(list(state.get("input_parts") or [])),
+        runtime_tool_count=len(list(runtime_tools or [])),
+        has_skill_runtime=skill_runtime is not None,
+    )
 
     user_message = str(state.get("user_message", ""))
     language = plan.language or "zh"
@@ -1332,11 +1439,14 @@ async def execute_step_node(
 
     llm_message: Optional[Dict[str, Any]] = None
     tool_events: List[ToolEvent] = []
+    tool_cost_ms = 0
+    skill_cost_ms = 0
 
     try:
         async with asyncio.timeout(STEP_EXECUTION_TIMEOUT_SECONDS):
             # 若运行时已注入工具能力，则优先走“提示词 + 工具循环”路径。
             if runtime_tools:
+                tool_started_at = now_perf()
                 llm_message, tool_events = await execute_step_with_prompt(
                     llm=llm,
                     step=step,
@@ -1345,10 +1455,20 @@ async def execute_step_node(
                     on_tool_event=emit_live_events,
                     user_content=user_content,
                 )
+                tool_cost_ms = elapsed_ms(tool_started_at)
 
             # 无工具能力时保持原 BE-LG-10 skill 路径。
             if llm_message is None and skill_runtime is not None:
                 try:
+                    log_runtime(
+                        logger,
+                        logging.INFO,
+                        "开始执行技能",
+                        state=state,
+                        step_id=str(step.id or ""),
+                        skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+                    )
+                    skill_started_at = now_perf()
                     skill_result = await skill_runtime.execute_skill(
                         skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
                         payload={
@@ -1360,15 +1480,34 @@ async def execute_step_node(
                             "execution_context": _build_execution_context_block(state),
                         },
                     )
+                    skill_cost_ms = elapsed_ms(skill_started_at)
                     llm_message = {
                         "success": bool(getattr(skill_result, "success", True)),
                         "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
                         "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
                     }
                 except Exception as e:
-                    logger.warning("执行步骤 Skill 运行失败，回退默认执行链路: %s", e)
+                    log_runtime(
+                        logger,
+                        logging.WARNING,
+                        "技能执行失败，回退默认链路",
+                        state=state,
+                        step_id=str(step.id or ""),
+                        skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+                        error=str(e),
+                        elapsed_ms=elapsed_ms(started_at),
+                    )
     except TimeoutError:
-        logger.warning("步骤执行超时: step_id=%s description=%s", str(step.id or ""), str(step.description or ""))
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "步骤执行超时",
+            state=state,
+            step_id=str(step.id or ""),
+            step_description=str(step.description or ""),
+            timeout_seconds=STEP_EXECUTION_TIMEOUT_SECONDS,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         llm_message = {
             "success": False,
             "result": f"步骤执行超时：{step.description}",
@@ -1386,6 +1525,17 @@ async def execute_step_node(
 
     interrupt_request = _normalize_interrupt_request(llm_message.get("interrupt_request"))
     if interrupt_request:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "步骤请求进入等待",
+            state=state,
+            step_id=str(step.id or ""),
+            interrupt_kind=str(interrupt_request.get("kind") or ""),
+            tool_elapsed_ms=tool_cost_ms,
+            skill_elapsed_ms=skill_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         step_local_memory = dict(state.get("step_local_memory") or {})
         step_local_memory["current_step_id"] = str(step.id)
         step_local_memory["pending_interrupt"] = interrupt_request
@@ -1455,6 +1605,22 @@ async def execute_step_node(
     step_local_memory["current_step_id"] = str(step.id)
     step_local_memory["observation_summary"] = step_summary
     step_local_memory["pending_findings"] = list(step.outcome.produced_artifacts or [])
+    log_runtime(
+        logger,
+        logging.INFO,
+        "步骤执行完成",
+        state=state,
+        step_id=str(step.id or ""),
+        status=step.status.value,
+        success=step_success,
+        artifact_count=len(model_attachment_paths),
+        blocker_count=len(list(step.outcome.blockers or [])),
+        open_question_count=len(list(step.outcome.open_questions or [])),
+        next_step_id=str(next_step.id or "") if next_step is not None else "",
+        tool_elapsed_ms=tool_cost_ms,
+        skill_elapsed_ms=skill_cost_ms,
+        elapsed_ms=elapsed_ms(started_at),
+    )
     return _reduce_state_with_events(
         state,
         updates={
@@ -1482,12 +1648,29 @@ async def wait_for_human_node(
         state: PlannerReActLangGraphState,
 ) -> PlannerReActLangGraphState:
     """在等待节点中恢复用户输入，并完成当前等待中的步骤。"""
+    started_at = now_perf()
     interrupt_request = _normalize_interrupt_request(state.get("pending_interrupt"))
     if not interrupt_request:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "跳过恢复处理",
+            state=state,
+            reason="没有待恢复的中断",
+            elapsed_ms=elapsed_ms(started_at),
+        )
         return {
             **state,
             "pending_interrupt": {},
         }
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始处理等待恢复",
+        state=state,
+        interrupt_kind=str(interrupt_request.get("kind") or ""),
+    )
 
     resume_value = interrupt(interrupt_request)
     resumed_message = _resume_value_to_message(interrupt_request, resume_value)
@@ -1517,6 +1700,14 @@ async def wait_for_human_node(
 
     plan = state.get("plan")
     if plan is None or not waiting_step_id:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "恢复完成，但未绑定步骤",
+            state=state,
+            resumed_message_length=len(resumed_message),
+            elapsed_ms=elapsed_ms(started_at),
+        )
         return {
             **state,
             "user_message": resumed_message,
@@ -1534,6 +1725,14 @@ async def wait_for_human_node(
             break
 
     if waiting_step is None:
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "恢复时未找到等待步骤",
+            state=state,
+            waiting_step_id=waiting_step_id,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         return {
             **state,
             "user_message": resumed_message,
@@ -1562,6 +1761,16 @@ async def wait_for_human_node(
     step_local_memory["current_step_id"] = str(waiting_step.id)
     step_local_memory["observation_summary"] = _normalize_step_result_text(waiting_step.outcome.summary)
     step_local_memory["pending_findings"] = []
+    log_runtime(
+        logger,
+        logging.INFO,
+        "等待恢复完成",
+        state=state,
+        step_id=str(waiting_step.id or ""),
+        resumed_message_length=len(resumed_message),
+        next_step_id=str(next_step.id or "") if next_step is not None else "",
+        elapsed_ms=elapsed_ms(started_at),
+    )
 
     return _reduce_state_with_events(
         state,
@@ -1588,6 +1797,15 @@ async def recall_memory_context_node(
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
 ) -> PlannerReActLangGraphState:
     """统一整理线程级短期记忆，为后续 planner/react 节点提供稳定输入。"""
+    started_at = now_perf()
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始召回记忆上下文",
+        state=state,
+        existing_memory_count=len(list(state.get("retrieved_memories") or [])),
+        has_repository=long_term_memory_repository is not None,
+    )
     plan = state.get("plan")
     working_memory = _ensure_working_memory(state)
     if not str(working_memory.get("goal") or "").strip():
@@ -1596,15 +1814,26 @@ async def recall_memory_context_node(
         working_memory["open_questions"] = _normalize_text_items(state.get("session_open_questions"))
 
     retrieved_memories = list(state.get("retrieved_memories") or [])
+    recall_cost_ms = 0
     if long_term_memory_repository is not None:
         try:
+            recall_started_at = now_perf()
             recalled_memories: List[LongTermMemory] = []
             for query in _build_memory_recall_queries(state):
                 recalled_memories.extend(await long_term_memory_repository.search(query))
             recalled_memories = _dedupe_recalled_memories(recalled_memories)
             retrieved_memories = [memory.model_dump(mode="json") for memory in recalled_memories]
+            recall_cost_ms = elapsed_ms(recall_started_at)
         except Exception as e:
-            logger.warning("长期记忆召回失败，回退已有线程态记忆快照: %s", e)
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "记忆召回失败，回退线程快照",
+                state=state,
+                error=str(e),
+                recall_elapsed_ms=recall_cost_ms,
+                elapsed_ms=elapsed_ms(started_at),
+            )
     if not dict(working_memory.get("user_preferences") or {}):
         working_memory["user_preferences"] = _extract_profile_preferences(retrieved_memories)
 
@@ -1616,6 +1845,17 @@ async def recall_memory_context_node(
     graph_metadata["context_recent_attempt_brief_count"] = len(state.get("recent_attempt_briefs") or [])
     graph_metadata["context_selected_artifact_count"] = len(state.get("selected_artifacts") or [])
     graph_metadata["context_historical_artifact_count"] = len(state.get("historical_artifact_refs") or [])
+    log_runtime(
+        logger,
+        logging.INFO,
+        "记忆召回完成",
+        state=state,
+        recalled_memory_count=len(retrieved_memories),
+        open_question_count=len(list(working_memory.get("open_questions") or [])),
+        preference_count=len(dict(working_memory.get("user_preferences") or {})),
+        recall_elapsed_ms=recall_cost_ms,
+        elapsed_ms=elapsed_ms(started_at),
+    )
 
     return {
         **state,
@@ -1631,6 +1871,7 @@ async def recall_memory_context_node(
 
 async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """根据最新步骤执行结果更新后续未完成步骤。"""
+    started_at = now_perf()
     plan = state.get("plan")
     last_step = state.get("last_executed_step")
     if plan is None or last_step is None:
@@ -1638,16 +1879,34 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
 
     prompt = UPDATE_PLAN_PROMPT.format(step=last_step.model_dump_json(), plan=plan.model_dump_json())
     prompt = _append_execution_context_to_prompt(prompt, state)
-    logger.info("replan 计划")
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始重规划",
+        state=state,
+        last_step_id=str(last_step.id or ""),
+        current_step_count=len(list(plan.steps or [])),
+    )
+    llm_started_at = now_perf()
     llm_message = await llm.invoke(
         messages=[{"role": "user", "content": prompt}],
         tools=[],
         response_format={"type": "json_object"},
     )
+    llm_cost_ms = elapsed_ms(llm_started_at)
     parsed = safe_parse_json(llm_message.get("content"))
 
     raw_steps = parsed.get("steps")
     if not isinstance(raw_steps, list):
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "重规划返回无效结果",
+            state=state,
+            response_keys=sorted(parsed.keys()),
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
         return state
 
     new_steps = [build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
@@ -1668,6 +1927,17 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     await emit_live_events(updated_event)
     planner_local_memory = dict(state.get("planner_local_memory") or {})
     planner_local_memory["replan_rationale"] = _get_step_outcome_summary(last_step)
+    log_runtime(
+        logger,
+        logging.INFO,
+        "重规划完成",
+        state=state,
+        new_step_count=len(new_steps),
+        total_step_count=len(list(plan.steps or [])),
+        next_step_id=str(next_step.id or "") if next_step is not None else "",
+        llm_elapsed_ms=llm_cost_ms,
+        elapsed_ms=elapsed_ms(started_at),
+    )
     return _reduce_state_with_events(
         state,
         updates={
@@ -1682,6 +1952,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
 
 async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """在所有步骤完成后汇总结果。"""
+    started_at = now_perf()
     plan = state.get("plan")
     if plan is None:
         return state
@@ -1693,12 +1964,22 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
                                                execution_count=execution_count,
                                                final_message=final_message,
                                                plan_snapshot=json.dumps(plan_snapshot, ensure_ascii=False))
-    logger.info("总结计划")
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始生成总结",
+        state=state,
+        execution_count=execution_count,
+        step_count=len(list(plan.steps or [])),
+        final_message_length=len(final_message),
+    )
+    llm_started_at = now_perf()
     llm_message = await llm.invoke(
         messages=[{"role": "user", "content": summarize_prompt}],
         tools=[],
         response_format={"type": "json_object"},
     )
+    llm_cost_ms = elapsed_ms(llm_started_at)
     parsed = safe_parse_json(llm_message.get("content"))
     summary_message = str(parsed.get("message") or "")
     extracted_facts = _normalize_memory_fact_items(parsed.get("facts_in_session"))
@@ -1758,6 +2039,18 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         summary_local_memory["memory_candidates_reason"] = "使用本轮任务结果生成保守的会话级长期记忆候选"
     else:
         summary_local_memory["memory_candidates_reason"] = ""
+    log_runtime(
+        logger,
+        logging.INFO,
+        "总结生成完成",
+        state=state,
+        attachment_count=len(summary_attachment_refs),
+        fact_count=len(extracted_facts),
+        preference_count=len(extracted_preferences),
+        memory_candidate_count=len(memory_candidates),
+        llm_elapsed_ms=llm_cost_ms,
+        elapsed_ms=elapsed_ms(started_at),
+    )
     return _reduce_state_with_events(
         state,
         updates={
@@ -1786,6 +2079,15 @@ async def consolidate_memory_node(
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
 ) -> PlannerReActLangGraphState:
     """统一收敛线程级短期记忆，压缩消息窗口并记录压缩元数据。"""
+    started_at = now_perf()
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始收敛记忆",
+        state=state,
+        pending_memory_write_count=len(list(state.get("pending_memory_writes") or [])),
+        message_window_size=len(list(state.get("message_window") or [])),
+    )
     # 获取并初始化摘要本地记忆
     summary_local_memory = dict(state.get("summary_local_memory") or {})
     
@@ -1819,6 +2121,7 @@ async def consolidate_memory_node(
     graph_metadata["memory_candidate_profile_merge_count"] = candidate_stats["merged_profile_count"]
     remaining_memory_writes: List[Dict[str, Any]] = []
     persisted_memory_ids: List[str] = []
+    write_cost_ms = 0
     
     if long_term_memory_repository is None:
         # 若未提供长期记忆仓库，则跳过写入，保留候选项供后续重试
@@ -1826,15 +2129,23 @@ async def consolidate_memory_node(
         remaining_memory_writes = pending_memory_writes
     else:
         # 遍历所有待写入的记忆候选项，尝试持久化
+        write_started_at = now_perf()
         for item in pending_memory_writes:
             try:
                 memory = LongTermMemory.model_validate(item)
                 persisted_memory = await long_term_memory_repository.upsert(memory)
                 persisted_memory_ids.append(persisted_memory.id)
             except Exception as e:
-                logger.warning("长期记忆写入失败，保留候选待后续重试：%s", e)
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "记忆写入失败，保留待重试",
+                    state=state,
+                    error=str(e),
+                )
                 if isinstance(item, dict):
                     remaining_memory_writes.append(item)
+        write_cost_ms = elapsed_ms(write_started_at)
         graph_metadata["memory_write_count"] = len(persisted_memory_ids)
         graph_metadata["memory_write_ids"] = persisted_memory_ids
 
@@ -1856,17 +2167,47 @@ async def consolidate_memory_node(
         "selected_artifacts": list(dict.fromkeys(list(state.get("selected_artifacts") or []) + list(summary_local_memory.get("selected_artifacts") or []))),
         "graph_metadata": graph_metadata,
     }
+    log_runtime(
+        logger,
+        logging.INFO,
+        "记忆收敛完成",
+        state=next_state,
+        compacted_message_window_size=len(compacted_message_window),
+        trimmed_message_count=trimmed_message_count,
+        kept_candidate_count=candidate_stats["kept_count"],
+        persisted_memory_count=len(persisted_memory_ids),
+        remaining_memory_write_count=len(remaining_memory_writes),
+        write_elapsed_ms=write_cost_ms,
+        elapsed_ms=elapsed_ms(started_at),
+    )
     return next_state
 
 
 async def finalize_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
     """结束节点，追加 done 事件。"""
+    started_at = now_perf()
     events = list(state.get("emitted_events") or [])
     if events and isinstance(events[-1], DoneEvent):
+        log_runtime(
+            logger,
+            logging.INFO,
+            "结束事件已存在，跳过收尾",
+            state=state,
+            reason="已存在完成事件",
+            elapsed_ms=elapsed_ms(started_at),
+        )
         return state
 
     done_event = DoneEvent()
     await emit_live_events(done_event)
+    log_runtime(
+        logger,
+        logging.INFO,
+        "流程收尾完成",
+        state=state,
+        emitted_event_count=len(events) + 1,
+        elapsed_ms=elapsed_ms(started_at),
+    )
     return _reduce_state_with_events(
         state,
         updates={},

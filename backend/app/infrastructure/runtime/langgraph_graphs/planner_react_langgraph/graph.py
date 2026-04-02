@@ -13,6 +13,7 @@ from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph_graphs.skill_subgraphs import build_default_skill_graph_registry
+from .runtime_logging import log_runtime
 from .nodes import (
     consolidate_memory_node,
     create_or_reuse_plan_node,
@@ -42,7 +43,12 @@ def build_planner_react_langgraph_graph(
     try:
         skill_runtime = build_default_skill_graph_registry().create_runtime(llm=llm)
     except Exception as e:
-        logger.warning("初始化默认 Skill 注册表失败，继续使用无 Skill 模式: %s", e)
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "技能注册表初始化失败",
+            error=str(e),
+        )
 
     async def _create_plan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await create_or_reuse_plan_node(state, llm)
@@ -126,6 +132,15 @@ def build_planner_react_langgraph_graph(
     graph.add_edge("summarize", "consolidate_memory")
     graph.add_edge("consolidate_memory", "finalize")
     graph.add_edge("finalize", END)
+    log_runtime(
+        logger,
+        logging.INFO,
+        "流程图编译完成",
+        runtime_tool_count=len(list(runtime_tools or [])),
+        max_tool_iterations=max_tool_iterations,
+        has_checkpointer=checkpointer is not None,
+        has_skill_runtime=skill_runtime is not None,
+    )
     if checkpointer is None:
         return graph.compile()
     return graph.compile(checkpointer=checkpointer)

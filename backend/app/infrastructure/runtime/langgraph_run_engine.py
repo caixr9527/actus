@@ -40,6 +40,14 @@ from app.infrastructure.runtime.langgraph_graphs import (
     build_planner_react_langgraph_graph,
     unbind_live_event_sink,
 )
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import (
+    bind_trace_id,
+    build_trace_id,
+    elapsed_ms,
+    log_runtime,
+    now_perf,
+    reset_trace_id,
+)
 from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.utils import BaseUtils
 
@@ -155,6 +163,15 @@ class LangGraphRunEngine(RunEngine):
             graph_kwargs["runtime_tools"] = runtime_tools
             graph_kwargs["max_tool_iterations"] = max_tool_iterations or 5
 
+        log_runtime(
+            logger,
+            logging.INFO,
+            "初始化运行流程图",
+            runtime_tool_count=len(list(runtime_tools or [])),
+            max_tool_iterations=max_tool_iterations or 5,
+            has_checkpointer=checkpointer is not None,
+            has_repository=long_term_memory_repository is not None,
+        )
         return build_planner_react_langgraph_graph(**graph_kwargs)
 
     async def _build_input_parts(
@@ -250,7 +267,15 @@ class LangGraphRunEngine(RunEngine):
                 )
         except Exception as e:
             # 状态构建失败时必须降级，不能阻断主链路执行。
-            logger.warning("会话[%s]构建Graph初始状态失败，回退最小输入: %s", self._session_id, e)
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "构建初始状态失败，回退最小输入",
+                session_id=self._session_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                error=str(e),
+            )
             return {
                 "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
                 "session_id": self._session_id,
@@ -335,7 +360,13 @@ class LangGraphRunEngine(RunEngine):
             try:
                 return WorkflowRunStatus(raw_status)
             except ValueError:
-                logger.warning("运行[%s]存在未知 run_status[%s]，回退数据库状态", getattr(run, "id", ""), raw_status)
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "运行状态无效，回退数据库状态",
+                    run_id=getattr(run, "id", ""),
+                    status=raw_status,
+                )
 
         if str(state.get("error") or "").strip():
             return WorkflowRunStatus.FAILED
@@ -498,7 +529,13 @@ class LangGraphRunEngine(RunEngine):
             async with self._uow_factory() as uow:
                 run = await uow.workflow_run.get_by_id(resolved_run_id)
                 if run is None:
-                    logger.warning("运行[%s]不存在，跳过graph_state_contract回写", resolved_run_id)
+                    log_runtime(
+                        logger,
+                        logging.WARNING,
+                        "运行不存在，跳过状态回写",
+                        session_id=self._session_id,
+                        run_id=resolved_run_id,
+                    )
                     return
                 await uow.workflow_run.update_runtime_metadata(
                     run_id=resolved_run_id,
@@ -510,8 +547,22 @@ class LangGraphRunEngine(RunEngine):
                     state=state,
                     uow=uow,
                 )
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "状态合同回写完成",
+                    state=state,
+                    run_id=resolved_run_id,
+                )
         except Exception as e:
-            logger.warning("会话[%s]回写graph_state_contract失败: %s", self._session_id, e)
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "状态合同回写失败",
+                session_id=self._session_id,
+                run_id=resolved_run_id,
+                error=str(e),
+            )
 
     async def _resolve_invoke_context(self) -> tuple[Dict[str, Dict[str, str]], Optional[str]]:
         invoke_config = {"configurable": {"thread_id": self._session_id}}
@@ -521,7 +572,13 @@ class LangGraphRunEngine(RunEngine):
                 invoke_config, run_id = await self._checkpoint_adapter.resolve_invoke_config()
             except Exception as e:
                 # 配置解析失败不阻断主流程，降级到 session 级 thread。
-                logger.warning("会话[%s]解析checkpoint配置失败，回退默认thread配置: %s", self._session_id, e)
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "解析检查点配置失败，回退默认线程配置",
+                    session_id=self._session_id,
+                    error=str(e),
+                )
         return invoke_config, run_id
 
     async def _load_checkpoint_state(
@@ -646,10 +703,20 @@ class LangGraphRunEngine(RunEngine):
             run_id: Optional[str],
             fallback_state: Optional[PlannerReActLangGraphState],
     ) -> AsyncGenerator[BaseEvent, None]:
+        started_at = now_perf()
         state: Optional[PlannerReActLangGraphState] = None
         wait_events: List[WaitEvent] = []
         deduplicator = _EventDeduplicator()
         live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
+        input_state = graph_input if isinstance(graph_input, dict) else fallback_state
+        log_runtime(
+            logger,
+            logging.INFO,
+            "开始运行流程",
+            state=input_state,
+            run_id=run_id,
+            graph_input_type=type(graph_input).__name__,
+        )
 
         async def _enqueue_live_event(base_event: BaseEvent) -> None:
             await live_event_queue.put(base_event)
@@ -677,9 +744,23 @@ class LangGraphRunEngine(RunEngine):
                 state = checkpoint_state or fallback_state
                 if state is not None:
                     state = self._inject_pending_interrupts(state=state, wait_events=wait_events)
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "流程进入等待",
+                    state=state or fallback_state,
+                    wait_event_count=len(wait_events),
+                )
             else:
                 state = raw_result
                 state = GraphStateContractMapper.apply_emitted_events(state=state)
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "流程执行完成",
+                    state=state,
+                    emitted_event_count=len(list((state or {}).get("emitted_events") or [])),
+                )
         finally:
             unbind_live_event_sink(sink_token)
             if graph_task is not None and not graph_task.done():
@@ -699,6 +780,14 @@ class LangGraphRunEngine(RunEngine):
                 run_id=run_id,
                 state=state or fallback_state,
             )
+            log_runtime(
+                logger,
+                logging.INFO,
+                "流程收尾同步完成",
+                state=state or fallback_state,
+                run_id=run_id,
+                elapsed_ms=elapsed_ms(started_at),
+            )
 
         for event in self._resolve_output_events(state=state, baseline_state=fallback_state):
             if deduplicator.should_emit(event):
@@ -708,31 +797,74 @@ class LangGraphRunEngine(RunEngine):
                 yield event
 
     async def invoke(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
+        started_at = now_perf()
         invoke_config, run_id = await self._resolve_invoke_context()
-
-        graph_input_state = await self._build_graph_input_state(
-            message=message,
-            run_id=run_id,
-            invoke_config=invoke_config,
-        )
-        async for event in self._run_graph(
-                graph_input=graph_input_state,
-                invoke_config=invoke_config,
+        trace_token = bind_trace_id(build_trace_id(self._session_id, run_id))
+        try:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "收到新消息并开始处理",
+                session_id=self._session_id,
                 run_id=run_id,
-                fallback_state=graph_input_state,
-        ):
-            yield event
+                message_length=len(str(message.message or "")),
+                attachment_count=len(list(message.attachments or [])),
+            )
+
+            graph_input_state = await self._build_graph_input_state(
+                message=message,
+                run_id=run_id,
+                invoke_config=invoke_config,
+            )
+            async for event in self._run_graph(
+                    graph_input=graph_input_state,
+                    invoke_config=invoke_config,
+                    run_id=run_id,
+                    fallback_state=graph_input_state,
+            ):
+                yield event
+            log_runtime(
+                logger,
+                logging.INFO,
+                "本轮消息处理完成",
+                session_id=self._session_id,
+                run_id=run_id,
+                elapsed_ms=elapsed_ms(started_at),
+            )
+        finally:
+            reset_trace_id(trace_token)
 
     async def resume(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
+        started_at = now_perf()
         invoke_config, run_id = await self._resolve_invoke_context()
         checkpoint_state = await self._load_checkpoint_state(invoke_config=invoke_config)
-        async for event in self._run_graph(
-                graph_input=Command(resume=value),
-                invoke_config=invoke_config,
+        trace_token = bind_trace_id(build_trace_id(self._session_id, run_id))
+        try:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "收到恢复输入并继续处理",
+                state=checkpoint_state,
                 run_id=run_id,
-                fallback_state=checkpoint_state,
-        ):
-            yield event
+                resume_value_type=type(value).__name__,
+            )
+            async for event in self._run_graph(
+                    graph_input=Command(resume=value),
+                    invoke_config=invoke_config,
+                    run_id=run_id,
+                    fallback_state=checkpoint_state,
+            ):
+                yield event
+            log_runtime(
+                logger,
+                logging.INFO,
+                "本轮恢复处理完成",
+                state=checkpoint_state,
+                run_id=run_id,
+                elapsed_ms=elapsed_ms(started_at),
+            )
+        finally:
+            reset_trace_id(trace_token)
 
     async def _forward_live_events(
             self,
@@ -741,7 +873,7 @@ class LangGraphRunEngine(RunEngine):
             live_event_queue: "asyncio.Queue[BaseEvent]",
             deduplicator: _EventDeduplicator,
     ) -> AsyncGenerator[BaseEvent, None]:
-        """边执行边转发 LangGraph 节点实时事件。"""
+        """边执行边转发节点实时事件。"""
         while True:
             if graph_task.done() and live_event_queue.empty():
                 break

@@ -17,6 +17,10 @@ from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENS
 class Settings(BaseSettings):
     env: str = "development"
     log_level: str = "INFO"
+    log_dir: str = "logs"
+    log_filename: str = "backend.log"
+    log_file_max_mb: int = 100
+    log_retention_days: int = 3
     # 日志输出配置（单配置项）：
     # - all：输出全部日志（项目 + 系统/框架）
     # - 其他值：按逗号分隔解析为 logger 前缀白名单，仅输出命中的日志
