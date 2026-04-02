@@ -16,6 +16,27 @@ from .parsers import normalize_attachments, safe_parse_json
 
 logger = logging.getLogger(__name__)
 
+WAIT_STEP_KEYWORDS: tuple[str, ...] = (
+    "等待",
+    "选择",
+    "确认",
+    "询问",
+    "提问",
+    "回复",
+    "补充",
+    "澄清",
+    "审批",
+    "review",
+    "approve",
+    "approval",
+    "confirm",
+    "choose",
+    "select",
+    "input",
+    "answer",
+    "human",
+)
+
 
 def collect_available_tools(runtime_tools: List[BaseTool]) -> List[Dict[str, Any]]:
     """收集当前步骤可用的工具 schema 列表。"""
@@ -131,6 +152,22 @@ def _parse_tool_call_args(raw_arguments: Any) -> Dict[str, Any]:
     return {}
 
 
+def _step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
+    takeover = str(function_args.get("suggest_user_takeover") or "").strip().lower()
+    if takeover == "browser":
+        return True
+
+    candidate_parts = [
+        str(step.title or "").strip(),
+        str(step.description or "").strip(),
+        *[str(item or "").strip() for item in list(step.success_criteria or [])],
+    ]
+    candidate_text = " ".join([part for part in candidate_parts if part]).lower()
+    if not candidate_text:
+        return False
+    return any(keyword in candidate_text for keyword in WAIT_STEP_KEYWORDS)
+
+
 async def execute_step_with_prompt(
         *,
         llm: LLM,
@@ -145,10 +182,10 @@ async def execute_step_with_prompt(
     emitted_tool_events: List[ToolEvent] = []
 
     async def _notify_tool_event(event: ToolEvent) -> None:
-        if on_tool_event is None:
-            return
         try:
             emitted_tool_events.append(event)
+            if on_tool_event is None:
+                return
             maybe_awaitable = on_tool_event(event)
             if inspect.isawaitable(maybe_awaitable):
                 await maybe_awaitable
@@ -195,6 +232,11 @@ async def execute_step_with_prompt(
             if parsed.get("success", True) and str(parsed.get("result", "")).strip() == '':
                 logger.warning("模型返回结果为空，尝试重新执行")
                 continue
+            return {
+                "success": bool(parsed.get("success", True)),
+                "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
+                "attachments": normalize_attachments(parsed.get("attachments")),
+            }, emitted_tool_events
 
         selected_tool_call = pick_preferred_tool_call(
             tool_calls=[item for item in tool_calls if isinstance(item, dict)],
@@ -234,6 +276,16 @@ async def execute_step_with_prompt(
 
         if matched_tool is None:
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
+        elif function_name == "message_ask_user" and not _step_allows_user_wait(step, function_args):
+            logger.warning(
+                "步骤[%s]尝试提前向用户提问，已拦截: %s",
+                str(step.id or ""),
+                str(step.description or ""),
+            )
+            tool_result = ToolResult(
+                success=False,
+                message="当前步骤不允许向用户提问。请先完成当前步骤，只能在明确需要用户确认/选择/输入的步骤中使用该工具。",
+            )
         else:
             try:
                 tool_result = await matched_tool.invoke(function_name, **function_args)

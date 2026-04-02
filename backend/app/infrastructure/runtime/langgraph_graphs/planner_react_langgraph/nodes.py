@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Planner-ReAct LangGraph 节点实现。"""
+import asyncio
 import hashlib
 import json
 import logging
@@ -59,6 +60,7 @@ MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
 CONVERSATION_SUMMARY_MAX_PARTS = 4
 PROMPT_CONTEXT_BRIEF_LIMIT = 5
 PROMPT_CONTEXT_ARTIFACT_LIMIT = 10
+STEP_EXECUTION_TIMEOUT_SECONDS = 180
 
 
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -1044,6 +1046,14 @@ def _resume_value_to_message(payload: Dict[str, Any], value: Any) -> str:
     return resolve_wait_resume_message(payload, value)
 
 
+def _build_wait_resume_step_summary(step: Step, resumed_message: str) -> str:
+    step_label = str(step.title or step.description or "当前步骤").strip() or "当前步骤"
+    normalized_message = str(resumed_message or "").strip()
+    if normalized_message:
+        return f"{step_label}已收到用户回复：{normalized_message}"
+    return f"{step_label}已完成用户交互"
+
+
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     plan = state.get("plan")
@@ -1196,38 +1206,49 @@ async def execute_step_node(
     llm_message: Optional[Dict[str, Any]] = None
     tool_events: List[ToolEvent] = []
 
-    # 若运行时已注入工具能力，则优先走“提示词 + 工具循环”路径。
-    if runtime_tools:
-        llm_message, tool_events = await execute_step_with_prompt(
-            llm=llm,
-            step=step,
-            runtime_tools=runtime_tools,
-            max_tool_iterations=max_tool_iterations,
-            on_tool_event=emit_live_events,
-            user_content=user_content,
-        )
+    try:
+        async with asyncio.timeout(STEP_EXECUTION_TIMEOUT_SECONDS):
+            # 若运行时已注入工具能力，则优先走“提示词 + 工具循环”路径。
+            if runtime_tools:
+                llm_message, tool_events = await execute_step_with_prompt(
+                    llm=llm,
+                    step=step,
+                    runtime_tools=runtime_tools,
+                    max_tool_iterations=max_tool_iterations,
+                    on_tool_event=emit_live_events,
+                    user_content=user_content,
+                )
 
-    # 无工具能力时保持原 BE-LG-10 skill 路径。
-    if llm_message is None and skill_runtime is not None:
-        try:
-            skill_result = await skill_runtime.execute_skill(
-                skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
-                payload={
-                    "session_id": str(state.get("session_id") or ""),
-                    "user_message": user_message,
-                    "step_description": step.description,
-                    "language": language,
-                    "attachments": attachments,
-                    "execution_context": _build_execution_context_block(state),
-                },
-            )
-            llm_message = {
-                "success": bool(getattr(skill_result, "success", True)),
-                "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
-                "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
-            }
-        except Exception as e:
-            logger.warning("执行步骤 Skill 运行失败，回退默认执行链路: %s", e)
+            # 无工具能力时保持原 BE-LG-10 skill 路径。
+            if llm_message is None and skill_runtime is not None:
+                try:
+                    skill_result = await skill_runtime.execute_skill(
+                        skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+                        payload={
+                            "session_id": str(state.get("session_id") or ""),
+                            "user_message": user_message,
+                            "step_description": step.description,
+                            "language": language,
+                            "attachments": attachments,
+                            "execution_context": _build_execution_context_block(state),
+                        },
+                    )
+                    llm_message = {
+                        "success": bool(getattr(skill_result, "success", True)),
+                        "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
+                        "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
+                    }
+                except Exception as e:
+                    logger.warning("执行步骤 Skill 运行失败，回退默认执行链路: %s", e)
+    except TimeoutError:
+        logger.warning("步骤执行超时: step_id=%s description=%s", str(step.id or ""), str(step.description or ""))
+        llm_message = {
+            "success": False,
+            "result": f"步骤执行超时：{step.description}",
+            "attachments": [],
+            "blockers": [f"当前步骤超过 {STEP_EXECUTION_TIMEOUT_SECONDS} 秒未完成"],
+            "next_hint": "请缩小当前步骤范围后重试",
+        }
 
     if llm_message is None:
         llm_message = {
@@ -1241,6 +1262,9 @@ async def execute_step_node(
         step_local_memory = dict(state.get("step_local_memory") or {})
         step_local_memory["current_step_id"] = str(step.id)
         step_local_memory["pending_interrupt"] = interrupt_request
+        step_local_memory["waiting_step_id"] = str(step.id)
+        step_local_memory["waiting_step_title"] = str(step.title or "").strip()
+        step_local_memory["waiting_step_description"] = str(step.description or "").strip()
         graph_metadata = dict(state.get("graph_metadata") or {})
         graph_metadata["waiting_interrupt_kind"] = interrupt_request.get("kind") or "input_text"
         graph_metadata["waiting_interrupt_prompt"] = interrupt_request.get("prompt") or ""
@@ -1330,7 +1354,7 @@ async def execute_step_node(
 async def wait_for_human_node(
         state: PlannerReActLangGraphState,
 ) -> PlannerReActLangGraphState:
-    """在独立节点中触发原生 interrupt，避免重复副作用。"""
+    """在等待节点中恢复用户输入，并完成当前等待中的步骤。"""
     interrupt_request = _normalize_interrupt_request(state.get("pending_interrupt"))
     if not interrupt_request:
         return {
@@ -1358,16 +1382,78 @@ async def wait_for_human_node(
 
     step_local_memory = dict(state.get("step_local_memory") or {})
     step_local_memory.pop("pending_interrupt", None)
+    waiting_step_id = str(
+        step_local_memory.pop("waiting_step_id", "") or state.get("current_step_id") or ""
+    ).strip()
+    step_local_memory.pop("waiting_step_title", None)
+    step_local_memory.pop("waiting_step_description", None)
 
-    return {
-        **state,
-        "user_message": resumed_message,
-        "input_parts": [],
-        "message_window": message_window,
-        "graph_metadata": graph_metadata,
-        "step_local_memory": step_local_memory,
-        "pending_interrupt": {},
-    }
+    plan = state.get("plan")
+    if plan is None or not waiting_step_id:
+        return {
+            **state,
+            "user_message": resumed_message,
+            "input_parts": [],
+            "message_window": message_window,
+            "graph_metadata": graph_metadata,
+            "step_local_memory": step_local_memory,
+            "pending_interrupt": {},
+        }
+
+    waiting_step: Optional[Step] = None
+    for candidate in list(plan.steps or []):
+        if str(candidate.id or "").strip() == waiting_step_id:
+            waiting_step = candidate
+            break
+
+    if waiting_step is None:
+        return {
+            **state,
+            "user_message": resumed_message,
+            "input_parts": [],
+            "message_window": message_window,
+            "graph_metadata": graph_metadata,
+            "step_local_memory": step_local_memory,
+            "pending_interrupt": {},
+        }
+
+    waiting_step.outcome = StepOutcome(
+        done=True,
+        summary=_build_wait_resume_step_summary(waiting_step, resumed_message),
+    )
+    waiting_step.status = ExecutionStatus.COMPLETED
+    completed_event = StepEvent(
+        step=waiting_step.model_copy(deep=True),
+        status=StepEventStatus.COMPLETED,
+    )
+    await emit_live_events(completed_event)
+    next_step = plan.get_next_step()
+    working_memory = _merge_step_outcome_into_working_memory(
+        _ensure_working_memory(state),
+        waiting_step.outcome,
+    )
+    step_local_memory["current_step_id"] = str(waiting_step.id)
+    step_local_memory["observation_summary"] = _normalize_step_result_text(waiting_step.outcome.summary)
+    step_local_memory["pending_findings"] = []
+
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "user_message": resumed_message,
+            "input_parts": [],
+            "message_window": message_window,
+            "graph_metadata": graph_metadata,
+            "step_local_memory": step_local_memory,
+            "pending_interrupt": {},
+            "last_executed_step": waiting_step.model_copy(deep=True),
+            "execution_count": int(state.get("execution_count", 0)) + 1,
+            "current_step_id": next_step.id if next_step is not None else None,
+            "working_memory": working_memory,
+            "final_message": _normalize_step_result_text(waiting_step.outcome.summary),
+        },
+        events=[completed_event],
+    )
 
 
 async def recall_memory_context_node(

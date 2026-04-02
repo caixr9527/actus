@@ -113,7 +113,7 @@ def build_planner_react_langgraph_graph(
             "replan": "replan",
         },
     )
-    graph.add_edge("wait_for_human", "create_plan_or_reuse")
+    graph.add_edge("wait_for_human", "replan")
     graph.add_conditional_edges(
         "replan",
         route_after_replan,

@@ -164,6 +164,8 @@ def normalize_wait_payload(raw: Any) -> Dict[str, Any]:
     """将等待载荷规范化为稳定字典结构。"""
     if raw is None:
         return {}
+    if isinstance(raw, dict) and len(raw) == 0:
+        return {}
 
     try:
         payload = _WAIT_PAYLOAD_ADAPTER.validate_python(raw)

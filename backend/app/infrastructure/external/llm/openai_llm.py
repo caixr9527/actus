@@ -31,7 +31,7 @@ class OpenAILLM(LLM):
         self._max_tokens = llm_config.max_tokens
         self._multimodal = bool(llm_config.multimodal)
         self._supported = [str(item) for item in list(llm_config.supported or []) if str(item).strip()]
-        self._timeout = 3600
+        self._timeout = 180
 
     @property
     def model_name(self) -> str:
