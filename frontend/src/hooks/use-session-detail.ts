@@ -38,6 +38,53 @@ const EMPTY_STREAM_RETRY_POLICY: RetryPolicy = {
   maxDelayMs: 10_000,
 }
 
+type SessionSnapshotPayload = {
+  detail: SessionDetail
+  fileListRaw: unknown
+}
+
+const pendingPromiseCache = new Map<string, Promise<unknown>>()
+
+function reusePendingPromise<T>(key: string, factory: () => Promise<T>): Promise<T> {
+  const existing = pendingPromiseCache.get(key)
+  if (existing) return existing as Promise<T>
+
+  const pending = factory().finally(() => {
+    if (pendingPromiseCache.get(key) === pending) {
+      pendingPromiseCache.delete(key)
+    }
+  })
+  pendingPromiseCache.set(key, pending)
+  return pending
+}
+
+function loadSessionSnapshotOnce(sessionId: string): Promise<SessionSnapshotPayload> {
+  return reusePendingPromise(`session-snapshot:${sessionId}`, async () => {
+    const [detail, fileListRaw] = await Promise.all([
+      sessionApi.getSessionDetail(sessionId),
+      sessionApi.getSessionFiles(sessionId),
+    ])
+    return {
+      detail,
+      fileListRaw,
+    }
+  })
+}
+
+function loadSessionFilesOnce(sessionId: string): Promise<unknown> {
+  return reusePendingPromise(`session-files:${sessionId}`, () => sessionApi.getSessionFiles(sessionId))
+}
+
+function loadModelsOnce(): Promise<{ models: ListModelItem[]; default_model_id: string | null }> {
+  return reusePendingPromise('models', async () => {
+    const data = await configApi.getModels()
+    return {
+      models: data.models,
+      default_model_id: data.default_model_id,
+    }
+  })
+}
+
 /**
  * 任务详情：拉取会话详情与文件列表，管理事件列表；
  * 未完成任务会通过 chat 空 body 流式拉取事件，发送消息时通过 chat 带 body 流式追加事件。
@@ -230,10 +277,7 @@ export function useSessionDetail(
 
   const loadSessionSnapshot = useCallback(async (targetSessionId: string, targetEpoch: number): Promise<SessionDetail | null> => {
     try {
-      const [detail, fileListRaw] = await Promise.all([
-        sessionApi.getSessionDetail(targetSessionId),
-        sessionApi.getSessionFiles(targetSessionId),
-      ])
+      const { detail, fileListRaw } = await loadSessionSnapshotOnce(targetSessionId)
 
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return null
@@ -288,7 +332,7 @@ export function useSessionDetail(
     const targetEpoch = sessionEpochRef.current
     const targetSessionId = sessionId
     try {
-      const fileListRaw = await sessionApi.getSessionFiles(targetSessionId)
+      const fileListRaw = await loadSessionFilesOnce(targetSessionId)
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return
       }
@@ -300,7 +344,7 @@ export function useSessionDetail(
 
   const loadModels = useCallback(async (targetSessionId: string, targetEpoch: number) => {
     try {
-      const data = await configApi.getModels()
+      const data = await loadModelsOnce()
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return
       }
