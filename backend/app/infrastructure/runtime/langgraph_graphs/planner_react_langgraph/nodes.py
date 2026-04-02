@@ -58,8 +58,16 @@ MESSAGE_WINDOW_MAX_MESSAGE_CHARS = 500
 MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS = 8
 MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
 CONVERSATION_SUMMARY_MAX_PARTS = 4
-PROMPT_CONTEXT_BRIEF_LIMIT = 5
-PROMPT_CONTEXT_ARTIFACT_LIMIT = 10
+PROMPT_CONTEXT_BRIEF_LIMIT = 3
+PROMPT_CONTEXT_ARTIFACT_LIMIT = 6
+PROMPT_CONTEXT_MEMORY_LIMIT = 6
+PROMPT_CONTEXT_MESSAGE_LIMIT = 6
+PROMPT_CONTEXT_COMPLETED_STEP_LIMIT = 5
+PROMPT_CONTEXT_SUMMARY_MAX_CHARS = 400
+PROMPT_CONTEXT_MESSAGE_MAX_CHARS = 200
+PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS = 160
+PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS = 240
+PROMPT_CONTEXT_OPEN_ITEM_LIMIT = 8
 STEP_EXECUTION_TIMEOUT_SECONDS = 180
 
 
@@ -112,6 +120,13 @@ def _normalize_text_items(raw: Any) -> List[str]:
     return normalized_items
 
 
+def _truncate_text_items(raw: Any, *, max_items: int, max_chars: int) -> List[str]:
+    return [
+        _truncate_text(item, max_chars=max_chars)
+        for item in _normalize_text_items(raw)[:max_items]
+    ]
+
+
 def _normalize_context_artifact_refs(raw: Any) -> List[str]:
     if isinstance(raw, str):
         items = [raw]
@@ -135,6 +150,30 @@ def _get_step_artifacts(step: Optional[Step]) -> List[str]:
     if step is None or step.outcome is None:
         return []
     return _normalize_attachment_paths(step.outcome.produced_artifacts)
+
+
+def _is_attachment_filepath(ref: Any) -> bool:
+    raw_ref = str(ref or "").strip()
+    return raw_ref.startswith("/")
+
+
+def _resolve_summary_attachment_refs(
+        state: PlannerReActLangGraphState,
+        parsed_attachments: Any,
+) -> List[str]:
+    explicit_attachment_refs = normalize_attachments(parsed_attachments)
+    if len(explicit_attachment_refs) > 0:
+        return explicit_attachment_refs
+
+    last_step_attachment_refs = _get_step_artifacts(state.get("last_executed_step"))
+    if len(last_step_attachment_refs) > 0:
+        return last_step_attachment_refs
+
+    return [
+        ref
+        for ref in list(state.get("selected_artifacts") or [])
+        if _is_attachment_filepath(ref)
+    ]
 
 
 def _reduce_state_with_events(
@@ -333,19 +372,14 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
 
 def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     """统一构造 planner / execute_step / replan 的结构化上下文块。"""
-    # 提取并过滤有效的步骤状态列表
     step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
-    # 筛选出所有状态为“已完成”的步骤
     completed_steps = [
         item for item in step_states
         if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
-    ]
-    # 获取最后执行的步骤对象
+    ][-PROMPT_CONTEXT_COMPLETED_STEP_LIMIT:]
     last_step = state.get("last_executed_step")
-    # 确保工作记忆已初始化
     working_memory = _ensure_working_memory(state)
-    
-    # 收集所有待解决的开放性问题，来源包括会话级、工作记忆及最后一步的执行结果
+
     open_questions = _normalize_text_items(state.get("session_open_questions"))
     open_questions.extend(_normalize_text_items(working_memory.get("open_questions")))
     if last_step is not None and last_step.outcome is not None:
@@ -364,7 +398,7 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
             "title": str(item.get("title") or "").strip(),
             "goal": str(item.get("goal") or "").strip(),
             "status": str(item.get("status") or "").strip(),
-            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=200),
+            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=120),
         }
         for item in list(state.get("recent_run_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
         if isinstance(item, dict) and str(item.get("run_id") or "").strip()
@@ -375,20 +409,113 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
             "title": str(item.get("title") or "").strip(),
             "goal": str(item.get("goal") or "").strip(),
             "status": str(item.get("status") or "").strip(),
-            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=200),
+            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=120),
         }
         for item in list(state.get("recent_attempt_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
         if isinstance(item, dict) and str(item.get("run_id") or "").strip()
     ]
 
-    # 构建并返回统一的执行上下文块
+    recent_messages: List[Dict[str, Any]] = []
+    for item in list(state.get("message_window") or [])[-PROMPT_CONTEXT_MESSAGE_LIMIT:]:
+        normalized_item = _normalize_message_window_entry(item, default_role="assistant")
+        if normalized_item is None:
+            continue
+        recent_messages.append(
+            {
+                **normalized_item,
+                "message": _truncate_text(
+                    normalized_item.get("message"),
+                    max_chars=PROMPT_CONTEXT_MESSAGE_MAX_CHARS,
+                ),
+            }
+        )
+
+    sanitized_completed_steps: List[Dict[str, Any]] = []
+    for item in completed_steps:
+        outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
+        sanitized_completed_steps.append(
+            {
+                "step_id": str(item.get("step_id") or "").strip(),
+                "title": _truncate_text(item.get("title"), max_chars=80),
+                "description": _truncate_text(item.get("description"), max_chars=120),
+                "status": str(item.get("status") or "").strip(),
+                "summary": _truncate_text(
+                    outcome.get("summary"),
+                    max_chars=160,
+                ),
+            }
+        )
+
+    sanitized_memories: List[Dict[str, Any]] = []
+    for item in list(state.get("retrieved_memories") or [])[:PROMPT_CONTEXT_MEMORY_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") if isinstance(item.get("content"), dict) else {}
+        content_fragments: List[str] = []
+        for key in list(content.keys()):
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key in {"embedding", "vector", "source", "score", "similarity", "distance"}:
+                continue
+            value = content.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                text = str(value).strip()
+                if text:
+                    content_fragments.append(
+                        _truncate_text(
+                            text if normalized_key in {"text", "content"} else f"{key}: {text}",
+                            max_chars=80,
+                        )
+                    )
+            elif isinstance(value, list):
+                items = [str(entry).strip() for entry in value if str(entry).strip()]
+                if items:
+                    content_fragments.append(
+                        _truncate_text(
+                            f"{key}: {', '.join(items[:4])}",
+                            max_chars=80,
+                        )
+                    )
+            if len(content_fragments) >= 3:
+                break
+        sanitized_memories.append(
+            {
+                "id": str(item.get("id") or "").strip(),
+                "memory_type": str(item.get("memory_type") or "").strip(),
+                "summary": _truncate_text(
+                    item.get("summary"),
+                    max_chars=PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS,
+                ),
+                "content_preview": _truncate_text(
+                    " | ".join(content_fragments),
+                    max_chars=PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS,
+                ),
+                "tags": [
+                    _truncate_text(tag, max_chars=40)
+                    for tag in list(item.get("tags") or [])[:6]
+                    if str(tag or "").strip()
+                ],
+            }
+        )
+
     return {
-        "conversation_summary": str(state.get("conversation_summary") or "").strip(),
-        "completed_steps": completed_steps,
+        "conversation_summary": _truncate_text(
+            state.get("conversation_summary"),
+            max_chars=PROMPT_CONTEXT_SUMMARY_MAX_CHARS,
+        ),
+        "recent_messages": recent_messages,
+        "completed_steps": sanitized_completed_steps,
         "last_step_result": _get_step_outcome_summary(last_step),
-        "retrieved_memories": list(state.get("retrieved_memories") or []),
-        "open_questions": list(dict.fromkeys(open_questions)),
-        "blockers": list(dict.fromkeys(blockers)),
+        "retrieved_memories": sanitized_memories,
+        "open_questions": _truncate_text_items(
+            list(dict.fromkeys(open_questions)),
+            max_items=PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
+            max_chars=120,
+        ),
+        "blockers": _truncate_text_items(
+            list(dict.fromkeys(blockers)),
+            max_items=PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
+            max_chars=120,
+        ),
         "selected_artifacts": list(dict.fromkeys(selected_artifacts))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
         "historical_artifact_refs": list(dict.fromkeys(historical_artifact_refs))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
         "recent_run_briefs": recent_run_briefs,
@@ -1348,7 +1475,7 @@ async def execute_step_node(
             "pending_interrupt": {},
         },
         events=events,
-    )
+        )
 
 
 async def wait_for_human_node(
@@ -1581,7 +1708,10 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         raw_candidates=parsed.get("memory_candidates"),
     )
     # 附件处理
-    summary_attachment_refs = merge_attachment_paths(normalize_attachments(parsed.get("attachments")))
+    summary_attachment_refs = _resolve_summary_attachment_refs(
+        state,
+        parsed.get("attachments"),
+    )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
 
     final_events: List[Any] = [

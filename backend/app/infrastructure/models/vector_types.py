@@ -16,6 +16,8 @@ class AsyncpgVector(VECTOR):
     4. 因此这里显式返回原始值，让 asyncpg codec 负责最终编码。
     """
 
+    cache_ok = True
+
     def bind_processor(self, dialect):
         def process(value):
             return value

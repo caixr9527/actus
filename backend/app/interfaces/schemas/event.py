@@ -136,6 +136,20 @@ class StepEventData(BaseEventData):
     status: ExecutionStatus  # 步骤执行状态
     event_status: StepEventStatus  # 步骤事件状态（started/completed/failed）
     description: str  # 步骤描述
+    outcome: Optional["StepOutcomeData"] = None
+
+
+class StepOutcomeData(BaseModel):
+    """步骤结果数据"""
+    done: bool = False
+    summary: str = ""
+    produced_artifacts: List[str] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    facts_learned: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+    next_hint: Optional[str] = None
+    reused_from_run_id: Optional[str] = None
+    reused_from_step_id: Optional[str] = None
 
 
 class StepSSEEvent(BaseSSEEvent):
@@ -151,7 +165,12 @@ class StepSSEEvent(BaseSSEEvent):
                 status=event.step.status,
                 event_status=event.status,
                 id=event.step.id,
-                description=event.step.description
+                description=event.step.description,
+                outcome=(
+                    StepOutcomeData.model_validate(event.step.outcome.model_dump(mode="json"))
+                    if event.step.outcome is not None
+                    else None
+                ),
             )
         )
 
@@ -192,6 +211,11 @@ class PlanSSEEvent(BaseSSEEvent):
                             )
                         ),
                         description=step.description,
+                        outcome=(
+                            StepOutcomeData.model_validate(step.outcome.model_dump(mode="json"))
+                            if step.outcome is not None
+                            else None
+                        ),
                     )
                     for step in event.plan.steps
                 ],

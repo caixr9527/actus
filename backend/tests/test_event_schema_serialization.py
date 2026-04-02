@@ -7,6 +7,8 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     PlanEventStatus,
+    StepEvent,
+    StepEventStatus,
     Step,
     StepOutcome,
     WaitEvent,
@@ -147,6 +149,38 @@ def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
     assert payload["data"]["status"] == PlanEventStatus.UPDATED.value
     assert payload["data"]["plan_status"] == ExecutionStatus.RUNNING.value
     assert payload["data"]["steps"][0]["event_status"] == "completed"
+    assert payload["data"]["steps"][0]["outcome"]["summary"] == "执行步骤1完成"
+
+
+def test_step_sse_event_should_include_step_outcome() -> None:
+    event = StepEvent(
+        id="evt-step-1",
+        created_at=datetime(2026, 3, 11, 12, 0, 7),
+        status=StepEventStatus.FAILED,
+        step=Step(
+            id="step-1",
+            title="执行步骤1",
+            description="执行步骤1",
+            objective_key="objective-step-1",
+            success_criteria=["执行步骤1完成"],
+            status=ExecutionStatus.FAILED,
+            outcome=StepOutcome(
+                done=False,
+                summary="步骤执行超时：执行步骤1",
+                blockers=["当前步骤超过 180 秒未完成"],
+                next_hint="请缩小当前步骤范围后重试",
+            ),
+        ),
+    )
+
+    sse_event = EventMapper.event_to_sse_event(event)
+    payload = sse_event.model_dump(mode="json")
+
+    assert payload["event"] == "step"
+    assert payload["data"]["status"] == ExecutionStatus.FAILED.value
+    assert payload["data"]["outcome"]["summary"] == "步骤执行超时：执行步骤1"
+    assert payload["data"]["outcome"]["blockers"] == ["当前步骤超过 180 秒未完成"]
+    assert payload["data"]["outcome"]["next_hint"] == "请缩小当前步骤范围后重试"
 
 
 def test_wait_sse_event_should_include_interrupt_payload() -> None:

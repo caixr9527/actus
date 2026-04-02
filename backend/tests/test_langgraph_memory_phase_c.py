@@ -362,7 +362,19 @@ def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
 def test_execution_context_block_should_separate_current_and_historical_context() -> None:
     state = {
         "conversation_summary": "会话摘要",
-        "retrieved_memories": [{"id": "mem-1", "summary": "偏好中文"}],
+        "retrieved_memories": [
+            {
+                "id": "mem-1",
+                "memory_type": "profile",
+                "summary": "偏好中文",
+                "content": {
+                    "language": "zh",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "source": {"kind": "vector"},
+                },
+                "tags": ["language", "profile"],
+            }
+        ],
         "session_open_questions": ["问题1", "问题2"],
         "session_blockers": ["阻塞1"],
         "selected_artifacts": [f"/tmp/current-{index}.md" for index in range(12)],
@@ -389,18 +401,30 @@ def test_execution_context_block_should_separate_current_and_historical_context(
         ],
         "working_memory": {"open_questions": ["问题2", "问题3"]},
         "step_states": [],
+        "message_window": [
+            {"role": "user", "message": "第一轮问题"},
+            {"role": "assistant", "message": "第一轮回答"},
+        ],
     }
 
     context_block = _build_execution_context_block(state)
 
-    assert context_block["selected_artifacts"] == [f"/tmp/current-{index}.md" for index in range(10)]
-    assert context_block["historical_artifact_refs"] == [f"/tmp/history-{index}.md" for index in range(10)]
-    assert len(context_block["recent_run_briefs"]) == 5
-    assert len(context_block["recent_attempt_briefs"]) == 5
+    assert context_block["selected_artifacts"] == [f"/tmp/current-{index}.md" for index in range(6)]
+    assert context_block["historical_artifact_refs"] == [f"/tmp/history-{index}.md" for index in range(6)]
+    assert len(context_block["recent_run_briefs"]) == 3
+    assert len(context_block["recent_attempt_briefs"]) == 3
     assert "总结0总结0" in context_block["recent_run_briefs"][0]["final_answer_summary"]
-    assert len(context_block["recent_run_briefs"][0]["final_answer_summary"]) <= 200
+    assert len(context_block["recent_run_briefs"][0]["final_answer_summary"]) <= 120
     assert context_block["blockers"] == ["阻塞1"]
     assert context_block["open_questions"] == ["问题1", "问题2", "问题3"]
+    assert context_block["recent_messages"] == [
+        {"role": "user", "message": "第一轮问题"},
+        {"role": "assistant", "message": "第一轮回答"},
+    ]
+    assert context_block["retrieved_memories"][0]["memory_type"] == "profile"
+    assert context_block["retrieved_memories"][0]["summary"] == "偏好中文"
+    assert context_block["retrieved_memories"][0]["content_preview"] == "language: zh"
+    assert "embedding" not in context_block["retrieved_memories"][0]
 
 
 def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assumption() -> None:
@@ -730,6 +754,122 @@ def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_
     assert summarized_state["pending_memory_writes"][0]["tags"] == ["task_outcome"]
 
 
+def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_empty_attachments() -> None:
+    llm = _FakeLLM()
+    last_executed_step = Step(
+        id="step-1",
+        title="生成文档",
+        description="生成课程目录文档",
+        objective_key="objective-step-1",
+        success_criteria=["文档生成完成"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="已生成课程目录文档",
+            produced_artifacts=["/home/ubuntu/course_directory.md"],
+        ),
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": last_executed_step,
+        "selected_artifacts": ["artifact-id-1", "/home/ubuntu/course_directory.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证总结附件回填",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/course_directory.md"]
+    assert summarized_state["selected_artifacts"] == ["artifact-id-1", "/home/ubuntu/course_directory.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/course_directory.md"]
+
+
+class _FakeSummaryAttachmentLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "最终总结",
+                    "attachments": ["/home/ubuntu/final-output.md"],
+                    "facts_in_session": [],
+                    "user_preferences": {},
+                    "memory_candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+def test_summarize_should_prefer_explicit_summary_attachments_over_previous_artifacts() -> None:
+    llm = _FakeSummaryAttachmentLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成文档",
+            description="生成课程目录文档",
+            objective_key="objective-step-1",
+            success_criteria=["文档生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成中间文档",
+                produced_artifacts=["/home/ubuntu/intermediate.md"],
+            ),
+        ),
+        "selected_artifacts": ["/home/ubuntu/intermediate.md", "/home/ubuntu/older.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证总结附件优先级",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+
+
 def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(monkeypatch) -> None:
     repository = _FakeLongTermMemoryRepository()
 
@@ -838,7 +978,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
         return await graph.ainvoke(
             {
                 "session_id": "session-1",
-                "user_message": "帮我整理记忆",
+                "user_message": "请规划并分阶段整理记忆任务",
                 "graph_metadata": {},
             },
             config={"configurable": {"thread_id": "session-1"}},
