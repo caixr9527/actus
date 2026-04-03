@@ -60,7 +60,7 @@ def build_run_engine(
         a2a_tool=a2a_tool,
     )
     # LangGraph 单步骤工具循环设置上限，避免单次 step 在高 max_iterations 配置下耗时失控。
-    max_tool_iterations = max(1, min(int(agent_config.max_iterations), 20))
+    # max_tool_iterations = max(1, min(int(agent_config.max_iterations), 20))
     return LangGraphRunEngine(
         session_id=session_id,
         llm=llm,
@@ -68,6 +68,6 @@ def build_run_engine(
         user_id=user_id,
         uow_factory=uow_factory,
         runtime_tools=runtime_tools,
-        max_tool_iterations=max_tool_iterations,
+        max_tool_iterations=agent_config.max_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
     )

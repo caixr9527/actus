@@ -24,6 +24,7 @@ from .shell import (
 )
 
 from .supervisor import TimeoutRequest
+from .searxng import SearXNGSearchRequest
 
 __all__ = [
     "Response",
@@ -40,4 +41,5 @@ __all__ = [
     "FileCheckRequest",
     "FileDeleteRequest",
     "TimeoutRequest",
+    "SearXNGSearchRequest",
 ]

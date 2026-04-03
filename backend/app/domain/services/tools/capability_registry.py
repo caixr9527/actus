@@ -140,7 +140,7 @@ class CapabilityRegistry:
                     capability_id=cls.CAPABILITY_SEARCH,
                     description="网络搜索能力",
                     tool_family="search",
-                    factory=lambda context: SearchTool(search_engine=context.search_engine),
+                    factory=lambda context: SearchTool(sandbox=context.sandbox),
                 ),
                 CapabilityDefinition(
                     capability_id=cls.CAPABILITY_BROWSER,
