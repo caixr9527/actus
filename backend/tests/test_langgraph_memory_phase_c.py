@@ -575,20 +575,12 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
         status=ExecutionStatus.COMPLETED,
         outcome=StepOutcome(done=True, summary="已完成"),
     )
-    pending_step = Step(
-        id="step-b",
-        title="待执行步骤",
-        description="待执行步骤",
-        objective_key="objective-step-b",
-        success_criteria=["待执行步骤完成"],
-        status=ExecutionStatus.PENDING,
-    )
     plan = Plan(
         title="重规划测试",
         goal="验证 step_id 去重",
         language="zh",
         message="开始重规划",
-        steps=[completed_step, pending_step],
+        steps=[completed_step],
     )
     state = {
         "plan": plan,
@@ -1027,7 +1019,30 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
         return _append_trace(state, "recall")
 
     async def _plan(state, _llm):
-        plan = _build_plan(step_status=ExecutionStatus.PENDING)
+        plan = Plan(
+            title="记忆阶段测试",
+            goal="验证长期记忆边界",
+            language="zh",
+            message="开始执行",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="执行阶段一",
+                    description="执行阶段一",
+                    objective_key="objective-step-1",
+                    success_criteria=["执行阶段一完成"],
+                    status=ExecutionStatus.PENDING,
+                ),
+                Step(
+                    id="step-2",
+                    title="执行阶段二",
+                    description="执行阶段二",
+                    objective_key="objective-step-2",
+                    success_criteria=["执行阶段二完成"],
+                    status=ExecutionStatus.PENDING,
+                ),
+            ],
+        )
         next_state = _append_trace(state, "plan")
         return {
             **next_state,
@@ -1037,17 +1052,20 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
 
     async def _execute(state, _llm, skill_runtime=None, runtime_tools=None, max_tool_iterations=5):
         plan = state["plan"].model_copy(deep=True)
-        plan.steps[0].status = ExecutionStatus.COMPLETED
-        plan.steps[0].outcome = StepOutcome(
+        current_step = next(step for step in plan.steps if not step.done)
+        current_step.status = ExecutionStatus.COMPLETED
+        current_step.outcome = StepOutcome(
             done=True,
             summary="步骤执行完成",
         )
+        next_step = plan.get_next_step()
         next_state = _append_trace(state, "execute")
         return {
             **next_state,
             "plan": plan,
-            "last_executed_step": plan.steps[0].model_copy(deep=True),
-            "current_step_id": None,
+            "last_executed_step": current_step.model_copy(deep=True),
+            "execution_count": int(state.get("execution_count", 0)) + 1,
+            "current_step_id": next_step.id if next_step is not None else None,
         }
 
     async def _guard(state):
@@ -1128,6 +1146,8 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     assert state["graph_metadata"]["trace"] == [
         "recall",
         "plan",
+        "guard",
+        "execute",
         "guard",
         "execute",
         "replan",

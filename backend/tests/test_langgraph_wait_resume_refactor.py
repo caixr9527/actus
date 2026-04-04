@@ -6,6 +6,9 @@ from app.domain.services.tools.message import MessageTool
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
     wait_for_human_node,
 )
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing import (
+    route_after_wait,
+)
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
     execute_step_with_prompt,
 )
@@ -180,3 +183,30 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     assert "已收到用户回复" in str(next_state["last_executed_step"].outcome.summary)
     assert next_state["graph_metadata"].get("pending_interrupts") is None
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
+
+
+def test_route_after_wait_should_continue_current_batch_before_replan() -> None:
+    plan = Plan(
+        title="课程推荐",
+        goal="推荐课程并等待用户选择",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="等待用户选择课程",
+                description="展示三门课程并等待用户选择",
+                status=ExecutionStatus.COMPLETED,
+            ),
+            Step(
+                id="step-2",
+                title="继续处理",
+                description="根据用户选择继续后续步骤",
+                status=ExecutionStatus.PENDING,
+            ),
+        ],
+    )
+
+    assert route_after_wait({"plan": plan, "execution_count": 1, "max_execution_steps": 20}) == "guard_step_reuse"
+
+    plan.steps[1].status = ExecutionStatus.COMPLETED
+    assert route_after_wait({"plan": plan, "execution_count": 2, "max_execution_steps": 20}) == "replan"

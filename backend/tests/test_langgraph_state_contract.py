@@ -10,6 +10,7 @@ from app.domain.models import (
     Session,
     Step,
     StepEvent,
+    StepEventStatus,
     StepOutcome,
     ToolEvent,
     ToolEventStatus,
@@ -360,3 +361,58 @@ def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> Non
 
     assert reduced_state["pending_interrupt"] == {}
     assert "pending_interrupts" not in runtime_metadata["graph_state_contract"]["graph_state"]["metadata"]
+
+
+def test_apply_emitted_events_should_keep_plan_in_sync_after_step_completed() -> None:
+    created_plan = Plan(
+        title="测试计划",
+        goal="验证步骤同步",
+        language="zh",
+        message="生成计划",
+        steps=[
+            Step(
+                id="step-1",
+                title="第一步",
+                description="第一步",
+                objective_key="objective-step-1",
+                success_criteria=["第一步完成"],
+                status=ExecutionStatus.PENDING,
+            ),
+            Step(
+                id="step-2",
+                title="第二步",
+                description="第二步",
+                objective_key="objective-step-2",
+                success_criteria=["第二步完成"],
+                status=ExecutionStatus.PENDING,
+            ),
+        ],
+    )
+    completed_step = created_plan.steps[0].model_copy(deep=True)
+    completed_step.status = ExecutionStatus.COMPLETED
+    completed_step.outcome = StepOutcome(done=True, summary="第一步完成")
+    state = {
+        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
+        "plan": created_plan.model_copy(deep=True),
+        "step_states": [],
+        "tool_invocations": {},
+        "graph_metadata": {},
+        "artifact_refs": [],
+        "audit_events": [],
+        "pending_interrupt": {},
+        "emitted_events": [
+            PlanEvent(plan=created_plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
+            StepEvent(step=completed_step.model_copy(deep=True), status=StepEventStatus.COMPLETED),
+        ],
+    }
+
+    reduced_state = GraphStateContractMapper.apply_emitted_events(state=state)
+
+    assert reduced_state["current_step_id"] == "step-2"
+    assert reduced_state["plan"] is not None
+    assert reduced_state["plan"].steps[0].status == ExecutionStatus.COMPLETED
+    assert reduced_state["plan"].steps[0].outcome is not None
+    assert reduced_state["plan"].steps[0].outcome.summary == "第一步完成"
+    assert reduced_state["plan"].steps[1].status == ExecutionStatus.PENDING
+    assert reduced_state["plan"].get_next_step() is not None
+    assert reduced_state["plan"].get_next_step().id == "step-2"

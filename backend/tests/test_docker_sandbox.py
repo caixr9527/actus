@@ -118,3 +118,22 @@ def test_search_searxng_should_post_search_request_to_sandbox() -> None:
     }
     assert result.success is True
     assert result.data == {"query": "openai", "results": []}
+
+
+def test_fetch_searxng_page_should_post_fetch_request_to_sandbox() -> None:
+    fake_client = _FakeAsyncClient()
+    sandbox = docker_sandbox.DockerSandbox(ip="127.0.0.1", container_name="sandbox-1")
+    sandbox.client = fake_client
+
+    result = asyncio.run(sandbox.fetch_searxng_page(
+        url="https://example.com/article",
+        max_chars=5000,
+    ))
+
+    assert fake_client.last_post_url == "http://127.0.0.1:8081/api/searxng/fetch-page"
+    assert fake_client.last_post_json == {
+        "url": "https://example.com/article",
+        "max_chars": 5000,
+    }
+    assert result.success is True
+    assert result.data == {"query": "openai", "results": []}
