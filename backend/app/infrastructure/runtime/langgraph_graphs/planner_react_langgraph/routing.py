@@ -12,6 +12,51 @@ from .runtime_logging import log_runtime
 logger = logging.getLogger(__name__)
 
 
+def _has_reached_execution_limit(state: PlannerReActLangGraphState) -> bool:
+    execution_count = int(state.get("execution_count", 0))
+    max_execution_steps = int(state.get("max_execution_steps", 20))
+    if execution_count < max_execution_steps:
+        return False
+
+    log_runtime(
+        logger,
+        logging.WARNING,
+        "达到执行上限，转入总结",
+        state=state,
+        execution_count=execution_count,
+        max_execution_steps=max_execution_steps,
+    )
+    return True
+
+
+def _route_after_completed_step(
+        state: PlannerReActLangGraphState,
+) -> Literal["guard_step_reuse", "replan", "summarize"]:
+    """步骤已完成后，优先继续当前批次；仅在批次跑完后进入重规划。"""
+    if _has_reached_execution_limit(state):
+        return "summarize"
+
+    plan = state.get("plan")
+    next_step = plan.get_next_step() if plan is not None else None
+    if next_step is not None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "当前批次仍有待执行步骤，继续执行",
+            state=state,
+            next_step_id=str(next_step.id or ""),
+        )
+        return "guard_step_reuse"
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "当前批次步骤已全部完成，进入重规划",
+        state=state,
+    )
+    return "replan"
+
+
 def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:
     """规划阶段后的分支路由。"""
     plan = state.get("plan")
@@ -19,20 +64,15 @@ def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_r
     if plan is None or plan.status == ExecutionStatus.COMPLETED:
         return "consolidate_memory"
 
-    if state.get("execution_count", 0) >= state.get("max_execution_steps", 20):
-        log_runtime(
-            logger,
-            logging.WARNING,
-            "达到执行上限，转入总结",
-            state=state,
-            max_execution_steps=state.get("max_execution_steps", 20),
-        )
+    if _has_reached_execution_limit(state):
         return "summarize"
 
     return "guard_step_reuse" if plan.get_next_step() is not None else "summarize"
 
 
-def route_after_guard(state: PlannerReActLangGraphState) -> Literal["execute_step", "replan", "summarize"]:
+def route_after_guard(
+        state: PlannerReActLangGraphState,
+) -> Literal["guard_step_reuse", "execute_step", "replan", "summarize"]:
     """复用防护后的分支路由。"""
     plan = state.get("plan")
     if plan is None:
@@ -40,17 +80,26 @@ def route_after_guard(state: PlannerReActLangGraphState) -> Literal["execute_ste
 
     graph_metadata = state.get("graph_metadata")
     if isinstance(graph_metadata, dict) and bool(graph_metadata.get("step_reuse_hit")):
-        return "replan" if plan.get_next_step() is not None else "summarize"
+        return _route_after_completed_step(state)
 
     return "execute_step" if plan.get_next_step() is not None else "summarize"
 
 
-def route_after_execute(state: PlannerReActLangGraphState) -> Literal["wait_for_human", "replan"]:
-    """步骤执行后，若存在 pending interrupt 则进入等待节点。"""
+def route_after_execute(
+        state: PlannerReActLangGraphState,
+) -> Literal["wait_for_human", "guard_step_reuse", "replan", "summarize"]:
+    """步骤执行后，优先处理等待；否则继续当前批次或进入重规划。"""
     pending_interrupt = state.get("pending_interrupt")
     if isinstance(pending_interrupt, dict) and len(pending_interrupt) > 0:
         return "wait_for_human"
-    return "replan"
+    return _route_after_completed_step(state)
+
+
+def route_after_wait(
+        state: PlannerReActLangGraphState,
+) -> Literal["guard_step_reuse", "replan", "summarize"]:
+    """等待恢复后，继续当前批次剩余步骤；批次结束后再重规划。"""
+    return _route_after_completed_step(state)
 
 
 def route_after_replan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:

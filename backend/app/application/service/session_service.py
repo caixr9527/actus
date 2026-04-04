@@ -205,7 +205,7 @@ class SessionService:
     async def get_session_files(self, user_id: str, session_id: str) -> List[File]:
         logger.info(f"获取任务会话文件列表: {session_id}")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
-        return session.files
+        return session.final_files
 
     async def read_file(self, user_id: str, session_id: str, filepath: str) -> FileReadResult:
         logger.info(f"获取会话：{session_id} 中文件路径：{filepath} 的内容")

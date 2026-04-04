@@ -194,6 +194,19 @@ class Sandbox(Protocol):
         """
         ...
 
+    async def fetch_searxng_page(
+            self,
+            url: str,
+            max_chars: Optional[int] = None,
+    ) -> ToolResult:
+        """
+        调用沙箱内 SearXNG 页面读取接口
+        :param url: 页面地址
+        :param max_chars: 正文最大字符数
+        :return:
+        """
+        ...
+
     async def upload_file(
             self,
             file_data: BinaryIO,

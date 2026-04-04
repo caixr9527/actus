@@ -458,9 +458,9 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
     """统一构造 planner / execute_step / replan 的结构化上下文块。"""
     step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
     completed_steps = [
-        item for item in step_states
-        if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
-    ][-PROMPT_CONTEXT_COMPLETED_STEP_LIMIT:]
+                          item for item in step_states
+                          if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
+                      ][-PROMPT_CONTEXT_COMPLETED_STEP_LIMIT:]
     last_step = state.get("last_executed_step")
     working_memory = _ensure_working_memory(state)
 
@@ -635,6 +635,28 @@ def _dedupe_replanned_steps(existing_steps: List[Step], new_steps: List[Step]) -
     return deduped_steps
 
 
+def _merge_replanned_steps_into_plan(plan: Plan, new_steps: List[Step]) -> Tuple[List[Step], str]:
+    """按批次语义合并重规划结果，避免在整批执行后丢失新增步骤。"""
+    first_pending_index: Optional[int] = None
+    for index, current_step in enumerate(plan.steps):
+        if not current_step.done:
+            first_pending_index = index
+            break
+
+    if first_pending_index is None:
+        completed_steps = list(plan.steps)
+        merged_steps = list(completed_steps)
+        # 当前批次全部执行完成后，replan 产出的步骤代表下一批待执行步骤，应直接追加到已完成批次之后。
+        merged_steps.extend(_dedupe_replanned_steps(completed_steps, new_steps))
+        return merged_steps, "append_after_completed_batch"
+
+    preserved_steps = plan.steps[:first_pending_index]
+    merged_steps = list(preserved_steps)
+    # 若仍存在未完成步骤，则从首个未完成步骤开始整体替换，避免旧步骤残留。
+    merged_steps.extend(_dedupe_replanned_steps(preserved_steps, new_steps))
+    return merged_steps, "replace_remaining_pending_steps"
+
+
 def _normalize_attachment_paths(raw: Any) -> List[str]:
     if isinstance(raw, str):
         items = [raw]
@@ -807,7 +829,8 @@ def _build_outcome_fact_text(
         return normalized_summary
 
     working_memory = _ensure_working_memory(state)
-    decisions = [str(item or "").strip() for item in list(working_memory.get("decisions") or []) if str(item or "").strip()]
+    decisions = [str(item or "").strip() for item in list(working_memory.get("decisions") or []) if
+                 str(item or "").strip()]
     if len(decisions) > 0:
         return decisions[-1]
 
@@ -1434,7 +1457,7 @@ async def execute_step_node(
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
 ) -> PlannerReActLangGraphState:
-    """执行单个步骤，完成后交给 replan 节点更新后续计划。"""
+    """执行单个步骤；当前批次未完成时继续跑后续步骤，整批完成后再统一重规划。"""
     started_at = now_perf()
     plan = state.get("plan")
     if plan is None:
@@ -1677,13 +1700,13 @@ async def execute_step_node(
             "pending_interrupt": {},
         },
         events=events,
-        )
+    )
 
 
 async def wait_for_human_node(
         state: PlannerReActLangGraphState,
 ) -> PlannerReActLangGraphState:
-    """在等待节点中恢复用户输入，并完成当前等待中的步骤。"""
+    """在等待节点中恢复用户输入，并回到当前批次继续执行剩余步骤。"""
     started_at = now_perf()
     interrupt_request = _normalize_interrupt_request(state.get("pending_interrupt"))
     if not interrupt_request:
@@ -1906,7 +1929,7 @@ async def recall_memory_context_node(
 
 
 async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
-    """根据最新步骤执行结果更新后续未完成步骤。"""
+    """在当前批次执行完成后，基于最新结果生成下一批步骤。"""
     started_at = now_perf()
     plan = state.get("plan")
     last_step = state.get("last_executed_step")
@@ -1946,17 +1969,8 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         return state
 
     new_steps = [build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
-    first_pending_index: Optional[int] = None
-    for index, current_step in enumerate(plan.steps):
-        if not current_step.done:
-            first_pending_index = index
-            break
-
-    if first_pending_index is not None:
-        updated_steps = plan.steps[:first_pending_index]
-        # 重规划返回的步骤可能复用了历史 step_id，需要统一做去重，避免覆盖已完成步骤。
-        updated_steps.extend(_dedupe_replanned_steps(updated_steps, new_steps))
-        plan.steps = updated_steps
+    updated_steps, merge_mode = _merge_replanned_steps_into_plan(plan, new_steps)
+    plan.steps = updated_steps
 
     next_step = plan.get_next_step()
     updated_event = PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.UPDATED)
@@ -1970,6 +1984,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         state=state,
         new_step_count=len(new_steps),
         total_step_count=len(list(plan.steps or [])),
+        merge_mode=merge_mode,
         next_step_id=str(next_step.id or "") if next_step is not None else "",
         llm_elapsed_ms=llm_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
@@ -2032,7 +2047,12 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
 
     final_events: List[Any] = [
-        MessageEvent(role="assistant", message=summary_message, attachments=summary_attachment_paths)]
+        MessageEvent(
+            role="assistant",
+            message=summary_message,
+            attachments=summary_attachment_paths,
+            stage="final",
+        )]
 
     plan.status = ExecutionStatus.COMPLETED
     final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
@@ -2121,7 +2141,7 @@ async def consolidate_memory_node(
     )
     # 获取并初始化摘要本地记忆
     summary_local_memory = dict(state.get("summary_local_memory") or {})
-    
+
     # 将最终消息和选中的附件添加到消息窗口中
     message_window = _append_message_window_entry(
         list(state.get("message_window") or []),
@@ -2129,10 +2149,10 @@ async def consolidate_memory_node(
         message=str(state.get("final_message") or ""),
         attachments=list(summary_local_memory.get("selected_artifacts") or []),
     )
-    
+
     # 压缩消息窗口，防止超出最大长度限制
     compacted_message_window, trimmed_message_count = _compact_message_window(message_window)
-    
+
     # 更新图元数据，记录记忆压缩相关信息
     graph_metadata = dict(state.get("graph_metadata") or {})
     graph_metadata["memory_compacted"] = True
@@ -2153,7 +2173,7 @@ async def consolidate_memory_node(
     remaining_memory_writes: List[Dict[str, Any]] = []
     persisted_memory_ids: List[str] = []
     write_cost_ms = 0
-    
+
     if long_term_memory_repository is None:
         # 若未提供长期记忆仓库，则跳过写入，保留候选项供后续重试
         graph_metadata["memory_write_skipped"] = len(pending_memory_writes) > 0

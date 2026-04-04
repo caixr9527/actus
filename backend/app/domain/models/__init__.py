@@ -29,6 +29,7 @@ from .event import (
     StepEventStatus,
     BrowserToolContent,
     SearchToolContent,
+    FetchPageToolContent,
     ShellToolContent,
     FileToolContent,
     MCPToolContent,
@@ -49,7 +50,7 @@ from .plan import (
 )
 from .runtime_input import ResumeInput, RuntimeInput
 from .runtime_llm_config import RuntimeLLMConfig
-from .search import SearchResults, SearchResultItem
+from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
 from .user import User, UserProfile, UserStatus
@@ -110,11 +111,13 @@ __all__ = [
     "Message",
     "SearchResults",
     "SearchResultItem",
+    "FetchedPage",
     "Session",
     "SessionStatus",
     "A2AConfig",
     "BrowserToolContent",
     "SearchToolContent",
+    "FetchPageToolContent",
     "ShellToolContent",
     "FileToolContent",
     "MCPToolContent",

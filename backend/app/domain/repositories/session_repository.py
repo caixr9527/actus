@@ -87,6 +87,10 @@ class SessionRepository(Protocol):
         """往会话中新增文件"""
         ...
 
+    async def add_final_files(self, session_id: str, file: File) -> None:
+        """往会话中新增文件"""
+        ...
+
     async def remove_file(self, session_id: str, file_id: str) -> None:
         """根据传递的会话id+文件id移除文件"""
         ...

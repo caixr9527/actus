@@ -655,6 +655,48 @@ class GraphStateContractMapper:
         return updated
 
     @classmethod
+    def _get_step_index_from_states(cls, step_states: List[StepState], step_id: str) -> Optional[int]:
+        """优先复用现有步骤顺序，避免 StepEvent 破坏 plan 中的稳定索引。"""
+        for index, step_state in enumerate(step_states):
+            if str(step_state.get("step_id") or "") == step_id:
+                return int(step_state.get("step_index", index))
+        return None
+
+    @classmethod
+    def _upsert_step_into_plan(
+            cls,
+            plan: Optional[Plan],
+            step: Step,
+            *,
+            step_states: List[StepState],
+    ) -> Optional[Plan]:
+        """把 StepEvent 的最新状态同步回 plan，避免 plan 与 step_states 分叉。"""
+        if plan is None:
+            return None
+
+        updated_plan = plan.model_copy(deep=True)
+        step_id = str(step.id)
+        for index, current in enumerate(updated_plan.steps):
+            if str(current.id) == step_id:
+                updated_plan.steps[index] = step.model_copy(deep=True)
+                return updated_plan
+
+        insert_index = cls._get_step_index_from_states(step_states=step_states, step_id=step_id)
+        normalized_index = len(updated_plan.steps) if insert_index is None else max(0, min(insert_index, len(updated_plan.steps)))
+        updated_plan.steps.insert(normalized_index, step.model_copy(deep=True))
+        return updated_plan
+
+    @classmethod
+    def _derive_current_step_id_from_plan(cls, plan: Optional[Plan]) -> Optional[str]:
+        """统一以 plan 快照推导当前步骤，避免 current_step_id 与 plan 各自漂移。"""
+        if plan is None:
+            return None
+        next_step = plan.get_next_step()
+        if next_step is None:
+            return None
+        return str(next_step.id or "") or None
+
+    @classmethod
     def _extract_artifact_refs_from_event(cls, event: BaseEvent) -> List[str]:
         refs: List[str] = []
 
@@ -686,6 +728,7 @@ class GraphStateContractMapper:
         """根据 emitted events 收敛 step/tool/audit 状态。"""
         events = list(state.get("emitted_events") or [])
         next_state: PlannerReActLangGraphState = dict(state)
+        plan = next_state.get("plan")
         step_states = list(next_state.get("step_states") or [])
         tool_invocations = dict(next_state.get("tool_invocations") or {})
         graph_metadata = dict(next_state.get("graph_metadata") or {})
@@ -703,19 +746,16 @@ class GraphStateContractMapper:
                 seen_event_ids.add(str(event.id))
 
             if isinstance(event, PlanEvent):
-                next_state["plan"] = event.plan.model_copy(deep=True)
-                step_states = cls._build_step_states_from_plan(next_state["plan"])
-                next_step = event.plan.get_next_step()
-                next_state["current_step_id"] = next_step.id if next_step is not None else None
+                plan = event.plan.model_copy(deep=True)
+                step_states = cls._build_step_states_from_plan(plan)
+                next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
                 graph_metadata["latest_plan_event_id"] = str(event.id)
                 continue
 
             if isinstance(event, StepEvent):
                 step_states = cls._upsert_step_state(step_states=step_states, step=event.step)
-                if event.step.status == ExecutionStatus.RUNNING:
-                    next_state["current_step_id"] = event.step.id
-                elif event.step.done and next_state.get("current_step_id") == event.step.id:
-                    next_state["current_step_id"] = None
+                plan = cls._upsert_step_into_plan(plan=plan, step=event.step, step_states=step_states)
+                next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
                 graph_metadata["latest_step_event_id"] = str(event.id)
                 continue
 
@@ -764,6 +804,9 @@ class GraphStateContractMapper:
                 graph_metadata["last_done_event_id"] = str(event.id)
                 pending_interrupt = {}
 
+        next_state["plan"] = plan
+        if not next_state.get("current_step_id"):
+            next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
         if not next_state.get("current_step_id"):
             for step_state in step_states:
                 if str(step_state.get("status")) == ExecutionStatus.RUNNING.value:

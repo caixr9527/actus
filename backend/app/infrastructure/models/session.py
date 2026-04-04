@@ -76,7 +76,12 @@ class SessionModel(Base):
         JSONB,
         nullable=False,
         server_default=text("'[]'::jsonb"),
-    )
+    )  # 所有文件
+    final_files: Mapped[List[Dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )  # 最终文件
     status: Mapped[str] = mapped_column(
         String(255),
         nullable=False,

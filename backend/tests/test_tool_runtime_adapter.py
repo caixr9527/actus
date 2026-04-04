@@ -1,6 +1,8 @@
 import asyncio
 
 from app.domain.models import (
+    FetchPageToolContent,
+    FetchedPage,
     MCPConfig,
     MCPServerConfig,
     MCPTransport,
@@ -83,6 +85,61 @@ def test_tool_runtime_adapter_should_enrich_search_event() -> None:
     assert event.tool_content is not None
     assert len(event.tool_content.results) == 1
     assert event.tool_content.results[0].url == "https://example.com"
+
+
+def test_tool_runtime_adapter_should_enrich_fetch_page_event() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="search",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/article", "max_chars": 2000},
+        function_result=ToolResult[FetchedPage](
+            success=True,
+            data=FetchedPage(
+                url="https://example.com/article",
+                final_url="https://example.com/article",
+                status_code=200,
+                content_type="text/html",
+                title="example title",
+                content="example page content",
+                excerpt="example page content",
+                content_length=20,
+                truncated=False,
+                max_chars=2000,
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    async def _get_browser_screenshot() -> str:
+        return "unused"
+
+    async def _read_shell_output(_session_id: str) -> ToolResult:
+        return ToolResult(success=True, data={})
+
+    async def _read_file_content(_filepath: str) -> ToolResult:
+        return ToolResult(success=True, data={})
+
+    async def _sync_file_to_storage(_filepath: str) -> None:
+        return None
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(
+                get_browser_screenshot=_get_browser_screenshot,
+                read_shell_output=_read_shell_output,
+                read_file_content=_read_file_content,
+                sync_file_to_storage=_sync_file_to_storage,
+            ),
+        )
+    )
+
+    assert handled is True
+    assert isinstance(event.tool_content, FetchPageToolContent)
+    assert event.tool_content.title == "example title"
+    assert event.tool_content.content == "example page content"
+    assert event.tool_content.max_chars == 2000
 
 
 def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> None:

@@ -279,7 +279,6 @@ class DBSessionRepository(SessionRepository):
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
 
-        """往会话中新增文件"""
         # 将文件对象转换为JSON格式的数据
         file_data = file.model_dump(mode="json")
 
@@ -290,6 +289,26 @@ class DBSessionRepository(SessionRepository):
             .where(SessionModel.id == session_id)
             .values(
                 files=func.coalesce(SessionModel.files, cast([], JSONB)) + cast([file_data], JSONB),
+            )
+        )
+        # 执行更新操作
+        result = await self.db_session.execute(stmt)
+
+        # 检查是否有行被更新，如果没有则抛出异常
+        if result.rowcount == 0:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+    async def add_final_files(self, session_id: str, file: File) -> None:
+        # 将文件对象转换为JSON格式的数据
+        file_data = file.model_dump(mode="json")
+
+        # 构建更新语句，将文件添加到会话的files字段中
+        # 使用coalesce函数处理files字段为空的情况，如果为空则视为空列表
+        stmt = (
+            update(SessionModel)
+            .where(SessionModel.id == session_id)
+            .values(
+                final_files=func.coalesce(SessionModel.final_files, cast([], JSONB)) + cast([file_data], JSONB),
             )
         )
         # 执行更新操作

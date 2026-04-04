@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .file import File
 from .plan import Plan, Step
-from .search import SearchResultItem
+from .search import FetchedPage, SearchResultItem
 from .tool_result import ToolResult
 from .wait import normalize_wait_payload
 
@@ -72,6 +72,7 @@ class MessageEvent(BaseEvent):
     role: Literal["user", "assistant"] = "assistant"  # 消息发送者角色，用户或助手
     message: str = ""  # 消息内容
     attachments: List[File] = Field(default_factory=list)  # 消息附件列表
+    stage: Literal["intermediate", "final"] = "intermediate"  # 消息阶段，中间消息或最终消息
 
 
 class BrowserToolContent(BaseModel):
@@ -80,7 +81,27 @@ class BrowserToolContent(BaseModel):
 
 
 class SearchToolContent(BaseModel):
+    """搜索结果卡片内容。"""
     results: List[SearchResultItem]
+
+
+class FetchPageToolContent(BaseModel):
+    """页面读取卡片内容。"""
+    url: str
+    final_url: str = ""
+    status_code: int = 0
+    content_type: str = ""
+    title: str = ""
+    content: str = ""
+    excerpt: str = ""
+    content_length: int = 0
+    truncated: bool = False
+    max_chars: Optional[int] = None
+
+    @classmethod
+    def from_fetched_page(cls, page: FetchedPage) -> "FetchPageToolContent":
+        # 事件层只暴露结构化页面读取结果，避免继续透传松散 dict。
+        return cls(**page.model_dump())
 
 
 class ShellToolContent(BaseModel):
@@ -106,6 +127,7 @@ class A2AToolContent(BaseModel):
 ToolContent = Union[
     BrowserToolContent,
     SearchToolContent,
+    FetchPageToolContent,
     ShellToolContent,
     MCPToolContent,
     FileToolContent,

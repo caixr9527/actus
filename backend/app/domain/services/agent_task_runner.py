@@ -10,7 +10,7 @@ import io
 import logging
 import uuid
 from datetime import datetime
-from typing import List, AsyncGenerator, Callable, BinaryIO, Optional, Any
+from typing import List, AsyncGenerator, Callable, BinaryIO, Optional, Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -306,13 +306,15 @@ class AgentTaskRunner(TaskRunner):
             return True
         return parsed
 
-    async def _sync_file_to_storage(self, filepath: str) -> Optional[File]:
+    async def _sync_file_to_storage(self,
+                                    filepath: str,
+                                    stage: Optional[Literal["intermediate", "final"]] = "intermediate") -> Optional[
+        File]:
         try:
             if not filepath.strip():
                 logger.info("接收到空附件路径，跳过附件同步")
                 return None
 
-            # BE-LG-08 bugfix：
             # 先校验沙箱路径是否存在，避免模型幻觉附件触发不必要的沙箱下载。
             if not await self._check_sandbox_file_exists(filepath=filepath):
                 return None
@@ -343,6 +345,8 @@ class AgentTaskRunner(TaskRunner):
                 if old_file:
                     await uow.session.remove_file(session_id=self._session_id, file_id=old_file.id)
                 await uow.session.add_file(session_id=self._session_id, file=new_file)
+                if stage == "final":
+                    await uow.session.add_final_files(session_id=self._session_id, file=new_file)
 
             return new_file
         except Exception as e:
@@ -357,7 +361,7 @@ class AgentTaskRunner(TaskRunner):
             if event.attachments:
                 for attachment in event.attachments:
                     # 将附件上传到存储
-                    file = await self._sync_file_to_storage(attachment.filepath)
+                    file = await self._sync_file_to_storage(attachment.filepath, event.stage)
                     if file:
                         attachments.append(file)
 

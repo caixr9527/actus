@@ -1,6 +1,6 @@
 import asyncio
 
-from app.domain.models import ToolResult
+from app.domain.models import FetchedPage, ToolResult
 from app.domain.services.tools.search import SearchTool
 
 
@@ -98,7 +98,8 @@ def test_search_tool_invoke_fetch_page_should_delegate_to_sandbox() -> None:
 
     assert result.success is True
     assert result.data is not None
-    assert result.data["url"] == "https://example.com/article"
-    assert result.data["title"] == "example title"
-    assert result.data["content"] == "example page content"
-    assert result.data["max_chars"] == 5000
+    assert isinstance(result.data, FetchedPage)
+    assert result.data.url == "https://example.com/article"
+    assert result.data.title == "example title"
+    assert result.data.content == "example page content"
+    assert result.data.max_chars == 5000

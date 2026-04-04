@@ -405,6 +405,20 @@ class DockerSandbox(Sandbox):
         )
         return ToolResult.from_sandbox(**response.json())
 
+    async def fetch_searxng_page(
+            self,
+            url: str,
+            max_chars: Optional[int] = None,
+    ) -> ToolResult:
+        response = await self.client.post(
+            f"{self._base_url}/api/searxng/fetch-page",
+            json={
+                "url": url,
+                "max_chars": max_chars,
+            }
+        )
+        return ToolResult.from_sandbox(**response.json())
+
     async def list_files(self, dir_path: str) -> ToolResult:
         return await self.find_files(dir_path=dir_path, glob_pattern="*")
 

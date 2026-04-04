@@ -25,7 +25,7 @@ from .nodes import (
     summarize_node,
     wait_for_human_node,
 )
-from .routing import route_after_execute, route_after_guard, route_after_plan, route_after_replan
+from .routing import route_after_execute, route_after_guard, route_after_plan, route_after_replan, route_after_wait
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,7 @@ def build_planner_react_langgraph_graph(
         "guard_step_reuse",
         route_after_guard,
         {
+            "guard_step_reuse": "guard_step_reuse",
             "execute_step": "execute_step",
             "replan": "replan",
             "summarize": "summarize",
@@ -116,10 +117,20 @@ def build_planner_react_langgraph_graph(
         route_after_execute,
         {
             "wait_for_human": "wait_for_human",
+            "guard_step_reuse": "guard_step_reuse",
             "replan": "replan",
+            "summarize": "summarize",
         },
     )
-    graph.add_edge("wait_for_human", "replan")
+    graph.add_conditional_edges(
+        "wait_for_human",
+        route_after_wait,
+        {
+            "guard_step_reuse": "guard_step_reuse",
+            "replan": "replan",
+            "summarize": "summarize",
+        },
+    )
     graph.add_conditional_edges(
         "replan",
         route_after_replan,

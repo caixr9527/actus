@@ -39,6 +39,7 @@ class Session(BaseModel):
     latest_message_at: Optional[datetime] = None  # 最新消息时间
     events: List[Event] = Field(default_factory=list)  # 事件列表
     files: List[File] = Field(default_factory=list)  # 文件列表
+    final_files: List[File] = Field(default_factory=list)  # 最终文件列表
     status: SessionStatus = SessionStatus.PENDING  # 状态
     updated_at: datetime = Field(default_factory=datetime.now)  # 更新时间
     created_at: datetime = Field(default_factory=datetime.now)  # 创建时间

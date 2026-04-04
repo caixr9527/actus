@@ -26,3 +26,17 @@ class SearchResults(BaseModel):
     date_range: Optional[str] = None
     total_results: int = 0
     results: List[SearchResultItem] = Field(default_factory=list)
+
+
+class FetchedPage(BaseModel):
+    """页面读取结果。"""
+    url: str
+    final_url: str = ""
+    status_code: int = 0
+    content_type: str = ""
+    title: str = ""
+    content: str = ""
+    excerpt: str = ""
+    content_length: int = 0
+    truncated: bool = False
+    max_chars: Optional[int] = None

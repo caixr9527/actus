@@ -13,11 +13,13 @@ from typing import Awaitable, Callable, List, Optional
 from app.domain.models import (
     A2AToolContent,
     BrowserToolContent,
+    FetchPageToolContent,
+    FetchedPage,
     MCPToolContent,
     SearchResults,
     SearchToolContent,
-    ShellToolContent,
     FileToolContent,
+    ShellToolContent,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
@@ -103,6 +105,28 @@ class ToolRuntimeAdapter:
         if message:
             return message
         return ""
+
+    @staticmethod
+    def _build_search_results_content(event: ToolEvent) -> SearchToolContent:
+        function_result = event.function_result
+        if function_result is None or function_result.data is None:
+            return SearchToolContent(results=[])
+
+        search_results = function_result.data
+        if not isinstance(search_results, SearchResults):
+            raise TypeError("search_web 的结果必须是 SearchResults")
+        return SearchToolContent(results=search_results.results)
+
+    @staticmethod
+    def _build_fetch_page_content(event: ToolEvent) -> FetchPageToolContent:
+        function_result = event.function_result
+        if function_result is None or function_result.data is None:
+            return FetchPageToolContent(url="")
+
+        fetched_page = function_result.data
+        if not isinstance(fetched_page, FetchedPage):
+            raise TypeError("fetch_page 的结果必须是 FetchedPage")
+        return FetchPageToolContent.from_fetched_page(fetched_page)
 
     def build_runtime_tools(
             self,
@@ -197,12 +221,14 @@ class ToolRuntimeAdapter:
             return True
 
         if event.tool_name == "search":
-            search_results: Optional[ToolResult[SearchResults]] = event.function_result
-            results = []
-            if search_results is not None and search_results.data is not None:
-                results = search_results.data.results
-            event.tool_content = SearchToolContent(results=results)
-            return True
+            function_name = str(event.function_name or "").strip().lower()
+            if function_name == "search_web":
+                event.tool_content = self._build_search_results_content(event)
+                return True
+            if function_name == "fetch_page":
+                event.tool_content = self._build_fetch_page_content(event)
+                return True
+            return False
 
         if event.tool_name == "shell":
             session_id = str(event.function_args.get("session_id") or "")
