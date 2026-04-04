@@ -1,0 +1,22 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Actus Sandbox SearXNG"
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  # 运行时优先由环境变量 SEARXNG_SECRET 覆盖。
+  secret_key: "managed-by-env"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+  bind_address: "127.0.0.1"
+  port: 8082
+
+valkey:
+  url: false

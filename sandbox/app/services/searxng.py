@@ -72,23 +72,6 @@ class SearXNGService:
             logger.error(f"SearXNG调用异常: {exc}")
             raise AppException(f"SearXNG调用异常: {exc}")
 
-    @staticmethod
-    def _normalize_number_of_results(value: Any) -> int:
-        """兼容 SearXNG 返回的不同结果数字格式。"""
-        if value is None:
-            return 0
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, (int, float)):
-            return int(value)
-        normalized = str(value).strip().replace(",", "")
-        if not normalized:
-            return 0
-        try:
-            return int(float(normalized))
-        except ValueError:
-            return 0
-
     async def get_status(self) -> SearXNGStatusResult:
         """检查 SearXNG 服务是否可访问。"""
         status_code, headers, _ = await self._request(path="/")
@@ -152,7 +135,7 @@ class SearXNGService:
 
         return SearXNGSearchResult(
             query=str(payload.get("query") or normalized_query),
-            number_of_results=self._normalize_number_of_results(payload.get("number_of_results")),
+            number_of_results=len(search_results),
             results=search_results,
             suggestions=[str(item) for item in (payload.get("suggestions") or [])],
             answers=[str(item) for item in (payload.get("answers") or [])],
