@@ -285,6 +285,29 @@ export type ToolEvent = {
   [key: string]: unknown;
 };
 
+export type SearchResultItem = {
+  url: string;
+  title: string;
+  snippet: string;
+};
+
+export type SearchToolContent = {
+  results: SearchResultItem[];
+};
+
+export type FetchPageToolContent = {
+  url: string;
+  final_url?: string;
+  status_code?: number;
+  content_type?: string;
+  title?: string;
+  content?: string;
+  excerpt?: string;
+  content_length?: number;
+  truncated?: boolean;
+  max_chars?: number | null;
+};
+
 export type WaitUserTakeover = "none" | "browser";
 
 export type WaitChoice = {

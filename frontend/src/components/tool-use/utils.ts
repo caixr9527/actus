@@ -154,6 +154,11 @@ export function getFriendlyToolLabel(
   }
 
   if (name === 'search' || fn === 'search_web' || fn.includes('search_web')) {
+    if (fn === 'fetch_page') {
+      return url
+        ? isEnglish ? `Reading page ${truncate(url, 80)}` : `正在读取页面 ${truncate(url, 80)}`
+        : isEnglish ? 'Reading page' : '正在读取页面'
+    }
     return query
       ? isEnglish ? `Searching ${truncate(query, 60)}` : `正在搜索 ${truncate(query, 60)}`
       : isEnglish ? 'Searching' : '正在搜索'

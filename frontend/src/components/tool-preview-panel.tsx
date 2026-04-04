@@ -2,7 +2,11 @@
 
 import { useMemo } from "react"
 import Image from "next/image"
-import type { ToolEvent } from "@/lib/api/types"
+import type {
+  FetchPageToolContent,
+  SearchResultItem,
+  ToolEvent,
+} from "@/lib/api/types"
 import {
   getToolKind,
   getFriendlyToolLabel,
@@ -38,7 +42,17 @@ export interface ToolPreviewPanelProps {
 
 type ConsoleRecord = { ps1: string; command: string; output: string }
 
-type SearchResultItem = { url: string; title: string; snippet: string }
+function isFetchPageContent(content: Record<string, unknown> | null): content is FetchPageToolContent & Record<string, unknown> {
+  if (!content) return false
+  return (
+    typeof content.url === "string"
+    && (
+      typeof content.content === "string"
+      || typeof content.title === "string"
+      || typeof content.excerpt === "string"
+    )
+  )
+}
 
 /* ------------------------------------------------------------------ */
 /*  Content extractors                                                 */
@@ -212,6 +226,7 @@ function BrowserPreview({
 
 function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
+  const isFetchPage = tool.function === "fetch_page" && isFetchPageContent(content)
   const rawResults = content?.results
 
   const results: SearchResultItem[] = useMemo(() => {
@@ -220,6 +235,71 @@ function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   }, [rawResults])
 
   const query = getArg(tool.args, "query", "q")
+
+  if (isFetchPage) {
+    const url = content.url
+    const finalUrl = typeof content.final_url === "string" ? content.final_url : ""
+    const title = typeof content.title === "string" ? content.title : ""
+    const excerpt = typeof content.excerpt === "string" ? content.excerpt : ""
+    const pageContent = typeof content.content === "string" ? content.content : ""
+    const contentType = typeof content.content_type === "string" ? content.content_type : ""
+    const statusCode = typeof content.status_code === "number" ? String(content.status_code) : ""
+    const contentLength = typeof content.content_length === "number" ? String(content.content_length) : ""
+    const truncated = content.truncated === true
+
+    return (
+      <div className="flex flex-col gap-3 p-4 h-full">
+        <div className="flex flex-col gap-2 rounded-lg border bg-gray-50 p-3 text-sm text-gray-700">
+          <div>
+            <span className="text-gray-500">{t("toolPreview.fetchPage.url")}</span>
+            <span className="break-all">{url}</span>
+          </div>
+          {finalUrl && finalUrl !== url && (
+            <div>
+              <span className="text-gray-500">{t("toolPreview.fetchPage.finalUrl")}</span>
+              <span className="break-all">{finalUrl}</span>
+            </div>
+          )}
+          {(statusCode || contentType || contentLength) && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+              {statusCode && (
+                <span>{t("toolPreview.fetchPage.statusCode", { statusCode })}</span>
+              )}
+              {contentType && (
+                <span>{t("toolPreview.fetchPage.contentType", { contentType })}</span>
+              )}
+              {contentLength && (
+                <span>{t("toolPreview.fetchPage.contentLength", { contentLength })}</span>
+              )}
+              {truncated && (
+                <span>{t("toolPreview.fetchPage.truncated")}</span>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col min-h-0">
+          {title && (
+            <div className="px-4 py-3 border-b border-gray-700 bg-[#2d2d2d] text-sm font-medium text-white">
+              {title}
+            </div>
+          )}
+          <ScrollArea className="flex-1">
+            <div className="p-4 flex flex-col gap-4">
+              {excerpt && (
+                <div className="rounded-lg border border-gray-700/80 bg-white/5 p-3 text-sm text-gray-300 whitespace-pre-wrap break-words">
+                  {excerpt}
+                </div>
+              )}
+              <pre className="font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
+                {pageContent || t("toolPreview.fetchPage.waitingContent")}
+              </pre>
+            </div>
+          </ScrollArea>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <ScrollArea className="h-full">
