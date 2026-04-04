@@ -11,11 +11,13 @@ import logging
 import os
 from typing import Optional, Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+
 from app.interfaces.errors import BadRequestException, AppException
-from app.models import SearXNGSearchItem, SearXNGSearchResult, SearXNGStatusResult
+from app.models import SearXNGFetchPageResult, SearXNGSearchItem, SearXNGSearchResult, SearXNGStatusResult
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ class SearXNGService:
     def __init__(self) -> None:
         self.base_url = os.getenv("SEARXNG_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
         self.timeout_seconds = int(os.getenv("SEARXNG_TIMEOUT_SECONDS", "30"))
+        self.crawl4ai_cdp_url = os.getenv("CRAWL4AI_CDP_URL", "http://127.0.0.1:9222")
 
     def _build_url(self, path: str, params: Optional[dict[str, Any]] = None) -> str:
         """拼接请求地址并过滤空参数。"""
@@ -71,6 +74,54 @@ class SearXNGService:
         except Exception as exc:
             logger.error(f"SearXNG调用异常: {exc}")
             raise AppException(f"SearXNG调用异常: {exc}")
+
+    @staticmethod
+    def _normalize_page_url(url: str) -> str:
+        normalized_url = str(url or "").strip()
+        if not normalized_url:
+            raise BadRequestException("页面地址不能为空")
+
+        parsed = urlparse(normalized_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise BadRequestException("页面地址必须是有效的 http 或 https URL")
+
+        return normalized_url
+
+    @staticmethod
+    def _pick_header_value(headers: Optional[dict[str, Any]], key: str) -> Optional[str]:
+        if not headers:
+            return None
+        for header_key, header_value in headers.items():
+            if str(header_key).lower() == key.lower():
+                return str(header_value)
+        return None
+
+    @staticmethod
+    def _extract_crawl_content(result: Any) -> str:
+        markdown = getattr(result, "markdown", None)
+        if isinstance(markdown, str):
+            return markdown.strip()
+
+        if markdown is not None:
+            for attr_name in ("fit_markdown", "raw_markdown", "markdown_with_citations"):
+                value = getattr(markdown, attr_name, None)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        extracted_content = getattr(result, "extracted_content", None)
+        if isinstance(extracted_content, str):
+            return extracted_content.strip()
+
+        return ""
+
+    def _build_crawl4ai_browser_config(self, browser_config_cls: Any) -> Any:
+        return browser_config_cls(
+            browser_mode="custom",
+            cdp_url=self.crawl4ai_cdp_url,
+            headless=True,
+            text_mode=True,
+            verbose=False,
+        )
 
     async def get_status(self) -> SearXNGStatusResult:
         """检查 SearXNG 服务是否可访问。"""
@@ -142,4 +193,56 @@ class SearXNGService:
             corrections=[str(item) for item in (payload.get("corrections") or [])],
             infoboxes=[item for item in (payload.get("infoboxes") or []) if isinstance(item, dict)],
             unresponsive_engines=[str(item) for item in (payload.get("unresponsive_engines") or [])],
+        )
+
+    async def fetch_page(self, url: str, max_chars: Optional[int] = 20000) -> SearXNGFetchPageResult:
+        """使用 crawl4ai 读取单个页面内容。"""
+        normalized_url = self._normalize_page_url(url)
+        if max_chars is not None and max_chars <= 0:
+            raise BadRequestException("max_chars 必须大于 0")
+
+        browser_config = self._build_crawl4ai_browser_config(BrowserConfig)
+        run_config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            page_timeout=self.timeout_seconds * 1000,
+        )
+
+        try:
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                result = await crawler.arun(url=normalized_url, config=run_config)
+        except BadRequestException:
+            raise
+        except Exception as exc:
+            logger.error(f"crawl4ai读取页面异常: {exc}")
+            raise AppException(f"页面读取失败: {exc}")
+
+        if not getattr(result, "success", False):
+            error_message = str(getattr(result, "error_message", None) or "页面读取失败")
+            status_code = getattr(result, "status_code", None)
+            if isinstance(status_code, int) and 400 <= status_code < 500:
+                raise BadRequestException(error_message)
+            raise AppException(error_message)
+
+        full_content = self._extract_crawl_content(result)
+        if not full_content:
+            raise AppException("页面读取成功，但未提取到正文内容")
+
+        truncated = max_chars is not None and len(full_content) > max_chars
+        content = full_content[:max_chars] if truncated and max_chars is not None else full_content
+        metadata = getattr(result, "metadata", None) or {}
+        title = str(metadata.get("title") or "") if isinstance(metadata, dict) else ""
+        response_headers = getattr(result, "response_headers", None)
+        content_type = self._pick_header_value(response_headers, "Content-Type")
+        status_code = getattr(result, "status_code", None)
+
+        return SearXNGFetchPageResult(
+            url=normalized_url,
+            final_url=str(getattr(result, "url", None) or normalized_url),
+            status_code=int(status_code) if isinstance(status_code, int) else 200,
+            content_type=content_type,
+            title=title,
+            content=content,
+            excerpt=full_content[:280],
+            content_length=len(full_content),
+            truncated=truncated,
         )

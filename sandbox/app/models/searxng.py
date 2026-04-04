@@ -40,3 +40,16 @@ class SearXNGStatusResult(BaseModel):
     available: bool = Field(..., description="服务是否可用")
     status_code: int = Field(..., description="HTTP 状态码")
     content_type: Optional[str] = Field(default=None, description="响应内容类型")
+
+
+class SearXNGFetchPageResult(BaseModel):
+    """SearXNG 单页读取结果"""
+    url: str = Field(..., description="请求的原始页面地址")
+    final_url: str = Field(..., description="最终页面地址")
+    status_code: int = Field(..., description="HTTP 状态码")
+    content_type: Optional[str] = Field(default=None, description="响应内容类型")
+    title: str = Field(default="", description="页面标题")
+    content: str = Field(default="", description="提取出的正文内容")
+    excerpt: str = Field(default="", description="正文摘要")
+    content_length: int = Field(default=0, description="正文总长度")
+    truncated: bool = Field(default=False, description="正文是否被截断")

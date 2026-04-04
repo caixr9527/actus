@@ -19,3 +19,9 @@ class SearXNGSearchRequest(BaseModel):
     page: Optional[int] = Field(default=None, description="分页页码")
     time_range: Optional[str] = Field(default=None, description="时间范围")
     safesearch: Optional[int] = Field(default=None, description="安全搜索级别")
+
+
+class SearXNGFetchPageRequest(BaseModel):
+    """SearXNG 单页读取请求结构体"""
+    url: str = Field(..., description="要读取的页面地址")
+    max_chars: Optional[int] = Field(default=20000, ge=1, le=100000, description="正文最大字符数")

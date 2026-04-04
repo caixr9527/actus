@@ -31,6 +31,7 @@ from .supervisor import (
     SupervisorTimeout
 )
 from .searxng import (
+    SearXNGFetchPageResult,
     SearXNGSearchItem,
     SearXNGSearchResult,
     SearXNGStatusResult,
@@ -55,6 +56,7 @@ _all_ = [
     "ProcessInfo",
     "SupervisorActionResult",
     "SupervisorTimeout",
+    "SearXNGFetchPageResult",
     "SearXNGSearchItem",
     "SearXNGSearchResult",
     "SearXNGStatusResult",

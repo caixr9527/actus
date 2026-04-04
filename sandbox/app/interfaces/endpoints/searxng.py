@@ -7,9 +7,9 @@
 """
 from fastapi import APIRouter, Depends
 
-from app.interfaces.schemas import Response, SearXNGSearchRequest
+from app.interfaces.schemas import Response, SearXNGFetchPageRequest, SearXNGSearchRequest
 from app.interfaces.service_dependencies import get_searxng_service
-from app.models import SearXNGStatusResult, SearXNGSearchResult
+from app.models import SearXNGFetchPageResult, SearXNGStatusResult, SearXNGSearchResult
 from app.services import SearXNGService
 
 router = APIRouter(prefix="/searxng", tags=["SearXNG模块"])
@@ -52,5 +52,25 @@ async def search(
     )
     return Response.success(
         msg=f"SearXNG搜索成功, 返回{len(result.results)}条结果",
+        data=result,
+    )
+
+
+@router.post(
+    path="/fetch-page",
+    response_model=Response[SearXNGFetchPageResult],
+    summary="读取单个页面正文",
+    description="使用 crawl4ai 读取指定 URL 的页面正文",
+)
+async def fetch_page(
+        request: SearXNGFetchPageRequest,
+        searxng_service: SearXNGService = Depends(get_searxng_service)
+) -> Response[SearXNGFetchPageResult]:
+    result = await searxng_service.fetch_page(
+        url=request.url,
+        max_chars=request.max_chars,
+    )
+    return Response.success(
+        msg="页面读取成功",
         data=result,
     )
