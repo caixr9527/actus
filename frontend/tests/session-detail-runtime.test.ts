@@ -30,14 +30,10 @@ test('reduceSessionRuntimeStateOnEvent should process a complex event sequence',
   assert.deepEqual(state, { status: 'completed', streaming: false })
 })
 
-test('reduceSessionRuntimeStateOnEvent should honor compat semantic type for waiting transition', () => {
+test('reduceSessionRuntimeStateOnEvent should switch to waiting on ask-user tool call', () => {
   const event = eventOf('tool', {
     function: 'message_ask_user',
-    extensions: {
-      compat: {
-        semantic_type: 'tool.calling',
-      },
-    },
+    status: 'calling',
   })
 
   const next = reduceSessionRuntimeStateOnEvent(

@@ -26,7 +26,6 @@ from app.interfaces.schemas import (
     ListSessionItem,
     ChatRequest,
     EventMapper,
-    EventCompatContext,
     GetSessionResponse,
     UpdateSessionModelRequest,
     UpdateSessionModelResponse,
@@ -181,7 +180,7 @@ async def get_session(
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[GetSessionResponse]:
     """传递指定会话id获取该会话的对话详情"""
-    session, event_records, runtime_extensions_by_run_id = await session_service.get_session_detail(
+    session, event_records = await session_service.get_session_detail(
         user_id=current_user.id,
         session_id=session_id,
     )
@@ -199,15 +198,7 @@ async def get_session(
             status=session.status,
             current_model_id=session.current_model_id,
             events=[
-                EventMapper.event_to_sse_event(
-                    event_record.event_payload,
-                    context=EventCompatContext(
-                        session_id=session.id,
-                        run_id=event_record.run_id,
-                        channel="session_detail",
-                        runtime_extensions=runtime_extensions_by_run_id.get(event_record.run_id, {}),
-                    ),
-                )
+                EventMapper.event_to_sse_event(event_record.event_payload)
                 for event_record in event_records
             ],
         )

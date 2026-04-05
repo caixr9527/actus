@@ -1,7 +1,7 @@
 import type { SSEEventData, PlanEvent, StepEvent, StepOutcome, ToolEvent, WaitEventData } from './api/types'
 import type { AppLocale } from './i18n'
 import { getFriendlyToolLabel } from '../components/tool-use/utils'
-import { adaptSessionEvent, type EventRuntimeContext, visitSessionEvent } from './session-event-adapter'
+import { visitSessionEvent } from './session-event-adapter'
 import { parseWaitEventContext, type WaitEventContext } from './wait-event'
 
 export type RunTimelineKind = 'message' | 'plan' | 'step' | 'tool' | 'wait' | 'error' | 'done'
@@ -11,9 +11,6 @@ export type RunTimelineItem = {
   kind: RunTimelineKind
   summary: string
   timestamp: number | null
-  semanticType: string
-  compatSchemaVersion: string | null
-  runtimeContext: EventRuntimeContext | null
 }
 
 export type StepViewStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed'
@@ -140,13 +137,9 @@ export function buildRunTimeline(events: SSEEventData[], locale: AppLocale = 'zh
   const items: RunTimelineItem[] = []
   for (let i = 0; i < events.length; i++) {
     const event = events[i]
-    const adapted = adaptSessionEvent(event)
     const base = {
       id: String((event.data as { event_id?: string }).event_id ?? `${event.type}-${i}`),
       timestamp: pickTimestamp(event),
-      semanticType: adapted.semanticType,
-      compatSchemaVersion: adapted.compatSchemaVersion,
-      runtimeContext: adapted.runtimeContext,
     }
 
     visitSessionEvent(event, {

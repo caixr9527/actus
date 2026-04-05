@@ -16,8 +16,6 @@ from app.domain.models import (
 from app.interfaces.schemas.event import (
     BaseEventData,
     CommonEventData,
-    EVENT_COMPAT_SCHEMA_VERSION,
-    EventCompatContext,
     EventMapper,
 )
 
@@ -78,40 +76,6 @@ def test_event_mapper_should_serialize_error_event_key_and_params() -> None:
     assert payload["data"]["error"] == "任务会话不存在"
     assert payload["data"]["error_key"] == "error.session.not_found"
     assert payload["data"]["error_params"] == {"session_id": "session-1"}
-
-
-def test_event_mapper_should_attach_v2_extensions_with_context() -> None:
-    event = MessageEvent(
-        id="evt-ctx-1",
-        created_at=datetime(2026, 3, 11, 12, 0, 5),
-        role="assistant",
-        message="兼容层测试",
-    )
-
-    sse_event = EventMapper.event_to_sse_event(
-        event,
-        context=EventCompatContext(
-            session_id="session-1",
-            run_id="run-1",
-            channel="chat_stream",
-            runtime_extensions={
-                "input_part_summary": {"total": 2, "by_type": {"text": 1, "file": 1}},
-                "downgrade_reason": "model_multimodal_disabled",
-                "unsupported_parts": [{"type": "image", "reason": "model_multimodal_disabled"}],
-            },
-        ),
-    )
-    payload = sse_event.model_dump(mode="json")
-
-    assert payload["data"]["extensions"]["compat"]["schema_version"] == EVENT_COMPAT_SCHEMA_VERSION
-    assert payload["data"]["extensions"]["compat"]["semantic_type"] == "message"
-    assert payload["data"]["extensions"]["runtime"]["session_id"] == "session-1"
-    assert payload["data"]["extensions"]["runtime"]["run_id"] == "run-1"
-    assert payload["data"]["extensions"]["runtime"]["channel"] == "chat_stream"
-    assert payload["data"]["extensions"]["runtime"]["input_part_summary"]["total"] == 2
-    assert payload["data"]["extensions"]["runtime"]["downgrade_reason"] == "model_multimodal_disabled"
-    assert payload["data"]["extensions"]["runtime"]["unsupported_parts"][0]["type"] == "image"
-
 
 def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
     event = PlanEvent(

@@ -18,7 +18,6 @@ from app.application.service import AgentService, SessionService
 from app.infrastructure.storage import get_redis_client
 from app.interfaces.schemas import (
     ChatRequest,
-    EventCompatContext,
     EventMapper,
     ListSessionItem,
     ListSessionResponse,
@@ -111,17 +110,6 @@ class SessionStreamFacade:
                 error_params={"session_id": session_id},
             )
 
-        runtime_run_id, runtime_extensions = await session_service.get_runtime_extensions(
-            user_id=user_id,
-            session_id=session_id,
-        )
-        event_context = EventCompatContext(
-            session_id=session_id,
-            run_id=runtime_run_id or session.current_run_id,
-            channel="chat_stream",
-            runtime_extensions=runtime_extensions,
-        )
-
         async def _event_generator() -> AsyncGenerator[ServerSentEvent, None]:
             async for event in agent_service.chat(
                     session_id=session_id,
@@ -132,7 +120,7 @@ class SessionStreamFacade:
                     latest_event_id=request.event_id,
                     timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
             ):
-                sse_event = EventMapper.event_to_sse_event(event, context=event_context)
+                sse_event = EventMapper.event_to_sse_event(event)
                 if sse_event:
                     yield ServerSentEvent(
                         event=sse_event.event,

@@ -1,5 +1,5 @@
 import type { SSEEventData, SessionStatus } from './api/types'
-import { adaptSessionEvent, visitSessionEvent } from './session-event-adapter'
+import { visitSessionEvent } from './session-event-adapter'
 
 export type SessionRuntimeState = {
   status: SessionStatus | null
@@ -14,23 +14,21 @@ export function reduceSessionRuntimeStateOnEvent(
 ): SessionRuntimeState {
   let nextStatus = prev.status
   let nextStreaming = prev.streaming
-  const adapted = adaptSessionEvent(event)
 
   visitSessionEvent(event, {
     step: (stepEvent) => {
       const stepData = stepEvent.data as { status?: string }
-      if (stepData.status === 'running' || adapted.semanticType === 'step.started') {
+      if (stepData.status === 'running') {
         nextStatus = 'running'
       }
-      if (stepData.status === 'waiting' || adapted.semanticType === 'step.waiting') {
+      if (stepData.status === 'waiting') {
         nextStatus = 'waiting'
         nextStreaming = false
       }
     },
     tool: (toolEvent) => {
       const toolData = toolEvent.data as { function?: string; status?: string }
-      const isCalling = toolData.status === 'calling' || adapted.semanticType === 'tool.calling'
-      if (toolData.function === 'message_ask_user' && isCalling) {
+      if (toolData.function === 'message_ask_user' && toolData.status === 'calling') {
         nextStatus = 'waiting'
         nextStreaming = false
       }

@@ -20,9 +20,6 @@ class _RouteWaitingSessionService:
             current_run_id="run-1",
         )
 
-    async def get_runtime_extensions(self, user_id: str, session_id: str):
-        return "run-1", {}
-
 
 class _RouteResumeInvalidAgentService:
     def __init__(self) -> None:
@@ -74,6 +71,3 @@ def test_session_chat_route_should_stream_error_event_when_resume_value_invalid(
     payload = json.loads(data_line[6:])
     assert payload["error_key"] == error_keys.SESSION_RESUME_VALUE_INVALID
     assert payload["error_params"] == {"session_id": "session-1"}
-    assert payload["extensions"]["runtime"]["session_id"] == "session-1"
-    assert payload["extensions"]["runtime"]["run_id"] == "run-1"
-

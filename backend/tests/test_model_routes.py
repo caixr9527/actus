@@ -81,13 +81,7 @@ class _RouteSessionService:
                 event_type="message",
                 event_payload=MessageEvent(id="evt-2", role="assistant", message="second"),
             ),
-        ], {
-            "run-1": {"downgrade_reason": "reason-a"},
-            "run-2": {"downgrade_reason": "reason-b"},
-        }
-
-    async def get_runtime_extensions(self, user_id: str, session_id: str):
-        return None, {}
+        ]
 
 
 def test_get_models_route_should_return_public_model_fields() -> None:
@@ -128,7 +122,5 @@ def test_session_model_routes_should_update_and_return_current_model_id() -> Non
     assert detail_response.status_code == 200
     assert detail_response.json()["data"]["current_model_id"] == "auto"
     detail_events = detail_response.json()["data"]["events"]
-    assert detail_events[0]["data"]["extensions"]["runtime"]["run_id"] == "run-1"
-    assert detail_events[0]["data"]["extensions"]["runtime"]["downgrade_reason"] == "reason-a"
-    assert detail_events[1]["data"]["extensions"]["runtime"]["run_id"] == "run-2"
-    assert detail_events[1]["data"]["extensions"]["runtime"]["downgrade_reason"] == "reason-b"
+    assert detail_events[0]["data"]["message"] == "first"
+    assert detail_events[1]["data"]["message"] == "second"
