@@ -7,6 +7,7 @@
 """
 import asyncio
 import logging
+import uuid
 from datetime import datetime
 from typing import AsyncGenerator, Optional, List, Type, Callable, Any
 
@@ -18,21 +19,33 @@ from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, Fi
 from app.domain.models import (
     BaseEvent,
     ErrorEvent,
+    ExecutionStatus,
     SessionStatus,
     AgentConfig,
     MCPConfig,
     A2AConfig,
     Session,
+    ContinueCancelledTaskInput,
     MessageEvent,
     ResumeInput,
     Event,
     DoneEvent,
     WaitEvent,
+    WorkflowRunStatus,
     validate_wait_resume_value,
+    RuntimeInput,
+    TaskStreamRecord,
+    TaskStreamEventRecord,
+    TaskRequestStartedRecord,
+    TaskRequestFinishedRecord,
+    TaskRequestRejectedRecord,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
+from app.domain.services.runtime.cancellation import (
+    build_cancelled_runtime_events,
+)
 from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -232,6 +245,39 @@ class AgentService:
             error_params={"session_id": session.id},
         )
 
+    @staticmethod
+    def _is_continue_cancelled_request(command: Optional[dict[str, Any]]) -> bool:
+        if not isinstance(command, dict):
+            return False
+        return str(command.get("type") or "").strip() == "continue_cancelled_task"
+
+    @staticmethod
+    def _get_reopenable_cancelled_plan(session: Session) -> Optional[Any]:
+        latest_plan = session.get_latest_plan()
+        if latest_plan is None or latest_plan.status != ExecutionStatus.CANCELLED:
+            return None
+        if not any(step.status == ExecutionStatus.CANCELLED for step in list(latest_plan.steps or [])):
+            return None
+        return latest_plan
+
+    @classmethod
+    def _ensure_continue_cancelled_available(cls, session: Session) -> None:
+        if session.status != SessionStatus.CANCELLED:
+            raise BadRequestError(
+                msg="当前会话不处于已取消状态，无法继续已取消任务",
+                error_key=error_keys.SESSION_NOT_CANCELLED,
+                error_params={"session_id": session.id},
+            )
+
+        if cls._get_reopenable_cancelled_plan(session) is not None:
+            return
+
+        raise BadRequestError(
+            msg="当前已取消任务没有可继续的执行计划，请重新发起任务",
+            error_key=error_keys.SESSION_CANCELLED_CONTINUE_UNAVAILABLE,
+            error_params={"session_id": session.id},
+        )
+
     async def chat(
             self,
             session_id: str,
@@ -239,10 +285,12 @@ class AgentService:
             message: Optional[str] = None,
             attachments: Optional[List[str]] = None,
             resume: Any = None,
+            command: Optional[dict[str, Any]] = None,
             latest_event_id: Optional[str] = None,
             timestamp: Optional[datetime] = None,
     ) -> AsyncGenerator[BaseEvent, None]:
         unread_reset_pending = False
+        request_id: Optional[str] = None
         try:
             # 获取会话信息
             async with self._uow_factory() as uow:
@@ -264,8 +312,9 @@ class AgentService:
             task = await self._get_task(session)
             is_resume_request = resume is not None
             is_message_request = bool(str(message or "").strip())
+            is_continue_cancelled_request = self._is_continue_cancelled_request(command)
 
-            if session.status == SessionStatus.WAITING and is_message_request and not is_resume_request:
+            if session.status == SessionStatus.WAITING and is_message_request:
                 raise BadRequestError(
                     msg="当前会话处于等待状态，请使用 resume 恢复执行",
                     error_key=error_keys.SESSION_RESUME_REQUIRED,
@@ -284,6 +333,8 @@ class AgentService:
                     pending_interrupt=inspection.pending_interrupt,
                     resume_value=resume,
                 )
+            if is_continue_cancelled_request:
+                self._ensure_continue_cancelled_available(session)
 
             # 处理用户发送的消息
             if is_message_request:
@@ -329,10 +380,15 @@ class AgentService:
                     message=message,
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
+                request_id = str(uuid.uuid4())
+                runtime_input = RuntimeInput(
+                    request_id=request_id,
+                    payload=message_event,
+                )
 
                 # 阶段2：输入流投递后，在单事务中同步“事件历史 + latest_message投影”。
                 # 这里将两项数据库写操作合并，避免“最新消息已更新但事件未落库”的拆分问题。
-                event_id = await task.input_stream.put(message_event.model_dump_json())
+                event_id = await task.input_stream.put(runtime_input.model_dump_json())
                 message_event.id = event_id
                 try:
                     async with self._uow_factory() as uow:
@@ -365,7 +421,13 @@ class AgentService:
                         logger.error(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
                         raise RuntimeError(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
 
-                event_id = await task.input_stream.put(ResumeInput(value=resume).model_dump_json())
+                request_id = str(uuid.uuid4())
+                event_id = await task.input_stream.put(
+                    RuntimeInput(
+                        request_id=request_id,
+                        payload=ResumeInput(value=resume),
+                    ).model_dump_json()
+                )
                 try:
                     async with self._uow_factory() as uow:
                         await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
@@ -379,11 +441,39 @@ class AgentService:
 
                 await task.invoke()
                 logger.info("会话%s, 已写入恢复请求并启动执行", session_id)
+            elif is_continue_cancelled_request:
+                if task is None or session.status != SessionStatus.RUNNING:
+                    task = await self._create_task(session, reuse_current_run=False)
+                    if not task:
+                        logger.error(f"会话{session_id}的继续取消任务请求失败: 创建任务失败")
+                        raise RuntimeError(f"会话{session_id}的继续取消任务请求失败: 创建任务失败")
+
+                request_id = str(uuid.uuid4())
+                event_id = await task.input_stream.put(
+                    RuntimeInput(
+                        request_id=request_id,
+                        payload=ContinueCancelledTaskInput(),
+                    ).model_dump_json()
+                )
+                try:
+                    async with self._uow_factory() as uow:
+                        await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                except Exception as update_err:
+                    logger.error(f"会话{session_id}更新继续取消任务状态失败，开始补偿输入流消息: {update_err}")
+                    try:
+                        await task.input_stream.delete_message(event_id)
+                    except Exception as compensate_err:
+                        logger.error(f"会话{session_id}继续取消任务输入流补偿删除失败: {compensate_err}")
+                    raise
+
+                await task.invoke()
+                logger.info("会话%s, 已写入继续已取消任务命令并启动执行", session_id)
 
             logger.info(f"会话{session_id},已启动,任务实例: {task}")
 
             # 持续监听任务输出流，直到任务完成
-            while task and not task.done:
+            request_started = request_id is None
+            while task:
                 # 从输出流获取下一个事件
                 event_id, event_str = await task.output_stream.get(
                     start_id=latest_event_id,
@@ -394,10 +484,40 @@ class AgentService:
                     latest_event_id = event_id
                 if event_str is None:
                     logger.debug(f"会话{session_id},输出队列中未发现事件内容")
+                    if task.done:
+                        break
                     continue
 
-                # 解析事件数据
-                event = TypeAdapter(Event).validate_json(event_str)
+                # 解析任务内部输出流记录。
+                record = TypeAdapter(TaskStreamRecord).validate_json(event_str)
+
+                if isinstance(record, TaskRequestStartedRecord):
+                    if request_id is not None and record.request_id == request_id:
+                        request_started = True
+                    continue
+
+                if isinstance(record, TaskRequestFinishedRecord):
+                    if request_id is not None and record.request_id == request_id:
+                        break
+                    continue
+
+                if isinstance(record, TaskRequestRejectedRecord):
+                    if request_id is not None and record.request_id == request_id:
+                        yield ErrorEvent(
+                            error=record.message,
+                            error_key=record.error_key,
+                        )
+                        break
+                    continue
+
+                if not isinstance(record, TaskStreamEventRecord):
+                    continue
+
+                if request_id is not None and not request_started:
+                    # 当前请求尚未进入自己的 run 边界前，共享流上的历史事件一律丢弃。
+                    continue
+
+                event = record.event
                 event.id = event_id
                 logger.debug(f"会话{session_id},输出队列中已发现事件: {type(event).__name__}")
 
@@ -413,8 +533,8 @@ class AgentService:
                 # 返回事件给调用方
                 yield event
 
-                # 如果遇到终止类型的事件，则退出循环
-                if isinstance(event, (DoneEvent, ErrorEvent, WaitEvent)):
+                # 空请求只是在附着已有运行流，仍按历史语义在首个终态处收口。
+                if request_id is None and isinstance(event, (DoneEvent, ErrorEvent, WaitEvent)):
                     break
 
             logger.info(f"会话{session_id},任务本轮运行结束")
@@ -461,15 +581,65 @@ class AgentService:
                 error_params={"session_id": session_id},
             )
 
-        # 获取与会话关联的任务实例
-        task = await self._get_task(session)
-        # 如果任务存在，则取消该任务
-        if task:
-            task.cancel()
+        runtime = getattr(self, "_graph_runtime", None)
+        if runtime is not None:
+            # stop 接口必须等 cancelled 状态与事件真正收敛后再返回，
+            # 避免前端 refresh 时只看到 session.cancelled、却看不到 step/plan.cancelled。
+            cancelled = await runtime.cancel_task(session=session)
+            if cancelled:
+                return
+        else:
+            task = await self._get_task(session)
+            if task and await task.cancel():
+                return
 
-        # 更新会话状态为已完成
+        await self._persist_cancelled_session_state(session_id=session_id)
+
+    async def _persist_cancelled_session_state(self, session_id: str) -> None:
+        """在没有活跃 task 实例时，直接收敛 session/run/step 为 cancelled。"""
         async with self._uow_factory() as uow:
-            await uow.session.update_status(session_id=session_id, status=SessionStatus.COMPLETED)
+            session = await uow.session.get_by_id(session_id=session_id)
+            if session is None:
+                return
+
+            await uow.session.update_status(
+                session_id=session_id,
+                status=SessionStatus.CANCELLED,
+            )
+
+            run_id = str(session.current_run_id or "").strip()
+            if not run_id:
+                return
+
+            run = await uow.workflow_run.get_by_id(run_id)
+            if run is None:
+                return
+
+            if run.status == WorkflowRunStatus.CANCELLED:
+                return
+
+            run_events = await uow.workflow_run.list_events(run_id)
+            await uow.workflow_run.cancel_run(run_id)
+
+            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
+            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
+                runtime_metadata,
+                run_events=run_events,
+                current_step_id=run.current_step_id,
+            )
+
+            if cancelled_step_event is not None:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=session_id,
+                    event=cancelled_step_event,
+                )
+
+            if cancelled_plan_event is not None:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=session_id,
+                    event=cancelled_plan_event,
+                    status=SessionStatus.CANCELLED,
+                )
 
     async def shutdown(self) -> None:
         """关闭会话服务"""

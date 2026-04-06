@@ -21,7 +21,6 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     StepEvent,
-    StepEventStatus,
 )
 
 class BaseEventData(BaseModel):
@@ -119,7 +118,6 @@ class StepEventData(BaseEventData):
     """步骤事件数据"""
     id: str  # 步骤id
     status: ExecutionStatus  # 步骤执行状态
-    event_status: StepEventStatus  # 步骤事件状态（started/completed/failed）
     description: str  # 步骤描述
     outcome: Optional["StepOutcomeData"] = None
 
@@ -148,7 +146,6 @@ class StepSSEEvent(BaseSSEEvent):
             data=StepEventData(
                 **BaseEventData.base_event_data(event),
                 status=event.step.status,
-                event_status=event.status,
                 id=event.step.id,
                 description=event.step.description,
                 outcome=(
@@ -186,15 +183,6 @@ class PlanSSEEvent(BaseSSEEvent):
                         **BaseEventData.base_event_data(event),
                         id=step.id,
                         status=step.status,
-                        event_status=(
-                            StepEventStatus.FAILED
-                            if step.status == ExecutionStatus.FAILED
-                            else (
-                                StepEventStatus.COMPLETED
-                                if step.status == ExecutionStatus.COMPLETED
-                                else StepEventStatus.STARTED
-                            )
-                        ),
                         description=step.description,
                         outcome=(
                             StepOutcomeData.model_validate(step.outcome.model_dump(mode="json"))

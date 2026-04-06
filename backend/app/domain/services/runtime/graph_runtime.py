@@ -156,7 +156,7 @@ class DefaultGraphRuntime(GraphRuntime):
 
             # 补偿1：撤销任务实例，避免无主任务继续留在运行时注册表。
             try:
-                task.cancel()
+                await task.cancel()
             except Exception as cancel_err:
                 logger.error("会话%s补偿取消任务失败: %s", session.id, cancel_err)
 
@@ -202,7 +202,7 @@ class DefaultGraphRuntime(GraphRuntime):
             logger.error("会话%s恢复任务写回失败，开始补偿: %s", session.id, save_err)
 
             try:
-                task.cancel()
+                await task.cancel()
             except Exception as cancel_err:
                 logger.error("会话%s恢复任务补偿取消失败: %s", session.id, cancel_err)
 
@@ -223,11 +223,11 @@ class DefaultGraphRuntime(GraphRuntime):
             raise
 
     async def cancel_task(self, session: Session) -> bool:
-        """取消会话当前任务，不存在任务时返回 False。"""
+        """取消会话当前任务，并等待运行态收敛结束；不存在任务时返回 False。"""
         task = await self.get_task(session=session)
         if task is None:
             return False
-        return task.cancel()
+        return await task.cancel()
 
     async def destroy(self) -> None:
         """销毁运行时任务实例。"""

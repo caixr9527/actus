@@ -99,6 +99,9 @@ def route_after_wait(
         state: PlannerReActLangGraphState,
 ) -> Literal["guard_step_reuse", "replan", "summarize"]:
     """等待恢复后，继续当前批次剩余步骤；批次结束后再重规划。"""
+    graph_metadata = state.get("graph_metadata")
+    if isinstance(graph_metadata, dict) and graph_metadata.get("wait_resume_action") == "replan":
+        return "replan"
     return _route_after_completed_step(state)
 
 

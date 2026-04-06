@@ -70,6 +70,13 @@ class WorkflowRunRepository(Protocol):
         """基于 StepEvent 增量更新运行步骤快照"""
         ...
 
+    async def cancel_run(
+            self,
+            run_id: str,
+    ) -> None:
+        """将运行及其未完成步骤统一收敛为 cancelled。"""
+        ...
+
     async def list_events(self, run_id: Optional[str]) -> List[Event]:
         """按运行ID读取事件列表；缺少运行ID时返回空列表"""
         ...

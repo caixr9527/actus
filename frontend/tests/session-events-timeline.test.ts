@@ -123,3 +123,94 @@ test('appendTimelineEvent should match full timeline build in append-only stream
   const full = eventsToTimeline(events)
   assert.deepEqual(context.list, full)
 })
+
+test('plan event should reconcile existing running step card to cancelled', () => {
+  const events: SSEEventData[] = [
+    eventOf('message', { role: 'user', message: 'q1' }),
+    eventOf('step', {
+      id: 's-1',
+      status: 'running',
+      description: 'step 1 running',
+    }),
+    eventOf('plan', {
+      steps: [
+        {
+          id: 's-1',
+          status: 'cancelled',
+          description: 'step 1 running',
+          outcome: {
+            done: false,
+            summary: '任务已取消',
+            produced_artifacts: [],
+            blockers: [],
+            facts_learned: [],
+            open_questions: [],
+          },
+        },
+      ],
+    }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+
+  assert.equal(stepItems.length, 1)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.data.status, 'cancelled')
+    assert.equal(stepItem.data.outcome?.summary, '任务已取消')
+  }
+})
+
+test('step cancelled after cancelled plan should update existing step card instead of appending duplicate', () => {
+  const events: SSEEventData[] = [
+    eventOf('message', { role: 'user', message: 'q1' }),
+    eventOf('step', {
+      id: 's-1',
+      status: 'running',
+      description: 'step 1 running',
+    }),
+    eventOf('plan', {
+      steps: [
+        {
+          id: 's-1',
+          status: 'cancelled',
+          description: 'step 1 running',
+          outcome: {
+            done: false,
+            summary: '任务已取消',
+            produced_artifacts: [],
+            blockers: [],
+            facts_learned: [],
+            open_questions: [],
+          },
+        },
+      ],
+    }),
+    eventOf('step', {
+      id: 's-1',
+      status: 'cancelled',
+      description: 'step 1 running',
+      outcome: {
+        done: false,
+        summary: '任务已取消',
+        produced_artifacts: [],
+        blockers: [],
+        facts_learned: [],
+        open_questions: [],
+      },
+    }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+
+  assert.equal(stepItems.length, 1)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.data.status, 'cancelled')
+    assert.equal(stepItem.data.outcome?.summary, '任务已取消')
+  }
+})

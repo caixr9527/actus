@@ -12,12 +12,12 @@ export type ApiResponse<T = unknown> = {
 /**
  * 会话状态
  */
-export type SessionStatus = "pending" | "running" | "waiting" | "completed";
+export type SessionStatus = "pending" | "running" | "waiting" | "completed" | "cancelled";
 
 /**
  * 执行状态
  */
-export type ExecutionStatus = "pending" | "running" | "completed" | "failed";
+export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 /**
  * 工具事件状态
@@ -200,6 +200,10 @@ export type ChatMessage = {
   [key: string]: unknown;
 };
 
+export type ChatCommand = {
+  type: "continue_cancelled_task";
+};
+
 /**
  * 聊天请求参数
  * message 为空时用于流式拉取未完成任务的事件列表
@@ -211,6 +215,7 @@ export type ChatParams = {
   resume?: {
     value: unknown;
   };
+  command?: ChatCommand;
   [key: string]: unknown;
 };
 

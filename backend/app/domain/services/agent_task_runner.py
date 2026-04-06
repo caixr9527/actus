@@ -14,6 +14,7 @@ from typing import List, AsyncGenerator, Callable, BinaryIO, Optional, Any, Lite
 
 from pydantic import TypeAdapter
 
+from app.application.errors import error_keys
 from app.domain.external import (
     TaskRunner,
     Task,
@@ -35,17 +36,27 @@ from app.domain.models import (
     MessageEvent,
     File,
     Message,
+    MessageCommand,
     BaseEvent,
     ToolEvent,
     ToolResult,
     DoneEvent,
     TitleEvent,
     WaitEvent,
+    ContinueCancelledTaskInput,
     ResumeInput,
     RuntimeInput,
+    WorkflowRunStatus,
+    TaskStreamEventRecord,
+    TaskRequestStartedRecord,
+    TaskRequestFinishedRecord,
+    TaskRequestRejectedRecord,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime.cancellation import (
+    build_cancelled_runtime_events,
+)
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, ToolRuntimeEventHooks
 
 logger = logging.getLogger(__name__)
@@ -140,6 +151,17 @@ class AgentTaskRunner(TaskRunner):
             tool_runtime_adapter=self._get_tool_runtime_adapter(),
         )
 
+    async def _put_stream_record(
+            self,
+            task: Task,
+            record: TaskStreamEventRecord
+                    | TaskRequestStartedRecord
+                    | TaskRequestFinishedRecord
+                    | TaskRequestRejectedRecord,
+    ) -> str:
+        """写入任务内部输出流。"""
+        return await task.output_stream.put(record.model_dump_json())
+
     async def _put_and_add_event(
             self,
             task: Task,
@@ -153,7 +175,10 @@ class AgentTaskRunner(TaskRunner):
         event_id = None
         try:
             # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
-            event_id = await task.output_stream.put(event.model_dump_json())
+            event_id = await self._put_stream_record(
+                task=task,
+                record=TaskStreamEventRecord(event=event),
+            )
             # 注意：不要原地修改传入 event.id。
             # LangGraphRunEngine 会对同一事件对象做 live + final replay 去重，
             # 若这里直接改写 id，可能导致 replay 阶段去重失效并重复落库。
@@ -182,6 +207,63 @@ class AgentTaskRunner(TaskRunner):
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
 
+    async def _emit_request_started(self, task: Task, request_id: str) -> None:
+        await self._put_stream_record(
+            task=task,
+            record=TaskRequestStartedRecord(request_id=request_id),
+        )
+
+    async def _emit_request_finished(
+            self,
+            task: Task,
+            *,
+            request_id: str,
+            terminal_event_type: Literal["wait", "done", "error"],
+    ) -> None:
+        await self._put_stream_record(
+            task=task,
+            record=TaskRequestFinishedRecord(
+                request_id=request_id,
+                terminal_event_type=terminal_event_type,
+            ),
+        )
+
+    async def _emit_request_rejected(
+            self,
+            task: Task,
+            *,
+            request_id: str,
+            message: str,
+            error_key: Optional[str] = None,
+    ) -> None:
+        await self._put_stream_record(
+            task=task,
+            record=TaskRequestRejectedRecord(
+                request_id=request_id,
+                message=message,
+                error_key=error_key,
+            ),
+        )
+
+    async def _reject_pending_requests(
+            self,
+            task: Task,
+            *,
+            message: str,
+            error_key: Optional[str] = None,
+    ) -> None:
+        """拒绝当前终态之后尚未开始执行的排队请求。"""
+        while not await task.input_stream.is_empty():
+            pending_input = await self._pop_event(task)
+            if pending_input is None:
+                continue
+            await self._emit_request_rejected(
+                task=task,
+                request_id=pending_input.request_id,
+                message=message,
+                error_key=error_key,
+            )
+
     async def _pop_event(self, task: Task) -> Optional[RuntimeInput]:
         # 从输入流中取出事件数据
         event_id, event_str = await task.input_stream.pop()
@@ -190,7 +272,8 @@ class AgentTaskRunner(TaskRunner):
             return None
 
         # 解析JSON字符串为运行时输入对象
-        event = TypeAdapter(RuntimeInput).validate_json(event_str)
+        runtime_input = TypeAdapter(RuntimeInput).validate_json(event_str)
+        event = runtime_input.payload
 
         if isinstance(event, MessageEvent):
             # 仅消息事件拥有领域事件ID；恢复输入是运行时内部控制消息，不进入事件历史。
@@ -204,7 +287,7 @@ class AgentTaskRunner(TaskRunner):
                 # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
                 logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")
 
-        return event
+        return runtime_input
 
     async def _sync_file_to_sandbox(self, file_id: str) -> File:
 
@@ -409,7 +492,7 @@ class AgentTaskRunner(TaskRunner):
 
     async def _run_flow(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         # 检查消息是否为空，如果为空则记录警告并返回错误事件
-        if not message.message:
+        if not message.message and message.command is None:
             logger.warning(f"接收了一条空消息")
             yield ErrorEvent(error=f"空消息错误")
             return
@@ -424,6 +507,17 @@ class AgentTaskRunner(TaskRunner):
                 await self._sync_message_attachments_to_storage(event)
 
             # 产出事件
+            yield event
+
+    async def _continue_cancelled_flow(self) -> AsyncGenerator[BaseEvent, None]:
+        """显式继续已取消任务，不伪造用户自然语言输入。"""
+        async for event in self._run_flow(
+                Message(
+                    message="",
+                    attachments=[],
+                    command=MessageCommand(type="continue_cancelled_task"),
+                )
+        ):
             yield event
 
     async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
@@ -446,7 +540,7 @@ class AgentTaskRunner(TaskRunner):
         )
 
     async def _mark_session_completed_fallback(self, scene: str) -> None:
-        """在事件写入失败时兜底更新会话状态为COMPLETED"""
+        """在事件写入失败时兜底更新会话状态为 completed。"""
         try:
             async with self._uow_factory() as uow:
                 await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
@@ -454,7 +548,71 @@ class AgentTaskRunner(TaskRunner):
             # 兜底再失败时保留错误日志，便于后续排障或离线修复。
             logger.error(f"会话[{self._session_id}]在{scene}状态兜底失败: {fallback_err}")
 
+    async def _mark_session_cancelled_fallback(self, scene: str) -> None:
+        """在取消收敛失败时至少落地 session/run 的 cancelled 状态。"""
+        try:
+            async with self._uow_factory() as uow:
+                session = await uow.session.get_by_id(session_id=self._session_id)
+                if session is None:
+                    return
+                await uow.session.update_status(
+                    session_id=self._session_id,
+                    status=SessionStatus.CANCELLED,
+                )
+                current_run_id = str(session.current_run_id or "").strip()
+                if current_run_id:
+                    await uow.workflow_run.cancel_run(current_run_id)
+        except Exception as fallback_err:
+            logger.error(f"会话[{self._session_id}]在{scene}取消兜底失败: {fallback_err}")
+
+    async def _persist_cancellation_state(self) -> None:
+        """将当前运行和未完成步骤统一收敛为 cancelled。"""
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=self._session_id)
+            if session is None:
+                return
+
+            await uow.session.update_status(
+                session_id=self._session_id,
+                status=SessionStatus.CANCELLED,
+            )
+
+            run_id = str(session.current_run_id or "").strip()
+            if not run_id:
+                return
+
+            run = await uow.workflow_run.get_by_id(run_id)
+            if run is None:
+                return
+
+            if run.status == WorkflowRunStatus.CANCELLED:
+                return
+
+            run_events = await uow.workflow_run.list_events(run_id)
+            await uow.workflow_run.cancel_run(run_id)
+
+            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
+            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
+                runtime_metadata,
+                run_events=run_events,
+                current_step_id=run.current_step_id,
+            )
+
+            if cancelled_step_event is not None:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=self._session_id,
+                    event=cancelled_step_event,
+                )
+
+            if cancelled_plan_event is not None:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=self._session_id,
+                    event=cancelled_plan_event,
+                    status=SessionStatus.CANCELLED,
+                )
+
     async def invoke(self, task: Task) -> None:
+        active_request_id: Optional[str] = None
         try:
             # 记录任务开始执行的日志
             logger.info(f"开始执行任务: {task.id}")
@@ -471,10 +629,13 @@ class AgentTaskRunner(TaskRunner):
             # 循环处理输入流中的事件，直到输入流为空
             while not await task.input_stream.is_empty():
                 # 从输入流中取出事件
-                event = await self._pop_event(task)
-                if event is None:
+                runtime_input = await self._pop_event(task)
+                if runtime_input is None:
                     # 空读场景直接跳过，避免后续访问空对象字段导致任务中断。
                     continue
+                active_request_id = runtime_input.request_id
+                event = runtime_input.payload
+                await self._emit_request_started(task=task, request_id=active_request_id)
 
                 # 初始化消息变量
                 message = ""
@@ -498,6 +659,9 @@ class AgentTaskRunner(TaskRunner):
                     event_stream = self._run_flow(message_obj)
                 elif isinstance(event, ResumeInput):
                     event_stream = self._resume_flow(event.value)
+                elif isinstance(event, ContinueCancelledTaskInput):
+                    logger.info("收到继续已取消任务命令")
+                    event_stream = self._continue_cancelled_flow()
                 else:
                     logger.warning("收到不支持的运行时输入类型: %s", type(event).__name__)
                     continue
@@ -529,6 +693,17 @@ class AgentTaskRunner(TaskRunner):
                             event=event,
                             status=SessionStatus.WAITING,
                         )
+                        await self._emit_request_finished(
+                            task=task,
+                            request_id=active_request_id,
+                            terminal_event_type="wait",
+                        )
+                        await self._reject_pending_requests(
+                            task=task,
+                            message="当前任务进入等待状态，请使用 resume 恢复执行",
+                            error_key=error_keys.SESSION_RESUME_REQUIRED,
+                        )
+                        active_request_id = None
                         return
                     elif isinstance(event, DoneEvent):
                         # Done事件优先走原子提交：
@@ -539,13 +714,29 @@ class AgentTaskRunner(TaskRunner):
                             event=event,
                             status=None if has_more_input else SessionStatus.COMPLETED,
                         )
+                        await self._emit_request_finished(
+                            task=task,
+                            request_id=active_request_id,
+                            terminal_event_type="done",
+                        )
+                        active_request_id = None
+                        break
+                    elif isinstance(event, ErrorEvent):
+                        await self._put_and_add_event(task=task, event=event)
+                        await self._emit_request_finished(
+                            task=task,
+                            request_id=active_request_id,
+                            terminal_event_type="error",
+                        )
+                        await self._reject_pending_requests(
+                            task=task,
+                            message="当前任务执行失败，排队请求已终止，请重新发起",
+                        )
+                        active_request_id = None
+                        break
                     else:
                         # 其他事件：仅记录事件历史。
                         await self._put_and_add_event(task=task, event=event)
-
-                    # 检查输入流是否还有更多事件，如果没有则退出循环
-                    if not await task.input_stream.is_empty():
-                        break
 
             # 所有事件处理完成后，执行一次状态兜底：
             # 正常情况下Done事件已将状态置为COMPLETED，这里仅作为防御性保障。
@@ -554,17 +745,15 @@ class AgentTaskRunner(TaskRunner):
         except asyncio.CancelledError:
             # 处理任务被取消的情况
             logger.info(f"AgentTaskRunner任务运行取消")
-            # 取消时优先写入Done事件+状态；如果该路径失败，再走独立状态兜底。
             try:
-                await self._put_and_add_event(
+                await self._reject_pending_requests(
                     task=task,
-                    event=DoneEvent(),
-                    status=SessionStatus.COMPLETED,
+                    message="当前任务已取消，排队请求已终止，请重新发起",
                 )
-            except Exception as done_err:
-                logger.error(f"任务取消分支写入Done事件失败: {done_err}")
-                await self._mark_session_completed_fallback(scene="取消分支")
-            # 抛出异常
+                await self._persist_cancellation_state()
+            except Exception as cancel_err:
+                logger.error(f"任务取消分支收敛 cancelled 状态失败: {cancel_err}")
+                await self._mark_session_cancelled_fallback(scene="取消分支")
             raise
         except Exception as e:
             # 处理其他异常情况
@@ -575,6 +764,17 @@ class AgentTaskRunner(TaskRunner):
                     task=task,
                     event=ErrorEvent(error=f"{str(e)}"),
                     status=SessionStatus.COMPLETED,
+                )
+                if active_request_id is not None:
+                    await self._emit_request_finished(
+                        task=task,
+                        request_id=active_request_id,
+                        terminal_event_type="error",
+                    )
+                    active_request_id = None
+                await self._reject_pending_requests(
+                    task=task,
+                    message="当前任务执行失败，排队请求已终止，请重新发起",
                 )
             except Exception as error_event_err:
                 logger.error(f"异常分支写入Error事件失败: {error_event_err}")

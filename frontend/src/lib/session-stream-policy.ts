@@ -24,7 +24,7 @@ export function shouldStartEmptySessionStream(
   skipEmptyStream: boolean,
 ): boolean {
   if (!status) return false
-  if (status === 'completed') return false
+  if (status === 'completed' || status === 'cancelled') return false
   if (isSendingMessage) return false
   if (skipEmptyStream) return false
   return true

@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { MonitorSmartphone, Paperclip } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { buildResumeValueFromWaitPayload, type WaitEventContext } from '@/lib/wait-event'
 import { useI18n } from '@/lib/i18n'
+import type { WaitInputTextPayload } from '@/lib/api/types'
 
 export interface WaitResumeCardProps {
   className?: string
@@ -25,32 +26,8 @@ export function WaitResumeCard({
 }: WaitResumeCardProps) {
   const { t } = useI18n()
   const payload = waitContext.payload
-  const [inputValue, setInputValue] = useState(
-    payload?.kind === 'input_text' ? (payload.default_value ?? '') : '',
-  )
-
-  useEffect(() => {
-    if (payload?.kind !== 'input_text') {
-      setInputValue('')
-      return
-    }
-    setInputValue(payload.default_value ?? '')
-  }, [payload, waitContext.interruptId])
 
   if (!payload) return null
-
-  const handleSubmitText = async () => {
-    if (payload.kind !== 'input_text') return
-    const nextValue = inputValue.trim()
-    if (!payload.allow_empty && nextValue.length === 0) {
-      return
-    }
-    try {
-      await onResume(buildResumeValueFromWaitPayload(payload, nextValue))
-    } catch {
-      return
-    }
-  }
 
   const handleResumeAction = (resumeValue: unknown) => {
     void Promise.resolve(onResume(resumeValue)).catch(() => undefined)
@@ -107,28 +84,12 @@ export function WaitResumeCard({
       ) : null}
 
       {payload.kind === 'input_text' ? (
-        <div className="mt-3 space-y-2">
-          <Textarea
-            value={inputValue}
-            onChange={(event) => setInputValue(event.target.value)}
-            placeholder={payload.placeholder || t('sessionDetail.waitCardInputPlaceholder')}
-            rows={payload.multiline === false ? 2 : 4}
-            disabled={busy}
-            className="border-amber-200 bg-white/90 text-sm text-gray-900"
-          />
-          <div className="flex justify-end">
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                void handleSubmitText()
-              }}
-              disabled={busy || (!payload.allow_empty && inputValue.trim().length === 0)}
-            >
-              {payload.submit_label || t('sessionDetail.waitCardSubmit')}
-            </Button>
-          </div>
-        </div>
+        <TextInputResumeSection
+          key={waitContext.interruptId || payload.response_key || payload.prompt}
+          busy={busy}
+          payload={payload}
+          onResume={onResume}
+        />
       ) : null}
 
       {payload.kind === 'confirm' ? (
@@ -178,6 +139,56 @@ export function WaitResumeCard({
           ))}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function TextInputResumeSection({
+  payload,
+  busy,
+  onResume,
+}: {
+  payload: WaitInputTextPayload
+  busy: boolean
+  onResume: (resumeValue: unknown) => Promise<void> | void
+}) {
+  const { t } = useI18n()
+  const [inputValue, setInputValue] = useState(payload.default_value ?? '')
+
+  const handleSubmitText = async () => {
+    const nextValue = inputValue.trim()
+    if (!payload.allow_empty && nextValue.length === 0) {
+      return
+    }
+    try {
+      await onResume(buildResumeValueFromWaitPayload(payload, nextValue))
+    } catch {
+      return
+    }
+  }
+
+  return (
+    <div className="mt-3 space-y-2">
+      <Textarea
+        value={inputValue}
+        onChange={(event) => setInputValue(event.target.value)}
+        placeholder={payload.placeholder || t('sessionDetail.waitCardInputPlaceholder')}
+        rows={payload.multiline === false ? 2 : 4}
+        disabled={busy}
+        className="border-amber-200 bg-white/90 text-sm text-gray-900"
+      />
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => {
+            void handleSubmitText()
+          }}
+          disabled={busy || (!payload.allow_empty && inputValue.trim().length === 0)}
+        >
+          {payload.submit_label || t('sessionDetail.waitCardSubmit')}
+        </Button>
+      </div>
     </div>
   )
 }

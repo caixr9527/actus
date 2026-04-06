@@ -23,6 +23,7 @@ class SessionStatus(str, Enum):
     RUNNING = "running"  # 运行中
     WAITING = "waiting"  # 等待人类响应
     COMPLETED = "completed"  # 已完成
+    CANCELLED = "cancelled"  # 已取消
 
 
 class Session(BaseModel):

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { CheckCircle2, ChevronDown, Clock3, Languages, Loader2, XCircle } from 'lucide-react'
+import { Ban, CheckCircle2, ChevronDown, Clock3, Languages, Loader2, XCircle } from 'lucide-react'
 import { ManusIcon } from '@/components/manus-icon'
 import { ToolUse } from '@/components/tool-use'
 import { AttachmentsMessage } from '@/components/attachments-message'
@@ -25,6 +25,7 @@ export interface ChatMessageProps {
 function getStepStatusIcon(status: StepEvent['status']) {
   if (status === 'completed') return <CheckCircle2 className="size-4 text-emerald-600" />
   if (status === 'failed') return <XCircle className="size-4 text-red-600" />
+  if (status === 'cancelled') return <Ban className="size-4 text-stone-500" />
   if (status === 'running') return <Loader2 className="size-4 animate-spin text-blue-600" />
   return <Clock3 className="size-4 text-amber-600" />
 }

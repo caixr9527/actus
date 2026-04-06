@@ -3,6 +3,8 @@ import test from 'node:test'
 
 import {
   classifyMessageStreamCloseReason,
+  collectSessionEventIds,
+  getSessionEventId,
   reduceSessionRuntimeStateOnEvent,
   shouldReloadSnapshotAfterMessageStreamClose,
   type SessionRuntimeState,
@@ -41,6 +43,46 @@ test('reduceSessionRuntimeStateOnEvent should switch to waiting on ask-user tool
     event,
   )
   assert.deepEqual(next, { status: 'waiting', streaming: false })
+})
+
+test('reduceSessionRuntimeStateOnEvent should switch to cancelled on cancelled step event', () => {
+  const next = reduceSessionRuntimeStateOnEvent(
+    { status: 'running', streaming: true },
+    eventOf('step', { status: 'cancelled' }),
+  )
+
+  assert.deepEqual(next, { status: 'cancelled', streaming: false })
+})
+
+test('reduceSessionRuntimeStateOnEvent should switch to cancelled on cancelled plan event', () => {
+  const next = reduceSessionRuntimeStateOnEvent(
+    { status: 'running', streaming: true },
+    eventOf('plan', { plan_status: 'cancelled', steps: [] }),
+  )
+
+  assert.deepEqual(next, { status: 'cancelled', streaming: false })
+})
+
+test('reduceSessionRuntimeStateOnEvent should keep cancelled as terminal status', () => {
+  const next = reduceSessionRuntimeStateOnEvent(
+    { status: 'cancelled', streaming: false },
+    eventOf('step', { status: 'running' }),
+  )
+
+  assert.deepEqual(next, { status: 'cancelled', streaming: false })
+})
+
+test('getSessionEventId and collectSessionEventIds should normalize event ids for dedupe', () => {
+  const events = [
+    eventOf('message', { event_id: ' evt-1 ' }),
+    eventOf('step', { event_id: 'evt-2', status: 'running' }),
+    eventOf('done', {}),
+    eventOf('message', { event_id: 'evt-1' }),
+  ]
+
+  assert.equal(getSessionEventId(events[0]), 'evt-1')
+  assert.equal(getSessionEventId(events[2]), null)
+  assert.deepEqual(Array.from(collectSessionEventIds(events)).sort(), ['evt-1', 'evt-2'])
 })
 
 test('classifyMessageStreamCloseReason should map abort, stream end and generic errors', () => {

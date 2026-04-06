@@ -28,6 +28,7 @@ class RedisStreamTask(Task):
         self._task_runner = task_runner
         self._id = str(uuid.uuid4())
         self._execution_task: Optional[asyncio.Task] = None
+        self._finalize_task: Optional[asyncio.Task] = None
         self._streams_cleaned = False
 
         input_stream_name = f"task:input:{self._id}"
@@ -65,21 +66,35 @@ class RedisStreamTask(Task):
         if cleanup_success:
             self._streams_cleaned = True
 
-    def _schedule_cleanup_streams(self) -> None:
-        # 流清理使用异步任务执行，避免阻塞主流程（尤其是 cancel/done 回调路径）。
+    async def _finalize_after_run(self) -> None:
+        """执行任务完成后的统一回收。
+
+        注意顺序：
+        1. 先执行 runner.on_done，保证运行态收尾逻辑可以访问 task 上下文；
+        2. 再清理流，避免 stop 返回前历史事件尚未可见就被删流；
+        3. 最后回收 registry，彻底移除活跃任务引用。
+        """
         try:
-            asyncio.create_task(self._cleanup_streams())
-        except RuntimeError as e:
-            logger.warning(f"任务{self._id}调度流清理失败: {e}")
+            if self._task_runner:
+                await self._task_runner.on_done(self)
+        finally:
+            try:
+                await self._cleanup_streams()
+            finally:
+                self._cleanup_registry()
 
     def _on_task_done(self) -> None:
-        """任务完成回调"""
-        self._schedule_cleanup_streams()
+        """任务完成回调。"""
+        if self._finalize_task is not None and not self._finalize_task.done():
+            return
+        self._finalize_task = asyncio.create_task(self._finalize_after_run())
 
-        if self._task_runner:
-            asyncio.create_task(self._task_runner.on_done(self))
-
-        self._cleanup_registry()
+    async def _wait_for_finalization(self) -> None:
+        finalize_task = self._finalize_task
+        if finalize_task is None:
+            await self._finalize_after_run()
+            return
+        await finalize_task
 
     async def _execute_task(self) -> None:
 
@@ -102,17 +117,20 @@ class RedisStreamTask(Task):
             self._execution_task = asyncio.create_task(self._execute_task())
             logger.info(f"开始执行任务: {self._id}")
 
-    def cancel(self) -> bool:
-        """任务取消方法"""
+    async def cancel(self) -> bool:
+        """取消任务，并等待执行协程完成 cancelled 收敛后再返回。"""
         if not self.done and self._execution_task:
             self._execution_task.cancel()
             logger.info(f"取消任务: {self._id}")
-            self._schedule_cleanup_streams()
-            self._cleanup_registry()
+            try:
+                await self._execution_task
+            except asyncio.CancelledError:
+                # 运行协程取消是预期路径；AgentTaskRunner 会在内部完成 cancelled 收敛。
+                pass
+            await self._wait_for_finalization()
             return True
 
-        self._schedule_cleanup_streams()
-        self._cleanup_registry()
+        await self._wait_for_finalization()
         return False
 
     @property
@@ -158,7 +176,7 @@ class RedisStreamTask(Task):
         # 第一阶段：取消任务执行，尽快停止运行态。
         for task in tasks:
             try:
-                task.cancel()
+                await task.cancel()
             except Exception as e:
                 logger.error(f"取消任务失败: {task.id}, 错误信息: {e}")
 
@@ -170,13 +188,6 @@ class RedisStreamTask(Task):
                     await task._task_runner.destroy()
                 except Exception as e:
                     logger.error(f"销毁任务运行器失败: {task.id}, 错误信息: {e}")
-
-        # 第三阶段：回收Redis Stream资源，避免任务结束后残留流key/历史消息。
-        for task in tasks:
-            try:
-                await task._cleanup_streams()
-            except Exception as e:
-                logger.error(f"清理任务流失败: {task.id}, 错误信息: {e}")
 
         # 清空任务注册表，释放所有任务引用
         cls._task_registry.clear()

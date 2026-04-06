@@ -169,12 +169,45 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             record.status = WorkflowRunStatus.FAILED.value
             record.finished_at = event.created_at
             return
+        if isinstance(event, PlanEvent) and event.plan.status == ExecutionStatus.CANCELLED:
+            record.status = WorkflowRunStatus.CANCELLED.value
+            record.finished_at = event.created_at
+            record.current_step_id = None
+            return
         if record.status not in {
             WorkflowRunStatus.COMPLETED.value,
             WorkflowRunStatus.CANCELLED.value,
             WorkflowRunStatus.FAILED.value,
         }:
             record.status = WorkflowRunStatus.RUNNING.value
+
+    async def cancel_run(self, run_id: str) -> None:
+        """将运行及其所有未完成步骤统一收敛为 cancelled。"""
+        run_record = await self._get_record_with_lock(run_id)
+        if run_record is None:
+            raise ValueError(f"运行[{run_id}]不存在，请核实后重试")
+
+        cancelled_at = datetime.now()
+        run_record.status = WorkflowRunStatus.CANCELLED.value
+        run_record.finished_at = cancelled_at
+        run_record.last_event_at = cancelled_at
+        run_record.current_step_id = None
+
+        stmt = (
+            select(WorkflowRunStepModel)
+            .where(WorkflowRunStepModel.run_id == run_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        step_records = result.scalars().all()
+        for step_record in step_records:
+            if step_record.status in {
+                ExecutionStatus.COMPLETED.value,
+                ExecutionStatus.FAILED.value,
+                ExecutionStatus.CANCELLED.value,
+            }:
+                continue
+            step_record.status = ExecutionStatus.CANCELLED.value
 
     async def add_event_if_absent(
             self,

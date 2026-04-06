@@ -93,6 +93,12 @@ export function createTimelineBuildContext(): TimelineBuildContext {
   };
 }
 
+function resetStepTurnContext(context: TimelineBuildContext): void {
+  context.lastStepId = null;
+  context.stepIndexById.clear();
+  context.stepToolIndexByStepId.clear();
+}
+
 function buildToolTimelineKey(tool: ToolEvent): string | null {
   const toolCallId = (tool as { tool_call_id?: string }).tool_call_id
   if (!toolCallId) return null
@@ -151,8 +157,10 @@ export function getToolTimeLabel(
 
 function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): void {
   if (msg.role === "user") {
-    // 用户消息标志着新的对话轮次，清除 step 上下文
-    context.lastStepId = null;
+    // 用户消息标志着新的对话轮次。
+    // 对话区里的 step 卡片只在当前轮次内做增量合并，跨轮必须断开索引，
+    // 否则 stop/cancelled 等终态事件会和旧轮次复用的 step.id 发生串卡。
+    resetStepTurnContext(context);
 
     context.list.push({
       kind: "user",
@@ -188,10 +196,9 @@ function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): vo
 }
 
 function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
-  const shouldUpdateCurrentStep = context.lastStepId !== null && context.lastStepId === step.id;
   const existingIdx = context.stepIndexById.get(step.id);
 
-  if (shouldUpdateCurrentStep && existingIdx !== undefined) {
+  if (existingIdx !== undefined) {
     const existing = context.list[existingIdx];
     if (existing?.kind === "step") {
       context.list[existingIdx] = {
@@ -224,11 +231,40 @@ function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
     context.stepToolIndexByStepId.set(step.id, new Map<string, number>());
   }
 
-  // 只要 step 不是 completed/failed 状态，就保持跟踪
-  if (step.status === "completed" || step.status === "failed") {
+  // completed/failed/cancelled 都表示当前步骤已收敛，后续工具事件不应再挂到它身上。
+  if (step.status === "completed" || step.status === "failed" || step.status === "cancelled") {
     context.lastStepId = null;
   } else {
     context.lastStepId = step.id;
+  }
+}
+
+function reconcileStepsFromPlan(context: TimelineBuildContext, plan: PlanEvent): void {
+  if (!Array.isArray(plan.steps) || plan.steps.length === 0) return
+
+  for (const step of plan.steps) {
+    if (!step?.id) continue
+    const existingIdx = context.stepIndexById.get(step.id)
+    if (existingIdx === undefined) continue
+
+    const existing = context.list[existingIdx]
+    if (existing?.kind !== 'step') continue
+
+    context.list[existingIdx] = {
+      ...existing,
+      data: {
+        ...existing.data,
+        ...step,
+        description: step.description ?? existing.data.description,
+        outcome: step.outcome ?? existing.data.outcome,
+      },
+    }
+
+    if (step.status === 'completed' || step.status === 'failed' || step.status === 'cancelled') {
+      if (context.lastStepId === step.id) {
+        context.lastStepId = null
+      }
+    }
   }
 }
 
@@ -333,6 +369,7 @@ export function appendTimelineEvent(
 ): void {
   visitSessionEvent(ev, {
     message: (event) => appendMessageEvent(context, event.data as ChatMessage),
+    plan: (event) => reconcileStepsFromPlan(context, event.data as PlanEvent),
     step: (event) => appendStepEvent(context, event.data as StepEvent),
     tool: (event) => appendToolEvent(context, event.data as ToolEvent, locale),
     error: (event) => appendErrorEvent(context, event.data, locale),

@@ -37,6 +37,7 @@ class ExecutionStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class StepOutcome(BaseModel):
@@ -68,7 +69,11 @@ class Step(BaseModel):
     @property
     def done(self) -> bool:
         """判断任务是否完成。"""
-        return self.status in [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED]
+        return self.status in [
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        ]
 
 
 class Plan(BaseModel):
@@ -86,7 +91,11 @@ class Plan(BaseModel):
     @property
     def done(self) -> bool:
         """判断任务是否完成。"""
-        return self.status in [ExecutionStatus.COMPLETED, ExecutionStatus.FAILED]
+        return self.status in [
+            ExecutionStatus.COMPLETED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        ]
 
     def get_next_step(self) -> Optional[Step]:
         """获取下一个未完成的步骤。"""

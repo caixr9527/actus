@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  createSessionScopedDetailViewState,
+  createSessionScopedRuntimeState,
   resolveStepExpandedState,
   shouldAutoCloseTaskPreview,
   shouldAutoExpandStep,
@@ -44,6 +46,7 @@ test('resolveStepExpandedState should auto expand running step and collapse when
 
 test('shouldAutoCloseTaskPreview should only close preview when running task completes', () => {
   assert.equal(shouldAutoCloseTaskPreview('running', 'completed'), true)
+  assert.equal(shouldAutoCloseTaskPreview('running', 'cancelled'), true)
   assert.equal(shouldAutoCloseTaskPreview('running', 'waiting'), false)
   assert.equal(shouldAutoCloseTaskPreview('completed', 'completed'), false)
   assert.equal(shouldAutoCloseTaskPreview(null, 'completed'), false)
@@ -51,32 +54,45 @@ test('shouldAutoCloseTaskPreview should only close preview when running task com
 
 test('shouldAutoScrollToLatest should auto scroll once per session when content exists', () => {
   assert.equal(shouldAutoScrollToLatest({
-    lastAutoScrolledSessionId: null,
-    sessionId: 'session-1',
+    hasAutoScrolled: false,
     timelineLength: 3,
     shouldShowThinking: false,
   }), true)
 
   assert.equal(shouldAutoScrollToLatest({
-    lastAutoScrolledSessionId: 'session-1',
-    sessionId: 'session-1',
+    hasAutoScrolled: true,
     timelineLength: 3,
     shouldShowThinking: true,
   }), false)
 
   assert.equal(shouldAutoScrollToLatest({
-    lastAutoScrolledSessionId: null,
-    sessionId: 'session-2',
+    hasAutoScrolled: false,
     timelineLength: 0,
     shouldShowThinking: true,
   }), true)
 
   assert.equal(shouldAutoScrollToLatest({
-    lastAutoScrolledSessionId: null,
-    sessionId: 'session-3',
+    hasAutoScrolled: false,
     timelineLength: 0,
     shouldShowThinking: false,
   }), false)
+})
+
+test('session scoped detail state factories should reset view state and runtime refs explicitly', () => {
+  assert.deepEqual(createSessionScopedDetailViewState(), {
+    fileListOpen: false,
+    previewFile: null,
+    previewTool: null,
+    timelineExpanded: false,
+    vncOpen: false,
+  })
+
+  assert.deepEqual(createSessionScopedRuntimeState(), {
+    initialMessageSent: false,
+    previousToolCount: 0,
+    hasAutoScrolled: false,
+    previousSessionStatus: null,
+  })
 })
 
 test('shouldShowSessionThinking should hide thinking while any step is running', () => {

@@ -36,8 +36,8 @@ class Task(Protocol):
         """任务执行方法"""
         ...
 
-    def cancel(self) -> bool:
-        """任务取消方法"""
+    async def cancel(self) -> bool:
+        """取消任务并等待运行态收敛完成。"""
         ...
 
     @property

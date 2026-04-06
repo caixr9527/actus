@@ -19,9 +19,12 @@ import {
 import { buildStepViewState, findLatestWaitEventContext } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import {
+  createSessionScopedDetailViewState,
+  createSessionScopedRuntimeState,
   shouldAutoCloseTaskPreview,
   shouldAutoScrollToLatest,
   shouldShowSessionThinking,
+  type SessionScopedDetailViewState,
 } from '@/lib/session-detail-view-state'
 import { cn } from '@/lib/utils'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -73,6 +76,18 @@ function removeInitQueryParamFromUrl(): void {
 const TIMELINE_WINDOW_SIZE = 120
 
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
+  return (
+    <SessionDetailViewSessionScope
+      key={sessionId}
+      sessionId={sessionId}
+      initialMessage={initialMessage}
+      initialAttachments={initialAttachments}
+      hasInitialMessage={hasInitialMessage}
+    />
+  )
+}
+
+function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
@@ -98,6 +113,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     updateSessionModel,
     sendMessage,
     resumeWaitingRun,
+    continueCancelledRun,
     streaming,
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
@@ -109,16 +125,12 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   const waitContext = useMemo(() => findLatestWaitEventContext(events), [events])
   const isWaitingForResume = session?.status === 'waiting'
 
-  const [fileListOpen, setFileListOpen] = useState(false)
-  const [previewFile, setPreviewFile] = useState<AttachmentFile | null>(null)
-  const [previewTool, setPreviewTool] = useState<ToolEvent | null>(null)
-  const [expandedTimelineSessionId, setExpandedTimelineSessionId] = useState<string | null>(null)
-  const [vncOpen, setVncOpen] = useState(false)
-  const initialMessageSentRef = useRef(false)
+  const [sessionUiState, setSessionUiState] = useState<SessionScopedDetailViewState<AttachmentFile, ToolEvent>>(
+    () => createSessionScopedDetailViewState<AttachmentFile, ToolEvent>(),
+  )
+  const sessionRuntimeRef = useRef(createSessionScopedRuntimeState())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const prevToolCountRef = useRef(0)
-  const autoScrolledSessionIdRef = useRef<string | null>(null)
-  const previousSessionStatusRef = useRef(session?.status ?? null)
+  const { fileListOpen, previewFile, previewTool, timelineExpanded, vncOpen } = sessionUiState
 
   useEffect(() => {
     if (!isHydrated || isLoggedIn) {
@@ -128,7 +140,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   }, [currentPath, isHydrated, isLoggedIn, router])
 
   const hasPreview = previewFile !== null || previewTool !== null
-  const showFullTimeline = expandedTimelineSessionId === sessionId
+  const showFullTimeline = timelineExpanded
   const visibleTimeline = useMemo(() => {
     if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
     return timeline.slice(-TIMELINE_WINDOW_SIZE)
@@ -158,21 +170,24 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
   useEffect(() => {
     if (session?.status !== 'running' || vncOpen) return
 
-    if (toolCount > prevToolCountRef.current && latestTool) {
+    if (toolCount > sessionRuntimeRef.current.previousToolCount && latestTool) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setPreviewTool(latestTool)
-      setPreviewFile(null)
+      setSessionUiState((prev) => ({
+        ...prev,
+        previewTool: latestTool,
+        previewFile: null,
+      }))
       scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
     }
-    prevToolCountRef.current = toolCount
+    sessionRuntimeRef.current.previousToolCount = toolCount
   }, [latestTool, session?.status, toolCount, vncOpen])
 
   useEffect(() => {
-    if (!initialMessage || initialMessageSentRef.current || !session || loading || streaming) {
+    if (!initialMessage || sessionRuntimeRef.current.initialMessageSent || !session || loading || streaming) {
       return
     }
 
-    initialMessageSentRef.current = true
+    sessionRuntimeRef.current.initialMessageSent = true
 
     sendMessage(initialMessage, initialAttachments || [])
       .then(() => {
@@ -208,6 +223,18 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     [resumeWaitingRun, t]
   )
 
+  const handleContinueCancelledRun = useCallback(
+    async () => {
+      try {
+        await continueCancelledRun()
+      } catch (error) {
+        toast.error(getApiErrorMessage(error, 'sessionDetail.sendFailed', t))
+        throw error
+      }
+    },
+    [continueCancelledRun, t],
+  )
+
   const handleModelChange = useCallback(
     async (modelId: string) => {
       await updateSessionModel(modelId)
@@ -217,44 +244,60 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
   const handleViewAllFiles = useCallback(() => {
     refreshFiles()
-    setFileListOpen(true)
+    setSessionUiState((prev) => ({ ...prev, fileListOpen: true }))
   }, [refreshFiles])
 
   const handleFileClick = useCallback((file: AttachmentFile) => {
-    setPreviewFile(file)
-    setPreviewTool(null)
+    setSessionUiState((prev) => ({
+      ...prev,
+      previewFile: file,
+      previewTool: null,
+    }))
   }, [])
 
   const handleToolClick = useCallback((tool: ToolEvent) => {
     const kind = getToolKind(tool)
     if (kind === 'message') return
-    setPreviewTool(tool)
-    setPreviewFile(null)
+    setSessionUiState((prev) => ({
+      ...prev,
+      previewTool: tool,
+      previewFile: null,
+    }))
   }, [])
 
   const handleClosePreview = useCallback(() => {
-    setPreviewFile(null)
-    setPreviewTool(null)
+    setSessionUiState((prev) => ({
+      ...prev,
+      previewFile: null,
+      previewTool: null,
+    }))
   }, [])
 
   const handleJumpToLatest = useCallback(() => {
     if (latestTool) {
-      setPreviewTool(latestTool)
-      setPreviewFile(null)
+      setSessionUiState((prev) => ({
+        ...prev,
+        previewTool: latestTool,
+        previewFile: null,
+      }))
     }
     scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
   }, [latestTool])
 
   const handleOpenVNC = useCallback(() => {
-    setVncOpen(true)
+    setSessionUiState((prev) => ({ ...prev, vncOpen: true }))
   }, [])
 
   const handleCloseVNC = useCallback(() => {
-    setVncOpen(false)
+    setSessionUiState((prev) => ({ ...prev, vncOpen: false }))
     // 关闭 VNC 后跳转到最新工具
     if (latestTool && session?.status === 'running') {
-      setPreviewTool(latestTool)
-      setPreviewFile(null)
+      setSessionUiState((prev) => ({
+        ...prev,
+        previewTool: latestTool,
+        previewFile: null,
+        vncOpen: false,
+      }))
       setTimeout(() => {
         scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
       }, 100)
@@ -265,15 +308,15 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
     if (!session) return
     try {
       await sessionApi.stopSession(sessionId)
+      await refresh({ resetRealtime: true })
       toast.success(t('sessionDetail.stopSuccess'))
-      refresh()
     } catch (error) {
       toast.error(getApiErrorMessage(error, 'sessionDetail.stopFailed', t))
     }
   }, [session, sessionId, refresh, t])
 
   const handleRealtimeRecover = useCallback(() => {
-    void refresh()
+    void refresh({ resetRealtime: true })
   }, [refresh])
   const isSessionRunning = session?.status === 'running'
 
@@ -297,8 +340,7 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
   useEffect(() => {
     if (!shouldAutoScrollToLatest({
-      lastAutoScrolledSessionId: autoScrolledSessionIdRef.current,
-      sessionId,
+      hasAutoScrolled: sessionRuntimeRef.current.hasAutoScrolled,
       timelineLength: timeline.length,
       shouldShowThinking,
     })) {
@@ -307,20 +349,25 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
 
     const container = scrollContainerRef.current
     if (!container) return
-    autoScrolledSessionIdRef.current = sessionId
+    sessionRuntimeRef.current.hasAutoScrolled = true
     requestAnimationFrame(() => {
       container.scrollTo({ top: container.scrollHeight, behavior: 'auto' })
     })
-  }, [sessionId, timeline.length, shouldShowThinking])
+  }, [timeline.length, shouldShowThinking])
 
   useEffect(() => {
-    const previousStatus = previousSessionStatusRef.current
+    const previousStatus = sessionRuntimeRef.current.previousSessionStatus
     const nextStatus = session?.status ?? null
     if (shouldAutoCloseTaskPreview(previousStatus, nextStatus)) {
-      setPreviewFile(null)
-      setPreviewTool(null)
+      // 任务从 running 收敛到 completed/cancelled 时，预览面板必须立即清空，避免显示过期执行态内容。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSessionUiState((prev) => ({
+        ...prev,
+        previewFile: null,
+        previewTool: null,
+      }))
     }
-    previousSessionStatusRef.current = nextStatus
+    sessionRuntimeRef.current.previousSessionStatus = nextStatus
   }, [session?.status])
 
   if (!isHydrated) {
@@ -435,7 +482,9 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                 title={session.title}
                 files={files}
                 fileListOpen={fileListOpen}
-                onFileListOpenChange={setFileListOpen}
+                onFileListOpenChange={(open) => {
+                  setSessionUiState((prev) => ({ ...prev, fileListOpen: open }))
+                }}
                 onFetchFiles={refreshFiles}
                 onFileClick={handleFileClick}
               />
@@ -463,7 +512,9 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                     <button
                       type="button"
                       className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
-                      onClick={() => setExpandedTimelineSessionId(sessionId)}
+                      onClick={() => {
+                        setSessionUiState((prev) => ({ ...prev, timelineExpanded: true }))
+                      }}
                     >
                       {t('sessionDetail.showEarlierRecords', { count: hiddenTimelineCount })}
                     </button>
@@ -474,7 +525,9 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                     <button
                       type="button"
                       className="text-xs text-gray-500 hover:text-gray-700 underline underline-offset-2 cursor-pointer"
-                      onClick={() => setExpandedTimelineSessionId(null)}
+                      onClick={() => {
+                        setSessionUiState((prev) => ({ ...prev, timelineExpanded: false }))
+                      }}
                     >
                       {t('sessionDetail.showRecentRecords', { count: TIMELINE_WINDOW_SIZE })}
                     </button>
@@ -520,19 +573,37 @@ export function SessionDetailView({ sessionId, initialMessage, initialAttachment
                   onOpenTakeover={waitContext.suggestUserTakeover ? handleOpenVNC : undefined}
                 />
               ) : (
-                <ChatInput
-                  onSend={handleSend}
-                  sessionId={sessionId}
-                  isRunning={isSessionRunning}
-                  disabled={streaming || isSessionRunning}
-                  onStop={handleStop}
-                  modelOptions={availableModels}
-                  currentModelId={session.current_model_id}
-                  defaultModelId={defaultModelId}
-                  modelsLoading={modelsLoading}
-                  modelUpdating={modelUpdating}
-                  onModelChange={handleModelChange}
-                />
+                <>
+                  {session.status === 'cancelled' && (
+                    <div className="mb-2 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      <span>{t('sessionDetail.cancelledContinueHint')}</span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="cursor-pointer"
+                        disabled={streaming}
+                        onClick={() => {
+                          void handleContinueCancelledRun()
+                        }}
+                      >
+                        {t('sessionDetail.continueCancelledTask')}
+                      </Button>
+                    </div>
+                  )}
+                  <ChatInput
+                    onSend={handleSend}
+                    sessionId={sessionId}
+                    isRunning={isSessionRunning}
+                    disabled={streaming || isSessionRunning}
+                    onStop={handleStop}
+                    modelOptions={availableModels}
+                    currentModelId={session.current_model_id}
+                    defaultModelId={defaultModelId}
+                    modelsLoading={modelsLoading}
+                    modelUpdating={modelUpdating}
+                    onModelChange={handleModelChange}
+                  />
+                </>
               )}
             </div>
           </div>

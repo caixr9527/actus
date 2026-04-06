@@ -13,7 +13,7 @@ export type RunTimelineItem = {
   timestamp: number | null
 }
 
-export type StepViewStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed'
+export type StepViewStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
 
 export type StepViewItem = {
   id: string
@@ -25,7 +25,7 @@ export type StepViewItem = {
 
 export type StepViewState = {
   steps: StepViewItem[]
-  completedCount: number
+  progressCount: number
   totalCount: number
 }
 
@@ -200,6 +200,7 @@ export function buildRunTimeline(events: SSEEventData[], locale: AppLocale = 'zh
 function normalizeStepStatus(raw: unknown): StepViewStatus {
   if (raw === 'completed') return 'completed'
   if (raw === 'failed') return 'failed'
+  if (raw === 'cancelled') return 'cancelled'
   if (raw === 'waiting') return 'waiting'
   if (raw === 'running') return 'running'
   return 'pending'
@@ -260,10 +261,10 @@ export function buildStepViewState(events: SSEEventData[]): StepViewState {
     .filter((step): step is StepViewItem => Boolean(step))
     .sort((a, b) => a.stepIndex - b.stepIndex)
 
-  const completedCount = steps.filter((step) => step.status === 'completed').length
+  const progressCount = steps.filter((step) => step.status === 'completed' || step.status === 'failed').length
   return {
     steps,
-    completedCount,
+    progressCount,
     totalCount: steps.length,
   }
 }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { ChevronDown, Clock3, Loader2, XCircle } from 'lucide-react'
+import { Ban, ChevronDown, Clock3, Loader2, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { type StepViewState, type StepViewStatus } from '@/lib/run-timeline'
 import { useI18n } from '@/lib/i18n'
@@ -21,6 +21,9 @@ function renderStepStatusIcon(status: StepViewStatus) {
   if (status === 'failed') {
     return <XCircle className="size-3.5 text-rose-600" />
   }
+  if (status === 'cancelled') {
+    return <Ban className="size-3.5 text-stone-500" />
+  }
   if (status === 'waiting') {
     return <Clock3 className="size-3.5 text-amber-600" />
   }
@@ -31,6 +34,7 @@ function getStepTitleClassName(status: StepViewStatus) {
   if (status === 'running') return 'text-stone-950'
   if (status === 'completed') return 'text-stone-700'
   if (status === 'failed') return 'text-rose-700'
+  if (status === 'cancelled') return 'text-stone-500'
   if (status === 'waiting') return 'text-stone-800'
   return 'text-stone-500'
 }
@@ -40,8 +44,8 @@ export function RunTimelinePanel({ className, stepView }: RunTimelinePanelProps)
   const [expanded, setExpanded] = useState(false)
 
   const totalCount = stepView.totalCount
-  const completedCount = stepView.completedCount
-  const progressPercent = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0
+  const progressCount = stepView.progressCount
+  const progressPercent = totalCount > 0 ? Math.round((progressCount / totalCount) * 100) : 0
 
   return (
     <div className={cn('px-1', className)}>
@@ -58,7 +62,7 @@ export function RunTimelinePanel({ className, stepView }: RunTimelinePanelProps)
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-3">
               <span className="shrink-0 text-xs text-stone-500">
-                {completedCount}/{totalCount || 0}
+                {progressCount}/{totalCount || 0}
               </span>
               <div className="min-w-0 flex-1">
                 {!expanded ? (

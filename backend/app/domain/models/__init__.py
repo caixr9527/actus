@@ -39,7 +39,7 @@ from .file import File
 from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
 from .long_term_memory import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
-from .message import Message
+from .message import Message, MessageCommand
 from .plan import (
     Plan,
     Step,
@@ -48,7 +48,7 @@ from .plan import (
     build_step_objective_key,
     build_step_objective_source,
 )
-from .runtime_input import ResumeInput, RuntimeInput
+from .runtime_input import ContinueCancelledTaskInput, ResumeInput, RuntimeInput, RuntimeInputPayload
 from .runtime_llm_config import RuntimeLLMConfig
 from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
@@ -61,6 +61,13 @@ from .workflow_run import (
     WorkflowRunStepRecord,
     WorkflowRunSummary,
     SessionContextSnapshot,
+)
+from .task_stream import (
+    TaskStreamRecord,
+    TaskStreamEventRecord,
+    TaskRequestStartedRecord,
+    TaskRequestFinishedRecord,
+    TaskRequestRejectedRecord,
 )
 from .wait import (
     WaitChoice,
@@ -106,9 +113,12 @@ __all__ = [
     "StepEventStatus",
     "ToolResult",
     "ResumeInput",
+    "ContinueCancelledTaskInput",
     "RuntimeInput",
+    "RuntimeInputPayload",
     "File",
     "Message",
+    "MessageCommand",
     "SearchResults",
     "SearchResultItem",
     "FetchedPage",
@@ -131,6 +141,11 @@ __all__ = [
     "WorkflowRunStepRecord",
     "WorkflowRunSummary",
     "SessionContextSnapshot",
+    "TaskStreamRecord",
+    "TaskStreamEventRecord",
+    "TaskRequestStartedRecord",
+    "TaskRequestFinishedRecord",
+    "TaskRequestRejectedRecord",
     "WaitChoice",
     "BaseWaitPayload",
     "TextInputWaitPayload",

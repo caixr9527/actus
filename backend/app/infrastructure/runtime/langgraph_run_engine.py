@@ -261,6 +261,10 @@ class LangGraphRunEngine(RunEngine):
                     session_context_snapshot=session_context_snapshot,
                     user_message=message.message,
                     input_parts=input_parts,
+                    continue_cancelled_task=(
+                        message.command is not None
+                        and message.command.type == "continue_cancelled_task"
+                    ),
                     thread_id=thread_id,
                     checkpoint_namespace=checkpoint_namespace,
                     checkpoint_id=checkpoint_id,
@@ -809,6 +813,7 @@ class LangGraphRunEngine(RunEngine):
                 run_id=run_id,
                 message_length=len(str(message.message or "")),
                 attachment_count=len(list(message.attachments or [])),
+                command_type=message.command.type if message.command is not None else "",
             )
 
             graph_input_state = await self._build_graph_input_state(

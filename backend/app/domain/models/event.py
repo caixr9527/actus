@@ -24,6 +24,7 @@ class PlanEventStatus(str, Enum):
     CREATED = "created"
     UPDATED = "updated"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class StepEventStatus(str, Enum):
@@ -31,6 +32,7 @@ class StepEventStatus(str, Enum):
     STARTED = "started"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ToolEventStatus(str, Enum):

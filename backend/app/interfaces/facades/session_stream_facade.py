@@ -117,6 +117,7 @@ class SessionStreamFacade:
                     message=request.message,
                     attachments=request.attachments,
                     resume=request.resume.value if request.resume is not None else None,
+                    command=request.command.model_dump(mode="json") if request.command is not None else None,
                     latest_event_id=request.event_id,
                     timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
             ):

@@ -228,11 +228,7 @@ function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
   const isFetchPage = tool.function === "fetch_page" && isFetchPageContent(content)
   const rawResults = content?.results
-
-  const results: SearchResultItem[] = useMemo(() => {
-    if (Array.isArray(rawResults)) return rawResults as SearchResultItem[]
-    return []
-  }, [rawResults])
+  const results: SearchResultItem[] = Array.isArray(rawResults) ? [...rawResults] as SearchResultItem[] : []
 
   const query = getArg(tool.args, "query", "q")
 

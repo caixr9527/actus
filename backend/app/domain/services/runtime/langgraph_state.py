@@ -22,6 +22,7 @@ from app.domain.models import (
     PlanEvent,
     Session,
     Step,
+    StepOutcome,
     StepEvent,
     ToolEvent,
     WaitEvent,
@@ -247,6 +248,42 @@ class GraphStateContractMapper:
     @staticmethod
     def _normalize_text(raw: Any) -> str:
         return str(raw or "")
+
+    @staticmethod
+    def _should_clear_cancellation_outcome(outcome: Optional[StepOutcome]) -> bool:
+        if outcome is None:
+            return False
+        return (
+            str(outcome.summary or "").strip() == "任务已取消"
+            and len(list(outcome.produced_artifacts or [])) == 0
+            and len(list(outcome.blockers or [])) == 0
+            and len(list(outcome.facts_learned or [])) == 0
+            and len(list(outcome.open_questions or [])) == 0
+            and not str(outcome.next_hint or "").strip()
+            and not str(outcome.reused_from_run_id or "").strip()
+            and not str(outcome.reused_from_step_id or "").strip()
+        )
+
+    @classmethod
+    def _reopen_cancelled_plan_for_continuation(cls, plan: Plan) -> Optional[Plan]:
+        if plan.status != ExecutionStatus.CANCELLED:
+            return None
+
+        reopened_plan = plan.model_copy(deep=True)
+        reopened_any_step = False
+        for step in reopened_plan.steps:
+            if step.status != ExecutionStatus.CANCELLED:
+                continue
+            step.status = ExecutionStatus.PENDING
+            if cls._should_clear_cancellation_outcome(step.outcome):
+                step.outcome = None
+            reopened_any_step = True
+
+        if not reopened_any_step:
+            return None
+
+        reopened_plan.status = ExecutionStatus.PENDING
+        return reopened_plan
 
     @classmethod
     def _normalize_dict_memory(cls, raw: Any) -> Dict[str, Any]:
@@ -521,16 +558,27 @@ class GraphStateContractMapper:
             session_context_snapshot: Optional[SessionContextSnapshot],
             user_message: str,
             input_parts: Optional[List[Dict[str, Any]]] = None,
+            continue_cancelled_task: bool = False,
             thread_id: str = "",
             checkpoint_namespace: str = "",
             checkpoint_id: Optional[str] = None,
     ) -> PlannerReActLangGraphState:
         """构建 BE-LG-04 契约化初始状态。"""
-        plan = cls._resolve_plan_snapshot(session=session, run=run)
         graph_state_from_metadata = cls._extract_contract_graph_state(run=run)
+        plan = cls._resolve_plan_snapshot(session=session, run=run)
+        plan_resumed_from_cancelled = False
+        if (
+                plan is not None
+                and len(graph_state_from_metadata) == 0
+                and continue_cancelled_task
+        ):
+            reopened_plan = cls._reopen_cancelled_plan_for_continuation(plan)
+            if reopened_plan is not None:
+                plan = reopened_plan
+                plan_resumed_from_cancelled = True
 
         step_states = graph_state_from_metadata.get("step_states")
-        if not isinstance(step_states, list):
+        if not isinstance(step_states, list) or plan_resumed_from_cancelled:
             step_states = cls._build_step_states_from_plan(plan=plan)
 
         current_step_id = graph_state_from_metadata.get("current_step_id")
@@ -580,6 +628,14 @@ class GraphStateContractMapper:
         if not conversation_summary and session_context_snapshot is not None:
             conversation_summary = cls._normalize_text(session_context_snapshot.summary_text)
 
+        graph_metadata = (
+            cls._normalize_dict_memory(graph_state_from_metadata.get("metadata"))
+            if isinstance(graph_state_from_metadata.get("metadata"), dict)
+            else {}
+        )
+        if plan_resumed_from_cancelled:
+            graph_metadata["continued_from_cancelled_plan"] = True
+
         return {
             "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
             "session_id": session.id,
@@ -627,11 +683,7 @@ class GraphStateContractMapper:
             "step_states": step_states,
             "pending_interrupt": cls._extract_pending_interrupt_from_metadata(graph_state_from_metadata),
             "tool_invocations": cls._normalize_tool_invocations(graph_state_from_metadata.get("tool_invocations")),
-            "graph_metadata": (
-                cls._normalize_dict_memory(graph_state_from_metadata.get("metadata"))
-                if isinstance(graph_state_from_metadata.get("metadata"), dict)
-                else {}
-            ),
+            "graph_metadata": graph_metadata,
             "artifact_refs": cls._normalize_artifact_refs(
                 (run.runtime_metadata or {}).get("artifacts") if run is not None else []
             ),
@@ -734,6 +786,7 @@ class GraphStateContractMapper:
         graph_metadata = dict(next_state.get("graph_metadata") or {})
         artifact_refs = list(next_state.get("artifact_refs") or [])
         pending_interrupt = cls._normalize_pending_interrupt(next_state.get("pending_interrupt"))
+        waiting_for_replan = graph_metadata.get("wait_resume_action") == "replan"
 
         audit_events = list(next_state.get("audit_events") or [])
         seen_event_ids = {str(event.id) for event in audit_events}
@@ -748,14 +801,14 @@ class GraphStateContractMapper:
             if isinstance(event, PlanEvent):
                 plan = event.plan.model_copy(deep=True)
                 step_states = cls._build_step_states_from_plan(plan)
-                next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
+                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(plan)
                 graph_metadata["latest_plan_event_id"] = str(event.id)
                 continue
 
             if isinstance(event, StepEvent):
                 step_states = cls._upsert_step_state(step_states=step_states, step=event.step)
                 plan = cls._upsert_step_into_plan(plan=plan, step=event.step, step_states=step_states)
-                next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
+                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(plan)
                 graph_metadata["latest_step_event_id"] = str(event.id)
                 continue
 
@@ -805,9 +858,9 @@ class GraphStateContractMapper:
                 pending_interrupt = {}
 
         next_state["plan"] = plan
-        if not next_state.get("current_step_id"):
+        if not next_state.get("current_step_id") and not waiting_for_replan:
             next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
-        if not next_state.get("current_step_id"):
+        if not next_state.get("current_step_id") and not waiting_for_replan:
             for step_state in step_states:
                 if str(step_state.get("status")) == ExecutionStatus.RUNNING.value:
                     next_state["current_step_id"] = str(step_state.get("step_id") or "")

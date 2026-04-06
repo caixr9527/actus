@@ -7,7 +7,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from langgraph.types import interrupt
 
@@ -217,8 +217,22 @@ def _resolve_summary_attachment_refs(
         parsed_attachments: Any,
 ) -> List[str]:
     explicit_attachment_refs = normalize_attachments(parsed_attachments)
+    known_attachment_refs = _merge_known_attachment_refs(
+        _get_step_artifacts(state.get("last_executed_step")),
+        [
+            ref
+            for ref in list(state.get("selected_artifacts") or [])
+            if _is_attachment_filepath(ref)
+        ],
+        _collect_current_run_artifacts(state),
+    )
     if len(explicit_attachment_refs) > 0:
-        return _normalize_attachment_paths(explicit_attachment_refs)
+        resolved_explicit_refs = [
+            ref for ref in _normalize_attachment_paths(explicit_attachment_refs)
+            if ref in known_attachment_refs
+        ]
+        if len(resolved_explicit_refs) > 0:
+            return resolved_explicit_refs
 
     last_step_attachment_refs = _get_step_artifacts(state.get("last_executed_step"))
     if len(last_step_attachment_refs) > 0:
@@ -1290,6 +1304,61 @@ def _build_wait_resume_step_summary(step: Step, resumed_message: str) -> str:
     return f"{step_label}已完成用户交互"
 
 
+def _build_wait_cancel_step_summary(step: Step, resumed_message: str) -> str:
+    step_label = str(step.title or step.description or "当前步骤").strip() or "当前步骤"
+    normalized_message = str(resumed_message or "").strip()
+    if normalized_message:
+        return f"{step_label}已被用户取消：{normalized_message}"
+    return f"{step_label}已被用户取消，等待重新规划"
+
+
+def _resolve_wait_resume_branch(
+        payload: Dict[str, Any],
+        resume_value: Any,
+) -> Literal["confirm_continue", "confirm_cancel", "select", "input_text"]:
+    """显式区分不同等待态恢复分支，避免不同 UI 交互共用一条模糊路径。"""
+    kind = str(payload.get("kind") or "").strip()
+    if kind == "confirm":
+        if resume_value == payload.get("cancel_resume_value"):
+            return "confirm_cancel"
+        return "confirm_continue"
+    if kind == "select":
+        return "select"
+    return "input_text"
+
+
+def _build_wait_resume_outcome(
+        step: Step,
+        *,
+        branch: Literal["confirm_continue", "select", "input_text"],
+        resumed_message: str,
+) -> StepOutcome:
+    """按恢复分支生成步骤结果，保证确认/选择/文本输入语义清晰。"""
+    step_label = str(step.title or step.description or "当前步骤").strip() or "当前步骤"
+    normalized_message = str(resumed_message or "").strip()
+
+    if branch == "confirm_continue":
+        if normalized_message:
+            summary = f"{step_label}已确认继续：{normalized_message}"
+        else:
+            summary = f"{step_label}已确认继续执行"
+    elif branch == "select":
+        if normalized_message:
+            summary = f"{step_label}已收到用户选择：{normalized_message}"
+        else:
+            summary = f"{step_label}已完成用户选择"
+    else:
+        if normalized_message:
+            summary = f"{step_label}已收到用户输入：{normalized_message}"
+        else:
+            summary = _build_wait_resume_step_summary(step, resumed_message)
+
+    return StepOutcome(
+        done=True,
+        summary=summary,
+    )
+
+
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     started_at = now_perf()
@@ -1301,22 +1370,40 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             working_memory["goal"] = str(plan.goal or state.get("user_message") or "")
         planner_local_memory = dict(state.get("planner_local_memory") or {})
         planner_local_memory["plan_brief"] = str(plan.message or plan.title or "")
+        graph_metadata = dict(state.get("graph_metadata") or {})
+        resumed_from_cancelled_plan = bool(graph_metadata.pop("continued_from_cancelled_plan", False))
+
+        reuse_events: List[Any] = []
+        if resumed_from_cancelled_plan:
+            reuse_events.append(
+                PlanEvent(
+                    plan=plan.model_copy(deep=True),
+                    status=PlanEventStatus.UPDATED,
+                )
+            )
         log_runtime(
             logger,
             logging.INFO,
-            "复用已有计划",
+            "继续复用已有计划" if resumed_from_cancelled_plan else "复用已有计划",
             state=state,
             plan_title=str(plan.title or ""),
             step_count=len(list(plan.steps or [])),
             next_step_id=str(next_step.id or "") if next_step is not None else "",
             elapsed_ms=elapsed_ms(started_at),
         )
-        return {
-            **state,
-            "working_memory": working_memory,
-            "planner_local_memory": planner_local_memory,
-            "current_step_id": next_step.id if next_step is not None else None,
-        }
+        if len(reuse_events) > 0:
+            await emit_live_events(*reuse_events)
+        return _reduce_state_with_events(
+            state,
+            updates={
+                "plan": plan,
+                "working_memory": working_memory,
+                "planner_local_memory": planner_local_memory,
+                "current_step_id": next_step.id if next_step is not None else None,
+                "graph_metadata": graph_metadata,
+            },
+            events=reuse_events,
+        )
 
     user_message = state.get("user_message", "").strip()
 
@@ -1748,6 +1835,7 @@ async def wait_for_human_node(
     graph_metadata.pop("waiting_interrupt_kind", None)
     graph_metadata.pop("waiting_interrupt_prompt", None)
     graph_metadata.pop("pending_interrupts", None)
+    graph_metadata.pop("wait_resume_action", None)
 
     step_local_memory = dict(state.get("step_local_memory") or {})
     step_local_memory.pop("pending_interrupt", None)
@@ -1802,9 +1890,59 @@ async def wait_for_human_node(
             "pending_interrupt": {},
         }
 
-    waiting_step.outcome = StepOutcome(
-        done=True,
-        summary=_build_wait_resume_step_summary(waiting_step, resumed_message),
+    resume_branch = _resolve_wait_resume_branch(interrupt_request, resume_value)
+
+    if resume_branch == "confirm_cancel":
+        waiting_step.outcome = StepOutcome(
+            done=False,
+            summary=_build_wait_cancel_step_summary(waiting_step, resumed_message),
+        )
+        waiting_step.status = ExecutionStatus.CANCELLED
+        cancelled_event = StepEvent(
+            step=waiting_step.model_copy(deep=True),
+            status=StepEventStatus.CANCELLED,
+        )
+        await emit_live_events(cancelled_event)
+        working_memory = _merge_step_outcome_into_working_memory(
+            _ensure_working_memory(state),
+            waiting_step.outcome,
+        )
+        step_local_memory["current_step_id"] = str(waiting_step.id)
+        step_local_memory["observation_summary"] = _normalize_step_result_text(waiting_step.outcome.summary)
+        step_local_memory["pending_findings"] = []
+        graph_metadata["wait_resume_action"] = "replan"
+        log_runtime(
+            logger,
+            logging.INFO,
+            "等待恢复收到取消确认，转入重规划",
+            state=state,
+            step_id=str(waiting_step.id or ""),
+            resumed_message_length=len(resumed_message),
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return _reduce_state_with_events(
+            state,
+            updates={
+                "plan": plan,
+                "user_message": resumed_message,
+                "input_parts": [],
+                "message_window": message_window,
+                "graph_metadata": graph_metadata,
+                "step_local_memory": step_local_memory,
+                "pending_interrupt": {},
+                "last_executed_step": waiting_step.model_copy(deep=True),
+                "execution_count": int(state.get("execution_count", 0)) + 1,
+                "current_step_id": None,
+                "working_memory": working_memory,
+                "final_message": _normalize_step_result_text(waiting_step.outcome.summary),
+            },
+            events=[cancelled_event],
+        )
+
+    waiting_step.outcome = _build_wait_resume_outcome(
+        waiting_step,
+        branch=resume_branch,
+        resumed_message=resumed_message,
     )
     waiting_step.status = ExecutionStatus.COMPLETED
     completed_event = StepEvent(
@@ -1977,6 +2115,8 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     await emit_live_events(updated_event)
     planner_local_memory = dict(state.get("planner_local_memory") or {})
     planner_local_memory["replan_rationale"] = _get_step_outcome_summary(last_step)
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata.pop("wait_resume_action", None)
     log_runtime(
         logger,
         logging.INFO,
@@ -1996,6 +2136,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
             "planner_local_memory": planner_local_memory,
             "step_local_memory": {},
             "current_step_id": next_step.id if next_step is not None else None,
+            "graph_metadata": graph_metadata,
         },
         events=[updated_event],
     )
