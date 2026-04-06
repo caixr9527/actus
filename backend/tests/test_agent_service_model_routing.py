@@ -34,7 +34,7 @@ class _Task:
         self.id = "task-1"
         self.task_runner = task_runner
 
-    def cancel(self):
+    async def cancel(self):
         return None
 
 

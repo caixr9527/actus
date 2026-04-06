@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 
 from app.domain.models import (
@@ -25,6 +26,8 @@ from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
 )
+from app.infrastructure.runtime.langgraph_graphs import bind_live_event_sink, unbind_live_event_sink
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import create_or_reuse_plan_node
 
 
 def _build_plan(step_status: ExecutionStatus = ExecutionStatus.PENDING) -> Plan:
@@ -186,6 +189,133 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["tool_invocations"]["call-1"]["tool_name"] == "search"
     assert state["graph_metadata"]["carry_over"] == "yes"
     assert state["artifact_refs"] == ["file-1", "file-2"]
+
+
+def test_graph_state_contract_should_reopen_cancelled_plan_for_explicit_command() -> None:
+    cancelled_plan = Plan(
+        title="被取消的任务",
+        goal="继续原任务",
+        language="zh",
+        message="原任务计划",
+        steps=[
+            Step(
+                id="step-1",
+                title="第一步",
+                description="已完成步骤",
+                status=ExecutionStatus.COMPLETED,
+                outcome=StepOutcome(done=True, summary="已完成"),
+            ),
+            Step(
+                id="step-2",
+                title="第二步",
+                description="被取消步骤",
+                status=ExecutionStatus.CANCELLED,
+                outcome=StepOutcome(done=False, summary="任务已取消"),
+            ),
+        ],
+        status=ExecutionStatus.CANCELLED,
+    )
+    session = Session(
+        id="session-1",
+        current_run_id="run-2",
+        events=[PlanEvent(plan=cancelled_plan, status=PlanEventStatus.CANCELLED)],
+    )
+    run = WorkflowRun(
+        id="run-2",
+        session_id="session-1",
+        status=WorkflowRunStatus.RUNNING,
+    )
+
+    state = GraphStateContractMapper.build_initial_state(
+        session=session,
+        run=run,
+        completed_run_summaries=[],
+        recent_attempt_summaries=[],
+        session_context_snapshot=None,
+        user_message="",
+        continue_cancelled_task=True,
+        thread_id="thread-1",
+    )
+
+    reopened_plan = state["plan"]
+    assert reopened_plan is not None
+    assert reopened_plan.status == ExecutionStatus.PENDING
+    assert [step.status for step in reopened_plan.steps] == [
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.PENDING,
+    ]
+    assert reopened_plan.steps[1].outcome is None
+    assert state["current_step_id"] == "step-2"
+    assert state["graph_metadata"]["continued_from_cancelled_plan"] is True
+    assert state["step_states"][1]["status"] == ExecutionStatus.PENDING.value
+
+
+def test_create_or_reuse_plan_node_should_emit_updated_plan_when_continuing_cancelled_task() -> None:
+    state = {
+        "session_id": "session-1",
+        "user_message": "继续",
+        "plan": Plan(
+            title="继续原任务",
+            goal="继续执行",
+            language="zh",
+            message="继续原任务",
+            steps=[
+                Step(id="step-2", description="继续步骤", status=ExecutionStatus.PENDING),
+            ],
+            status=ExecutionStatus.PENDING,
+        ),
+        "graph_metadata": {
+            "continued_from_cancelled_plan": True,
+        },
+        "working_memory": {},
+        "planner_local_memory": {},
+        "step_local_memory": {},
+        "summary_local_memory": {},
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "selected_artifacts": [],
+        "historical_artifact_refs": [],
+        "input_parts": [],
+        "message_window": [],
+        "retrieved_memories": [],
+        "pending_memory_writes": [],
+        "memory_context_version": None,
+        "current_step_id": None,
+        "execution_count": 0,
+        "max_execution_steps": 20,
+        "last_executed_step": None,
+        "pending_interrupt": {},
+        "tool_invocations": {},
+        "artifact_refs": [],
+        "audit_events": [],
+        "emitted_events": [],
+        "final_message": "",
+        "error": None,
+        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
+        "thread_id": "thread-1",
+        "checkpoint_ref_namespace": "",
+        "checkpoint_ref_id": None,
+        "conversation_summary": "",
+    }
+    emitted_events = []
+
+    async def _sink(event):
+        emitted_events.append(event)
+
+    token = bind_live_event_sink(_sink)
+    try:
+        next_state = asyncio.run(create_or_reuse_plan_node(state, llm=object()))
+    finally:
+        unbind_live_event_sink(token)
+
+    assert len(emitted_events) == 1
+    assert isinstance(emitted_events[0], PlanEvent)
+    assert emitted_events[0].status == PlanEventStatus.UPDATED
+    assert next_state["current_step_id"] == "step-2"
+    assert next_state["graph_metadata"].get("continued_from_cancelled_plan") is None
+    assert len(next_state["emitted_events"]) == 1
 
 
 def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_metadata() -> None:

@@ -83,6 +83,7 @@ def test_stream_chat_should_map_events() -> None:
     assert agent_service.calls[0]["message"] == "hello"
     assert agent_service.calls[0]["attachments"] == ["file-1"]
     assert agent_service.calls[0]["resume"] is None
+    assert agent_service.calls[0]["command"] is None
     assert agent_service.calls[0]["latest_event_id"] == "evt-cursor-1"
 
 
@@ -114,6 +115,37 @@ def test_stream_chat_should_forward_resume_payload() -> None:
     assert agent_service.calls[0]["message"] is None
     assert agent_service.calls[0]["attachments"] == []
     assert agent_service.calls[0]["resume"] == {"approved": True}
+    assert agent_service.calls[0]["command"] is None
+
+
+def test_stream_chat_should_forward_command_payload() -> None:
+    facade = SessionStreamFacade()
+    session_service = _SessionServiceForChat()
+    agent_service = _AgentServiceForChat()
+    request = ChatRequest(
+        command=ChatRequest.CommandPayload(type="continue_cancelled_task"),
+        event_id="evt-cursor-4",
+    )
+
+    async def _collect():
+        iterator = await facade.stream_chat(
+            user_id="user-1",
+            session_id="session-1",
+            request=request,
+            session_service=session_service,
+            agent_service=agent_service,
+        )
+        events = []
+        async for event in iterator:
+            events.append(event)
+        return events
+
+    asyncio.run(_collect())
+
+    assert len(agent_service.calls) == 1
+    assert agent_service.calls[0]["message"] is None
+    assert agent_service.calls[0]["resume"] is None
+    assert agent_service.calls[0]["command"] == {"type": "continue_cancelled_task"}
 
 
 def test_chat_request_should_allow_empty_stream_request() -> None:
@@ -121,4 +153,13 @@ def test_chat_request_should_allow_empty_stream_request() -> None:
 
     assert request.message is None
     assert request.resume is None
+    assert request.command is None
     assert request.event_id == "evt-cursor-3"
+
+
+def test_chat_request_should_reject_command_with_attachments() -> None:
+    with pytest.raises(ValueError, match="不允许携带 attachments"):
+        ChatRequest(
+            command=ChatRequest.CommandPayload(type="continue_cancelled_task"),
+            attachments=["file-1"],
+        )

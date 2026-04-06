@@ -3,7 +3,7 @@ import asyncio
 # 先初始化依赖模块，避免触发 app.application.service 的历史循环导入路径。
 from app.interfaces.dependencies.services import get_agent_service  # noqa: F401
 from app.application.service.agent_service import AgentService
-from app.domain.models import DoneEvent, MessageEvent, SessionStatus
+from app.domain.models import DoneEvent, MessageEvent, SessionStatus, TaskStreamEventRecord
 
 
 class _Session:
@@ -53,8 +53,12 @@ class _RedisLikeOutputStream:
         self._task = task
         self.start_ids: list[str | None] = []
         self._empty_after_first = False
-        first = MessageEvent(role="assistant", message="first reply").model_dump_json()
-        done = DoneEvent().model_dump_json()
+        first = TaskStreamEventRecord(
+            event=MessageEvent(role="assistant", message="first reply"),
+        ).model_dump_json()
+        done = TaskStreamEventRecord(
+            event=DoneEvent(),
+        ).model_dump_json()
         self._events: list[tuple[str, str]] = [("1-0", first), ("2-0", done)]
 
     async def get(self, start_id=None, block_ms=0):

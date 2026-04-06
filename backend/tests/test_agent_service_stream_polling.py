@@ -3,7 +3,7 @@ import asyncio
 # 先初始化依赖模块，避免触发 app.application.service 的历史循环导入路径。
 from app.interfaces.dependencies.services import get_agent_service  # noqa: F401
 from app.application.service.agent_service import AgentService, OUTPUT_STREAM_BLOCK_MS
-from app.domain.models import SessionStatus, MessageEvent, DoneEvent
+from app.domain.models import SessionStatus, MessageEvent, DoneEvent, TaskStreamEventRecord
 
 
 class _Session:
@@ -98,7 +98,9 @@ class _CursorOutputStream:
         self.start_ids.append(start_id)
         if start_id is None:
             self._none_cursor_reads += 1
-            event = MessageEvent(role="assistant", message="first reply")
+            event = TaskStreamEventRecord(
+                event=MessageEvent(role="assistant", message="first reply"),
+            )
             if self._none_cursor_reads == 1:
                 return "evt-1", event.model_dump_json()
             # 若游标被错误重置为 None，会重复返回首条消息。
@@ -111,7 +113,7 @@ class _CursorOutputStream:
                 # 模拟一次空读
                 return None, None
             self._task.done = True
-            return "evt-2", DoneEvent().model_dump_json()
+            return "evt-2", TaskStreamEventRecord(event=DoneEvent()).model_dump_json()
 
         self._task.done = True
         return None, None

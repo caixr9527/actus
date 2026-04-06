@@ -1,7 +1,7 @@
 import asyncio
 
 from app.application.service.agent_service import AgentService
-from app.domain.models import RuntimeLLMConfig, Session
+from app.domain.models import RuntimeLLMConfig, Session, SessionStatus
 
 
 class _StubTask:
@@ -14,6 +14,7 @@ class _StubGraphRuntime:
         self.get_calls: list[str] = []
         self.create_calls: list[tuple[str, object]] = []
         self.resume_calls: list[tuple[str, object]] = []
+        self.cancel_calls: list[str] = []
         self.destroy_calls = 0
         self.task = _StubTask()
 
@@ -30,6 +31,7 @@ class _StubGraphRuntime:
         return self.task
 
     async def cancel_task(self, session: Session) -> bool:
+        self.cancel_calls.append(session.id)
         return True
 
     async def destroy(self) -> None:
@@ -118,3 +120,30 @@ def test_agent_service_create_task_should_delegate_resume_to_graph_runtime() -> 
     assert task is runtime.task
     assert runtime.create_calls == []
     assert runtime.resume_calls == [("session-a", llm_factory.last_llm)]
+
+
+def test_agent_service_stop_session_should_delegate_cancel_to_graph_runtime() -> None:
+    runtime = _StubGraphRuntime()
+    session = Session(id="session-a", user_id="user-a", status=SessionStatus.RUNNING)
+
+    class _SessionRepo:
+        async def get_by_id(self, session_id: str, user_id: str | None = None):
+            return session
+
+    class _UoW:
+        def __init__(self) -> None:
+            self.session = _SessionRepo()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    service = object.__new__(AgentService)
+    service._graph_runtime = runtime
+    service._uow_factory = lambda: _UoW()
+
+    asyncio.run(service.stop_session("session-a", "user-a"))
+
+    assert runtime.cancel_calls == ["session-a"]

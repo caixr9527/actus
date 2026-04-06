@@ -180,9 +180,70 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     assert next_state["current_step_id"] == "step-2"
     assert next_state["last_executed_step"].id == "step-1"
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert "已收到用户回复" in str(next_state["last_executed_step"].outcome.summary)
+    assert "已收到用户选择" in str(next_state["last_executed_step"].outcome.summary)
     assert next_state["graph_metadata"].get("pending_interrupts") is None
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
+
+
+def test_wait_for_human_node_should_cancel_waiting_step_and_replan_after_confirm_cancel(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        lambda payload: False,
+    )
+
+    plan = Plan(
+        title="课程推荐",
+        goal="推荐课程并等待用户确认",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="等待用户确认",
+                description="请确认是否继续当前批次",
+                status=ExecutionStatus.RUNNING,
+            ),
+            Step(
+                id="step-2",
+                title="继续处理",
+                description="根据确认结果继续后续步骤",
+                status=ExecutionStatus.PENDING,
+            ),
+        ],
+    )
+
+    next_state = asyncio.run(
+        wait_for_human_node(
+            {
+                "plan": plan,
+                "current_step_id": "step-1",
+                "pending_interrupt": {
+                    "kind": "confirm",
+                    "prompt": "确认继续执行？",
+                    "confirm_resume_value": True,
+                    "cancel_resume_value": False,
+                    "confirm_label": "继续",
+                    "cancel_label": "取消",
+                },
+                "step_local_memory": {
+                    "current_step_id": "step-1",
+                    "waiting_step_id": "step-1",
+                },
+                "graph_metadata": {},
+                "message_window": [],
+                "working_memory": {},
+                "execution_count": 0,
+            }
+        )
+    )
+
+    assert next_state["pending_interrupt"] == {}
+    assert next_state["execution_count"] == 1
+    assert next_state["current_step_id"] is None
+    assert next_state["last_executed_step"].id == "step-1"
+    assert next_state["last_executed_step"].status == ExecutionStatus.CANCELLED
+    assert next_state["graph_metadata"]["wait_resume_action"] == "replan"
+    assert "已被用户取消" in str(next_state["last_executed_step"].outcome.summary)
+    assert route_after_wait(next_state) == "replan"
 
 
 def test_route_after_wait_should_continue_current_batch_before_replan() -> None:

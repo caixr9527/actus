@@ -979,10 +979,96 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
             {
                 "step_id": "step-1",
                 "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成中间文档与最终文档",
+                    "produced_artifacts": [
+                        "/home/ubuntu/intermediate.md",
+                        "/home/ubuntu/final-output.md",
+                    ],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
             }
         ],
         "working_memory": {
             "goal": "验证总结附件优先级",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "artifact_refs": ["/home/ubuntu/final-output.md"],
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+
+
+class _FakeUnknownSummaryAttachmentLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "最终总结",
+                    "attachments": ["/home/ubuntu/non-existent-final-output.md"],
+                    "facts_in_session": [],
+                    "user_preferences": {},
+                    "memory_candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+def test_summarize_should_fallback_when_model_returns_unknown_summary_attachment() -> None:
+    llm = _FakeUnknownSummaryAttachmentLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成文档",
+            description="生成课程目录文档",
+            objective_key="objective-step-1",
+            success_criteria=["文档生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成真实附件",
+                produced_artifacts=["/home/ubuntu/intermediate.md"],
+            ),
+        ),
+        "selected_artifacts": ["/home/ubuntu/intermediate.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成真实附件",
+                    "produced_artifacts": ["/home/ubuntu/intermediate.md"],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证总结附件未知路径回退",
             "user_preferences": {},
             "facts_in_session": [],
         },
@@ -995,10 +1081,10 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
-    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/intermediate.md"]
 
 
 def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(monkeypatch) -> None:

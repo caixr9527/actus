@@ -112,7 +112,7 @@ def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
     assert payload["data"]["language"] == "zh"
     assert payload["data"]["status"] == PlanEventStatus.UPDATED.value
     assert payload["data"]["plan_status"] == ExecutionStatus.RUNNING.value
-    assert payload["data"]["steps"][0]["event_status"] == "completed"
+    assert "event_status" not in payload["data"]["steps"][0]
     assert payload["data"]["steps"][0]["outcome"]["summary"] == "执行步骤1完成"
 
 

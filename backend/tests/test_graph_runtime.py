@@ -39,7 +39,7 @@ class _Task:
         self.id = task_id
         self.cancel_calls = 0
 
-    def cancel(self) -> bool:
+    async def cancel(self) -> bool:
         self.cancel_calls += 1
         return True
 
