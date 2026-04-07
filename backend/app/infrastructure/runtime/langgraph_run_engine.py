@@ -33,6 +33,7 @@ from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
     PlannerReActLangGraphState,
 )
+from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph_graphs import (
@@ -43,6 +44,7 @@ from app.infrastructure.runtime.langgraph_graphs import (
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import (
     bind_trace_id,
     build_trace_id,
+    describe_stage_llms,
     elapsed_ms,
     log_runtime,
     now_perf,
@@ -114,7 +116,7 @@ class LangGraphRunEngine(RunEngine):
     def __init__(
             self,
             session_id: str,
-            llm: LLM,
+            stage_llms: Dict[str, LLM],
             file_storage: Optional[FileStorage] = None,
             user_id: Optional[str] = None,
             uow_factory: Optional[Callable[[], IUnitOfWork]] = None,
@@ -127,13 +129,14 @@ class LangGraphRunEngine(RunEngine):
         self._user_id = user_id
         self._uow_factory = uow_factory
         self._checkpointer = checkpointer
+        normalized_stage_llms = ensure_required_stage_llms(stage_llms)
         self._long_term_memory_repository = (
             LangGraphLongTermMemoryRepository(uow_factory=uow_factory)
             if uow_factory is not None
             else None
         )
         self._graph = self._build_graph(
-            llm=llm,
+            stage_llms=normalized_stage_llms,
             runtime_tools=runtime_tools,
             max_tool_iterations=max_tool_iterations,
             checkpointer=self._checkpointer,
@@ -148,14 +151,14 @@ class LangGraphRunEngine(RunEngine):
     @staticmethod
     def _build_graph(
             *,
-            llm: LLM,
+            stage_llms: Dict[str, LLM],
             runtime_tools: Optional[List[BaseTool]],
             max_tool_iterations: Optional[int],
             checkpointer: Any,
             long_term_memory_repository: Any,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
-            "llm": llm,
+            "stage_llms": stage_llms,
             "checkpointer": checkpointer,
             "long_term_memory_repository": long_term_memory_repository,
         }
@@ -169,6 +172,8 @@ class LangGraphRunEngine(RunEngine):
             "初始化运行流程图",
             runtime_tool_count=len(list(runtime_tools or [])),
             max_tool_iterations=max_tool_iterations or 5,
+            stage_llm_count=len(stage_llms),
+            stage_llm_models=describe_stage_llms(stage_llms),
             has_checkpointer=checkpointer is not None,
             has_repository=long_term_memory_repository is not None,
         )

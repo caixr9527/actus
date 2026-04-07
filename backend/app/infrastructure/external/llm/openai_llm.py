@@ -21,6 +21,7 @@ class OpenAILLM(LLM):
     """OpenAI语言模型"""
 
     def __init__(self, llm_config: RuntimeLLMConfig, **kwargs) -> None:
+        self._llm_config = llm_config.model_copy(deep=True)
         self._client = AsyncOpenAI(
             base_url=str(llm_config.base_url),
             api_key=llm_config.api_key,
@@ -32,6 +33,28 @@ class OpenAILLM(LLM):
         self._multimodal = bool(llm_config.multimodal)
         self._supported = [str(item) for item in list(llm_config.supported or []) if str(item).strip()]
         self._timeout = 180
+
+    @property
+    def llm_config(self) -> RuntimeLLMConfig:
+        """返回当前实例的运行时配置快照。"""
+        return self._llm_config.model_copy(deep=True)
+
+    def clone_with_overrides(
+            self,
+            *,
+            model_name: str | None = None,
+            temperature: float | None = None,
+            max_tokens: int | None = None,
+    ) -> "OpenAILLM":
+        """基于当前配置派生一个轻量变体，供不同阶段复用。"""
+        next_config = self._llm_config.model_copy(deep=True)
+        if model_name is not None and str(model_name).strip():
+            next_config.model_name = str(model_name).strip()
+        if temperature is not None:
+            next_config.temperature = float(temperature)
+        if max_tokens is not None:
+            next_config.max_tokens = int(max_tokens)
+        return OpenAILLM(llm_config=next_config)
 
     @property
     def model_name(self) -> str:

@@ -43,6 +43,7 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
+from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.runtime.cancellation import (
     build_cancelled_runtime_events,
 )
@@ -198,7 +199,7 @@ class AgentService:
         llm = await self._resolve_runtime_llm(session)
         inspector = LangGraphRunEngine(
             session_id=session.id,
-            llm=llm,
+            stage_llms=build_uniform_stage_llms(llm),
             user_id=session.user_id,
             uow_factory=self._uow_factory,
             checkpointer=get_langgraph_checkpointer().get_checkpointer(),

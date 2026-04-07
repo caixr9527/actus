@@ -12,6 +12,25 @@ from .runtime_logging import log_runtime
 logger = logging.getLogger(__name__)
 
 
+def route_after_entry(
+        state: PlannerReActLangGraphState,
+) -> Literal["direct_answer", "direct_wait", "direct_execute", "create_plan_or_reuse", "recall_memory_context"]:
+    graph_metadata = state.get("graph_metadata")
+    if not isinstance(graph_metadata, dict):
+        return "recall_memory_context"
+
+    strategy = str(graph_metadata.get("entry_strategy") or "").strip().lower()
+    if strategy in {
+        "direct_answer",
+        "direct_wait",
+        "direct_execute",
+        "create_plan_or_reuse",
+        "recall_memory_context",
+    }:
+        return strategy  # type: ignore[return-value]
+    return "recall_memory_context"
+
+
 def _has_reached_execution_limit(state: PlannerReActLangGraphState) -> bool:
     execution_count = int(state.get("execution_count", 0))
     max_execution_steps = int(state.get("max_execution_steps", 20))
@@ -47,6 +66,16 @@ def _route_after_completed_step(
             next_step_id=str(next_step.id or ""),
         )
         return "guard_step_reuse"
+
+    graph_metadata = state.get("graph_metadata")
+    if isinstance(graph_metadata, dict) and bool(graph_metadata.get("skip_replan_when_plan_finished")):
+        log_runtime(
+            logger,
+            logging.INFO,
+            "计划已完成，按直接路径收尾",
+            state=state,
+        )
+        return "summarize"
 
     log_runtime(
         logger,

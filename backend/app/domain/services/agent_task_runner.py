@@ -473,17 +473,11 @@ class AgentTaskRunner(TaskRunner):
         """读取 shell 控制台输出，供 ToolRuntimeAdapter 富化 shell 工具结果。"""
         return await self._sandbox.read_shell_output(session_id=session_id, console=True)
 
-    async def _read_file_content_for_tool(self, filepath: str) -> ToolResult:
-        """读取文件内容，供 ToolRuntimeAdapter 富化 file 工具结果。"""
-        return await self._sandbox.read_file(file_path=filepath)
-
     async def _handle_tool_event(self, event: ToolEvent) -> None:
         try:
             hooks = ToolRuntimeEventHooks(
                 get_browser_screenshot=self._get_browser_screenshot,
                 read_shell_output=self._read_shell_output_for_tool,
-                read_file_content=self._read_file_content_for_tool,
-                sync_file_to_storage=self._sync_file_to_storage,
             )
             await self._get_tool_runtime_adapter().enrich_tool_event(event=event, hooks=hooks)
         except Exception as e:

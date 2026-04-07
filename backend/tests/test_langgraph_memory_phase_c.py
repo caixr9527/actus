@@ -101,6 +101,26 @@ class _FakeStructuredMemoryLLM:
         }
 
 
+class _CaptureSummaryPromptLLM:
+    def __init__(self) -> None:
+        self.last_prompt = ""
+
+    async def invoke(self, messages, tools, response_format):
+        self.last_prompt = str(messages[0]["content"])
+        return {
+            "content": json.dumps(
+                {
+                    "message": "最终总结",
+                    "attachments": [],
+                    "facts_in_session": [],
+                    "user_preferences": {},
+                    "memory_candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _FakeReplanLLM:
     def __init__(self, steps) -> None:
         self.steps = list(steps)
@@ -114,19 +134,6 @@ class _FakeReplanLLM:
                 ensure_ascii=False,
             )
         }
-
-
-class _FakeSkillRuntime:
-    async def execute_skill(self, skill_id, payload):
-        return type(
-            "SkillResult",
-            (),
-            {
-                "success": True,
-                "result": None,
-                "attachments": [],
-            },
-        )()
 
 
 class _FakeWriteFileTool(BaseTool):
@@ -298,7 +305,7 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
     assert next_state["graph_metadata"]["memory_recall_count"] == 2
 
 
-def test_execute_step_node_should_not_write_string_none_when_skill_result_missing() -> None:
+def test_execute_step_node_should_not_write_string_none_when_no_executor_path_available() -> None:
     state = {
         "session_id": "session-1",
         "user_message": "继续执行",
@@ -329,14 +336,13 @@ def test_execute_step_node_should_not_write_string_none_when_skill_result_missin
         execute_step_node(
             state,
             llm=object(),
-            skill_runtime=_FakeSkillRuntime(),
         )
     )
 
     assert next_state["plan"].steps[0].outcome is not None
-    assert next_state["plan"].steps[0].outcome.summary == "已完成步骤：执行阶段"
-    assert next_state["final_message"] == "已完成步骤：执行阶段"
-    assert next_state["working_memory"]["decisions"] == ["已完成步骤：执行阶段"]
+    assert next_state["plan"].steps[0].outcome.summary == "步骤执行失败：执行阶段"
+    assert next_state["final_message"] == "步骤执行失败：执行阶段"
+    assert next_state["working_memory"]["decisions"] == ["步骤执行失败：执行阶段"]
     assert next_state["step_states"][0]["step_id"] == "step-1"
 
 
@@ -662,6 +668,44 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
     assert consolidated_state["graph_metadata"]["memory_write_count"] == 2
     assert len(consolidated_state["graph_metadata"]["memory_write_ids"]) == 2
     assert consolidated_state["summary_local_memory"] == {}
+
+
+def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
+    llm = _CaptureSummaryPromptLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终总结",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "selected_artifacts": ["/home/ubuntu/final.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证总结快照",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "summary_local_memory": {},
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    asyncio.run(summarize_node(state, llm))
+
+    assert "计划摘要快照(JSON)" in llm.last_prompt
+    assert '"completed_step_summaries"' in llm.last_prompt
+    assert '"selected_artifacts": ["/home/ubuntu/final.md"]' in llm.last_prompt
+    assert '"objective_key"' not in llm.last_prompt
+    assert '"success_criteria"' not in llm.last_prompt
 
 
 def test_consolidate_memory_should_trim_message_window_and_update_summary() -> None:
@@ -1104,6 +1148,15 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
         assert long_term_memory_repository is repository
         return _append_trace(state, "recall")
 
+    async def _entry_router(state):
+        next_state = _append_trace(state, "entry_router")
+        graph_metadata = dict(next_state.get("graph_metadata") or {})
+        graph_metadata["entry_strategy"] = "recall_memory_context"
+        return {
+            **next_state,
+            "graph_metadata": graph_metadata,
+        }
+
     async def _plan(state, _llm):
         plan = Plan(
             title="记忆阶段测试",
@@ -1180,8 +1233,24 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
         return _append_trace(state, "finalize")
 
     monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.entry_router_node",
+        _entry_router,
+    )
+    monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.recall_memory_context_node",
         _recall,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.direct_answer_node",
+        lambda state, llm: state,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.direct_wait_node",
+        lambda state: state,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.direct_execute_node",
+        lambda state: state,
     )
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.create_or_reuse_plan_node",
@@ -1213,7 +1282,13 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     )
 
     graph = build_planner_react_langgraph_graph(
-        llm=object(),
+        stage_llms={
+            "router": object(),
+            "planner": object(),
+            "executor": object(),
+            "replan": object(),
+            "summary": object(),
+        },
         long_term_memory_repository=repository,
     )
 
@@ -1230,6 +1305,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     state = asyncio.run(_invoke())
 
     assert state["graph_metadata"]["trace"] == [
+        "entry_router",
         "recall",
         "plan",
         "guard",

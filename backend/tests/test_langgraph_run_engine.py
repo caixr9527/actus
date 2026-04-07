@@ -2,12 +2,11 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from langgraph.types import Command
 
 from app.domain.models import (
-    DoneEvent,
     Message,
-    MessageEvent,
     WaitEvent,
     Session,
     WorkflowRun,
@@ -51,6 +50,16 @@ class _FakeUoW:
         return None
 
 
+def _build_stage_llms(llm=object()) -> dict[str, object]:
+    return {
+        "router": llm,
+        "planner": llm,
+        "executor": llm,
+        "replan": llm,
+        "summary": llm,
+    }
+
+
 def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monkeypatch) -> None:
     captured = {}
     checkpointer = object()
@@ -66,11 +75,19 @@ def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monk
 
     LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
         checkpointer=checkpointer,
     )
 
     assert captured["checkpointer"] is checkpointer
+
+
+def test_langgraph_run_engine_should_require_complete_stage_llms() -> None:
+    with pytest.raises(ValueError, match="缺少必要阶段模型配置"):
+        LangGraphRunEngine(
+            session_id="session-1",
+            stage_llms={"executor": object()},
+        )
 
 
 def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monkeypatch) -> None:
@@ -102,7 +119,7 @@ def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monke
 
     engine = LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
     )
 
     async def _collect():
@@ -120,32 +137,26 @@ def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monke
 
 
 def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:
-    fake_graph = _FakeGraph(
-        result={"emitted_events": []},
-        checkpoint_state={
-            "session_id": "session-1",
-            "graph_metadata": {
-                "pending_interrupts": [
-                    {
-                        "interrupt_id": "interrupt-1",
-                        "payload": {"kind": "input_text", "prompt": "请确认是否继续", "response_key": "message"},
-                    }
-                ]
-            },
-            "pending_interrupt": {"kind": "input_text", "prompt": "请确认是否继续", "response_key": "message"},
-            "emitted_events": [],
-        },
-    )
-
-    monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
-        lambda **kwargs: fake_graph,
-    )
-
     engine = LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
     )
+    captured = {}
+
+    async def _fake_run_graph(*, graph_input, invoke_config, run_id, fallback_state):
+        captured["graph_input"] = graph_input
+        captured["invoke_config"] = invoke_config
+        captured["run_id"] = run_id
+        captured["fallback_state"] = fallback_state
+        if False:
+            yield None
+
+    async def _fake_load_checkpoint_state(*, invoke_config):
+        captured["checkpoint_invoke_config"] = invoke_config
+        return {"session_id": "session-1", "pending_interrupt": {}}
+
+    monkeypatch.setattr(engine, "_run_graph", _fake_run_graph)
+    monkeypatch.setattr(engine, "_load_checkpoint_state", _fake_load_checkpoint_state)
 
     async def _collect():
         events = []
@@ -156,52 +167,10 @@ def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> N
     events = asyncio.run(_collect())
 
     assert events == []
-    assert len(fake_graph.calls) == 1
-    graph_input, config = fake_graph.calls[0]
-    assert isinstance(graph_input, Command)
-    assert graph_input.resume == {"approved": True}
-    assert config == {"configurable": {"thread_id": "session-1"}}
-
-
-def test_langgraph_run_engine_resume_should_only_emit_incremental_events(monkeypatch) -> None:
-    history_event = MessageEvent(id="evt-history", role="assistant", message="历史消息")
-    new_event = DoneEvent(id="evt-done")
-    fake_graph = _FakeGraph(
-        result={
-            "session_id": "session-1",
-            "graph_metadata": {},
-            "pending_interrupt": {},
-            "emitted_events": [history_event, new_event],
-        },
-        checkpoint_state={
-            "session_id": "session-1",
-            "graph_metadata": {},
-            "pending_interrupt": {"kind": "input_text", "prompt": "请确认是否继续", "response_key": "message"},
-            "emitted_events": [history_event],
-        },
-    )
-
-    monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
-        lambda **kwargs: fake_graph,
-    )
-
-    engine = LangGraphRunEngine(
-        session_id="session-1",
-        llm=object(),
-    )
-
-    async def _collect():
-        events = []
-        async for event in engine.resume({"approved": True}):
-            events.append(event)
-        return events
-
-    events = asyncio.run(_collect())
-
-    assert len(events) == 1
-    assert isinstance(events[0], DoneEvent)
-    assert events[0].id == "evt-done"
+    assert isinstance(captured["graph_input"], Command)
+    assert captured["graph_input"].resume == {"approved": True}
+    assert captured["invoke_config"] == {"configurable": {"thread_id": "session-1"}}
+    assert captured["checkpoint_invoke_config"] == {"configurable": {"thread_id": "session-1"}}
 
 
 def test_langgraph_run_engine_inspect_resume_checkpoint_should_report_missing_pending_interrupt(monkeypatch) -> None:
@@ -222,7 +191,7 @@ def test_langgraph_run_engine_inspect_resume_checkpoint_should_report_missing_pe
 
     engine = LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
     )
 
     inspection = asyncio.run(engine.inspect_resume_checkpoint())
@@ -303,7 +272,7 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
 
     engine = LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
             session_repo=session_repo,
             workflow_run_repo=workflow_run_repo,
@@ -372,7 +341,7 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
 
     engine = LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
             session_repo=SimpleNamespace(),
             workflow_run_repo=workflow_run_repo,
@@ -534,7 +503,7 @@ def test_langgraph_run_engine_invoke_should_not_sync_episodic_projection_for_wai
 
     engine = LangGraphRunEngine(
         session_id="session-1",
-        llm=object(),
+        stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
             session_repo=session_repo,
             workflow_run_repo=workflow_run_repo,

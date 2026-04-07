@@ -11,12 +11,17 @@ from app.domain.external import LLM
 from app.domain.repositories import LongTermMemoryRepository
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
+from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph_graphs.skill_subgraphs import build_default_skill_graph_registry
 from .runtime_logging import log_runtime
 from .nodes import (
     consolidate_memory_node,
     create_or_reuse_plan_node,
+    direct_answer_node,
+    direct_execute_node,
+    direct_wait_node,
+    entry_router_node,
     execute_step_node,
     finalize_node,
     guard_step_reuse_node,
@@ -25,23 +30,33 @@ from .nodes import (
     summarize_node,
     wait_for_human_node,
 )
-from .routing import route_after_execute, route_after_guard, route_after_plan, route_after_replan, route_after_wait
+from .routing import (
+    route_after_entry,
+    route_after_execute,
+    route_after_guard,
+    route_after_plan,
+    route_after_replan,
+    route_after_wait,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def build_planner_react_langgraph_graph(
-        llm: LLM,
+        stage_llms: dict[str, LLM],
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
         checkpointer: Optional[Any] = None,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
 ) -> Any:
     """构建 LangGraph Planner-ReAct V1 图。"""
+    stage_llm_map = ensure_required_stage_llms(stage_llms)
 
     skill_runtime: Optional[SkillGraphRuntime] = None
     try:
-        skill_runtime = build_default_skill_graph_registry().create_runtime(llm=llm)
+        skill_runtime = build_default_skill_graph_registry().create_runtime(
+            llm=stage_llm_map["executor"]
+        )
     except Exception as e:
         log_runtime(
             logger,
@@ -51,7 +66,19 @@ def build_planner_react_langgraph_graph(
         )
 
     async def _create_plan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await create_or_reuse_plan_node(state, llm)
+        return await create_or_reuse_plan_node(state, stage_llm_map["planner"])
+
+    async def _entry_router(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await entry_router_node(state)
+
+    async def _direct_answer(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await direct_answer_node(state, stage_llm_map["router"])
+
+    async def _direct_wait(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await direct_wait_node(state)
+
+    async def _direct_execute(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await direct_execute_node(state)
 
     async def _recall_memory_context(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await recall_memory_context_node(
@@ -62,17 +89,17 @@ def build_planner_react_langgraph_graph(
     async def _execute_step_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await execute_step_node(
             state,
-            llm,
+            stage_llm_map["executor"],
             skill_runtime=skill_runtime,
             runtime_tools=runtime_tools,
             max_tool_iterations=max_tool_iterations,
         )
 
     async def _replan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await replan_node(state, llm)
+        return await replan_node(state, stage_llm_map["replan"])
 
     async def _summarize_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await summarize_node(state, llm)
+        return await summarize_node(state, stage_llm_map["summary"])
 
     async def _consolidate_memory(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await consolidate_memory_node(
@@ -81,6 +108,10 @@ def build_planner_react_langgraph_graph(
         )
 
     graph = StateGraph(PlannerReActLangGraphState)
+    graph.add_node("entry_router", _entry_router)
+    graph.add_node("direct_answer", _direct_answer)
+    graph.add_node("direct_wait", _direct_wait)
+    graph.add_node("direct_execute", _direct_execute)
     graph.add_node("recall_memory_context", _recall_memory_context)
     graph.add_node("create_plan_or_reuse", _create_plan_with_llm)
     graph.add_node("guard_step_reuse", guard_step_reuse_node)
@@ -91,8 +122,22 @@ def build_planner_react_langgraph_graph(
     graph.add_node("consolidate_memory", _consolidate_memory)
     graph.add_node("finalize", finalize_node)
 
-    graph.add_edge(START, "recall_memory_context")
+    graph.add_edge(START, "entry_router")
+    graph.add_conditional_edges(
+        "entry_router",
+        route_after_entry,
+        {
+            "direct_answer": "direct_answer",
+            "direct_wait": "direct_wait",
+            "direct_execute": "direct_execute",
+            "create_plan_or_reuse": "create_plan_or_reuse",
+            "recall_memory_context": "recall_memory_context",
+        },
+    )
     graph.add_edge("recall_memory_context", "create_plan_or_reuse")
+    graph.add_edge("direct_answer", "consolidate_memory")
+    graph.add_edge("direct_wait", "wait_for_human")
+    graph.add_edge("direct_execute", "guard_step_reuse")
     graph.add_conditional_edges(
         "create_plan_or_reuse",
         route_after_plan,
@@ -148,6 +193,7 @@ def build_planner_react_langgraph_graph(
         logging.INFO,
         "流程图编译完成",
         runtime_tool_count=len(list(runtime_tools or [])),
+        stage_llm_count=len(stage_llm_map),
         max_tool_iterations=max_tool_iterations,
         has_checkpointer=checkpointer is not None,
         has_skill_runtime=skill_runtime is not None,

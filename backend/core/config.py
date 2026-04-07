@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     sandbox_http_proxy: Optional[str] = None
     sandbox_no_proxy: Optional[str] = None
     agent_runtime_engine: str = "langgraph"
+    agent_runtime_router_model_name: Optional[str] = None
+    agent_runtime_planner_model_name: Optional[str] = None
+    agent_runtime_executor_model_name: Optional[str] = None
+    agent_runtime_replan_model_name: Optional[str] = None
+    agent_runtime_summary_model_name: Optional[str] = None
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"

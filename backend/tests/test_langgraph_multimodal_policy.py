@@ -188,10 +188,10 @@ def test_execute_step_with_prompt_should_send_multimodal_user_content_when_parts
     async def _run():
         payload, _ = await execute_step_with_prompt(
             llm=llm,
-            execution_prompt="请识别图片内容",
             step=Step(description="识别图片"),
             runtime_tools=None,
-            extra_user_content_parts=[
+            user_content=[
+                {"type": "text", "text": "请识别图片内容"},
                 {
                     "type": "image",
                     "base64": "ZmFrZS1pbWFnZQ==",
@@ -213,23 +213,23 @@ def test_execute_step_with_prompt_should_send_multimodal_user_content_when_parts
     assert payload["result"] == "ok"
 
 
-def test_execute_step_with_prompt_should_block_disallowed_read_file_call() -> None:
+def test_execute_step_with_prompt_should_block_shell_call_for_research_task_mode() -> None:
     class _FakeFileTool(BaseTool):
-        name = "file"
+        name = "shell"
 
         def __init__(self) -> None:
             super().__init__()
             self.invoked = False
 
         @tool(
-            name="read_file",
-            description="Read file content",
-            parameters={"filepath": {"type": "string", "description": "path"}},
-            required=["filepath"],
+            name="shell_execute",
+            description="Execute shell command",
+            parameters={"command": {"type": "string", "description": "command"}},
+            required=["command"],
         )
-        async def read_file(self, filepath: str):
+        async def shell_execute(self, command: str):
             self.invoked = True
-            return {"success": True, "data": {"content": "should-not-run"}}
+            return {"success": True, "data": {"stdout": "should-not-run"}}
 
     class _ToolCallLLM(_FakeLLM):
         def __init__(self) -> None:
@@ -247,8 +247,8 @@ def test_execute_step_with_prompt_should_block_disallowed_read_file_call() -> No
                             "id": "call-1",
                             "type": "function",
                             "function": {
-                                "name": "read_file",
-                                "arguments": '{"filepath":"/home/ubuntu/upload/1.txt"}',
+                                "name": "shell_execute",
+                                "arguments": '{"command":"ls"}',
                             },
                         }
                     ],
@@ -268,46 +268,46 @@ def test_execute_step_with_prompt_should_block_disallowed_read_file_call() -> No
             return {"success": True, "data": {"items": []}}
 
     llm = _ToolCallLLM()
-    file_tool = _FakeFileTool()
+    shell_tool = _FakeFileTool()
     search_tool = _FakeSearchTool()
 
     async def _run():
         return await execute_step_with_prompt(
             llm=llm,
-            execution_prompt="读取文本内容",
             step=Step(description="读取文本"),
-            runtime_tools=[file_tool, search_tool],
-            disallowed_function_names=["read_file"],
+            runtime_tools=[shell_tool, search_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "读取文本内容"}],
         )
 
     payload, events = asyncio.run(_run())
     assert payload["result"] == "ok"
-    assert file_tool.invoked is False
+    assert shell_tool.invoked is False
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
-    assert called_events[0].function_name == "read_file"
+    assert called_events[0].function_name == "shell_execute"
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
-    assert "工具已禁用" in str(called_events[0].function_result.message or "")
+    assert "任务模式 research 不允许调用工具" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_hide_disallowed_tool_from_schema() -> None:
+def test_execute_step_with_prompt_should_hide_shell_tool_from_research_schema() -> None:
     class _FakeFileTool(BaseTool):
-        name = "file"
+        name = "shell"
 
         def __init__(self) -> None:
             super().__init__()
             self.invoked = False
 
         @tool(
-            name="read_file",
-            description="Read file content",
-            parameters={"filepath": {"type": "string", "description": "path"}},
-            required=["filepath"],
+            name="shell_execute",
+            description="Execute shell command",
+            parameters={"command": {"type": "string", "description": "command"}},
+            required=["command"],
         )
-        async def read_file(self, filepath: str):
+        async def shell_execute(self, command: str):
             self.invoked = True
-            return {"success": True, "data": {"content": "should-not-run"}}
+            return {"success": True, "data": {"stdout": "should-not-run"}}
 
     class _CaptureToolSchemaLLM(_FakeLLM):
         def __init__(self) -> None:
@@ -324,10 +324,10 @@ def test_execute_step_with_prompt_should_hide_disallowed_tool_from_schema() -> N
     async def _run():
         return await execute_step_with_prompt(
             llm=llm,
-            execution_prompt="读取文本内容",
             step=Step(description="读取文本"),
             runtime_tools=[file_tool],
-            disallowed_function_names=["read_file"],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "读取文本内容"}],
         )
 
     payload, events = asyncio.run(_run())
@@ -340,4 +340,4 @@ def test_execute_step_with_prompt_should_hide_disallowed_tool_from_schema() -> N
         for schema in llm.last_tools
         if isinstance(schema, dict)
     }
-    assert "read_file" not in exposed_function_names
+    assert "shell_execute" not in exposed_function_names

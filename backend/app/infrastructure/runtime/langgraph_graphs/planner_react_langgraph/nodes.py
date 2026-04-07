@@ -33,12 +33,20 @@ from app.domain.models import (
     resolve_wait_resume_message,
 )
 from app.domain.repositories import LongTermMemoryRepository
-from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, UPDATE_PLAN_PROMPT, SYSTEM_PROMPT, \
-    PLANNER_SYSTEM_PROMPT, SUMMARIZE_PROMPT
+from app.domain.services.prompts import (
+    CREATE_PLAN_PROMPT,
+    DIRECT_ANSWER_PROMPT,
+    EXECUTION_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+    SUMMARIZE_PROMPT,
+    SYSTEM_PROMPT,
+    UPDATE_PLAN_PROMPT,
+)
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
+from .language_checker import build_direct_path_copy, infer_working_language_from_message
 from .live_events import emit_live_events
 from .parsers import (
     build_fallback_plan_title,
@@ -49,8 +57,8 @@ from .parsers import (
     normalize_attachments,
     safe_parse_json,
 )
-from .runtime_logging import elapsed_ms, log_runtime, now_perf
-from .tools import execute_step_with_prompt
+from .runtime_logging import describe_llm_runtime, elapsed_ms, log_runtime, now_perf
+from .tools import classify_step_task_mode, execute_step_with_prompt, infer_entry_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +277,51 @@ def _reduce_state_with_events(
     if len(new_events) == 0:
         return next_state
     return GraphStateContractMapper.apply_emitted_events(state=next_state)
+
+
+def _build_direct_plan_title(user_message: str, fallback: str) -> str:
+    normalized_message = str(user_message or "").strip()
+    if not normalized_message:
+        return fallback
+    return normalized_message[:40]
+
+
+def _build_summary_plan_snapshot(
+        plan: Optional[Plan],
+        *,
+        selected_artifacts: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    if plan is None:
+        return {}
+
+    completed_step_summaries: List[str] = []
+    failed_step_summaries: List[str] = []
+    pending_step_titles: List[str] = []
+    for step in list(plan.steps or []):
+        if step.status == ExecutionStatus.COMPLETED:
+            completed_step_summaries.append(
+                _normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
+            )
+            continue
+        if step.status == ExecutionStatus.FAILED:
+            failed_step_summaries.append(
+                _normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
+            )
+            continue
+        pending_title = _normalize_step_result_text(step.title, fallback=step.description)
+        if pending_title:
+            pending_step_titles.append(pending_title)
+
+    return {
+        "title": str(plan.title or "").strip(),
+        "goal": str(plan.goal or "").strip(),
+        "status": str(plan.status.value if hasattr(plan.status, "value") else plan.status or "").strip(),
+        "step_count": len(list(plan.steps or [])),
+        "completed_step_summaries": completed_step_summaries[:5],
+        "failed_step_summaries": failed_step_summaries[:3],
+        "pending_step_titles": pending_step_titles[:5],
+        "selected_artifacts": _normalize_attachment_paths(list(selected_artifacts or []))[:6],
+    }
 
 
 def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
@@ -1359,6 +1412,183 @@ def _build_wait_resume_outcome(
     )
 
 
+async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+    """P0 入口轻路由：先判断是否需要完整记忆召回和 Planner。"""
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    plan = state.get("plan")
+    graph_metadata["entry_strategy"] = infer_entry_strategy(
+        user_message=str(state.get("user_message") or ""),
+        has_input_parts=bool(list(state.get("input_parts") or [])),
+        has_active_plan=bool(plan is not None and len(list(plan.steps or [])) > 0 and not plan.done),
+    )
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "入口路由完成",
+        state=state,
+        entry_strategy=str(graph_metadata.get("entry_strategy") or ""),
+    )
+    return {
+        **state,
+        "graph_metadata": graph_metadata,
+    }
+
+
+async def direct_answer_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
+    """直接回答类任务跳过 Planner 和工具循环。"""
+    started_at = now_perf()
+    user_message = str(state.get("user_message") or "").strip()
+    language = infer_working_language_from_message(user_message)
+    direct_copy = build_direct_path_copy(language)
+    prompt = DIRECT_ANSWER_PROMPT.format(message=user_message)
+    llm_runtime = describe_llm_runtime(llm)
+    llm_started_at = now_perf()
+    llm_message = await llm.invoke(
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        tools=[],
+        response_format={"type": "json_object"},
+    )
+    parsed = safe_parse_json(llm_message.get("content"))
+    final_message = str(parsed.get("message") or user_message or "").strip()
+    plan = Plan(
+        title=_build_direct_plan_title(user_message, direct_copy["direct_answer_fallback"]),
+        goal=user_message,
+        language=language,
+        message=final_message,
+        steps=[],
+        status=ExecutionStatus.COMPLETED,
+    )
+    events: List[Any] = [
+        TitleEvent(title=plan.title),
+        MessageEvent(role="assistant", message=final_message, stage="final"),
+    ]
+    await emit_live_events(*events)
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata["entry_strategy"] = "direct_answer"
+    graph_metadata["skip_replan_when_plan_finished"] = True
+    log_runtime(
+        logger,
+        logging.INFO,
+        "直接回复完成",
+        state=state,
+        stage_name="router",
+        model_name=llm_runtime["model_name"],
+        max_tokens=llm_runtime["max_tokens"],
+        llm_elapsed_ms=elapsed_ms(llm_started_at),
+        elapsed_ms=elapsed_ms(started_at),
+    )
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "current_step_id": None,
+            "final_message": final_message,
+            "graph_metadata": graph_metadata,
+        },
+        events=events,
+    )
+
+
+async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+    """直接构造前置确认等待步骤，避免为等待任务先走重 Planner。"""
+    user_message = str(state.get("user_message") or "").strip()
+    language = infer_working_language_from_message(user_message)
+    direct_copy = build_direct_path_copy(language)
+    step_wait = Step(
+        id="direct-wait-confirm",
+        title=direct_copy["direct_wait_title"],
+        description=direct_copy["direct_wait_description"],
+        status=ExecutionStatus.RUNNING,
+    )
+    step_execute = Step(
+        id="direct-wait-execute",
+        title=direct_copy["direct_wait_execute_title"],
+        description=user_message,
+        status=ExecutionStatus.PENDING,
+    )
+    plan = Plan(
+        title=_build_direct_plan_title(user_message, direct_copy["direct_wait_fallback"]),
+        goal=user_message,
+        language=language,
+        message=direct_copy["direct_wait_message"],
+        steps=[step_wait, step_execute],
+        status=ExecutionStatus.PENDING,
+    )
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata["entry_strategy"] = "direct_wait"
+    graph_metadata["skip_replan_when_plan_finished"] = True
+    events: List[Any] = [
+        TitleEvent(title=plan.title),
+        PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
+    ]
+    await emit_live_events(*events)
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "current_step_id": step_wait.id,
+            "pending_interrupt": {
+                "kind": "confirm",
+                "prompt": direct_copy["direct_wait_prompt"],
+                "confirm_resume_value": True,
+                "cancel_resume_value": False,
+                "confirm_label": direct_copy["direct_wait_confirm_label"],
+                "cancel_label": direct_copy["direct_wait_cancel_label"],
+            },
+            "step_local_memory": {
+                "current_step_id": step_wait.id,
+                "waiting_step_id": step_wait.id,
+                "waiting_step_title": step_wait.title,
+                "waiting_step_description": step_wait.description,
+            },
+            "graph_metadata": graph_metadata,
+        },
+        events=events,
+    )
+
+
+async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+    """直接进入单步执行，跳过 Planner。"""
+    user_message = str(state.get("user_message") or "").strip()
+    language = infer_working_language_from_message(user_message)
+    direct_copy = build_direct_path_copy(language)
+    step = Step(
+        id="direct-execute-step",
+        title=direct_copy["direct_execute_step_title"],
+        description=user_message,
+        status=ExecutionStatus.PENDING,
+    )
+    plan = Plan(
+        title=_build_direct_plan_title(user_message, direct_copy["direct_execute_fallback"]),
+        goal=user_message,
+        language=language,
+        message=direct_copy["direct_execute_message"],
+        steps=[step],
+        status=ExecutionStatus.PENDING,
+    )
+    graph_metadata = dict(state.get("graph_metadata") or {})
+    graph_metadata["entry_strategy"] = "direct_execute"
+    graph_metadata["skip_replan_when_plan_finished"] = True
+    events: List[Any] = [
+        TitleEvent(title=plan.title),
+        PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
+    ]
+    await emit_live_events(*events)
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "current_step_id": step.id,
+            "graph_metadata": graph_metadata,
+        },
+        events=events,
+    )
+
+
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     started_at = now_perf()
@@ -1416,12 +1646,16 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
     user_message_prompt = _append_execution_context_to_prompt(user_message_prompt, state)
 
     user_content = await _build_message(llm, user_message_prompt, input_parts)
+    llm_runtime = describe_llm_runtime(llm)
 
     log_runtime(
         logger,
         logging.INFO,
         "开始创建计划",
         state=state,
+        stage_name="planner",
+        model_name=llm_runtime["model_name"],
+        max_tokens=llm_runtime["max_tokens"],
         attachment_count=len(attachments),
         context_memory_count=len(list(state.get("retrieved_memories") or [])),
         context_recent_run_count=len(list(state.get("recent_run_briefs") or [])),
@@ -1554,6 +1788,7 @@ async def execute_step_node(
     if step is None:
         return state
 
+    task_mode = classify_step_task_mode(step)
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     await emit_live_events(started_event)
@@ -1564,6 +1799,7 @@ async def execute_step_node(
         state=state,
         step_id=str(step.id or ""),
         step_title=str(step.title or step.description or ""),
+        task_mode=task_mode,
         attachment_count=len(list(state.get("input_parts") or [])),
         runtime_tool_count=len(list(runtime_tools or [])),
         has_skill_runtime=skill_runtime is not None,
@@ -1598,6 +1834,7 @@ async def execute_step_node(
                     step=step,
                     runtime_tools=runtime_tools,
                     max_tool_iterations=max_tool_iterations,
+                    task_mode=task_mode,
                     on_tool_event=emit_live_events,
                     user_content=user_content,
                 )
@@ -1693,6 +1930,7 @@ async def execute_step_node(
         graph_metadata["waiting_interrupt_prompt"] = interrupt_request.get("prompt") or ""
         graph_metadata["step_reuse_hit"] = False
         graph_metadata["last_step_execution_mode"] = "executed"
+        graph_metadata["task_mode"] = task_mode
         return _reduce_state_with_events(
             state,
             updates={
@@ -1748,6 +1986,7 @@ async def execute_step_node(
     graph_metadata = dict(state.get("graph_metadata") or {})
     graph_metadata["step_reuse_hit"] = False
     graph_metadata["last_step_execution_mode"] = "executed"
+    graph_metadata["task_mode"] = task_mode
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
         step.outcome,
@@ -2076,11 +2315,15 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
 
     prompt = UPDATE_PLAN_PROMPT.format(step=last_step.model_dump_json(), plan=plan.model_dump_json())
     prompt = _append_execution_context_to_prompt(prompt, state)
+    llm_runtime = describe_llm_runtime(llm)
     log_runtime(
         logger,
         logging.INFO,
         "开始重规划",
         state=state,
+        stage_name="replan",
+        model_name=llm_runtime["model_name"],
+        max_tokens=llm_runtime["max_tokens"],
         last_step_id=str(last_step.id or ""),
         current_step_count=len(list(plan.steps or [])),
     )
@@ -2148,19 +2391,26 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     plan = state.get("plan")
     if plan is None:
         return state
-    plan_snapshot = plan.model_dump(mode="json") if plan is not None else {}
+    summary_plan_snapshot = _build_summary_plan_snapshot(
+        plan,
+        selected_artifacts=list(state.get("selected_artifacts") or []),
+    )
     final_message = str(state.get("final_message") or "")
     user_message = str(state.get("user_message") or "")
     execution_count = int(state.get("execution_count") or 0)
+    llm_runtime = describe_llm_runtime(llm)
     summarize_prompt = SUMMARIZE_PROMPT.format(user_message=user_message,
                                                execution_count=execution_count,
                                                final_message=final_message,
-                                               plan_snapshot=json.dumps(plan_snapshot, ensure_ascii=False))
+                                               plan_snapshot=json.dumps(summary_plan_snapshot, ensure_ascii=False))
     log_runtime(
         logger,
         logging.INFO,
         "开始生成总结",
         state=state,
+        stage_name="summary",
+        model_name=llm_runtime["model_name"],
+        max_tokens=llm_runtime["max_tokens"],
         execution_count=execution_count,
         step_count=len(list(plan.steps or [])),
         final_message_length=len(final_message),

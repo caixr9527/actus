@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 
 from app.domain.models import (
+    BrowserToolContent,
     DoneEvent,
     ExecutionStatus,
     File,
@@ -461,6 +462,33 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert memory_metadata["compacted"] is True
     assert memory_metadata["last_compaction_at"] == "2026-03-29T12:00:00"
     assert memory_metadata["summary_version"] == "ctx-v2"
+
+
+def test_apply_emitted_events_should_collect_browser_screenshot_artifact_refs() -> None:
+    state = {
+        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
+        "step_states": [],
+        "tool_invocations": {},
+        "graph_metadata": {},
+        "artifact_refs": [],
+        "audit_events": [],
+        "pending_interrupt": {},
+        "emitted_events": [
+            ToolEvent(
+                tool_call_id="call-browser-1",
+                tool_name="browser",
+                tool_content=BrowserToolContent(screenshot="https://cdn.example.com/browser-shot.png"),
+                function_name="browser_view",
+                function_args={},
+                function_result=ToolResult[dict](success=True, data={"url": "https://example.com"}),
+                status=ToolEventStatus.CALLED,
+            )
+        ],
+    }
+
+    reduced_state = GraphStateContractMapper.apply_emitted_events(state=state)
+
+    assert reduced_state["artifact_refs"] == ["https://cdn.example.com/browser-shot.png"]
 
 
 def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> None:

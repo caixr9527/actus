@@ -32,6 +32,17 @@ from app.domain.services.tools.mcp import MCPTool
 
 logger = logging.getLogger(__name__)
 
+FILE_CONTENT_PREVIEW_MAX_CHARS = 2000
+BROWSER_SCREENSHOT_FUNCTIONS: tuple[str, ...] = (
+    "browser_view",
+    "browser_navigate",
+    "browser_restart",
+    "browser_click",
+    "browser_input",
+    "browser_press_key",
+    "browser_select_option",
+)
+
 
 @dataclass(frozen=True)
 class ToolRuntimeEventHooks:
@@ -39,13 +50,14 @@ class ToolRuntimeEventHooks:
 
     设计说明：
     - ToolRuntimeAdapter 位于 domain service 层，不直接依赖具体基础设施实现。
-    - 通过 hooks 由调用方注入环境能力，实现“逻辑抽离 + 依赖倒置”。
+    - 通过 hooks 由调用方按需注入环境能力，实现“逻辑抽离 + 依赖倒置”。
+    - 非热路径或当前阶段不需要的能力允许留空，避免调用方传递 no-op 占位函数。
     """
 
-    get_browser_screenshot: Callable[[], Awaitable[str]]
-    read_shell_output: Callable[[str], Awaitable[ToolResult]]
-    read_file_content: Callable[[str], Awaitable[ToolResult]]
-    sync_file_to_storage: Callable[[str], Awaitable[object]]
+    get_browser_screenshot: Optional[Callable[[], Awaitable[str]]] = None
+    read_shell_output: Optional[Callable[[str], Awaitable[ToolResult]]] = None
+    read_file_content: Optional[Callable[[str], Awaitable[ToolResult]]] = None
+    sync_file_to_storage: Optional[Callable[[str], Awaitable[object]]] = None
 
 
 class ToolRuntimeAdapter:
@@ -86,6 +98,12 @@ class ToolRuntimeAdapter:
 
         result_data = function_result.data if hasattr(function_result, "data") else None
         function_name = str(event.function_name or "").strip().lower()
+
+        if function_name == "read_file" and isinstance(result_data, dict):
+            content = str(result_data.get("content") or "")
+            if content:
+                return content[:FILE_CONTENT_PREVIEW_MAX_CHARS]
+            return str(function_result.message or "").strip()
 
         if function_name in {"list_files", "find_files"} and isinstance(result_data, dict):
             raw_files = result_data.get("files")
@@ -215,9 +233,11 @@ class ToolRuntimeAdapter:
             return False
 
         if event.tool_name == "browser":
-            event.tool_content = BrowserToolContent(
-                screenshot=await hooks.get_browser_screenshot(),
-            )
+            function_name = str(event.function_name or "").strip().lower()
+            screenshot = ""
+            if hooks.get_browser_screenshot is not None and function_name in BROWSER_SCREENSHOT_FUNCTIONS:
+                screenshot = str(await hooks.get_browser_screenshot() or "").strip()
+            event.tool_content = BrowserToolContent(screenshot=screenshot)
             return True
 
         if event.tool_name == "search":
@@ -232,7 +252,7 @@ class ToolRuntimeAdapter:
 
         if event.tool_name == "shell":
             session_id = str(event.function_args.get("session_id") or "")
-            if not session_id:
+            if not session_id or hooks.read_shell_output is None:
                 event.tool_content = ShellToolContent(console="(No console)")
                 return True
 
@@ -243,16 +263,8 @@ class ToolRuntimeAdapter:
             return True
 
         if event.tool_name == "file":
-            filepath = str(event.function_args.get("filepath") or "")
-            if not filepath:
-                rendered_result = self._render_file_tool_result(event)
-                event.tool_content = FileToolContent(content=rendered_result or "(No Content)")
-                return True
-
-            file_read_result = await hooks.read_file_content(filepath)
-            file_content = (file_read_result.data or {}).get("content", "")
-            event.tool_content = FileToolContent(content=file_content)
-            await hooks.sync_file_to_storage(filepath)
+            rendered_result = self._render_file_tool_result(event)
+            event.tool_content = FileToolContent(content=rendered_result or "(No Content)")
             return True
 
         # 事件富化层保留 MCP/A2A 兼容分支，确保既有前端结果卡片协议不变。

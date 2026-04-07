@@ -7,8 +7,9 @@ import logging
 import time
 import uuid
 from contextvars import ContextVar, Token
-from typing import Any, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
+from app.domain.external import LLM
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 
 LOG_PREFIX = "规划执行"
@@ -65,6 +66,10 @@ FIELD_LABELS: dict[str, str] = {
     "response_keys": "返回键",
     "event_type": "事件类型",
     "language": "语言",
+    "stage_name": "阶段",
+    "model_name": "模型名",
+    "max_tokens": "最大Token",
+    "stage_llm_models": "阶段模型",
     "fact_count": "事实数",
     "raw_length": "原始长度",
     "graph_input_type": "输入类型",
@@ -103,6 +108,22 @@ STATE_CONTEXT_KEYS: tuple[str, ...] = (
     "execution_count",
 )
 _TRACE_ID: ContextVar[Optional[str]] = ContextVar("planner_react_trace_id", default=None)
+
+
+def describe_llm_runtime(llm: Any) -> Dict[str, Any]:
+    """提取单个 LLM 的稳定日志字段。"""
+    return {
+        "model_name": str(getattr(llm, "model_name", "") or ""),
+        "max_tokens": int(getattr(llm, "max_tokens", 0) or 0),
+    }
+
+
+def describe_stage_llms(stage_llms: Optional[Dict[str, LLM]]) -> Dict[str, Dict[str, Any]]:
+    """提取阶段 LLM 配置，供运行图初始化日志统一复用。"""
+    summarized: Dict[str, Dict[str, Any]] = {}
+    for stage_name, llm in dict(stage_llms or {}).items():
+        summarized[str(stage_name)] = describe_llm_runtime(llm)
+    return summarized
 
 
 def _normalize_log_value(value: Any) -> str:

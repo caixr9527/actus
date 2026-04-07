@@ -67,7 +67,7 @@ CREATE_PLAN_PROMPT = """
 TypeScript 接口定义：
 ```typescript
 interface CreatePlanResponse {{
-  /** 对用户消息的回复以及对任务的思考，尽可能详细，使用用户的语言 **/
+  /** 对用户消息的简短回复或计划说明，使用用户的语言 **/
   message: string;
   /** 根据用户消息确定的工作语言 **/
   language: string;

@@ -57,27 +57,10 @@ def test_tool_runtime_adapter_should_enrich_search_event() -> None:
         status=ToolEventStatus.CALLED,
     )
 
-    async def _get_browser_screenshot() -> str:
-        return "unused"
-
-    async def _read_shell_output(_session_id: str) -> ToolResult:
-        return ToolResult(success=True, data={})
-
-    async def _read_file_content(_filepath: str) -> ToolResult:
-        return ToolResult(success=True, data={})
-
-    async def _sync_file_to_storage(_filepath: str) -> None:
-        return None
-
     handled = asyncio.run(
         adapter.enrich_tool_event(
             event=event,
-            hooks=ToolRuntimeEventHooks(
-                get_browser_screenshot=_get_browser_screenshot,
-                read_shell_output=_read_shell_output,
-                read_file_content=_read_file_content,
-                sync_file_to_storage=_sync_file_to_storage,
-            ),
+            hooks=ToolRuntimeEventHooks(),
         )
     )
 
@@ -111,27 +94,10 @@ def test_tool_runtime_adapter_should_enrich_fetch_page_event() -> None:
         status=ToolEventStatus.CALLED,
     )
 
-    async def _get_browser_screenshot() -> str:
-        return "unused"
-
-    async def _read_shell_output(_session_id: str) -> ToolResult:
-        return ToolResult(success=True, data={})
-
-    async def _read_file_content(_filepath: str) -> ToolResult:
-        return ToolResult(success=True, data={})
-
-    async def _sync_file_to_storage(_filepath: str) -> None:
-        return None
-
     handled = asyncio.run(
         adapter.enrich_tool_event(
             event=event,
-            hooks=ToolRuntimeEventHooks(
-                get_browser_screenshot=_get_browser_screenshot,
-                read_shell_output=_read_shell_output,
-                read_file_content=_read_file_content,
-                sync_file_to_storage=_sync_file_to_storage,
-            ),
+            hooks=ToolRuntimeEventHooks(),
         )
     )
 
@@ -147,41 +113,43 @@ def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> Non
     event = ToolEvent(
         tool_name="file",
         function_name="read_file",
-        function_args={"filepath": "/tmp/a.txt"},
-        function_result=ToolResult(success=True, data={}),
+        function_args={"filepath": "/tmp/a.txt", "max_length": 1000},
+        function_result=ToolResult(success=True, data={"content": "hello world"}),
         status=ToolEventStatus.CALLED,
     )
-    synced_paths: list[str] = []
-
-    async def _get_browser_screenshot() -> str:
-        return "unused"
-
-    async def _read_shell_output(_session_id: str) -> ToolResult:
-        return ToolResult(success=True, data={})
-
-    async def _read_file_content(_filepath: str) -> ToolResult:
-        return ToolResult(success=True, data={"content": "hello world"})
-
-    async def _sync_file_to_storage(filepath: str) -> None:
-        synced_paths.append(filepath)
-        return None
 
     handled = asyncio.run(
         adapter.enrich_tool_event(
             event=event,
-            hooks=ToolRuntimeEventHooks(
-                get_browser_screenshot=_get_browser_screenshot,
-                read_shell_output=_read_shell_output,
-                read_file_content=_read_file_content,
-                sync_file_to_storage=_sync_file_to_storage,
-            ),
+            hooks=ToolRuntimeEventHooks(),
         )
     )
 
     assert handled is True
     assert event.tool_content is not None
     assert event.tool_content.content == "hello world"
-    assert synced_paths == ["/tmp/a.txt"]
+
+
+def test_tool_runtime_adapter_should_sync_storage_only_for_write_file() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="file",
+        function_name="write_file",
+        function_args={"filepath": "/tmp/a.txt"},
+        function_result=ToolResult(success=True, data={"filepath": "/tmp/a.txt"}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert "/tmp/a.txt" in event.tool_content.content
 
 
 def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() -> None:
@@ -199,32 +167,11 @@ def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() 
         ),
         status=ToolEventStatus.CALLED,
     )
-    read_file_calls: list[str] = []
-    sync_calls: list[str] = []
-
-    async def _get_browser_screenshot() -> str:
-        return "unused"
-
-    async def _read_shell_output(_session_id: str) -> ToolResult:
-        return ToolResult(success=True, data={})
-
-    async def _read_file_content(filepath: str) -> ToolResult:
-        read_file_calls.append(filepath)
-        return ToolResult(success=True, data={"content": "unused"})
-
-    async def _sync_file_to_storage(filepath: str) -> None:
-        sync_calls.append(filepath)
-        return None
 
     handled = asyncio.run(
         adapter.enrich_tool_event(
             event=event,
-            hooks=ToolRuntimeEventHooks(
-                get_browser_screenshot=_get_browser_screenshot,
-                read_shell_output=_read_shell_output,
-                read_file_content=_read_file_content,
-                sync_file_to_storage=_sync_file_to_storage,
-            ),
+            hooks=ToolRuntimeEventHooks(),
         )
     )
 
@@ -233,8 +180,95 @@ def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() 
     assert "目录: /home/ubuntu" in event.tool_content.content
     assert "/home/ubuntu/a.md" in event.tool_content.content
     assert "/home/ubuntu/b.md" in event.tool_content.content
-    assert read_file_calls == []
-    assert sync_calls == []
+
+
+def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions() -> None:
+    adapter = ToolRuntimeAdapter()
+    screenshot_calls: list[str] = []
+
+    async def _get_browser_screenshot() -> str:
+        screenshot_calls.append("shot")
+        return "https://cdn.example.com/browser-shot.png"
+
+    view_event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+    scroll_event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_scroll_down",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled_view = asyncio.run(
+        adapter.enrich_tool_event(
+            event=view_event,
+            hooks=ToolRuntimeEventHooks(get_browser_screenshot=_get_browser_screenshot),
+        )
+    )
+    handled_scroll = asyncio.run(
+        adapter.enrich_tool_event(
+            event=scroll_event,
+            hooks=ToolRuntimeEventHooks(get_browser_screenshot=_get_browser_screenshot),
+        )
+    )
+
+    assert handled_view is True
+    assert handled_scroll is True
+    assert view_event.tool_content is not None
+    assert view_event.tool_content.screenshot == "https://cdn.example.com/browser-shot.png"
+    assert scroll_event.tool_content is not None
+    assert scroll_event.tool_content.screenshot == ""
+    assert screenshot_calls == ["shot"]
+
+
+def test_tool_runtime_adapter_should_keep_browser_event_usable_without_screenshot_hook() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.screenshot == ""
+
+
+def test_tool_runtime_adapter_should_keep_shell_event_usable_without_shell_hook() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="shell",
+        function_name="shell_execute",
+        function_args={"session_id": "session-1"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.console == "(No console)"
 
 
 class _FakeMCPTool(BaseTool):
