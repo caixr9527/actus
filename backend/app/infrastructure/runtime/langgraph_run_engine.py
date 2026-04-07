@@ -262,8 +262,8 @@ class LangGraphRunEngine(RunEngine):
                     user_message=message.message,
                     input_parts=input_parts,
                     continue_cancelled_task=(
-                        message.command is not None
-                        and message.command.type == "continue_cancelled_task"
+                            message.command is not None
+                            and message.command.type == "continue_cancelled_task"
                     ),
                     thread_id=thread_id,
                     checkpoint_namespace=checkpoint_namespace,
@@ -709,7 +709,6 @@ class LangGraphRunEngine(RunEngine):
     ) -> AsyncGenerator[BaseEvent, None]:
         started_at = now_perf()
         state: Optional[PlannerReActLangGraphState] = None
-        wait_events: List[WaitEvent] = []
         deduplicator = _EventDeduplicator()
         live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
         input_state = graph_input if isinstance(graph_input, dict) else fallback_state

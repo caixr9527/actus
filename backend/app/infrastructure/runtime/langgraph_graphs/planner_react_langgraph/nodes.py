@@ -1603,46 +1603,46 @@ async def execute_step_node(
                 )
                 tool_cost_ms = elapsed_ms(tool_started_at)
 
-            # 无工具能力时保持原 BE-LG-10 skill 路径。
-            if llm_message is None and skill_runtime is not None:
-                try:
-                    log_runtime(
-                        logger,
-                        logging.INFO,
-                        "开始执行技能",
-                        state=state,
-                        step_id=str(step.id or ""),
-                        skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
-                    )
-                    skill_started_at = now_perf()
-                    skill_result = await skill_runtime.execute_skill(
-                        skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
-                        payload={
-                            "session_id": str(state.get("session_id") or ""),
-                            "user_message": user_message,
-                            "step_description": step.description,
-                            "language": language,
-                            "attachments": attachments,
-                            "execution_context": _build_execution_context_block(state),
-                        },
-                    )
-                    skill_cost_ms = elapsed_ms(skill_started_at)
-                    llm_message = {
-                        "success": bool(getattr(skill_result, "success", True)),
-                        "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
-                        "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
-                    }
-                except Exception as e:
-                    log_runtime(
-                        logger,
-                        logging.WARNING,
-                        "技能执行失败，回退默认链路",
-                        state=state,
-                        step_id=str(step.id or ""),
-                        skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
-                        error=str(e),
-                        elapsed_ms=elapsed_ms(started_at),
-                    )
+            # 暂时忽略, 因为技能能力目前尚未实现。
+            # if llm_message is None and skill_runtime is not None:
+            #     try:
+            #         log_runtime(
+            #             logger,
+            #             logging.INFO,
+            #             "开始执行技能",
+            #             state=state,
+            #             step_id=str(step.id or ""),
+            #             skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+            #         )
+            #         skill_started_at = now_perf()
+            #         skill_result = await skill_runtime.execute_skill(
+            #             skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+            #             payload={
+            #                 "session_id": str(state.get("session_id") or ""),
+            #                 "user_message": user_message,
+            #                 "step_description": step.description,
+            #                 "language": language,
+            #                 "attachments": attachments,
+            #                 "execution_context": _build_execution_context_block(state),
+            #             },
+            #         )
+            #         skill_cost_ms = elapsed_ms(skill_started_at)
+            #         llm_message = {
+            #             "success": bool(getattr(skill_result, "success", True)),
+            #             "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
+            #             "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
+            #         }
+            #     except Exception as e:
+            #         log_runtime(
+            #             logger,
+            #             logging.WARNING,
+            #             "技能执行失败，回退默认链路",
+            #             state=state,
+            #             step_id=str(step.id or ""),
+            #             skill_id=PLANNER_EXECUTE_STEP_SKILL_ID,
+            #             error=str(e),
+            #             elapsed_ms=elapsed_ms(started_at),
+            #         )
     except TimeoutError:
         log_runtime(
             logger,
