@@ -6,7 +6,7 @@ import logging
 from typing import Literal
 
 from app.domain.models import ExecutionStatus
-from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
+from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState, get_graph_control
 from .runtime_logging import log_runtime
 
 logger = logging.getLogger(__name__)
@@ -15,11 +15,7 @@ logger = logging.getLogger(__name__)
 def route_after_entry(
         state: PlannerReActLangGraphState,
 ) -> Literal["direct_answer", "direct_wait", "direct_execute", "create_plan_or_reuse", "recall_memory_context"]:
-    graph_metadata = state.get("graph_metadata")
-    if not isinstance(graph_metadata, dict):
-        return "recall_memory_context"
-
-    strategy = str(graph_metadata.get("entry_strategy") or "").strip().lower()
+    strategy = str(get_graph_control(state.get("graph_metadata")).get("entry_strategy") or "").strip().lower()
     if strategy in {
         "direct_answer",
         "direct_wait",
@@ -67,8 +63,7 @@ def _route_after_completed_step(
         )
         return "guard_step_reuse"
 
-    graph_metadata = state.get("graph_metadata")
-    if isinstance(graph_metadata, dict) and bool(graph_metadata.get("skip_replan_when_plan_finished")):
+    if bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
         log_runtime(
             logger,
             logging.INFO,
@@ -107,8 +102,7 @@ def route_after_guard(
     if plan is None:
         return "summarize"
 
-    graph_metadata = state.get("graph_metadata")
-    if isinstance(graph_metadata, dict) and bool(graph_metadata.get("step_reuse_hit")):
+    if bool(get_graph_control(state.get("graph_metadata")).get("step_reuse_hit")):
         return _route_after_completed_step(state)
 
     return "execute_step" if plan.get_next_step() is not None else "summarize"
@@ -128,8 +122,7 @@ def route_after_wait(
         state: PlannerReActLangGraphState,
 ) -> Literal["guard_step_reuse", "replan", "summarize"]:
     """等待恢复后，继续当前批次剩余步骤；批次结束后再重规划。"""
-    graph_metadata = state.get("graph_metadata")
-    if isinstance(graph_metadata, dict) and graph_metadata.get("wait_resume_action") == "replan":
+    if get_graph_control(state.get("graph_metadata")).get("wait_resume_action") == "replan":
         return "replan"
     return _route_after_completed_step(state)
 

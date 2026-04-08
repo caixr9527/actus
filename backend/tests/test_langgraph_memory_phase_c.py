@@ -302,7 +302,6 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
         "language": "zh",
         "style": "concise",
     }
-    assert next_state["graph_metadata"]["memory_recall_count"] == 2
 
 
 def test_execute_step_node_should_not_write_string_none_when_no_executor_path_available() -> None:
@@ -327,7 +326,6 @@ def test_execute_step_node_should_not_write_string_none_when_no_executor_path_av
         ),
         "input_parts": [],
         "working_memory": {},
-        "step_local_memory": {},
         "graph_metadata": {},
         "emitted_events": [],
     }
@@ -369,7 +367,6 @@ def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_t
         ),
         "input_parts": [],
         "working_memory": {},
-        "step_local_memory": {},
         "graph_metadata": {},
         "selected_artifacts": [],
         "artifact_refs": [],
@@ -388,12 +385,12 @@ def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_t
     executed_step = next_state["plan"].steps[0]
     assert executed_step.outcome is not None
     assert executed_step.outcome.produced_artifacts == ["/home/ubuntu/report.md"]
-    assert next_state["step_local_memory"]["pending_findings"] == ["/home/ubuntu/report.md"]
     assert next_state["selected_artifacts"] == []
+    assert next_state["artifact_refs"] == ["/home/ubuntu/report.md"]
     assert llm.tool_name_snapshots[0].count("message_notify_user") == 1
     assert "message_notify_user" not in llm.tool_name_snapshots[1]
     assert next_state["step_states"][0]["status"] == ExecutionStatus.COMPLETED.value
-    assert next_state["graph_metadata"]["last_step_execution_mode"] == "executed"
+    assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is False
 
 
 def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> None:
@@ -428,7 +425,6 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
             steps=[completed_step, pending_duplicate_step],
         ),
         "working_memory": {},
-        "step_local_memory": {},
         "graph_metadata": {},
         "selected_artifacts": [],
         "emitted_events": [],
@@ -445,10 +441,9 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
     assert reused_step.outcome.produced_artifacts == ["/tmp/report.md"]
     assert next_state["step_states"][-1]["step_id"] == "step-2"
     assert next_state["step_states"][-1]["status"] == ExecutionStatus.COMPLETED.value
-    assert next_state["graph_metadata"]["step_reuse_hit"] is True
-    assert next_state["graph_metadata"]["last_step_execution_mode"] == "reused"
+    assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is True
     assert next_state["selected_artifacts"] == []
-    assert next_state["step_local_memory"]["pending_findings"] == ["/tmp/report.md"]
+    assert next_state["artifact_refs"] == ["/tmp/report.md"]
     assert next_state["working_memory"]["facts_in_session"] == ["报告结构已确定"]
 
 
@@ -470,7 +465,6 @@ def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
             steps=[pending_step],
         ),
         "working_memory": {},
-        "step_local_memory": {},
         "graph_metadata": {},
         "selected_artifacts": [],
         "recent_run_briefs": [
@@ -491,7 +485,7 @@ def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
     guarded_step = next_state["plan"].steps[0]
     assert guarded_step.status == ExecutionStatus.PENDING
     assert guarded_step.outcome is None
-    assert next_state["graph_metadata"]["step_reuse_hit"] is False
+    assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is False
 
 
 def test_execution_context_block_should_separate_current_and_historical_context() -> None:
@@ -591,7 +585,6 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
     state = {
         "plan": plan,
         "last_executed_step": completed_step.model_copy(deep=True),
-        "planner_local_memory": {},
         "emitted_events": [],
     }
 
@@ -616,7 +609,7 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
     assert len(set(step_ids)) == 3
     assert replanned_steps[1].description == "新的分析步骤"
     assert replanned_steps[2].id == "step-c"
-    assert next_state["planner_local_memory"]["replan_rationale"] == "已完成"
+    assert next_state["current_step_id"] == step_ids[1]
 
 
 def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates() -> None:
@@ -641,7 +634,6 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
             "user_preferences": {"language": "zh"},
             "facts_in_session": ["本会话只关注 backend"],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [
             {"role": "user", "message": "帮我完成总结", "attachment_paths": []},
@@ -653,7 +645,7 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
     summarized_state = asyncio.run(summarize_node(state, llm))
 
     assert len(summarized_state["pending_memory_writes"]) == 2
-    assert summarized_state["summary_local_memory"]["memory_candidates_reason"] != ""
+    assert summarized_state["selected_artifacts"] == []
 
     consolidated_state = asyncio.run(
         consolidate_memory_node(
@@ -665,9 +657,6 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
     assert len(repository.upserted) == 2
     assert {item.memory_type for item in repository.upserted} == {"profile", "fact"}
     assert consolidated_state["pending_memory_writes"] == []
-    assert consolidated_state["graph_metadata"]["memory_write_count"] == 2
-    assert len(consolidated_state["graph_metadata"]["memory_write_ids"]) == 2
-    assert consolidated_state["summary_local_memory"] == {}
 
 
 def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
@@ -692,7 +681,6 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -729,9 +717,7 @@ def test_consolidate_memory_should_trim_message_window_and_update_summary() -> N
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {
-            "selected_artifacts": [f"/tmp/artifact-{index}.md" for index in range(12)],
-        },
+        "selected_artifacts": [f"/tmp/artifact-{index}.md" for index in range(12)],
         "pending_memory_writes": [],
         "message_window": [
             {"role": "user", "message": f"历史消息 {index}", "attachment_paths": []}
@@ -746,7 +732,6 @@ def test_consolidate_memory_should_trim_message_window_and_update_summary() -> N
     consolidated_state = asyncio.run(consolidate_memory_node(state))
 
     assert len(consolidated_state["message_window"]) == 100
-    assert consolidated_state["graph_metadata"]["memory_trimmed_message_count"] == 6
     assert "裁剪:6条消息" in consolidated_state["conversation_summary"]
     assert consolidated_state["message_window"][-1]["message"] == long_final_message[:500]
     assert len(consolidated_state["message_window"][-1]["attachment_paths"]) == 8
@@ -773,7 +758,6 @@ def test_consolidate_memory_should_govern_candidates_before_persisting() -> None
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [
             {
                 "namespace": "user/user-1/profile",
@@ -838,11 +822,6 @@ def test_consolidate_memory_should_govern_candidates_before_persisting() -> None
     }
     assert persisted_fact.content == {"text": "当前任务只关注 backend"}
     assert consolidated_state["pending_memory_writes"] == []
-    assert consolidated_state["graph_metadata"]["memory_candidate_input_count"] == 5
-    assert consolidated_state["graph_metadata"]["memory_candidate_kept_count"] == 2
-    assert consolidated_state["graph_metadata"]["memory_candidate_dropped_invalid_count"] == 1
-    assert consolidated_state["graph_metadata"]["memory_candidate_dropped_low_confidence_count"] == 1
-    assert consolidated_state["graph_metadata"]["memory_candidate_profile_merge_count"] == 1
 
 
 def test_summarize_should_generate_candidates_from_structured_extraction_when_working_memory_empty() -> None:
@@ -867,7 +846,6 @@ def test_summarize_should_generate_candidates_from_structured_extraction_when_wo
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -889,7 +867,6 @@ def test_summarize_should_generate_candidates_from_structured_extraction_when_wo
         "fact",
         "instruction",
     }
-    assert summarized_state["summary_local_memory"]["memory_candidates_reason"] != ""
 
 
 def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_memory_available() -> None:
@@ -914,7 +891,6 @@ def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -964,7 +940,6 @@ def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_emp
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -973,7 +948,6 @@ def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_emp
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/course_directory.md"]
     assert summarized_state["selected_artifacts"] == ["/home/ubuntu/course_directory.md"]
     message_event = summarized_state["emitted_events"][0]
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/course_directory.md"]
@@ -1041,7 +1015,6 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -1051,7 +1024,6 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
     assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
     message_event = summarized_state["emitted_events"][0]
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
@@ -1116,7 +1088,6 @@ def test_summarize_should_fallback_when_model_returns_unknown_summary_attachment
             "user_preferences": {},
             "facts_in_session": [],
         },
-        "summary_local_memory": {},
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -1125,7 +1096,6 @@ def test_summarize_should_fallback_when_model_returns_unknown_summary_attachment
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["summary_local_memory"]["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
     assert summarized_state["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
     message_event = summarized_state["emitted_events"][0]
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/intermediate.md"]
@@ -1135,13 +1105,13 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     repository = _FakeLongTermMemoryRepository()
 
     def _append_trace(state: dict, marker: str) -> dict:
-        graph_metadata = dict(state.get("graph_metadata") or {})
-        trace = list(graph_metadata.get("trace") or [])
+        working_memory = dict(state.get("working_memory") or {})
+        trace = list(working_memory.get("trace") or [])
         trace.append(marker)
-        graph_metadata["trace"] = trace
+        working_memory["trace"] = trace
         return {
             **state,
-            "graph_metadata": graph_metadata,
+            "working_memory": working_memory,
         }
 
     async def _recall(state, long_term_memory_repository=None):
@@ -1150,8 +1120,11 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
 
     async def _entry_router(state):
         next_state = _append_trace(state, "entry_router")
-        graph_metadata = dict(next_state.get("graph_metadata") or {})
-        graph_metadata["entry_strategy"] = "recall_memory_context"
+        graph_metadata = {
+            "control": {
+                "entry_strategy": "recall_memory_context",
+            }
+        }
         return {
             **next_state,
             "graph_metadata": graph_metadata,
@@ -1304,7 +1277,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
 
     state = asyncio.run(_invoke())
 
-    assert state["graph_metadata"]["trace"] == [
+    assert state["working_memory"]["trace"] == [
         "entry_router",
         "recall",
         "plan",
@@ -1321,26 +1294,20 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
 
 def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> None:
     state = {
-        "schema_version": "be-lg-04.v5",
         "session_id": "session-1",
         "user_id": "user-1",
         "run_id": "run-1",
         "thread_id": "thread-1",
-        "retrieved_memories": [],
-        "pending_memory_writes": [],
-        "graph_metadata": {"memory_write_count": 2, "memory_write_ids": ["mem-1", "mem-2"]},
+        "retrieved_memories": [{"id": "mem-0", "summary": "历史记忆"}],
+        "pending_memory_writes": [{"id": "mem-1"}, {"id": "mem-2"}],
+        "graph_metadata": {},
         "message_window": [],
         "conversation_summary": "",
         "working_memory": {},
-        "planner_local_memory": {},
-        "step_local_memory": {},
-        "summary_local_memory": {},
-        "memory_context_version": "ctx-v3",
         "execution_count": 0,
         "max_execution_steps": 20,
         "step_states": [],
         "pending_interrupt": {},
-        "tool_invocations": {},
         "artifact_refs": [],
         "emitted_events": [],
     }
@@ -1348,5 +1315,7 @@ def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> No
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
 
     assert runtime_metadata["graph_state_contract"]["graph_state"]["user_id"] == "user-1"
-    assert runtime_metadata["memory"]["persisted_write_count"] == 2
-    assert runtime_metadata["memory"]["persisted_write_ids"] == ["mem-1", "mem-2"]
+    assert runtime_metadata["memory"]["recall_count"] == 1
+    assert runtime_metadata["memory"]["recall_ids"] == ["mem-0"]
+    assert runtime_metadata["memory"]["write_count"] == 2
+    assert runtime_metadata["memory"]["write_ids"] == ["mem-1", "mem-2"]

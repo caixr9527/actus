@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from langgraph.types import interrupt
@@ -44,7 +43,13 @@ from app.domain.services.prompts import (
 )
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_events import append_events
-from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, PlannerReActLangGraphState
+from app.domain.services.runtime.langgraph_state import (
+    GraphStateContractMapper,
+    PlannerReActLangGraphState,
+    get_graph_control,
+    normalize_retrieved_memories,
+    replace_graph_control,
+)
 from app.domain.services.tools import BaseTool
 from .language_checker import build_direct_path_copy, infer_working_language_from_message
 from .live_events import emit_live_events
@@ -102,6 +107,14 @@ PROMPT_CONTEXT_OPEN_ITEM_LIMIT = 8
 
 # 步骤执行的超时时间（秒）
 STEP_EXECUTION_TIMEOUT_SECONDS = 180 * 3
+
+
+def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
+    return get_graph_control(state.get("graph_metadata"))
+
+
+def _replace_control_metadata(state: PlannerReActLangGraphState, control: Dict[str, Any]) -> Dict[str, Any]:
+    return replace_graph_control(state.get("graph_metadata"), control)
 
 
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -446,10 +459,8 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
     )
 
     reusable_step = _find_reusable_step_outcome(state=state, step=step, plan=plan)
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["step_reuse_hit"] = False
-    graph_metadata.pop("step_reuse_source_run_id", None)
-    graph_metadata.pop("step_reuse_source_step_id", None)
+    control = _get_control_metadata(state)
+    control["step_reuse_hit"] = False
 
     if reusable_step is None:
         log_runtime(
@@ -461,7 +472,7 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
         )
         return {
             **state,
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
         }
 
     source_outcome, reused_from_run_id, reused_from_step_id = reusable_step
@@ -484,14 +495,7 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
         _ensure_working_memory(state),
         step.outcome,
     )
-    step_local_memory = dict(state.get("step_local_memory") or {})
-    step_local_memory["current_step_id"] = str(step.id)
-    step_local_memory["observation_summary"] = _normalize_step_result_text(step.outcome.summary)
-    step_local_memory["pending_findings"] = list(step.outcome.produced_artifacts or [])
-    graph_metadata["step_reuse_hit"] = True
-    graph_metadata["step_reuse_source_run_id"] = reused_from_run_id
-    graph_metadata["step_reuse_source_step_id"] = reused_from_step_id
-    graph_metadata["last_step_execution_mode"] = "reused"
+    control["step_reuse_hit"] = True
     log_runtime(
         logger,
         logging.INFO,
@@ -511,8 +515,7 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
             "execution_count": int(state.get("execution_count", 0)) + 1,
             "current_step_id": next_step.id if next_step is not None else None,
             "working_memory": working_memory,
-            "step_local_memory": step_local_memory,
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
             "final_message": _normalize_step_result_text(step.outcome.summary),
             "selected_artifacts": list(state.get("selected_artifacts") or []),
             "pending_interrupt": {},
@@ -767,17 +770,6 @@ def _normalize_message_window_entry(
     if input_part_count > 0:
         normalized_entry["input_part_count"] = input_part_count
     return normalized_entry
-
-
-def _build_memory_context_version(state: PlannerReActLangGraphState) -> str:
-    return ":".join(
-        [
-            str(state.get("thread_id") or ""),
-            str(int(state.get("execution_count") or 0)),
-            str(len(state.get("message_window") or [])),
-            str(len(state.get("retrieved_memories") or [])),
-        ]
-    )
 
 
 def _build_memory_query(state: PlannerReActLangGraphState) -> str:
@@ -1276,7 +1268,11 @@ def _compact_message_window(
     return list(normalized_window[-MESSAGE_WINDOW_MAX_ITEMS:]), trimmed_count
 
 
-def _build_conversation_summary(state: PlannerReActLangGraphState) -> str:
+def _build_conversation_summary(
+        state: PlannerReActLangGraphState,
+        *,
+        trimmed_message_count: int = 0,
+) -> str:
     # 获取之前的对话摘要
     previous_summary = str(state.get("conversation_summary") or "").strip()
     # 确保工作记忆存在并初始化默认值
@@ -1303,7 +1299,6 @@ def _build_conversation_summary(state: PlannerReActLangGraphState) -> str:
     if total_steps > 0:
         parts.append(f"进度:{completed_steps}/{total_steps}")
 
-    trimmed_message_count = int((state.get("graph_metadata") or {}).get("memory_trimmed_message_count") or 0)
     if trimmed_message_count > 0:
         parts.append(f"裁剪:{trimmed_message_count}条消息")
 
@@ -1414,9 +1409,9 @@ def _build_wait_resume_outcome(
 
 async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
     """P0 入口轻路由：先判断是否需要完整记忆召回和 Planner。"""
-    graph_metadata = dict(state.get("graph_metadata") or {})
+    control = _get_control_metadata(state)
     plan = state.get("plan")
-    graph_metadata["entry_strategy"] = infer_entry_strategy(
+    control["entry_strategy"] = infer_entry_strategy(
         user_message=str(state.get("user_message") or ""),
         has_input_parts=bool(list(state.get("input_parts") or [])),
         has_active_plan=bool(plan is not None and len(list(plan.steps or [])) > 0 and not plan.done),
@@ -1427,11 +1422,11 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
         logging.INFO,
         "入口路由完成",
         state=state,
-        entry_strategy=str(graph_metadata.get("entry_strategy") or ""),
+        entry_strategy=str(control.get("entry_strategy") or ""),
     )
     return {
         **state,
-        "graph_metadata": graph_metadata,
+        "graph_metadata": _replace_control_metadata(state, control),
     }
 
 
@@ -1467,9 +1462,9 @@ async def direct_answer_node(state: PlannerReActLangGraphState, llm: LLM) -> Pla
         MessageEvent(role="assistant", message=final_message, stage="final"),
     ]
     await emit_live_events(*events)
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["entry_strategy"] = "direct_answer"
-    graph_metadata["skip_replan_when_plan_finished"] = True
+    control = _get_control_metadata(state)
+    control["entry_strategy"] = "direct_answer"
+    control["skip_replan_when_plan_finished"] = True
     log_runtime(
         logger,
         logging.INFO,
@@ -1487,7 +1482,7 @@ async def direct_answer_node(state: PlannerReActLangGraphState, llm: LLM) -> Pla
             "plan": plan,
             "current_step_id": None,
             "final_message": final_message,
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
         },
         events=events,
     )
@@ -1518,9 +1513,9 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
         steps=[step_wait, step_execute],
         status=ExecutionStatus.PENDING,
     )
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["entry_strategy"] = "direct_wait"
-    graph_metadata["skip_replan_when_plan_finished"] = True
+    control = _get_control_metadata(state)
+    control["entry_strategy"] = "direct_wait"
+    control["skip_replan_when_plan_finished"] = True
     events: List[Any] = [
         TitleEvent(title=plan.title),
         PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
@@ -1539,13 +1534,7 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
                 "confirm_label": direct_copy["direct_wait_confirm_label"],
                 "cancel_label": direct_copy["direct_wait_cancel_label"],
             },
-            "step_local_memory": {
-                "current_step_id": step_wait.id,
-                "waiting_step_id": step_wait.id,
-                "waiting_step_title": step_wait.title,
-                "waiting_step_description": step_wait.description,
-            },
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
         },
         events=events,
     )
@@ -1570,9 +1559,9 @@ async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReAct
         steps=[step],
         status=ExecutionStatus.PENDING,
     )
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["entry_strategy"] = "direct_execute"
-    graph_metadata["skip_replan_when_plan_finished"] = True
+    control = _get_control_metadata(state)
+    control["entry_strategy"] = "direct_execute"
+    control["skip_replan_when_plan_finished"] = True
     events: List[Any] = [
         TitleEvent(title=plan.title),
         PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
@@ -1583,7 +1572,7 @@ async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReAct
         updates={
             "plan": plan,
             "current_step_id": step.id,
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
         },
         events=events,
     )
@@ -1598,10 +1587,8 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
         working_memory = _ensure_working_memory(state)
         if not str(working_memory.get("goal") or "").strip():
             working_memory["goal"] = str(plan.goal or state.get("user_message") or "")
-        planner_local_memory = dict(state.get("planner_local_memory") or {})
-        planner_local_memory["plan_brief"] = str(plan.message or plan.title or "")
-        graph_metadata = dict(state.get("graph_metadata") or {})
-        resumed_from_cancelled_plan = bool(graph_metadata.pop("continued_from_cancelled_plan", False))
+        control = _get_control_metadata(state)
+        resumed_from_cancelled_plan = bool(control.pop("continued_from_cancelled_plan", False))
 
         reuse_events: List[Any] = []
         if resumed_from_cancelled_plan:
@@ -1628,9 +1615,8 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             updates={
                 "plan": plan,
                 "working_memory": working_memory,
-                "planner_local_memory": planner_local_memory,
                 "current_step_id": next_step.id if next_step is not None else None,
-                "graph_metadata": graph_metadata,
+                "graph_metadata": _replace_control_metadata(state, control),
             },
             events=reuse_events,
         )
@@ -1679,12 +1665,6 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
     planner_message = str(parsed.get("message") or user_message or "已生成任务计划")
     working_memory = _ensure_working_memory(state)
     working_memory["goal"] = goal
-    planner_local_memory = dict(state.get("planner_local_memory") or {})
-    planner_local_memory["plan_brief"] = planner_message or title
-    planner_local_memory["plan_assumptions"] = _append_unique_text_item(
-        list(planner_local_memory.get("plan_assumptions") or []),
-        str(parsed.get("assumption") or ""),
-    )
     raw_steps = parsed.get("steps")
     if not isinstance(raw_steps, list) or raw_steps is None or len(raw_steps) == 0:
         log_runtime(
@@ -1716,12 +1696,9 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             updates={
                 "plan": plan,
                 "working_memory": working_memory,
-                "planner_local_memory": planner_local_memory,
                 "current_step_id": None,
                 "final_message": planner_message,
-                "graph_metadata": {
-                    **dict(state.get("graph_metadata") or {}),
-                },
+                "graph_metadata": dict(state.get("graph_metadata") or {}),
                 "step_states": [],
             },
             events=planner_events,
@@ -1761,11 +1738,8 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             updates={
                 "plan": plan,
                 "working_memory": working_memory,
-                "planner_local_memory": planner_local_memory,
                 "current_step_id": next_step.id if next_step is not None else None,
-                "graph_metadata": {
-                    **dict(state.get("graph_metadata") or {}),
-                },
+                "graph_metadata": dict(state.get("graph_metadata") or {}),
             },
             events=planner_events,
         )
@@ -1919,25 +1893,14 @@ async def execute_step_node(
             skill_elapsed_ms=skill_cost_ms,
             elapsed_ms=elapsed_ms(started_at),
         )
-        step_local_memory = dict(state.get("step_local_memory") or {})
-        step_local_memory["current_step_id"] = str(step.id)
-        step_local_memory["pending_interrupt"] = interrupt_request
-        step_local_memory["waiting_step_id"] = str(step.id)
-        step_local_memory["waiting_step_title"] = str(step.title or "").strip()
-        step_local_memory["waiting_step_description"] = str(step.description or "").strip()
-        graph_metadata = dict(state.get("graph_metadata") or {})
-        graph_metadata["waiting_interrupt_kind"] = interrupt_request.get("kind") or "input_text"
-        graph_metadata["waiting_interrupt_prompt"] = interrupt_request.get("prompt") or ""
-        graph_metadata["step_reuse_hit"] = False
-        graph_metadata["last_step_execution_mode"] = "executed"
-        graph_metadata["task_mode"] = task_mode
+        control = _get_control_metadata(state)
+        control["step_reuse_hit"] = False
         return _reduce_state_with_events(
             state,
             updates={
                 "plan": plan,
                 "current_step_id": step.id,
-                "step_local_memory": step_local_memory,
-                "graph_metadata": graph_metadata,
+                "graph_metadata": _replace_control_metadata(state, control),
                 "pending_interrupt": interrupt_request,
             },
             events=[started_event, *tool_events],
@@ -1983,18 +1946,12 @@ async def execute_step_node(
 
     events: List[Any] = [started_event, *tool_events, *final_step_events]
     next_step = plan.get_next_step()
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["step_reuse_hit"] = False
-    graph_metadata["last_step_execution_mode"] = "executed"
-    graph_metadata["task_mode"] = task_mode
+    control = _get_control_metadata(state)
+    control["step_reuse_hit"] = False
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
         step.outcome,
     )
-    step_local_memory = dict(state.get("step_local_memory") or {})
-    step_local_memory["current_step_id"] = str(step.id)
-    step_local_memory["observation_summary"] = step_summary
-    step_local_memory["pending_findings"] = list(step_attachment_paths)
     log_runtime(
         logger,
         logging.INFO,
@@ -2019,8 +1976,7 @@ async def execute_step_node(
             "execution_count": int(state.get("execution_count", 0)) + 1,
             "current_step_id": next_step.id if next_step is not None else None,
             "working_memory": working_memory,
-            "step_local_memory": step_local_memory,
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
             "final_message": step_summary,
             "selected_artifacts": list(state.get("selected_artifacts") or []),
             "pending_interrupt": {},
@@ -2068,21 +2024,10 @@ async def wait_for_human_node(
             attachments=[],
         )
 
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["last_resume_value"] = resume_value
-    graph_metadata["last_resumed_at"] = datetime.now().isoformat()
-    graph_metadata.pop("waiting_interrupt_kind", None)
-    graph_metadata.pop("waiting_interrupt_prompt", None)
-    graph_metadata.pop("pending_interrupts", None)
-    graph_metadata.pop("wait_resume_action", None)
+    control = _get_control_metadata(state)
+    control.pop("wait_resume_action", None)
 
-    step_local_memory = dict(state.get("step_local_memory") or {})
-    step_local_memory.pop("pending_interrupt", None)
-    waiting_step_id = str(
-        step_local_memory.pop("waiting_step_id", "") or state.get("current_step_id") or ""
-    ).strip()
-    step_local_memory.pop("waiting_step_title", None)
-    step_local_memory.pop("waiting_step_description", None)
+    waiting_step_id = str(state.get("current_step_id") or "").strip()
 
     plan = state.get("plan")
     if plan is None or not waiting_step_id:
@@ -2099,8 +2044,7 @@ async def wait_for_human_node(
             "user_message": resumed_message,
             "input_parts": [],
             "message_window": message_window,
-            "graph_metadata": graph_metadata,
-            "step_local_memory": step_local_memory,
+            "graph_metadata": _replace_control_metadata(state, control),
             "pending_interrupt": {},
         }
 
@@ -2124,8 +2068,7 @@ async def wait_for_human_node(
             "user_message": resumed_message,
             "input_parts": [],
             "message_window": message_window,
-            "graph_metadata": graph_metadata,
-            "step_local_memory": step_local_memory,
+            "graph_metadata": _replace_control_metadata(state, control),
             "pending_interrupt": {},
         }
 
@@ -2146,10 +2089,7 @@ async def wait_for_human_node(
             _ensure_working_memory(state),
             waiting_step.outcome,
         )
-        step_local_memory["current_step_id"] = str(waiting_step.id)
-        step_local_memory["observation_summary"] = _normalize_step_result_text(waiting_step.outcome.summary)
-        step_local_memory["pending_findings"] = []
-        graph_metadata["wait_resume_action"] = "replan"
+        control["wait_resume_action"] = "replan"
         log_runtime(
             logger,
             logging.INFO,
@@ -2166,8 +2106,7 @@ async def wait_for_human_node(
                 "user_message": resumed_message,
                 "input_parts": [],
                 "message_window": message_window,
-                "graph_metadata": graph_metadata,
-                "step_local_memory": step_local_memory,
+                "graph_metadata": _replace_control_metadata(state, control),
                 "pending_interrupt": {},
                 "last_executed_step": waiting_step.model_copy(deep=True),
                 "execution_count": int(state.get("execution_count", 0)) + 1,
@@ -2194,9 +2133,6 @@ async def wait_for_human_node(
         _ensure_working_memory(state),
         waiting_step.outcome,
     )
-    step_local_memory["current_step_id"] = str(waiting_step.id)
-    step_local_memory["observation_summary"] = _normalize_step_result_text(waiting_step.outcome.summary)
-    step_local_memory["pending_findings"] = []
     log_runtime(
         logger,
         logging.INFO,
@@ -2215,8 +2151,7 @@ async def wait_for_human_node(
             "user_message": resumed_message,
             "input_parts": [],
             "message_window": message_window,
-            "graph_metadata": graph_metadata,
-            "step_local_memory": step_local_memory,
+            "graph_metadata": _replace_control_metadata(state, control),
             "pending_interrupt": {},
             "last_executed_step": waiting_step.model_copy(deep=True),
             "execution_count": int(state.get("execution_count", 0)) + 1,
@@ -2258,7 +2193,9 @@ async def recall_memory_context_node(
             for query in _build_memory_recall_queries(state):
                 recalled_memories.extend(await long_term_memory_repository.search(query))
             recalled_memories = _dedupe_recalled_memories(recalled_memories)
-            retrieved_memories = [memory.model_dump(mode="json") for memory in recalled_memories]
+            retrieved_memories = normalize_retrieved_memories(
+                [memory.model_dump(mode="json") for memory in recalled_memories]
+            )
             recall_cost_ms = elapsed_ms(recall_started_at)
         except Exception as e:
             log_runtime(
@@ -2273,14 +2210,6 @@ async def recall_memory_context_node(
     if not dict(working_memory.get("user_preferences") or {}):
         working_memory["user_preferences"] = _extract_profile_preferences(retrieved_memories)
 
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["memory_recall_prepared_at"] = datetime.now().isoformat()
-    graph_metadata["memory_recall_count"] = len(retrieved_memories)
-    graph_metadata["memory_recall_namespaces"] = _build_memory_namespace_prefixes(state)
-    graph_metadata["context_recent_run_brief_count"] = len(state.get("recent_run_briefs") or [])
-    graph_metadata["context_recent_attempt_brief_count"] = len(state.get("recent_attempt_briefs") or [])
-    graph_metadata["context_selected_artifact_count"] = len(state.get("selected_artifacts") or [])
-    graph_metadata["context_historical_artifact_count"] = len(state.get("historical_artifact_refs") or [])
     log_runtime(
         logger,
         logging.INFO,
@@ -2297,11 +2226,6 @@ async def recall_memory_context_node(
         **state,
         "working_memory": working_memory,
         "retrieved_memories": retrieved_memories,
-        "planner_local_memory": dict(state.get("planner_local_memory") or {}),
-        "step_local_memory": dict(state.get("step_local_memory") or {}),
-        "summary_local_memory": dict(state.get("summary_local_memory") or {}),
-        "memory_context_version": _build_memory_context_version(state),
-        "graph_metadata": graph_metadata,
     }
 
 
@@ -2356,10 +2280,8 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     next_step = plan.get_next_step()
     updated_event = PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.UPDATED)
     await emit_live_events(updated_event)
-    planner_local_memory = dict(state.get("planner_local_memory") or {})
-    planner_local_memory["replan_rationale"] = _get_step_outcome_summary(last_step)
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata.pop("wait_resume_action", None)
+    control = _get_control_metadata(state)
+    control.pop("wait_resume_action", None)
     log_runtime(
         logger,
         logging.INFO,
@@ -2376,10 +2298,8 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         state,
         updates={
             "plan": plan,
-            "planner_local_memory": planner_local_memory,
-            "step_local_memory": {},
             "current_step_id": next_step.id if next_step is not None else None,
-            "graph_metadata": graph_metadata,
+            "graph_metadata": _replace_control_metadata(state, control),
         },
         events=[updated_event],
     )
@@ -2461,9 +2381,6 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         merged_preferences.update(extracted_preferences)
         working_memory["user_preferences"] = merged_preferences
 
-    summary_local_memory = dict(state.get("summary_local_memory") or {})
-    summary_local_memory["answer_outline"] = summary_message
-    summary_local_memory["selected_artifacts"] = summary_attachment_refs
     next_state_for_memory: PlannerReActLangGraphState = {
         **state,
         "working_memory": working_memory,
@@ -2478,14 +2395,6 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         if outcome_candidate is not None:
             memory_candidates = [outcome_candidate]
     memory_candidates = _merge_memory_candidates(memory_candidates, model_memory_candidates)
-    if len(model_memory_candidates) > 0:
-        summary_local_memory["memory_candidates_reason"] = "基于总结阶段的结构化提炼生成长期记忆候选"
-    elif extracted_facts or extracted_preferences:
-        summary_local_memory["memory_candidates_reason"] = "从总结阶段提炼出的稳定事实与偏好生成长期记忆候选"
-    elif len(memory_candidates) > 0:
-        summary_local_memory["memory_candidates_reason"] = "使用本轮任务结果生成保守的会话级长期记忆候选"
-    else:
-        summary_local_memory["memory_candidates_reason"] = ""
     log_runtime(
         logger,
         logging.INFO,
@@ -2510,7 +2419,6 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
                 list(state.get("pending_memory_writes") or []),
                 memory_candidates,
             ),
-            "summary_local_memory": summary_local_memory,
         },
         events=final_events,
     )
@@ -2530,44 +2438,27 @@ async def consolidate_memory_node(
         pending_memory_write_count=len(list(state.get("pending_memory_writes") or [])),
         message_window_size=len(list(state.get("message_window") or [])),
     )
-    # 获取并初始化摘要本地记忆
-    summary_local_memory = dict(state.get("summary_local_memory") or {})
-
     # 将最终消息和选中的附件添加到消息窗口中
     message_window = _append_message_window_entry(
         list(state.get("message_window") or []),
         role="assistant",
         message=str(state.get("final_message") or ""),
-        attachments=list(summary_local_memory.get("selected_artifacts") or []),
+        attachments=list(state.get("selected_artifacts") or []),
     )
 
     # 压缩消息窗口，防止超出最大长度限制
     compacted_message_window, trimmed_message_count = _compact_message_window(message_window)
 
-    # 更新图元数据，记录记忆压缩相关信息
-    graph_metadata = dict(state.get("graph_metadata") or {})
-    graph_metadata["memory_compacted"] = True
-    graph_metadata["memory_last_compaction_at"] = datetime.now().isoformat()
-    graph_metadata["memory_message_window_size"] = len(compacted_message_window)
-    graph_metadata["memory_trimmed_message_count"] = trimmed_message_count
-
     # 处理待写入的长期记忆候选项
     pending_memory_writes, candidate_stats = _govern_memory_candidates(
         list(state.get("pending_memory_writes") or [])
     )
-    graph_metadata["memory_candidate_input_count"] = candidate_stats["input_count"]
-    graph_metadata["memory_candidate_kept_count"] = candidate_stats["kept_count"]
-    graph_metadata["memory_candidate_dropped_invalid_count"] = candidate_stats["dropped_invalid_count"]
-    graph_metadata["memory_candidate_dropped_low_confidence_count"] = candidate_stats["dropped_low_confidence_count"]
-    graph_metadata["memory_candidate_deduped_count"] = candidate_stats["deduped_count"]
-    graph_metadata["memory_candidate_profile_merge_count"] = candidate_stats["merged_profile_count"]
     remaining_memory_writes: List[Dict[str, Any]] = []
     persisted_memory_ids: List[str] = []
     write_cost_ms = 0
 
     if long_term_memory_repository is None:
         # 若未提供长期记忆仓库，则跳过写入，保留候选项供后续重试
-        graph_metadata["memory_write_skipped"] = len(pending_memory_writes) > 0
         remaining_memory_writes = pending_memory_writes
     else:
         # 遍历所有待写入的记忆候选项，尝试持久化
@@ -2588,8 +2479,6 @@ async def consolidate_memory_node(
                 if isinstance(item, dict):
                     remaining_memory_writes.append(item)
         write_cost_ms = elapsed_ms(write_started_at)
-        graph_metadata["memory_write_count"] = len(persisted_memory_ids)
-        graph_metadata["memory_write_ids"] = persisted_memory_ids
 
     # 构建下一个状态对象，更新消息窗口、对话摘要、清理临时记忆并保留未成功写入的记忆候选
     next_state: PlannerReActLangGraphState = {
@@ -2599,17 +2488,11 @@ async def consolidate_memory_node(
             {
                 **state,
                 "message_window": compacted_message_window,
-                "graph_metadata": graph_metadata,
-            }
+            },
+            trimmed_message_count=trimmed_message_count,
         ),
         "pending_memory_writes": remaining_memory_writes,
-        "planner_local_memory": {},
-        "step_local_memory": {},
-        "summary_local_memory": {},
-        "selected_artifacts": _normalize_context_artifact_refs(
-            summary_local_memory.get("selected_artifacts") or state.get("selected_artifacts")
-        ),
-        "graph_metadata": graph_metadata,
+        "selected_artifacts": _normalize_context_artifact_refs(state.get("selected_artifacts")),
     }
     log_runtime(
         logger,

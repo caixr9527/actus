@@ -178,7 +178,7 @@ def test_entry_router_node_should_route_direct_answer_for_greeting() -> None:
         )
     )
 
-    assert state["graph_metadata"]["entry_strategy"] == "direct_answer"
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
 
 
 def test_entry_router_node_should_route_direct_wait_for_preconfirm_request() -> None:
@@ -191,7 +191,7 @@ def test_entry_router_node_should_route_direct_wait_for_preconfirm_request() -> 
         )
     )
 
-    assert state["graph_metadata"]["entry_strategy"] == "direct_wait"
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_wait"
 
 
 def test_entry_router_node_should_route_direct_execute_for_simple_tool_task() -> None:
@@ -204,7 +204,7 @@ def test_entry_router_node_should_route_direct_execute_for_simple_tool_task() ->
         )
     )
 
-    assert state["graph_metadata"]["entry_strategy"] == "direct_execute"
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
 
 
 def test_entry_router_node_should_route_direct_execute_for_url_request_without_tool_name_hint() -> None:
@@ -217,7 +217,7 @@ def test_entry_router_node_should_route_direct_execute_for_url_request_without_t
         )
     )
 
-    assert state["graph_metadata"]["entry_strategy"] == "direct_execute"
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
 
 
 def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> None:
@@ -270,7 +270,7 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
     assert state["plan"].status == ExecutionStatus.COMPLETED
     assert state["plan"].language == "zh"
     assert state["final_message"] == "你好，我在。"
-    assert state["graph_metadata"]["skip_replan_when_plan_finished"] is True
+    assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
 
 
 def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
@@ -287,7 +287,7 @@ def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
     assert state["plan"].language == "zh"
     assert [step.id for step in state["plan"].steps] == ["direct-wait-confirm", "direct-wait-execute"]
     assert state["pending_interrupt"]["kind"] == "confirm"
-    assert state["graph_metadata"]["skip_replan_when_plan_finished"] is True
+    assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
 
 
 def test_direct_execute_node_should_build_single_step_plan() -> None:
@@ -304,7 +304,7 @@ def test_direct_execute_node_should_build_single_step_plan() -> None:
     assert state["plan"].language == "zh"
     assert len(state["plan"].steps) == 1
     assert state["current_step_id"] == "direct-execute-step"
-    assert state["graph_metadata"]["skip_replan_when_plan_finished"] is True
+    assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
 
 
 def test_direct_wait_node_should_preserve_english_working_language() -> None:

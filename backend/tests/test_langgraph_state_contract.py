@@ -79,36 +79,14 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                     "pending_memory_writes": [
                         {"id": "pending-1", "summary": "待写入事实"},
                     ],
-                    "planner_local_memory": {
-                        "plan_brief": "已有规划摘要",
-                    },
-                    "step_local_memory": {
-                        "current_step_id": "step-1",
-                    },
-                    "summary_local_memory": {
-                        "answer_outline": "总结提纲",
-                    },
-                    "memory_context_version": "ctx-v1",
+                    "selected_artifacts": ["/tmp/final.md"],
                     "pending_interrupt": {
                         "kind": "input_text",
                         "prompt": "请补充上下文",
                         "attachments": ["/tmp/context.md"],
                         "response_key": "message",
                     },
-                    "tool_invocations": {
-                        "call-1": {
-                            "invocation_id": "call-1",
-                            "event_id": "evt-tool",
-                            "tool_name": "search",
-                            "function_name": "search_web",
-                            "status": "called",
-                            "function_args": {"q": "langgraph"},
-                            "function_result": {"success": True},
-                            "created_at": "2026-03-21T12:00:00",
-                            "updated_at": "2026-03-21T12:00:00",
-                        }
-                    },
-                    "metadata": {"carry_over": "yes"},
+                    "metadata": {"control": {"entry_strategy": "recall_memory_context"}},
                 }
             },
             "artifacts": ["file-1", "file-1", "file-2"],
@@ -156,11 +134,8 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
         ),
         user_message="你好",
         thread_id="thread-1",
-        checkpoint_namespace="",
-        checkpoint_id="cp-1",
     )
 
-    assert state["schema_version"] == GRAPH_STATE_CONTRACT_SCHEMA_VERSION
     assert state["run_id"] == "run-1"
     assert state["thread_id"] == "thread-1"
     assert state["current_step_id"] == "step-1"
@@ -170,25 +145,21 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["working_memory"]["goal"] == "验证状态契约"
     assert state["retrieved_memories"][0]["id"] == "mem-1"
     assert state["pending_memory_writes"][0]["id"] == "pending-1"
-    assert state["planner_local_memory"]["plan_brief"] == "已有规划摘要"
-    assert state["step_local_memory"]["current_step_id"] == "step-1"
-    assert state["summary_local_memory"]["answer_outline"] == "总结提纲"
-    assert state["memory_context_version"] == "ctx-v1"
     assert state["recent_run_briefs"][0]["run_id"] == "run-completed"
     assert state["recent_run_briefs"][0]["final_answer_summary"] == "已经输出过结论"
     assert state["recent_attempt_briefs"][0]["run_id"] == "run-failed"
     assert state["recent_attempt_briefs"][0]["status"] == WorkflowRunStatus.FAILED.value
     assert state["session_open_questions"] == ["已完成运行待确认", "失败运行待确认", "还需确认范围"]
     assert state["session_blockers"] == ["远端接口不可用"]
-    assert state["selected_artifacts"] == []
+    assert state["selected_artifacts"] == ["/tmp/final.md"]
     assert state["historical_artifact_refs"] == ["artifact-from-snapshot", "history-artifact", "failed-artifact"]
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
-    assert state["step_states"][0]["objective_key"] == "objective-step-1"
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
+    assert sorted(state["step_states"][0].keys()) == ["description", "status", "step_id", "step_index", "title"]
+    assert sorted(state["retrieved_memories"][0].keys()) == ["content", "id", "memory_type", "summary", "tags"]
     assert state["pending_interrupt"]["prompt"] == "请补充上下文"
-    assert state["tool_invocations"]["call-1"]["tool_name"] == "search"
-    assert state["graph_metadata"]["carry_over"] == "yes"
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
     assert state["artifact_refs"] == ["file-1", "file-2"]
 
 
@@ -247,7 +218,7 @@ def test_graph_state_contract_should_reopen_cancelled_plan_for_explicit_command(
     ]
     assert reopened_plan.steps[1].outcome is None
     assert state["current_step_id"] == "step-2"
-    assert state["graph_metadata"]["continued_from_cancelled_plan"] is True
+    assert state["graph_metadata"]["control"]["continued_from_cancelled_plan"] is True
     assert state["step_states"][1]["status"] == ExecutionStatus.PENDING.value
 
 
@@ -266,12 +237,9 @@ def test_create_or_reuse_plan_node_should_emit_updated_plan_when_continuing_canc
             status=ExecutionStatus.PENDING,
         ),
         "graph_metadata": {
-            "continued_from_cancelled_plan": True,
+            "control": {"continued_from_cancelled_plan": True},
         },
         "working_memory": {},
-        "planner_local_memory": {},
-        "step_local_memory": {},
-        "summary_local_memory": {},
         "recent_run_briefs": [],
         "recent_attempt_briefs": [],
         "session_open_questions": [],
@@ -282,22 +250,15 @@ def test_create_or_reuse_plan_node_should_emit_updated_plan_when_continuing_canc
         "message_window": [],
         "retrieved_memories": [],
         "pending_memory_writes": [],
-        "memory_context_version": None,
         "current_step_id": None,
         "execution_count": 0,
         "max_execution_steps": 20,
         "last_executed_step": None,
         "pending_interrupt": {},
-        "tool_invocations": {},
         "artifact_refs": [],
-        "audit_events": [],
         "emitted_events": [],
         "final_message": "",
-        "error": None,
-        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
         "thread_id": "thread-1",
-        "checkpoint_ref_namespace": "",
-        "checkpoint_ref_id": None,
         "conversation_summary": "",
     }
     emitted_events = []
@@ -315,7 +276,7 @@ def test_create_or_reuse_plan_node_should_emit_updated_plan_when_continuing_canc
     assert isinstance(emitted_events[0], PlanEvent)
     assert emitted_events[0].status == PlanEventStatus.UPDATED
     assert next_state["current_step_id"] == "step-2"
-    assert next_state["graph_metadata"].get("continued_from_cancelled_plan") is None
+    assert next_state["graph_metadata"].get("control", {}).get("continued_from_cancelled_plan") is None
     assert len(next_state["emitted_events"]) == 1
 
 
@@ -391,8 +352,6 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
         session_context_snapshot=None,
         user_message="帮我调研一下",
         thread_id="thread-1",
-        checkpoint_namespace="",
-        checkpoint_id="cp-1",
     )
     state["emitted_events"] = [
         PlanEvent(plan=created_plan, status=PlanEventStatus.CREATED),
@@ -415,21 +374,13 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     state["pending_memory_writes"] = [
         {"id": "pending-1", "summary": "需要沉淀的后端约束"},
     ]
-    state["planner_local_memory"] = {"plan_brief": "调研方案"}
-    state["step_local_memory"] = {"current_step_id": "step-1"}
-    state["summary_local_memory"] = {"answer_outline": "最终答复"}
-    state["memory_context_version"] = "ctx-v2"
-    state["graph_metadata"] = {
-        "memory_compacted": True,
-        "memory_last_compaction_at": "2026-03-29T12:00:00",
-    }
+    state["selected_artifacts"] = ["/tmp/final.md"]
+    state["graph_metadata"] = {}
 
     reduced_state = GraphStateContractMapper.apply_emitted_events(state=state)
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(reduced_state)
 
     assert reduced_state["current_step_id"] is None
-    assert len(reduced_state["audit_events"]) == len(state["emitted_events"])
-    assert reduced_state["tool_invocations"]["call-1"]["status"] == ToolEventStatus.CALLED.value
     assert reduced_state["artifact_refs"] == ["file-1"]
     assert reduced_state["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert reduced_state["pending_interrupt"]["attachments"] == ["/tmp/reference.md"]
@@ -444,34 +395,44 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["conversation_summary"] == "用户希望调研 LangGraph 持久化"
     assert contract["graph_state"]["working_memory"]["goal"] == "调研 LangGraph 持久化"
     assert contract["graph_state"]["retrieved_memories"][0]["id"] == "mem-1"
+    assert sorted(contract["graph_state"]["retrieved_memories"][0].keys()) == [
+        "content",
+        "id",
+        "memory_type",
+        "summary",
+        "tags",
+    ]
     assert contract["graph_state"]["pending_memory_writes"][0]["id"] == "pending-1"
-    assert contract["graph_state"]["planner_local_memory"]["plan_brief"] == "调研方案"
-    assert contract["graph_state"]["step_local_memory"]["current_step_id"] == "step-1"
-    assert contract["graph_state"]["summary_local_memory"]["answer_outline"] == "最终答复"
-    assert contract["graph_state"]["memory_context_version"] == "ctx-v2"
+    assert contract["graph_state"]["selected_artifacts"] == ["/tmp/final.md"]
+    assert sorted(contract["graph_state"]["step_states"][0].keys()) == [
+        "description",
+        "outcome",
+        "status",
+        "step_id",
+        "step_index",
+        "title",
+    ]
+    assert sorted(contract["graph_state"]["step_states"][0]["outcome"].keys()) == [
+        "produced_artifacts",
+        "summary",
+    ]
     assert contract["graph_state"]["recent_attempt_briefs"][0]["run_id"] == "run-failed"
     assert contract["graph_state"]["session_blockers"] == ["缺少凭证"]
     assert contract["graph_state"]["historical_artifact_refs"] == ["artifact-prev"]
     assert contract["graph_state"]["pending_interrupt"]["prompt"] == "请确认是否继续？"
-    assert contract["graph_state"]["metadata"]["pending_interrupts"][0]["interrupt_id"] == "interrupt-1"
+    assert contract["graph_state"]["metadata"]["projection"]["run_status"] == "waiting"
     assert contract["planes"]["projection_only_fields"] == ["sessions.title/latest_message/status"]
     assert memory_metadata["recall_count"] == 1
     assert memory_metadata["recall_ids"] == ["mem-1"]
     assert memory_metadata["write_count"] == 1
     assert memory_metadata["write_ids"] == ["pending-1"]
-    assert memory_metadata["compacted"] is True
-    assert memory_metadata["last_compaction_at"] == "2026-03-29T12:00:00"
-    assert memory_metadata["summary_version"] == "ctx-v2"
 
 
 def test_apply_emitted_events_should_collect_browser_screenshot_artifact_refs() -> None:
     state = {
-        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
         "step_states": [],
-        "tool_invocations": {},
         "graph_metadata": {},
         "artifact_refs": [],
-        "audit_events": [],
         "pending_interrupt": {},
         "emitted_events": [
             ToolEvent(
@@ -493,24 +454,14 @@ def test_apply_emitted_events_should_collect_browser_screenshot_artifact_refs() 
 
 def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> None:
     state = {
-        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
         "pending_interrupt": {
             "kind": "input_text",
             "prompt": "还需要确认",
             "response_key": "message",
         },
-        "graph_metadata": {
-            "pending_interrupts": [
-                {
-                    "interrupt_id": "interrupt-1",
-                    "payload": {"kind": "input_text", "prompt": "还需要确认", "response_key": "message"},
-                }
-            ]
-        },
+        "graph_metadata": {},
         "step_states": [],
-        "tool_invocations": {},
         "artifact_refs": [],
-        "audit_events": [],
         "emitted_events": [DoneEvent(created_at=datetime(2026, 3, 22, 12, 0, 0))],
     }
 
@@ -518,7 +469,7 @@ def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> Non
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(reduced_state)
 
     assert reduced_state["pending_interrupt"] == {}
-    assert "pending_interrupts" not in runtime_metadata["graph_state_contract"]["graph_state"]["metadata"]
+    assert runtime_metadata["graph_state_contract"]["graph_state"]["metadata"]["projection"]["run_status"] == "completed"
 
 
 def test_apply_emitted_events_should_keep_plan_in_sync_after_step_completed() -> None:
@@ -550,13 +501,10 @@ def test_apply_emitted_events_should_keep_plan_in_sync_after_step_completed() ->
     completed_step.status = ExecutionStatus.COMPLETED
     completed_step.outcome = StepOutcome(done=True, summary="第一步完成")
     state = {
-        "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
         "plan": created_plan.model_copy(deep=True),
         "step_states": [],
-        "tool_invocations": {},
         "graph_metadata": {},
         "artifact_refs": [],
-        "audit_events": [],
         "pending_interrupt": {},
         "emitted_events": [
             PlanEvent(plan=created_plan.model_copy(deep=True), status=PlanEventStatus.CREATED),

@@ -32,6 +32,8 @@ from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
     PlannerReActLangGraphState,
+    get_graph_projection,
+    replace_graph_projection,
 )
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
@@ -227,8 +229,6 @@ class LangGraphRunEngine(RunEngine):
 
         configurable = invoke_config.get("configurable") or {}
         thread_id = str(configurable.get("thread_id") or self._session_id)
-        checkpoint_namespace = str(configurable.get("checkpoint_ns") or "")
-        checkpoint_id = str(configurable.get("checkpoint_id") or None)
         input_parts: List[Dict[str, Any]] = []
 
         try:
@@ -271,8 +271,6 @@ class LangGraphRunEngine(RunEngine):
                             and message.command.type == "continue_cancelled_task"
                     ),
                     thread_id=thread_id,
-                    checkpoint_namespace=checkpoint_namespace,
-                    checkpoint_id=checkpoint_id,
                 )
         except Exception as e:
             # 状态构建失败时必须降级，不能阻断主链路执行。
@@ -286,13 +284,10 @@ class LangGraphRunEngine(RunEngine):
                 error=str(e),
             )
             return {
-                "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
                 "session_id": self._session_id,
                 "user_id": self._user_id,
                 "run_id": run_id,
                 "thread_id": thread_id,
-                "checkpoint_ref_namespace": checkpoint_namespace,
-                "checkpoint_ref_id": checkpoint_id,
                 "user_message": message.message,
                 "input_parts": input_parts,
                 "message_window": [],
@@ -300,16 +295,12 @@ class LangGraphRunEngine(RunEngine):
                 "working_memory": {},
                 "retrieved_memories": [],
                 "pending_memory_writes": [],
-                "planner_local_memory": {},
-                "step_local_memory": {},
-                "summary_local_memory": {},
                 "recent_run_briefs": [],
                 "recent_attempt_briefs": [],
                 "session_open_questions": [],
                 "session_blockers": [],
                 "selected_artifacts": [],
                 "historical_artifact_refs": [],
-                "memory_context_version": None,
                 "plan": None,
                 "current_step_id": None,
                 "execution_count": 0,
@@ -317,13 +308,10 @@ class LangGraphRunEngine(RunEngine):
                 "last_executed_step": None,
                 "step_states": [],
                 "pending_interrupt": {},
-                "tool_invocations": {},
                 "graph_metadata": {},
                 "artifact_refs": [],
-                "audit_events": [],
                 "final_message": "",
                 "emitted_events": [],
-                "error": None,
             }
 
     @staticmethod
@@ -364,7 +352,7 @@ class LangGraphRunEngine(RunEngine):
         if pending_interrupt:
             return WorkflowRunStatus.WAITING
 
-        raw_status = str((state.get("graph_metadata") or {}).get("run_status") or "").strip()
+        raw_status = str(get_graph_projection(state.get("graph_metadata")).get("run_status") or "").strip()
         if raw_status:
             try:
                 return WorkflowRunStatus(raw_status)
@@ -377,8 +365,6 @@ class LangGraphRunEngine(RunEngine):
                     status=raw_status,
                 )
 
-        if str(state.get("error") or "").strip():
-            return WorkflowRunStatus.FAILED
         return run.status
 
     @classmethod
@@ -640,19 +626,12 @@ class LangGraphRunEngine(RunEngine):
             state: PlannerReActLangGraphState,
             wait_events: List[WaitEvent],
     ) -> PlannerReActLangGraphState:
-        graph_metadata = dict(state.get("graph_metadata") or {})
-        pending_interrupts = [
-            {
-                "interrupt_id": event.interrupt_id,
-                "payload": dict(event.payload or {}),
-            }
-            for event in wait_events
-        ]
-        graph_metadata["pending_interrupts"] = pending_interrupts
-        if len(wait_events) > 0 and wait_events[-1].interrupt_id:
-            graph_metadata["latest_interrupt_id"] = str(wait_events[-1].interrupt_id)
+        graph_metadata = state.get("graph_metadata")
         if len(wait_events) > 0:
-            graph_metadata["run_status"] = WorkflowRunStatus.WAITING.value
+            graph_metadata = replace_graph_projection(
+                graph_metadata,
+                {"run_status": WorkflowRunStatus.WAITING.value},
+            )
         return {
             **state,
             "pending_interrupt": (

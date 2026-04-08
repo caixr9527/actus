@@ -45,82 +45,192 @@ class StepState(TypedDict, total=False):
     step_index: int
     title: str
     description: str
-    objective_key: str
-    success_criteria: List[str]
     status: str
-    outcome: Optional[Dict[str, Any]]
-    error: Optional[str]
+    outcome: Optional["StepOutcomeState"]
 
 
-class ToolInvocationState(TypedDict, total=False):
-    """Graph 内部工具调用状态。"""
+class StepOutcomeState(TypedDict, total=False):
+    """Graph 内部步骤结果快照，仅保留真实消费字段。"""
 
-    invocation_id: str
-    event_id: str
-    tool_name: str
-    function_name: str
-    status: str
-    function_args: Dict[str, Any]
-    function_result: Optional[Any]
-    error: Optional[str]
-    created_at: str
-    updated_at: str
+    summary: str
+    produced_artifacts: List[str]
+    blockers: List[str]
+    facts_learned: List[str]
+    open_questions: List[str]
+
+
+class RetrievedMemoryState(TypedDict, total=False):
+    """Graph 内部召回记忆快照，仅保留 prompt/runtime 真正消费的字段。"""
+
+    id: str
+    memory_type: str
+    summary: str
+    content: Dict[str, Any]
+    tags: List[str]
+
+
+class GraphControlState(TypedDict, total=False):
+    """图运行中的控制状态。"""
+
+    entry_strategy: str
+    skip_replan_when_plan_finished: bool
+    step_reuse_hit: bool
+    wait_resume_action: str
+    continued_from_cancelled_plan: bool
+
+
+class GraphProjectionState(TypedDict, total=False):
+    """图运行结束后的投影状态。"""
+
+    run_status: str
+
+
+class GraphMetadataState(TypedDict, total=False):
+    """Graph 内部元状态，仅保留控制与投影字段。"""
+
+    control: GraphControlState
+    projection: GraphProjectionState
+
+
+def normalize_graph_metadata(raw: Any) -> GraphMetadataState:
+    """标准化 graph metadata，仅保留 control/projection 两个平面。"""
+    if not isinstance(raw, dict):
+        return {}
+
+    metadata: GraphMetadataState = {}
+    raw_control = raw.get("control")
+    if isinstance(raw_control, dict):
+        control: GraphControlState = {}
+        entry_strategy = str(raw_control.get("entry_strategy") or "").strip()
+        if entry_strategy:
+            control["entry_strategy"] = entry_strategy
+        if "skip_replan_when_plan_finished" in raw_control:
+            control["skip_replan_when_plan_finished"] = bool(raw_control.get("skip_replan_when_plan_finished"))
+        if "step_reuse_hit" in raw_control:
+            control["step_reuse_hit"] = bool(raw_control.get("step_reuse_hit"))
+        wait_resume_action = str(raw_control.get("wait_resume_action") or "").strip()
+        if wait_resume_action:
+            control["wait_resume_action"] = wait_resume_action
+        if "continued_from_cancelled_plan" in raw_control:
+            control["continued_from_cancelled_plan"] = bool(raw_control.get("continued_from_cancelled_plan"))
+        if control:
+            metadata["control"] = control
+
+    raw_projection = raw.get("projection")
+    if isinstance(raw_projection, dict):
+        projection: GraphProjectionState = {}
+        run_status = str(raw_projection.get("run_status") or "").strip()
+        if run_status:
+            projection["run_status"] = run_status
+        if projection:
+            metadata["projection"] = projection
+
+    return metadata
+
+
+def get_graph_control(metadata: Any) -> GraphControlState:
+    normalized = normalize_graph_metadata(metadata)
+    return dict(normalized.get("control") or {})
+
+
+def get_graph_projection(metadata: Any) -> GraphProjectionState:
+    normalized = normalize_graph_metadata(metadata)
+    return dict(normalized.get("projection") or {})
+
+
+def replace_graph_control(metadata: Any, control: Dict[str, Any]) -> GraphMetadataState:
+    normalized = normalize_graph_metadata(metadata)
+    next_metadata: GraphMetadataState = {}
+    next_control = dict(control or {})
+    next_projection = dict(normalized.get("projection") or {})
+    if next_control:
+        next_metadata["control"] = next_control
+    if next_projection:
+        next_metadata["projection"] = next_projection
+    return next_metadata
+
+
+def replace_graph_projection(metadata: Any, projection: Dict[str, Any]) -> GraphMetadataState:
+    normalized = normalize_graph_metadata(metadata)
+    next_metadata: GraphMetadataState = {}
+    next_control = dict(normalized.get("control") or {})
+    next_projection = dict(projection or {})
+    if next_control:
+        next_metadata["control"] = next_control
+    if next_projection:
+        next_metadata["projection"] = next_projection
+    return next_metadata
 
 
 class PlannerReActLangGraphState(TypedDict, total=False):
-    """LangGraph 状态对象（BE-LG-04 契约版本）。"""
+    """LangGraph 状态对象"""
 
-    schema_version: str
+    """当前会话 ID；用于绑定 session 级上下文、记忆命名空间和运行投影。"""
     session_id: str
+    """当前用户 ID；用于用户级长期记忆读写和运行归属。"""
     user_id: Optional[str]
+    """当前运行 ID；用于状态回写、事件归并和运行内复用标识。"""
     run_id: Optional[str]
+    """LangGraph 线程 ID；用于 checkpoint 隔离与恢复。"""
     thread_id: str
-    checkpoint_ref_namespace: str
-    checkpoint_ref_id: Optional[str]
+    """当前轮用户输入文本；用于入口路由、规划、执行和总结提示词。"""
     user_message: str
+    """当前轮输入附件/多模态片段；用于构建多模态提示和附件上下文。"""
     input_parts: List[Dict[str, Any]]
+    """当前线程的消息窗口快照；用于 prompt 上下文拼装和会话摘要压缩。"""
     message_window: List[Dict[str, Any]]
+    """当前线程的压缩对话摘要；用于跨多轮保留核心上下文。"""
     conversation_summary: str
+    """当前运行的工作记忆；用于沉淀 goal、事实、偏好、开放问题等可变上下文。"""
     working_memory: Dict[str, Any]
-    retrieved_memories: List[Dict[str, Any]]
+    """本轮召回的长期记忆快照；用于 prompt 注入和偏好提取。"""
+    retrieved_memories: List[RetrievedMemoryState]
+    """待写入长期记忆仓库的候选项；用于总结后统一治理、落库或重试。"""
     pending_memory_writes: List[Dict[str, Any]]
-    planner_local_memory: Dict[str, Any]
-    step_local_memory: Dict[str, Any]
-    summary_local_memory: Dict[str, Any]
+    """同会话近期成功运行摘要；用于补充已完成历史上下文。"""
     recent_run_briefs: List[Dict[str, Any]]
+    """同会话近期失败/取消运行摘要；用于补充失败尝试与阻塞上下文。"""
     recent_attempt_briefs: List[Dict[str, Any]]
+    """会话级待解决问题集合；用于 prompt 上下文和工作记忆初始化。"""
     session_open_questions: List[str]
+    """会话级阻塞项集合；用于 prompt 上下文补充历史受阻信息。"""
     session_blockers: List[str]
+    """当前运行明确选中/确认的产物引用；用于总结输出和历史上下文投影。"""
     selected_artifacts: List[str]
+    """历史运行产物引用；用于当前运行 prompt 中补充跨轮产物上下文。"""
     historical_artifact_refs: List[str]
-    memory_context_version: Optional[str]
+    """当前运行的计划快照；承载步骤编排，是执行主路径的核心状态。"""
     plan: Optional[Plan]
+    """当前待执行或等待恢复的步骤 ID；用于运行持久化、取消和恢复定位。"""
     current_step_id: Optional[str]
+    """当前运行已完成的步骤执行次数；用于执行上限控制和总结展示。"""
     execution_count: int
+    """当前运行允许的最大步骤执行次数；用于防止图内无限循环。"""
     max_execution_steps: int
+    """最近一次执行完成的步骤快照；用于总结、产物回填和后续重规划。"""
     last_executed_step: Optional[Step]
+    """步骤运行态 ledger；用于稳定步骤顺序、prompt 上下文和运行摘要聚合。"""
     step_states: List[StepState]
+    """当前待恢复的等待态载荷；用于 wait 路由、恢复校验和继续执行。"""
     pending_interrupt: Dict[str, Any]
-    tool_invocations: Dict[str, ToolInvocationState]
-    graph_metadata: Dict[str, Any]
+    """图内控制/投影元状态；用于路由控制和 run_status 投影。"""
+    graph_metadata: GraphMetadataState
+    """当前运行从事件层收敛出的原始产物引用集合；用于附件兜底解析。"""
     artifact_refs: List[str]
-    audit_events: List[BaseEvent]
+    """当前运行最新的面向用户结果文本；用于投影、总结和消息窗口收敛。"""
     final_message: str
+    """当前 graph 已发射但尚未完成外部归并的事件序列；用于状态归并和流式事件去重。"""
     emitted_events: List[BaseEvent]
-    error: Optional[str]
 
 
 class GraphStateContractMapper:
-    """BE-LG-04：Graph State 与领域对象映射器。"""
+    """Graph State 与领域对象映射器。"""
 
     GRAPH_STATE_FIELDS: tuple[str, ...] = (
-        "schema_version",
         "session_id",
         "user_id",
         "run_id",
         "thread_id",
-        "checkpoint_ref_namespace",
-        "checkpoint_ref_id",
         "user_message",
         "input_parts",
         "message_window",
@@ -128,16 +238,12 @@ class GraphStateContractMapper:
         "working_memory",
         "retrieved_memories",
         "pending_memory_writes",
-        "planner_local_memory",
-        "step_local_memory",
-        "summary_local_memory",
         "recent_run_briefs",
         "recent_attempt_briefs",
         "session_open_questions",
         "session_blockers",
         "selected_artifacts",
         "historical_artifact_refs",
-        "memory_context_version",
         "plan",
         "current_step_id",
         "execution_count",
@@ -145,9 +251,7 @@ class GraphStateContractMapper:
         "last_executed_step",
         "step_states",
         "pending_interrupt",
-        "tool_invocations",
         "graph_metadata",
-        "artifact_refs",
     )
 
     PROJECTION_ONLY_FIELDS: tuple[str, ...] = (
@@ -191,17 +295,116 @@ class GraphStateContractMapper:
 
     @classmethod
     def _step_to_state(cls, step: Step, step_index: int) -> StepState:
-        return {
+        step_state: StepState = {
             "step_id": step.id,
             "step_index": step_index,
             "title": step.title,
             "description": step.description,
-            "objective_key": step.objective_key,
-            "success_criteria": list(step.success_criteria or []),
             "status": step.status.value,
-            "outcome": cls._to_json_safe(step.outcome),
-            "error": step.error,
         }
+        normalized_outcome = cls._normalize_step_outcome_state(step.outcome)
+        if normalized_outcome is not None:
+            step_state["outcome"] = normalized_outcome
+        return step_state
+
+    @classmethod
+    def _normalize_step_outcome_state(cls, raw: Any) -> Optional[StepOutcomeState]:
+        if raw is None:
+            return None
+
+        if isinstance(raw, StepOutcome):
+            outcome = raw
+            normalized_outcome: StepOutcomeState = {}
+            summary = str(outcome.summary or "").strip()
+            if summary:
+                normalized_outcome["summary"] = summary
+            produced_artifacts = cls._normalize_string_list(outcome.produced_artifacts)
+            if produced_artifacts:
+                normalized_outcome["produced_artifacts"] = produced_artifacts
+            blockers = cls._normalize_string_list(outcome.blockers)
+            if blockers:
+                normalized_outcome["blockers"] = blockers
+            facts_learned = cls._normalize_string_list(outcome.facts_learned)
+            if facts_learned:
+                normalized_outcome["facts_learned"] = facts_learned
+            open_questions = cls._normalize_string_list(outcome.open_questions)
+            if open_questions:
+                normalized_outcome["open_questions"] = open_questions
+            return normalized_outcome or None
+
+        if not isinstance(raw, dict):
+            return None
+
+        normalized_outcome = {}
+        summary = str(raw.get("summary") or "").strip()
+        if summary:
+            normalized_outcome["summary"] = summary
+        produced_artifacts = cls._normalize_string_list(raw.get("produced_artifacts"))
+        if produced_artifacts:
+            normalized_outcome["produced_artifacts"] = produced_artifacts
+        blockers = cls._normalize_string_list(raw.get("blockers"))
+        if blockers:
+            normalized_outcome["blockers"] = blockers
+        facts_learned = cls._normalize_string_list(raw.get("facts_learned"))
+        if facts_learned:
+            normalized_outcome["facts_learned"] = facts_learned
+        open_questions = cls._normalize_string_list(raw.get("open_questions"))
+        if open_questions:
+            normalized_outcome["open_questions"] = open_questions
+        return normalized_outcome or None
+
+    @classmethod
+    def _normalize_step_states(cls, raw: Any) -> List[StepState]:
+        if not isinstance(raw, list):
+            return []
+        normalized_states: List[StepState] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                continue
+            step_id = str(item.get("step_id") or "").strip()
+            if not step_id:
+                continue
+            normalized_state: StepState = {
+                "step_id": step_id,
+                "step_index": int(item.get("step_index", index) or index),
+                "title": str(item.get("title") or "").strip(),
+                "description": str(item.get("description") or "").strip(),
+                "status": str(item.get("status") or "").strip(),
+            }
+            normalized_outcome = cls._normalize_step_outcome_state(item.get("outcome"))
+            if normalized_outcome is not None:
+                normalized_state["outcome"] = normalized_outcome
+            normalized_states.append(normalized_state)
+        return normalized_states
+
+    @classmethod
+    def _normalize_retrieved_memory(cls, raw: Any) -> Optional[RetrievedMemoryState]:
+        if not isinstance(raw, dict):
+            return None
+        memory_id = str(raw.get("id") or "").strip()
+        if not memory_id:
+            return None
+
+        content = raw.get("content") if isinstance(raw.get("content"), dict) else {}
+        tags = cls._normalize_string_list(raw.get("tags"))
+        return {
+            "id": memory_id,
+            "memory_type": str(raw.get("memory_type") or "").strip(),
+            "summary": str(raw.get("summary") or "").strip(),
+            "content": cls._normalize_dict_memory(content),
+            "tags": tags,
+        }
+
+    @classmethod
+    def _normalize_retrieved_memories(cls, raw: Any) -> List[RetrievedMemoryState]:
+        if not isinstance(raw, list):
+            return []
+        normalized_items: List[RetrievedMemoryState] = []
+        for item in raw:
+            normalized_item = cls._normalize_retrieved_memory(item)
+            if normalized_item is not None:
+                normalized_items.append(normalized_item)
+        return normalized_items
 
     @classmethod
     def _build_step_states_from_plan(cls, plan: Optional[Plan]) -> List[StepState]:
@@ -254,14 +457,14 @@ class GraphStateContractMapper:
         if outcome is None:
             return False
         return (
-            str(outcome.summary or "").strip() == "任务已取消"
-            and len(list(outcome.produced_artifacts or [])) == 0
-            and len(list(outcome.blockers or [])) == 0
-            and len(list(outcome.facts_learned or [])) == 0
-            and len(list(outcome.open_questions or [])) == 0
-            and not str(outcome.next_hint or "").strip()
-            and not str(outcome.reused_from_run_id or "").strip()
-            and not str(outcome.reused_from_step_id or "").strip()
+                str(outcome.summary or "").strip() == "任务已取消"
+                and len(list(outcome.produced_artifacts or [])) == 0
+                and len(list(outcome.blockers or [])) == 0
+                and len(list(outcome.facts_learned or [])) == 0
+                and len(list(outcome.open_questions or [])) == 0
+                and not str(outcome.next_hint or "").strip()
+                and not str(outcome.reused_from_run_id or "").strip()
+                and not str(outcome.reused_from_step_id or "").strip()
         )
 
     @classmethod
@@ -421,6 +624,10 @@ class GraphStateContractMapper:
         return normalize_wait_payload(raw)
 
     @classmethod
+    def _normalize_graph_metadata(cls, raw: Any) -> GraphMetadataState:
+        return normalize_graph_metadata(raw)
+
+    @classmethod
     def get_pending_interrupt(
             cls,
             state: Optional[PlannerReActLangGraphState],
@@ -428,42 +635,7 @@ class GraphStateContractMapper:
         """统一读取并标准化当前 checkpoint 中的等待态。"""
         if not isinstance(state, dict):
             return {}
-        pending_interrupt = cls._normalize_pending_interrupt(state.get("pending_interrupt"))
-        if pending_interrupt:
-            return pending_interrupt
-
-        graph_metadata = state.get("graph_metadata")
-        if not isinstance(graph_metadata, dict):
-            return {}
-        pending_interrupts = graph_metadata.get("pending_interrupts")
-        if not isinstance(pending_interrupts, list) or len(pending_interrupts) == 0:
-            return {}
-        first_interrupt = pending_interrupts[0]
-        if not isinstance(first_interrupt, dict):
-            return {}
-        return cls._normalize_pending_interrupt(first_interrupt.get("payload"))
-
-    @classmethod
-    def _normalize_tool_invocations(cls, raw: Any) -> Dict[str, ToolInvocationState]:
-        if not isinstance(raw, dict):
-            return {}
-        normalized: Dict[str, ToolInvocationState] = {}
-        for invocation_id, payload in raw.items():
-            if not isinstance(payload, dict):
-                continue
-            normalized[str(invocation_id)] = {
-                "invocation_id": str(payload.get("invocation_id") or invocation_id),
-                "event_id": str(payload.get("event_id") or ""),
-                "tool_name": str(payload.get("tool_name") or ""),
-                "function_name": str(payload.get("function_name") or ""),
-                "status": str(payload.get("status") or ""),
-                "function_args": payload.get("function_args") if isinstance(payload.get("function_args"), dict) else {},
-                "function_result": cls._to_json_safe(payload.get("function_result")),
-                "error": str(payload.get("error")) if payload.get("error") else None,
-                "created_at": str(payload.get("created_at") or datetime.now().isoformat()),
-                "updated_at": str(payload.get("updated_at") or datetime.now().isoformat()),
-            }
-        return normalized
+        return cls._normalize_pending_interrupt(state.get("pending_interrupt"))
 
     @staticmethod
     def _normalize_artifact_refs(raw: Any) -> List[str]:
@@ -532,21 +704,7 @@ class GraphStateContractMapper:
             cls,
             graph_state_from_metadata: Dict[str, Any],
     ) -> Dict[str, Any]:
-        pending_interrupt = cls._normalize_pending_interrupt(graph_state_from_metadata.get("pending_interrupt"))
-        if pending_interrupt:
-            return pending_interrupt
-
-        metadata = graph_state_from_metadata.get("metadata")
-        if not isinstance(metadata, dict):
-            return {}
-        pending_interrupts = metadata.get("pending_interrupts")
-        if not isinstance(pending_interrupts, list) or len(pending_interrupts) == 0:
-            return {}
-
-        first_interrupt = pending_interrupts[0]
-        if not isinstance(first_interrupt, dict):
-            return {}
-        return cls._normalize_pending_interrupt(first_interrupt.get("payload"))
+        return cls._normalize_pending_interrupt(graph_state_from_metadata.get("pending_interrupt"))
 
     @classmethod
     def build_initial_state(
@@ -560,8 +718,6 @@ class GraphStateContractMapper:
             input_parts: Optional[List[Dict[str, Any]]] = None,
             continue_cancelled_task: bool = False,
             thread_id: str = "",
-            checkpoint_namespace: str = "",
-            checkpoint_id: Optional[str] = None,
     ) -> PlannerReActLangGraphState:
         """构建 BE-LG-04 契约化初始状态。"""
         graph_state_from_metadata = cls._extract_contract_graph_state(run=run)
@@ -580,6 +736,8 @@ class GraphStateContractMapper:
         step_states = graph_state_from_metadata.get("step_states")
         if not isinstance(step_states, list) or plan_resumed_from_cancelled:
             step_states = cls._build_step_states_from_plan(plan=plan)
+        else:
+            step_states = cls._normalize_step_states(step_states)
 
         current_step_id = graph_state_from_metadata.get("current_step_id")
         if current_step_id is not None:
@@ -628,16 +786,13 @@ class GraphStateContractMapper:
         if not conversation_summary and session_context_snapshot is not None:
             conversation_summary = cls._normalize_text(session_context_snapshot.summary_text)
 
-        graph_metadata = (
-            cls._normalize_dict_memory(graph_state_from_metadata.get("metadata"))
-            if isinstance(graph_state_from_metadata.get("metadata"), dict)
-            else {}
-        )
+        graph_metadata = cls._normalize_graph_metadata(graph_state_from_metadata.get("metadata"))
         if plan_resumed_from_cancelled:
-            graph_metadata["continued_from_cancelled_plan"] = True
+            control = dict(graph_metadata.get("control") or {})
+            control["continued_from_cancelled_plan"] = True
+            graph_metadata["control"] = control
 
         return {
-            "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
             "session_id": session.id,
             "user_id": (
                 run.user_id
@@ -646,8 +801,6 @@ class GraphStateContractMapper:
             ),
             "run_id": run.id if run is not None else session.current_run_id,
             "thread_id": thread_id,
-            "checkpoint_ref_namespace": checkpoint_namespace,
-            "checkpoint_ref_id": checkpoint_id,
             "user_message": user_message,
             "input_parts": cls._normalize_input_parts(input_parts),
             "message_window": cls._append_current_user_message(
@@ -657,22 +810,15 @@ class GraphStateContractMapper:
             ),
             "conversation_summary": conversation_summary,
             "working_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("working_memory")),
-            "retrieved_memories": cls._normalize_list_memory(graph_state_from_metadata.get("retrieved_memories")),
+            "retrieved_memories": cls._normalize_retrieved_memories(
+                graph_state_from_metadata.get("retrieved_memories")),
             "pending_memory_writes": cls._normalize_list_memory(graph_state_from_metadata.get("pending_memory_writes")),
-            "planner_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("planner_local_memory")),
-            "step_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("step_local_memory")),
-            "summary_local_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("summary_local_memory")),
             "recent_run_briefs": recent_run_briefs,
             "recent_attempt_briefs": recent_attempt_briefs,
             "session_open_questions": session_open_questions,
             "session_blockers": session_blockers,
             "selected_artifacts": selected_artifacts,
             "historical_artifact_refs": historical_artifact_refs,
-            "memory_context_version": (
-                str(graph_state_from_metadata.get("memory_context_version"))
-                if graph_state_from_metadata.get("memory_context_version") is not None
-                else None
-            ),
             "plan": plan,
             "current_step_id": current_step_id,
             "execution_count": int(graph_state_from_metadata.get("execution_count") or 0),
@@ -682,15 +828,12 @@ class GraphStateContractMapper:
             ),
             "step_states": step_states,
             "pending_interrupt": cls._extract_pending_interrupt_from_metadata(graph_state_from_metadata),
-            "tool_invocations": cls._normalize_tool_invocations(graph_state_from_metadata.get("tool_invocations")),
             "graph_metadata": graph_metadata,
             "artifact_refs": cls._normalize_artifact_refs(
                 (run.runtime_metadata or {}).get("artifacts") if run is not None else []
             ),
-            "audit_events": [],
             "emitted_events": [],
             "final_message": "",
-            "error": None,
         }
 
     @classmethod
@@ -734,7 +877,8 @@ class GraphStateContractMapper:
                 return updated_plan
 
         insert_index = cls._get_step_index_from_states(step_states=step_states, step_id=step_id)
-        normalized_index = len(updated_plan.steps) if insert_index is None else max(0, min(insert_index, len(updated_plan.steps)))
+        normalized_index = len(updated_plan.steps) if insert_index is None else max(0, min(insert_index,
+                                                                                           len(updated_plan.steps)))
         updated_plan.steps.insert(normalized_index, step.model_copy(deep=True))
         return updated_plan
 
@@ -781,80 +925,42 @@ class GraphStateContractMapper:
         events = list(state.get("emitted_events") or [])
         next_state: PlannerReActLangGraphState = dict(state)
         plan = next_state.get("plan")
-        step_states = list(next_state.get("step_states") or [])
-        tool_invocations = dict(next_state.get("tool_invocations") or {})
-        graph_metadata = dict(next_state.get("graph_metadata") or {})
+        step_states = cls._normalize_step_states(next_state.get("step_states"))
+        graph_metadata = cls._normalize_graph_metadata(next_state.get("graph_metadata"))
+        control = dict(graph_metadata.get("control") or {})
+        projection = dict(graph_metadata.get("projection") or {})
         artifact_refs = list(next_state.get("artifact_refs") or [])
         pending_interrupt = cls._normalize_pending_interrupt(next_state.get("pending_interrupt"))
-        waiting_for_replan = graph_metadata.get("wait_resume_action") == "replan"
-
-        audit_events = list(next_state.get("audit_events") or [])
-        seen_event_ids = {str(event.id) for event in audit_events}
+        waiting_for_replan = control.get("wait_resume_action") == "replan"
 
         for event in events:
             artifact_refs.extend(cls._extract_artifact_refs_from_event(event))
 
-            if str(event.id) not in seen_event_ids:
-                audit_events.append(event)
-                seen_event_ids.add(str(event.id))
-
             if isinstance(event, PlanEvent):
                 plan = event.plan.model_copy(deep=True)
                 step_states = cls._build_step_states_from_plan(plan)
-                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(plan)
-                graph_metadata["latest_plan_event_id"] = str(event.id)
+                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(
+                    plan)
                 continue
 
             if isinstance(event, StepEvent):
                 step_states = cls._upsert_step_state(step_states=step_states, step=event.step)
                 plan = cls._upsert_step_into_plan(plan=plan, step=event.step, step_states=step_states)
-                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(plan)
-                graph_metadata["latest_step_event_id"] = str(event.id)
-                continue
-
-            if isinstance(event, ToolEvent):
-                invocation_id = event.tool_call_id or str(event.id)
-                function_result = (
-                    event.function_result.model_dump(mode="json")
-                    if event.function_result is not None
-                    else None
-                )
-                tool_invocations[invocation_id] = {
-                    "invocation_id": invocation_id,
-                    "event_id": str(event.id),
-                    "tool_name": event.tool_name,
-                    "function_name": event.function_name,
-                    "status": event.status.value,
-                    "function_args": cls._to_json_safe(event.function_args or {}),
-                    "function_result": cls._to_json_safe(function_result),
-                    "error": None if event.function_result is not None else "tool_result_missing",
-                    "created_at": cls._to_iso(event.created_at),
-                    "updated_at": cls._to_iso(event.created_at),
-                }
+                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(
+                    plan)
                 continue
 
             if isinstance(event, WaitEvent):
                 pending_interrupt = cls._normalize_pending_interrupt(event.payload)
-                graph_metadata["latest_wait_event_id"] = str(event.id)
-                graph_metadata["pending_interrupts"] = [
-                    {
-                        "interrupt_id": event.interrupt_id,
-                        "payload": cls._to_json_safe(pending_interrupt),
-                    }
-                ]
-                if event.interrupt_id:
-                    graph_metadata["latest_interrupt_id"] = str(event.interrupt_id)
+                projection["run_status"] = "waiting"
                 continue
 
             if isinstance(event, ErrorEvent):
-                graph_metadata["run_status"] = "failed"
-                graph_metadata["last_error"] = event.error
-                graph_metadata["last_error_event_id"] = str(event.id)
+                projection["run_status"] = "failed"
                 continue
 
             if isinstance(event, DoneEvent):
-                graph_metadata["run_status"] = "completed"
-                graph_metadata["last_done_event_id"] = str(event.id)
+                projection["run_status"] = "completed"
                 pending_interrupt = {}
 
         next_state["plan"] = plan
@@ -873,10 +979,13 @@ class GraphStateContractMapper:
 
         next_state["step_states"] = step_states
         next_state["pending_interrupt"] = pending_interrupt
-        next_state["tool_invocations"] = tool_invocations
-        next_state["graph_metadata"] = graph_metadata
+        next_graph_metadata: GraphMetadataState = {}
+        if control:
+            next_graph_metadata["control"] = control
+        if projection:
+            next_graph_metadata["projection"] = projection
+        next_state["graph_metadata"] = next_graph_metadata
         next_state["artifact_refs"] = list(dict.fromkeys(artifact_refs))
-        next_state["audit_events"] = audit_events
         return next_state
 
     @classmethod
@@ -885,34 +994,19 @@ class GraphStateContractMapper:
         events = list(state.get("emitted_events") or [])
         last_event = events[-1] if events else None
         pending_interrupt = cls._normalize_pending_interrupt(state.get("pending_interrupt"))
-        graph_metadata = cls._normalize_dict_memory(state.get("graph_metadata"))
-
-        if pending_interrupt:
-            graph_metadata["pending_interrupts"] = [
-                {
-                    "interrupt_id": graph_metadata.get("latest_interrupt_id"),
-                    "payload": cls._to_json_safe(pending_interrupt),
-                }
-            ]
-        else:
-            graph_metadata.pop("pending_interrupts", None)
+        graph_metadata = cls._normalize_graph_metadata(state.get("graph_metadata"))
+        step_states = cls._normalize_step_states(state.get("step_states"))
+        retrieved_memories = cls._normalize_retrieved_memories(state.get("retrieved_memories"))
 
         return {
             "memory": {
-                "recall_count": len(state.get("retrieved_memories") or []),
-                "recall_ids": cls._extract_memory_ids(list(state.get("retrieved_memories") or [])),
+                "recall_count": len(retrieved_memories),
+                "recall_ids": cls._extract_memory_ids(retrieved_memories),
                 "write_count": len(state.get("pending_memory_writes") or []),
                 "write_ids": cls._extract_memory_ids(list(state.get("pending_memory_writes") or [])),
-                "compacted": bool(graph_metadata.get("memory_compacted", False)),
-                "last_compaction_at": graph_metadata.get("memory_last_compaction_at"),
-                "summary_version": state.get("memory_context_version"),
-                "persisted_write_count": int(graph_metadata.get("memory_write_count") or 0),
-                "persisted_write_ids": cls._to_json_safe(graph_metadata.get("memory_write_ids") or []),
             },
             "graph_state_contract": {
-                "schema_version": str(
-                    state.get("schema_version") or GRAPH_STATE_CONTRACT_SCHEMA_VERSION
-                ),
+                "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
                 "planes": {
                     "graph_state_fields": list(cls.GRAPH_STATE_FIELDS),
                     "projection_only_fields": list(cls.PROJECTION_ONLY_FIELDS),
@@ -924,32 +1018,25 @@ class GraphStateContractMapper:
                     "user_id": state.get("user_id"),
                     "run_id": state.get("run_id"),
                     "thread_id": state.get("thread_id"),
-                    "checkpoint_ref_namespace": state.get("checkpoint_ref_namespace"),
-                    "checkpoint_ref_id": state.get("checkpoint_ref_id"),
                     "input_parts": cls._to_json_safe(state.get("input_parts") or []),
                     "message_window": cls._to_json_safe(state.get("message_window") or []),
                     "conversation_summary": str(state.get("conversation_summary") or ""),
                     "working_memory": cls._to_json_safe(state.get("working_memory") or {}),
-                    "retrieved_memories": cls._to_json_safe(state.get("retrieved_memories") or []),
+                    "retrieved_memories": cls._to_json_safe(retrieved_memories),
                     "pending_memory_writes": cls._to_json_safe(state.get("pending_memory_writes") or []),
-                    "planner_local_memory": cls._to_json_safe(state.get("planner_local_memory") or {}),
-                    "step_local_memory": cls._to_json_safe(state.get("step_local_memory") or {}),
-                    "summary_local_memory": cls._to_json_safe(state.get("summary_local_memory") or {}),
                     "recent_run_briefs": cls._to_json_safe(state.get("recent_run_briefs") or []),
                     "recent_attempt_briefs": cls._to_json_safe(state.get("recent_attempt_briefs") or []),
                     "session_open_questions": cls._to_json_safe(state.get("session_open_questions") or []),
                     "session_blockers": cls._to_json_safe(state.get("session_blockers") or []),
                     "selected_artifacts": cls._to_json_safe(state.get("selected_artifacts") or []),
                     "historical_artifact_refs": cls._to_json_safe(state.get("historical_artifact_refs") or []),
-                    "memory_context_version": state.get("memory_context_version"),
                     "plan": cls._to_json_safe(state.get("plan")),
                     "current_step_id": state.get("current_step_id"),
                     "execution_count": int(state.get("execution_count") or 0),
                     "max_execution_steps": int(state.get("max_execution_steps") or 20),
                     "last_executed_step": cls._to_json_safe(state.get("last_executed_step")),
-                    "step_states": cls._to_json_safe(state.get("step_states") or []),
+                    "step_states": cls._to_json_safe(step_states),
                     "pending_interrupt": cls._to_json_safe(pending_interrupt),
-                    "tool_invocations": cls._to_json_safe(state.get("tool_invocations") or {}),
                     "metadata": cls._to_json_safe(graph_metadata),
                 },
                 "audit": {
@@ -961,3 +1048,8 @@ class GraphStateContractMapper:
             },
             "artifacts": cls._to_json_safe(state.get("artifact_refs") or []),
         }
+
+
+def normalize_retrieved_memories(raw: Any) -> List[RetrievedMemoryState]:
+    """统一裁剪 graph state 中的召回记忆快照。"""
+    return GraphStateContractMapper._normalize_retrieved_memories(raw)

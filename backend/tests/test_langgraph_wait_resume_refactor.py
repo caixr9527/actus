@@ -149,24 +149,7 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
                         {"label": "AI 人工智能算法工程师体系课", "resume_value": "AI 人工智能算法工程师体系课"},
                     ],
                 },
-                "step_local_memory": {
-                    "current_step_id": "step-1",
-                    "waiting_step_id": "step-1",
-                },
-                "graph_metadata": {
-                    "pending_interrupts": [
-                        {
-                            "interrupt_id": "interrupt-1",
-                            "payload": {
-                                "kind": "select",
-                                "prompt": "请选择一门课程",
-                                "options": [
-                                    {"label": "AI 人工智能算法工程师体系课", "resume_value": "AI 人工智能算法工程师体系课"},
-                                ],
-                            },
-                        }
-                    ]
-                },
+                "graph_metadata": {},
                 "message_window": [],
                 "working_memory": {},
                 "execution_count": 0,
@@ -181,7 +164,7 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     assert next_state["last_executed_step"].id == "step-1"
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert "已收到用户选择" in str(next_state["last_executed_step"].outcome.summary)
-    assert next_state["graph_metadata"].get("pending_interrupts") is None
+    assert next_state["graph_metadata"] == {}
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
 
 
@@ -224,10 +207,6 @@ def test_wait_for_human_node_should_cancel_waiting_step_and_replan_after_confirm
                     "confirm_label": "继续",
                     "cancel_label": "取消",
                 },
-                "step_local_memory": {
-                    "current_step_id": "step-1",
-                    "waiting_step_id": "step-1",
-                },
                 "graph_metadata": {},
                 "message_window": [],
                 "working_memory": {},
@@ -241,7 +220,7 @@ def test_wait_for_human_node_should_cancel_waiting_step_and_replan_after_confirm
     assert next_state["current_step_id"] is None
     assert next_state["last_executed_step"].id == "step-1"
     assert next_state["last_executed_step"].status == ExecutionStatus.CANCELLED
-    assert next_state["graph_metadata"]["wait_resume_action"] == "replan"
+    assert next_state["graph_metadata"]["control"]["wait_resume_action"] == "replan"
     assert "已被用户取消" in str(next_state["last_executed_step"].outcome.summary)
     assert route_after_wait(next_state) == "replan"
 
