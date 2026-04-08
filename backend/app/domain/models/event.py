@@ -12,6 +12,12 @@ from typing import Literal, List, Any, Union, Optional, Dict, Annotated
 
 from pydantic import BaseModel, Field
 
+from .browser import (
+    BrowserActionableElement,
+    BrowserCardItem,
+    BrowserMainContentResult,
+    BrowserPageStructuredResult,
+)
 from .file import File
 from .plan import Plan, Step
 from .search import FetchedPage, SearchResultItem
@@ -79,7 +85,19 @@ class MessageEvent(BaseEvent):
 
 class BrowserToolContent(BaseModel):
     """浏览器工具扩展内容"""
-    screenshot: str  # 浏览器快照截图
+    screenshot: str = ""  # 浏览器快照截图
+    page_type: str = ""
+    url: str = ""
+    title: str = ""
+    structured_page: Optional[BrowserPageStructuredResult] = None
+    main_content: Optional[BrowserMainContentResult] = None
+    cards: List[BrowserCardItem] = Field(default_factory=list)
+    actionable_elements: List[BrowserActionableElement] = Field(default_factory=list)
+    matched_link_text: str = ""
+    matched_link_url: str = ""
+    matched_link_selector: str = ""
+    matched_link_index: Optional[int] = None
+    degrade_reason: str = ""
 
 
 class SearchToolContent(BaseModel):

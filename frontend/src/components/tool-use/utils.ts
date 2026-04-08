@@ -78,6 +78,8 @@ export function getFriendlyToolLabel(
   const command = getArg(args, 'command', 'cmd', 'script')
   const url = getArg(args, 'url', 'href', 'link')
   const key = getArg(args, 'key')
+  const text = getArg(args, 'text')
+  const index = typeof args.index === 'number' ? String(args.index) : ''
 
   if (name === 'file') {
     switch (fn) {
@@ -118,6 +120,18 @@ export function getFriendlyToolLabel(
     switch (fn) {
       case 'browser_view':
         return isEnglish ? 'Viewing current page' : '正在查看当前页面'
+      case 'browser_read_current_page_structured':
+        return isEnglish ? 'Analyzing current page structure' : '正在分析当前页面结构'
+      case 'browser_extract_main_content':
+        return isEnglish ? 'Extracting main page content' : '正在提取页面正文'
+      case 'browser_extract_cards':
+        return isEnglish ? 'Extracting candidate cards' : '正在提取候选卡片'
+      case 'browser_find_link_by_text':
+        return text
+          ? isEnglish ? `Locating target link ${truncate(text, 60)}` : `正在定位目标链接 ${truncate(text, 60)}`
+          : isEnglish ? 'Locating target link' : '正在定位目标链接'
+      case 'browser_find_actionable_elements':
+        return isEnglish ? 'Finding actionable elements' : '正在识别可交互元素'
       case 'browser_navigate':
         return url
           ? isEnglish ? `Opening page ${truncate(url, 80)}` : `正在打开页面 ${truncate(url, 80)}`
@@ -127,7 +141,9 @@ export function getFriendlyToolLabel(
           ? isEnglish ? `Restarting browser and opening ${truncate(url, 80)}` : `正在重启浏览器并打开 ${truncate(url, 80)}`
           : isEnglish ? 'Restarting browser' : '正在重启浏览器'
       case 'browser_click':
-        return isEnglish ? 'Clicking page element' : '正在点击页面元素'
+        return index
+          ? isEnglish ? `Clicking page element #${index}` : `正在点击页面元素 #${index}`
+          : isEnglish ? 'Clicking page element' : '正在点击页面元素'
       case 'browser_input':
         return isEnglish ? 'Typing input' : '正在输入内容'
       case 'browser_move_mouse':

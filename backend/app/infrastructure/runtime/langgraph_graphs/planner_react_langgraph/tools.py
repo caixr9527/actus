@@ -10,8 +10,22 @@ import re
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from pydantic import BaseModel
+
 from app.domain.external import LLM
-from app.domain.models import SearchResults, Step, ToolEvent, ToolEventStatus, ToolResult
+from app.domain.models import (
+    BrowserActionableElementsResult,
+    BrowserCardExtractionResult,
+    BrowserLinkMatchResult,
+    BrowserMainContentResult,
+    BrowserPageStructuredResult,
+    BrowserPageType,
+    SearchResults,
+    Step,
+    ToolEvent,
+    ToolEventStatus,
+    ToolResult,
+)
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.runtime.normalizers import truncate_text
 from app.domain.services.tools import BaseTool
@@ -24,6 +38,8 @@ from .settings import (
     ABSOLUTE_PATH_PATTERN,
     ACTION_PATTERN,
     ASK_USER_FUNCTION_NAME,
+    BROWSER_ATOMIC_FUNCTION_NAMES,
+    BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     BROWSER_INTERACTION_PATTERN,
     BROWSER_NO_PROGRESS_LIMIT,
     BROWSER_PROGRESS_FUNCTIONS,
@@ -176,6 +192,8 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
         # 搜索类优先，浏览器类后置：多数检索任务先走 search 更快。
         if "search" in function_name:
             return 0, function_name
+        if function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES:
+            return 10, function_name
         if function_name.startswith("browser_"):
             return 80, function_name
         return 20, function_name
@@ -214,7 +232,19 @@ def classify_step_task_mode(step: Step) -> str:
         if any(name in signals["text"] for name in
                ("browser_click", "browser_input", "browser_scroll", "browser_press_key", "browser_select_option")):
             scores["browser_interaction"] += 3
-        if any(name in signals["text"] for name in ("browser_view", "browser_navigate", "browser_restart")):
+        if any(
+                name in signals["text"]
+                for name in (
+                        "browser_view",
+                        "browser_navigate",
+                        "browser_restart",
+                        "browser_read_current_page_structured",
+                        "browser_extract_main_content",
+                        "browser_extract_cards",
+                        "browser_find_link_by_text",
+                        "browser_find_actionable_elements",
+                )
+        ):
             scores["web_reading"] += 2
         if "shell_" in signals["text"]:
             scores["coding"] += 2
@@ -268,6 +298,8 @@ def _tool_call_priority(
         return -50 + preferred_names.index(normalized_name)
     if "search" in normalized_name:
         return 0
+    if normalized_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES:
+        return 10
     if normalized_name == NOTIFY_USER_FUNCTION_NAME:
         return 90
     if normalized_name == ASK_USER_FUNCTION_NAME:
@@ -407,6 +439,8 @@ def _truncate_tool_text(value: Any, *, max_chars: int = TOOL_RESULT_MAX_TEXT_CHA
 def _compact_tool_value(value: Any, *, depth: int = 0) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
+    if isinstance(value, BaseModel):
+        return _compact_tool_value(value.model_dump(mode="json"), depth=depth)
     if isinstance(value, str):
         return _truncate_tool_text(value)
     if depth >= 2:
@@ -458,6 +492,380 @@ def _build_browser_observation_fingerprint(tool_result: ToolResult) -> str:
             "message": _truncate_tool_text(getattr(tool_result, "message", ""), max_chars=200),
             "data": _compact_tool_value(result_data),
         }
+    )
+
+
+def _build_browser_route_state_key(
+        *,
+        browser_page_type: str,
+        browser_url: str,
+        browser_observation_fingerprint: str,
+) -> str:
+    # 这里把“页面类型 + 当前 URL + 最近一次浏览器观察结果”压成一个稳定 key。
+    # 这个 key 的职责不是表达“信息已经完整”，而是表达“当前失败应该绑定在哪个页面状态上”。
+    # 即使三项里有空字符串，它仍然有意义，因为“尚未读到页面结构/URL/观察结果”本身也是一个明确状态。
+    # 这样首轮高阶工具失败时，会先被收敛到“初始空状态”；一旦后续读到了 URL 或页面观察变化，key 就会变化，失败封禁也会自然失效。
+    return _hash_payload(
+        {
+            # page_type 用来区分正文页、列表页等不同路由状态，避免跨页面类型误复用失败记录。
+            "page_type": browser_page_type.strip().lower(),
+            # url 用来区分至少最常见的页面变化场景；只要跳到新页面，这里的 key 就会变化。
+            "url": browser_url.strip(),
+            # observation 记录最近一次浏览器高阶观察结果的摘要；URL 不变但页面内容变化时，也能触发 key 变化。
+            "observation": browser_observation_fingerprint.strip(),
+        }
+    )
+
+
+def _build_browser_high_level_failure_key(
+        *,
+        function_name: str,
+        function_args: Dict[str, Any],
+        browser_route_state_key: str,
+) -> str:
+    return _hash_payload(
+        {
+            "function_name": function_name.strip().lower(),
+            "page": browser_route_state_key,
+            "args": _compact_tool_value(function_args),
+        }
+    )
+
+
+def _is_browser_high_level_temporarily_blocked(
+        *,
+        function_name: str,
+        function_args: Dict[str, Any],
+        browser_route_state_key: str,
+        failed_high_level_keys: set[str],
+) -> bool:
+    normalized_function_name = function_name.strip().lower()
+    if normalized_function_name not in BROWSER_HIGH_LEVEL_FUNCTION_NAMES:
+        return False
+    return _build_browser_high_level_failure_key(
+        function_name=normalized_function_name,
+        function_args=function_args,
+        browser_route_state_key=browser_route_state_key,
+    ) in failed_high_level_keys
+
+
+def _collect_temporarily_blocked_browser_high_level_function_names(
+        *,
+        browser_route_state_key: str,
+        failed_high_level_keys: set[str],
+) -> set[str]:
+    return {
+        function_name
+        for function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES
+        if _is_browser_high_level_temporarily_blocked(
+            function_name=function_name,
+            function_args={},
+            browser_route_state_key=browser_route_state_key,
+            failed_high_level_keys=failed_high_level_keys,
+        )
+    }
+
+
+def _build_browser_preferred_function_names(
+        *,
+        task_mode: str,
+        available_function_names: set[str],
+        browser_page_type: str,
+        browser_structured_ready: bool,
+        browser_main_content_ready: bool,
+        browser_cards_ready: bool,
+        browser_link_match_ready: bool,
+        browser_actionables_ready: bool,
+        failed_high_level_functions: set[str],
+) -> Tuple[str, ...]:
+    is_listing_page = browser_page_type in {
+        BrowserPageType.LISTING.value,
+        BrowserPageType.SEARCH_RESULTS.value,
+    }
+
+    ordered_candidates: Tuple[str, ...] = ()
+    if task_mode == "web_reading":
+        if not browser_structured_ready:
+            ordered_candidates = ("browser_read_current_page_structured",)
+        elif is_listing_page:
+            if not browser_cards_ready:
+                ordered_candidates = ("browser_extract_cards",)
+            elif not browser_link_match_ready:
+                ordered_candidates = ("browser_find_link_by_text",)
+            else:
+                ordered_candidates = ("browser_click", "browser_navigate")
+        elif not browser_main_content_ready:
+            ordered_candidates = ("browser_extract_main_content",)
+    elif task_mode == "browser_interaction":
+        if not browser_structured_ready:
+            ordered_candidates = ("browser_read_current_page_structured",)
+        elif is_listing_page:
+            if not browser_cards_ready:
+                ordered_candidates = ("browser_extract_cards",)
+            elif not browser_link_match_ready:
+                ordered_candidates = ("browser_find_link_by_text",)
+            else:
+                ordered_candidates = ("browser_click", "browser_navigate")
+        elif not browser_actionables_ready:
+            ordered_candidates = ("browser_find_actionable_elements",)
+    else:
+        return ()
+
+    return tuple(
+        function_name
+        for function_name in ordered_candidates
+        if function_name in available_function_names and function_name not in failed_high_level_functions
+    )
+
+
+def _normalize_browser_page_type(value: Any) -> str:
+    if isinstance(value, BrowserPageType):
+        return value.value
+    normalized_value = getattr(value, "value", value)
+    return str(normalized_value or "").strip().lower()
+
+
+def _extract_browser_tool_state(tool_result: ToolResult) -> Dict[str, Any]:
+    data = tool_result.data
+    if isinstance(
+            data,
+            (
+                    BrowserPageStructuredResult,
+                    BrowserMainContentResult,
+                    BrowserCardExtractionResult,
+                    BrowserActionableElementsResult,
+            ),
+    ):
+        return {
+            "url": str(data.url or "").strip(),
+            "title": str(data.title or "").strip(),
+            "page_type": _normalize_browser_page_type(data.page_type),
+            "selector": "",
+            "index": None,
+        }
+    if isinstance(data, BrowserLinkMatchResult):
+        return {
+            "url": str(data.url or "").strip(),
+            "title": str(data.matched_text or "").strip(),
+            "page_type": "",
+            "selector": str(data.selector or "").strip(),
+            "index": data.index,
+        }
+    if isinstance(data, dict):
+        return {
+            "url": str(data.get("url") or "").strip(),
+            "title": str(data.get("title") or data.get("matched_text") or "").strip(),
+            "page_type": _normalize_browser_page_type(data.get("page_type")),
+            "selector": str(data.get("selector") or "").strip(),
+            "index": data.get("index"),
+        }
+    return {"url": "", "title": "", "page_type": "", "selector": "", "index": None}
+
+
+def _build_browser_atomic_allowlist(
+        *,
+        task_mode: str,
+        browser_page_type: str,
+        browser_structured_ready: bool,
+        browser_link_match_ready: bool,
+        browser_actionables_ready: bool,
+        failed_high_level_functions: set[str],
+) -> Tuple[str, ...]:
+    # 这里不再保留 browser_cards_ready 这种未使用参数。
+    # 原子工具是否放行，当前只依赖：
+    # 1. 页面类型是否已经判明
+    # 2. 链接是否已经匹配完成
+    # 3. 可交互元素是否已经提取完成
+    # 4. 哪些高阶能力在当前页面状态下失败过
+    # 没有参与判断的状态就直接删除，避免函数签名和真实逻辑不一致。
+    is_listing_page = browser_page_type in {
+        BrowserPageType.LISTING.value,
+        BrowserPageType.SEARCH_RESULTS.value,
+    }
+
+    if task_mode == "web_reading":
+        if not browser_structured_ready and "browser_read_current_page_structured" in failed_high_level_functions:
+            return ("browser_view", "browser_scroll_down", "browser_scroll_up")
+        if is_listing_page:
+            if browser_link_match_ready:
+                return ("browser_click", "browser_navigate")
+            if any(
+                    function_name in failed_high_level_functions
+                    for function_name in (
+                            "browser_extract_cards",
+                            "browser_read_current_page_structured",
+                    )
+            ):
+                return ("browser_view", "browser_scroll_down", "browser_scroll_up", "browser_navigate")
+            return ()
+        if any(
+                function_name in failed_high_level_functions
+                for function_name in (
+                        "browser_extract_main_content",
+                        "browser_read_current_page_structured",
+                )
+        ):
+            return ("browser_view", "browser_scroll_down", "browser_scroll_up")
+        return ()
+
+    if task_mode == "browser_interaction":
+        if not browser_structured_ready and "browser_read_current_page_structured" in failed_high_level_functions:
+            return BROWSER_ATOMIC_FUNCTION_NAMES
+        if is_listing_page:
+            if browser_link_match_ready:
+                return ("browser_click", "browser_navigate")
+            if any(
+                    function_name in failed_high_level_functions
+                    for function_name in (
+                            "browser_extract_cards",
+                            "browser_read_current_page_structured",
+                    )
+            ):
+                return BROWSER_ATOMIC_FUNCTION_NAMES
+            return ()
+        if browser_actionables_ready or any(
+                function_name in failed_high_level_functions
+                for function_name in (
+                        "browser_find_actionable_elements",
+                        "browser_read_current_page_structured",
+                )
+        ):
+            return BROWSER_ATOMIC_FUNCTION_NAMES
+        return ()
+
+    return ()
+
+
+def _build_browser_capability_gap_allowlist(
+        *,
+        task_mode: str,
+) -> Tuple[str, ...]:
+    if task_mode == "web_reading":
+        return ("browser_view", "browser_navigate", "browser_restart", "browser_scroll_down", "browser_scroll_up")
+    if task_mode == "browser_interaction":
+        return BROWSER_ATOMIC_FUNCTION_NAMES
+    return ()
+
+
+def _build_browser_route_block_message(
+        *,
+        task_mode: str,
+        function_name: str,
+        browser_page_type: str,
+        browser_structured_ready: bool,
+        browser_cards_ready: bool,
+        browser_link_match_ready: bool,
+        browser_actionables_ready: bool,
+        last_browser_route_url: str,
+        last_browser_route_selector: str,
+        last_browser_route_index: Optional[int],
+) -> str:
+    is_listing_page = browser_page_type in {
+        BrowserPageType.LISTING.value,
+        BrowserPageType.SEARCH_RESULTS.value,
+    }
+    normalized_function_name = function_name.strip().lower()
+
+    if not browser_structured_ready:
+        return "当前步骤属于浏览器任务，请先调用 browser_read_current_page_structured 判断页面类型，再决定后续动作。"
+
+    if is_listing_page:
+        if not browser_cards_ready:
+            return "当前页面是列表页，请先调用 browser_extract_cards 提取候选卡片，不要直接执行原子浏览器动作。"
+        if not browser_link_match_ready:
+            return "当前页面是列表页，已提取候选卡片，请先调用 browser_find_link_by_text 选定目标，不要直接执行原子浏览器动作。"
+        if normalized_function_name not in {"browser_click", "browser_navigate"}:
+            if last_browser_route_index is not None:
+                url_hint = f"；如需直接跳转可使用 browser_navigate 或 fetch_page 读取 {last_browser_route_url}" if last_browser_route_url else ""
+                selector_hint = f"；匹配定位: {last_browser_route_selector}" if last_browser_route_selector else ""
+                return (
+                    "当前页面已完成目标链接定位，请优先使用 "
+                    f"browser_click(index={last_browser_route_index}){url_hint}{selector_hint}。"
+                )
+            if last_browser_route_url:
+                return (
+                    "当前页面已完成目标链接定位，请优先使用返回结果中的 URL 调用 browser_navigate"
+                    f" 或 fetch_page，当前可用 URL: {last_browser_route_url}"
+                )
+            return "当前页面已完成目标链接定位，请优先使用 browser_click 或 browser_navigate。"
+
+    if task_mode == "web_reading":
+        return "当前步骤属于网页阅读任务，请优先使用高阶浏览器阅读能力，只有高阶提取失败后才能退回原子浏览器动作。"
+    if task_mode == "browser_interaction" and not browser_actionables_ready:
+        return "当前步骤属于浏览器交互任务，请先调用 browser_find_actionable_elements 确认可交互元素，再执行原子浏览器动作。"
+    return "当前浏览器原子动作尚未开放，请先完成当前阶段要求的高阶浏览器能力。"
+
+
+def _attach_browser_degrade_payload(
+        tool_result: ToolResult,
+        *,
+        function_name: str,
+        degrade_reason: str,
+        browser_page_type: str,
+        browser_url: str,
+        browser_title: str,
+) -> ToolResult:
+    payload = tool_result.data if isinstance(tool_result.data, dict) else {}
+    payload = {
+        **payload,
+        "degrade_reason": degrade_reason,
+        "function_name": function_name,
+        "page_type": browser_page_type,
+        "url": browser_url,
+        "title": browser_title,
+    }
+    tool_result.data = payload
+    return tool_result
+
+
+def _build_browser_high_level_retry_block_message(
+        *,
+        function_name: str,
+        function_args: Dict[str, Any],
+) -> str:
+    normalized_function_name = function_name.strip().lower()
+    if normalized_function_name == "browser_find_link_by_text":
+        query = str(function_args.get("text") or "").strip()
+        if query:
+            return f"当前页面中“{query}”的链接匹配刚刚失败，请先更换关键词或改变页面状态后再试。"
+        return "当前页面的链接匹配刚刚失败，请先更换关键词或改变页面状态后再试。"
+    return f"{function_name} 在当前页面状态下刚刚失败，请先改变页面状态或尝试其他高阶路径后再试。"
+
+
+def _coerce_optional_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        stripped_value = value.strip()
+        if stripped_value.isdigit() or (
+                stripped_value.startswith("-") and stripped_value[1:].isdigit()
+        ):
+            return int(stripped_value)
+    return None
+
+
+def _build_listing_click_target_block_message(
+        *,
+        last_browser_route_index: Optional[int],
+        last_browser_route_url: str,
+        last_browser_route_selector: str,
+) -> str:
+    if last_browser_route_index is None:
+        if last_browser_route_url:
+            return (
+                "当前列表页已完成目标链接定位，但匹配结果没有可点击 index，"
+                f"请改用 browser_navigate 或 fetch_page 读取 {last_browser_route_url}。"
+            )
+        return "当前列表页已完成目标链接定位，但匹配结果没有可点击 index，请改用 browser_navigate。"
+    selector_hint = f"；匹配定位: {last_browser_route_selector}" if last_browser_route_selector else ""
+    url_hint = f"；目标 URL: {last_browser_route_url}" if last_browser_route_url else ""
+    return (
+        "当前列表页已完成目标链接定位，只允许点击刚刚匹配到的目标，"
+        f"请调用 browser_click(index={last_browser_route_index}){selector_hint}{url_hint}。"
     )
 
 
@@ -678,10 +1086,17 @@ async def execute_step_with_prompt(
         for tool_schema in available_tools
         if _extract_function_name(tool_schema)
     }
+    browser_route_enabled = (
+            task_mode in {"web_reading", "browser_interaction"}
+            and any(function_name in available_function_names for function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES)
+    )
     blocked_function_names = _build_task_mode_disallowed_names(
         available_tools,
         task_mode=task_mode,
     )
+    if task_mode in {"web_reading", "browser_interaction"} and not browser_route_enabled:
+        for function_name in _build_browser_capability_gap_allowlist(task_mode=task_mode):
+            blocked_function_names.discard(function_name)
     log_runtime(
         logger,
         logging.INFO,
@@ -736,8 +1151,8 @@ async def execute_step_with_prompt(
     notify_user_sent = False
     allow_ask_user = task_mode == "human_wait" or _step_allows_user_wait(step, {})
     research_route_enabled = (
-        task_mode in {"research", "web_reading"}
-        and {"search_web", "fetch_page"}.issubset(available_function_names)
+            task_mode in {"research", "web_reading"}
+            and {"search_web", "fetch_page"}.issubset(available_function_names)
     )
     research_has_explicit_url = research_route_enabled and _step_or_user_content_has_url(
         step,
@@ -746,17 +1161,73 @@ async def execute_step_with_prompt(
     research_search_ready = False
     research_fetch_completed = False
     research_candidate_urls: List[str] = []
+    browser_page_type = ""
+    browser_structured_ready = False
+    browser_main_content_ready = False
+    browser_cards_ready = False
+    browser_link_match_ready = False
+    browser_actionables_ready = False
+    last_browser_route_url = ""
+    last_browser_route_title = ""
+    last_browser_route_selector = ""
+    last_browser_route_index: Optional[int] = None
     last_tool_fingerprint = ""
     same_tool_repeat_count = 0
     search_repeat_counter: Dict[str, int] = {}
     last_browser_observation_fingerprint = ""
     browser_no_progress_count = 0
+    failed_browser_high_level_keys: set[str] = set()
     consecutive_failure_count = 0
 
     for index in range(max(1, int(max_tool_iterations))):
+        # 每轮都先根据“当前页面状态”生成一个 route key。
+        # 这里即使 browser_page_type / last_browser_route_url / last_browser_observation_fingerprint 里有空值，key 仍然有意义：
+        # 1. 空值组合本身就代表“还没读到页面结构/URL/观察结果”的初始状态。
+        # 2. 首轮高阶工具如果在这个初始状态下失败，需要有地方把失败绑定起来，避免同页同参立刻空转重试。
+        # 3. 只要后续任一维度从空值变成非空，或观察结果发生变化，这个 key 就会变化，旧失败记录不会再继续封禁新状态。
+        # 4. 所以这个 key 的核心价值是“失败收敛按状态隔离”，不是“要求三项字段一开始就必须完整”。
+        browser_route_state_key = _build_browser_route_state_key(
+            # 当前已知页面类型；未读到结构化结果时这里会是空字符串。
+            browser_page_type=browser_page_type,
+            # 当前已知路由 URL；还没拿到浏览器结果时这里也可能为空。
+            browser_url=last_browser_route_url,
+            # 最近一次浏览器观察摘要；没有成功浏览器观察前同样允许为空。
+            browser_observation_fingerprint=last_browser_observation_fingerprint,
+        )
+        # 再用这个页面状态 key 反推出：在“当前页面状态”下，哪些高阶浏览器函数应该被暂时封禁。
+        # 这里拿到的是“函数名集合”，目的是给本轮工具白名单/黑名单直接使用。
+        failed_browser_high_level_functions = _collect_temporarily_blocked_browser_high_level_function_names(
+            # 当前轮次使用的页面状态 key。
+            browser_route_state_key=browser_route_state_key,
+            # 整个 step 生命周期里累积的“函数 + 参数 + 页面状态”失败键集合。
+            failed_high_level_keys=failed_browser_high_level_keys,
+        )
+        # 先从任务模式级别的禁用工具开始构建本轮黑名单。
+        iteration_blocked_function_names = set(blocked_function_names)
+        # 再把“当前页面状态下暂时封禁的高阶浏览器函数”叠加进去。
+        iteration_blocked_function_names.update(failed_browser_high_level_functions)
+        if browser_route_enabled:
+            # 浏览器强路由开启时，再单独算一遍原子浏览器工具的白名单。
+            allowed_atomic_browser_functions = set(
+                _build_browser_atomic_allowlist(
+                    task_mode=task_mode,
+                    browser_page_type=browser_page_type,
+                    browser_structured_ready=browser_structured_ready,
+                    browser_link_match_ready=browser_link_match_ready,
+                    browser_actionables_ready=browser_actionables_ready,
+                    failed_high_level_functions=failed_browser_high_level_functions,
+                )
+            )
+            for function_name in BROWSER_ATOMIC_FUNCTION_NAMES:
+                # 原子浏览器工具默认先禁用；只有进入 allowlist 的工具才会被放开。
+                if function_name in available_function_names and function_name not in allowed_atomic_browser_functions:
+                    iteration_blocked_function_names.add(function_name)
+                # 已进入 allowlist 的原子工具，要从黑名单里移除，保证模型这一轮真的能调用到。
+                elif function_name in allowed_atomic_browser_functions:
+                    iteration_blocked_function_names.discard(function_name)
         iteration_tools = _filter_available_tools(
             available_tools,
-            disallowed_function_names=blocked_function_names,
+            disallowed_function_names=iteration_blocked_function_names,
             allow_notify_user=not notify_user_sent,
             allow_ask_user=allow_ask_user,
         )
@@ -813,8 +1284,19 @@ async def execute_step_with_prompt(
             available_tools=iteration_tools,
             preferred_function_names=(
                 ("fetch_page",)
-                if research_route_enabled and not research_fetch_completed and (research_search_ready or research_has_explicit_url)
-                else ()
+                if research_route_enabled and not research_fetch_completed and (
+                            research_search_ready or research_has_explicit_url)
+                else _build_browser_preferred_function_names(
+                    task_mode=task_mode,
+                    available_function_names=available_function_names,
+                    browser_page_type=browser_page_type,
+                    browser_structured_ready=browser_structured_ready,
+                    browser_main_content_ready=browser_main_content_ready,
+                    browser_cards_ready=browser_cards_ready,
+                    browser_link_match_ready=browser_link_match_ready,
+                    browser_actionables_ready=browser_actionables_ready,
+                    failed_high_level_functions=failed_browser_high_level_functions,
+                )
             ),
         )
         if selected_tool_call is None:
@@ -879,20 +1361,51 @@ async def execute_step_with_prompt(
                 function_name=function_name,
             )
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
-        elif normalized_function_name in blocked_function_names:
-            loop_break_reason = "task_mode_tool_blocked"
-            log_runtime(
-                logger,
-                logging.WARNING,
-                "任务模式拦截工具调用",
-                step_id=str(step.id or ""),
-                function_name=function_name,
-                task_mode=task_mode,
-            )
-            tool_result = ToolResult(
-                success=False,
-                message=f"当前步骤的任务模式 {task_mode} 不允许调用工具: {function_name}",
-            )
+        elif normalized_function_name in iteration_blocked_function_names:
+            if browser_route_enabled and normalized_function_name.startswith("browser_"):
+                loop_break_reason = "browser_route_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "浏览器固定路径拦截工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                    browser_page_type=browser_page_type,
+                    browser_structured_ready=browser_structured_ready,
+                    browser_cards_ready=browser_cards_ready,
+                    browser_link_match_ready=browser_link_match_ready,
+                    browser_actionables_ready=browser_actionables_ready,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message=_build_browser_route_block_message(
+                        task_mode=task_mode,
+                        function_name=function_name,
+                        browser_page_type=browser_page_type,
+                        browser_structured_ready=browser_structured_ready,
+                        browser_cards_ready=browser_cards_ready,
+                        browser_link_match_ready=browser_link_match_ready,
+                        browser_actionables_ready=browser_actionables_ready,
+                        last_browser_route_url=last_browser_route_url,
+                        last_browser_route_selector=last_browser_route_selector,
+                        last_browser_route_index=last_browser_route_index,
+                    ),
+                )
+            else:
+                loop_break_reason = "task_mode_tool_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "任务模式拦截工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message=f"当前步骤的任务模式 {task_mode} 不允许调用工具: {function_name}",
+                )
         elif research_route_enabled and normalized_function_name == "fetch_page" and not research_has_explicit_url and not research_search_ready:
             loop_break_reason = "research_route_search_required"
             tool_result = ToolResult(
@@ -911,8 +1424,8 @@ async def execute_step_with_prompt(
             tool_result = ToolResult(
                 success=False,
                 message=(
-                    "已经拿到候选链接，请优先对搜索结果中的 URL 调用 fetch_page 读取正文。"
-                    + (f" 可用链接示例: {candidate_hint}" if candidate_hint else "")
+                        "已经拿到候选链接，请优先对搜索结果中的 URL 调用 fetch_page 读取正文。"
+                        + (f" 可用链接示例: {candidate_hint}" if candidate_hint else "")
                 ),
             )
         elif function_name == NOTIFY_USER_FUNCTION_NAME and notify_user_sent:
@@ -940,6 +1453,89 @@ async def execute_step_with_prompt(
             tool_result = ToolResult(
                 success=False,
                 message="当前步骤不允许向用户提问。请先完成当前步骤，只能在明确需要用户确认/选择/输入的步骤中使用该工具。",
+            )
+        elif (
+                browser_route_enabled
+                and normalized_function_name == "browser_click"
+                and browser_page_type in {
+                    BrowserPageType.LISTING.value,
+                    BrowserPageType.SEARCH_RESULTS.value,
+                }
+                and browser_link_match_ready
+        ):
+            requested_index = _coerce_optional_int(function_args.get("index"))
+            coordinate_x = function_args.get("coordinate_x")
+            coordinate_y = function_args.get("coordinate_y")
+            if (
+                    coordinate_x is not None
+                    or coordinate_y is not None
+                    or requested_index is None
+                    or last_browser_route_index is None
+                    or requested_index != last_browser_route_index
+            ):
+                loop_break_reason = "browser_click_target_blocked"
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "列表页点击目标与已匹配结果不一致，已拦截",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    requested_index=requested_index,
+                    matched_index=last_browser_route_index,
+                    has_coordinate_x=coordinate_x is not None,
+                    has_coordinate_y=coordinate_y is not None,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message=_build_listing_click_target_block_message(
+                        last_browser_route_index=last_browser_route_index,
+                        last_browser_route_url=last_browser_route_url,
+                        last_browser_route_selector=last_browser_route_selector,
+                    ),
+                )
+            else:
+                tool_started_at = now_perf()
+                try:
+                    tool_result = await matched_tool.invoke(function_name, **function_args)
+                    tool_cost_ms = elapsed_ms(tool_started_at)
+                    if not isinstance(tool_result, ToolResult):
+                        tool_result = ToolResult(success=True, data=tool_result)
+                except Exception as e:
+                    tool_cost_ms = elapsed_ms(tool_started_at)
+                    log_runtime(
+                        logger,
+                        logging.ERROR,
+                        "工具调用失败",
+                        step_id=str(step.id or ""),
+                        function_name=function_name,
+                        tool_name=tool_name,
+                        error=str(e),
+                        tool_elapsed_ms=tool_cost_ms,
+                        elapsed_ms=elapsed_ms(started_at),
+                        exc_info=True,
+                    )
+                    tool_result = ToolResult(success=False, message=f"调用工具失败: {function_name}")
+        elif browser_route_enabled and _is_browser_high_level_temporarily_blocked(
+                function_name=normalized_function_name,
+                function_args=function_args,
+                browser_route_state_key=browser_route_state_key,
+                failed_high_level_keys=failed_browser_high_level_keys,
+        ):
+            loop_break_reason = "browser_high_level_retry_blocked"
+            log_runtime(
+                logger,
+                logging.INFO,
+                "浏览器高阶能力在当前页面状态下暂时封禁",
+                step_id=str(step.id or ""),
+                function_name=function_name,
+                browser_route_state_key=browser_route_state_key,
+            )
+            tool_result = ToolResult(
+                success=False,
+                message=_build_browser_high_level_retry_block_message(
+                    function_name=function_name,
+                    function_args=function_args,
+                ),
             )
         elif normalized_function_name == "search_web":
             search_fingerprint = _build_search_fingerprint(function_args)
@@ -1022,12 +1618,64 @@ async def execute_step_with_prompt(
             consecutive_failure_count = 0
         else:
             consecutive_failure_count += 1
+            if (
+                    normalized_function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES
+                    and loop_break_reason != "browser_high_level_retry_blocked"
+            ):
+                failed_browser_high_level_keys.add(
+                    _build_browser_high_level_failure_key(
+                        function_name=normalized_function_name,
+                        function_args=function_args,
+                        browser_route_state_key=browser_route_state_key,
+                    )
+                )
+                degrade_reason = f"{normalized_function_name}_failed"
+                tool_result = _attach_browser_degrade_payload(
+                    tool_result,
+                    function_name=function_name,
+                    degrade_reason=degrade_reason,
+                    browser_page_type=browser_page_type,
+                    browser_url=last_browser_route_url,
+                    browser_title=last_browser_route_title,
+                )
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "浏览器高阶能力失败，允许降级为其他浏览器能力",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    degrade_reason=degrade_reason,
+                )
 
         if research_route_enabled and normalized_function_name == "search_web" and bool(tool_result.success):
             research_candidate_urls = _extract_search_result_urls(tool_result)
             research_search_ready = len(research_candidate_urls) > 0
         elif research_route_enabled and normalized_function_name == "fetch_page" and bool(tool_result.success):
             research_fetch_completed = True
+
+        browser_tool_state = _extract_browser_tool_state(tool_result)
+        if browser_tool_state["page_type"]:
+            browser_page_type = browser_tool_state["page_type"]
+        if browser_tool_state["url"]:
+            last_browser_route_url = browser_tool_state["url"]
+        if browser_tool_state["title"]:
+            last_browser_route_title = browser_tool_state["title"]
+        if browser_tool_state["selector"]:
+            last_browser_route_selector = str(browser_tool_state["selector"])
+        if browser_tool_state["index"] is not None:
+            last_browser_route_index = int(browser_tool_state["index"])
+
+        if bool(tool_result.success):
+            if normalized_function_name == "browser_read_current_page_structured":
+                browser_structured_ready = True
+            elif normalized_function_name == "browser_extract_main_content":
+                browser_main_content_ready = True
+            elif normalized_function_name == "browser_extract_cards":
+                browser_cards_ready = True
+            elif normalized_function_name == "browser_find_link_by_text":
+                browser_link_match_ready = True
+            elif normalized_function_name == "browser_find_actionable_elements":
+                browser_actionables_ready = True
 
         called_event = ToolEvent(
             tool_call_id=tool_call_id,

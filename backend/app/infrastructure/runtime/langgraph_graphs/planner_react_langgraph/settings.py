@@ -39,7 +39,36 @@ ASK_USER_FUNCTION_NAME = "message_ask_user"
 TOOL_RESULT_MAX_TEXT_CHARS = 2400
 TOOL_RESULT_MAX_LIST_ITEMS = 12
 TOOL_RESULT_MAX_DICT_ITEMS = 12
-BROWSER_PROGRESS_FUNCTIONS: tuple[str, ...] = ("browser_view", "browser_scroll_down", "browser_scroll_up")
+BROWSER_HIGH_LEVEL_FUNCTION_NAMES: tuple[str, ...] = (
+    "browser_read_current_page_structured",
+    "browser_extract_main_content",
+    "browser_extract_cards",
+    "browser_find_link_by_text",
+    "browser_find_actionable_elements",
+)
+BROWSER_ATOMIC_FUNCTION_NAMES: tuple[str, ...] = (
+    "browser_view",
+    "browser_navigate",
+    "browser_restart",
+    "browser_click",
+    "browser_input",
+    "browser_move_mouse",
+    "browser_press_key",
+    "browser_select_option",
+    "browser_scroll_up",
+    "browser_scroll_down",
+    "browser_console_exec",
+    "browser_console_view",
+)
+BROWSER_PROGRESS_FUNCTIONS: tuple[str, ...] = (
+    "browser_read_current_page_structured",
+    "browser_extract_main_content",
+    "browser_extract_cards",
+    "browser_find_actionable_elements",
+    "browser_view",
+    "browser_scroll_down",
+    "browser_scroll_up",
+)
 REPEAT_TOOL_LIMIT = 2
 SEARCH_REPEAT_LIMIT = 2
 BROWSER_NO_PROGRESS_LIMIT = 2
@@ -61,7 +90,7 @@ FILE_FUNCTION_NAMES: tuple[str, ...] = (
 TASK_MODE_ALLOWED_PREFIXES: dict[str, tuple[str, ...]] = {
     "research": (),
     "web_reading": (),
-    "browser_interaction": ("browser_",),
+    "browser_interaction": (),
     "coding": ("shell_",),
     "file_processing": (),
     "human_wait": (),
@@ -76,12 +105,14 @@ TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
     ),
     "web_reading": (
         *SEARCH_FUNCTION_NAMES,
+        *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
         *READ_ONLY_FILE_FUNCTION_NAMES,
         NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "browser_interaction": (
         *SEARCH_FUNCTION_NAMES,
+        *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
         *FILE_FUNCTION_NAMES,
         NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
@@ -140,7 +171,7 @@ BROWSER_INTERACTION_PATTERN = re.compile(
 )
 WEB_READING_PATTERN = re.compile(
     r"(网页|页面|站点|官网|文章|正文|文档页|详情页|链接信息|页面内容|read page|page content)"
-    r"|(\bbrowser_(view|navigate|restart|console_view)\b)",
+    r"|(\bbrowser_(view|navigate|restart|console_view|read_current_page_structured|extract_main_content|extract_cards|find_link_by_text|find_actionable_elements)\b)",
     re.IGNORECASE,
 )
 SEARCH_PATTERN = re.compile(

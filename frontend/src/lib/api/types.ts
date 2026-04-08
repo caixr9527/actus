@@ -300,6 +300,22 @@ export type SearchToolContent = {
   results: SearchResultItem[];
 };
 
+export type BrowserToolContent = {
+  screenshot?: string;
+  page_type?: string;
+  url?: string;
+  title?: string;
+  structured_page?: unknown;
+  main_content?: unknown;
+  cards?: unknown[];
+  actionable_elements?: unknown[];
+  matched_link_text?: string;
+  matched_link_url?: string;
+  matched_link_selector?: string;
+  matched_link_index?: number | null;
+  degrade_reason?: string;
+};
+
 export type FetchPageToolContent = {
   url: string;
   final_url?: string;

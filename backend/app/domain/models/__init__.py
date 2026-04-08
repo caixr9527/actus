@@ -13,6 +13,16 @@ from .app_config import (
     MCPServerConfig,
     A2AConfig,
 )
+from .browser import (
+    BrowserPageType,
+    BrowserCardItem,
+    BrowserActionableElement,
+    BrowserPageStructuredResult,
+    BrowserMainContentResult,
+    BrowserCardExtractionResult,
+    BrowserLinkMatchResult,
+    BrowserActionableElementsResult,
+)
 from .event import (
     BaseEvent,
     PlanEvent,
@@ -125,6 +135,14 @@ __all__ = [
     "Session",
     "SessionStatus",
     "A2AConfig",
+    "BrowserPageType",
+    "BrowserCardItem",
+    "BrowserActionableElement",
+    "BrowserPageStructuredResult",
+    "BrowserMainContentResult",
+    "BrowserCardExtractionResult",
+    "BrowserLinkMatchResult",
+    "BrowserActionableElementsResult",
     "BrowserToolContent",
     "SearchToolContent",
     "FetchPageToolContent",

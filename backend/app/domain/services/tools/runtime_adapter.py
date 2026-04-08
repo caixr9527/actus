@@ -12,6 +12,11 @@ from typing import Awaitable, Callable, List, Optional
 
 from app.domain.models import (
     A2AToolContent,
+    BrowserActionableElementsResult,
+    BrowserCardExtractionResult,
+    BrowserLinkMatchResult,
+    BrowserMainContentResult,
+    BrowserPageStructuredResult,
     BrowserToolContent,
     FetchPageToolContent,
     FetchedPage,
@@ -146,6 +151,62 @@ class ToolRuntimeAdapter:
             raise TypeError("fetch_page 的结果必须是 FetchedPage")
         return FetchPageToolContent.from_fetched_page(fetched_page)
 
+    @staticmethod
+    def _build_browser_content(event: ToolEvent, screenshot: str) -> BrowserToolContent:
+        function_result = event.function_result
+        result_data = function_result.data if function_result is not None else None
+        content = BrowserToolContent(screenshot=screenshot)
+
+        if isinstance(result_data, BrowserPageStructuredResult):
+            content.url = result_data.url
+            content.title = result_data.title
+            content.page_type = result_data.page_type.value
+            content.structured_page = result_data
+            content.cards = list(result_data.cards or [])
+            content.actionable_elements = list(result_data.actionable_elements or [])
+            return content
+
+        if isinstance(result_data, BrowserMainContentResult):
+            content.url = result_data.url
+            content.title = result_data.title
+            content.page_type = result_data.page_type.value
+            content.main_content = result_data
+            return content
+
+        if isinstance(result_data, BrowserCardExtractionResult):
+            content.url = result_data.url
+            content.title = result_data.title
+            content.page_type = result_data.page_type.value
+            content.cards = list(result_data.cards or [])
+            return content
+
+        if isinstance(result_data, BrowserActionableElementsResult):
+            content.url = result_data.url
+            content.title = result_data.title
+            content.page_type = result_data.page_type.value
+            content.actionable_elements = list(result_data.elements or [])
+            return content
+
+        if isinstance(result_data, BrowserLinkMatchResult):
+            content.url = result_data.url
+            content.title = result_data.matched_text
+            content.matched_link_text = result_data.matched_text
+            content.matched_link_url = result_data.url
+            content.matched_link_selector = result_data.selector
+            content.matched_link_index = result_data.index
+            if result_data.card is not None:
+                content.cards = [result_data.card]
+            return content
+
+        if isinstance(result_data, dict):
+            content.url = str(result_data.get("url") or "").strip()
+            content.title = str(result_data.get("title") or "").strip()
+            content.page_type = str(result_data.get("page_type") or "").strip()
+            content.degrade_reason = str(result_data.get("degrade_reason") or "").strip()
+            return content
+
+        return content
+
     def build_runtime_tools(
             self,
             capability_context: CapabilityBuildContext,
@@ -237,7 +298,7 @@ class ToolRuntimeAdapter:
             screenshot = ""
             if hooks.get_browser_screenshot is not None and function_name in BROWSER_SCREENSHOT_FUNCTIONS:
                 screenshot = str(await hooks.get_browser_screenshot() or "").strip()
-            event.tool_content = BrowserToolContent(screenshot=screenshot)
+            event.tool_content = self._build_browser_content(event, screenshot)
             return True
 
         if event.tool_name == "search":

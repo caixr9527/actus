@@ -7,25 +7,39 @@
 """
 import asyncio
 import logging
-from typing import Optional, List, Any
+from typing import Any, List, Optional
 
 from markdownify import markdownify
-from playwright.async_api import Playwright, Browser, Page, async_playwright
+from playwright.async_api import Browser, Page, Playwright, async_playwright
 
 from app.domain.external import Browser as BrowserProtocol, LLM
-from app.domain.models import ToolResult
-from .playwright_browser_fun import GET_VISIBLE_CONTENT_FUNC, GET_INTERACTIVE_ELEMENTS_FUNC, INJECT_CONSOLE_LOGS_FUNC
+from app.domain.models import (
+    BrowserActionableElement,
+    BrowserActionableElementsResult,
+    BrowserCardExtractionResult,
+    BrowserCardItem,
+    BrowserLinkMatchResult,
+    BrowserMainContentResult,
+    BrowserPageStructuredResult,
+    BrowserPageType,
+    ToolResult,
+)
+from .playwright_browser_fun import GET_PAGE_STRUCTURED_DATA_FUNC, INJECT_CONSOLE_LOGS_FUNC
 
 logger = logging.getLogger(__name__)
 
+MAIN_CONTENT_MAX_CHARS = 12000
+MAIN_CONTENT_PREVIEW_MAX_CHARS = 1200
+CONTENT_SUMMARY_MAX_CHARS = 320
+
 
 class PlaywrightBrowser(BrowserProtocol):
-    """Playwright 浏览器服务实现"""
+    """Playwright 浏览器服务实现。"""
 
     def __init__(
             self,
             cdp_url: str,
-            llm: Optional[LLM]
+            llm: Optional[LLM],
     ) -> None:
         self.llm: Optional[LLM] = llm
         self.cdp_url: str = cdp_url
@@ -34,98 +48,399 @@ class PlaywrightBrowser(BrowserProtocol):
         self.page: Optional[Page] = None
 
     async def _ensure_browser(self) -> None:
-        """确保浏览器已启动"""
-        # 检查浏览器实例和页面实例是否都已创建，如果没有则尝试初始化
         if not self.browser or not self.page:
-            # 调用初始化方法，如果初始化失败则抛出异常
             if not await self.initialize():
-                raise Exception("初始化浏览器服务失败")
+                raise RuntimeError("初始化浏览器服务失败")
 
     async def _ensure_page(self) -> None:
-        """确保当前页面已初始化"""
         await self._ensure_browser()
-
-        # 如果当前没有页面，则创建新页面
         if not self.page:
             self.page = await self.browser.new_page()
-        else:
-            # 检查浏览器上下文是否存在
-            contexts = self.browser.contexts
-            if contexts:
-                # 获取默认上下文（第一个上下文）
-                default_context = contexts[0]
-                # 获取上下文中的所有页面
-                pages = default_context.pages
-                if pages:
-                    # 获取最新的页面（最后一个页面）
-                    latest_page = pages[-1]
+            return
 
-                    # 如果当前页面不是最新页面，则更新为最新页面
-                    if self.page != latest_page:
-                        self.page = latest_page
+        contexts = self.browser.contexts if self.browser is not None else []
+        if not contexts:
+            return
+        latest_pages = contexts[0].pages
+        if latest_pages:
+            self.page = latest_pages[-1]
 
-    async def _extract_content(self) -> str:
-        # 获取页面可见内容
-        visible_content = await self.page.evaluate(GET_VISIBLE_CONTENT_FUNC)
-        # 将HTML内容转换为Markdown格式
-        markdown_content = markdownify(visible_content)
-        # 限制内容长度最多为50000字符
-        max_content_length = min(len(markdown_content), 50000)
-        # 如果配置了LLM，则使用LLM处理内容
-        if self.llm:
-            # 调用LLM提取并格式化内容
-            response = await self.llm.invoke([
-                {
-                    "role": "system",
-                    "content": "您是一名专业的网页信息提取助手。请从当前页面内容中提取所有信息并将其转换为markdown格式。",
-                },
-                {
-                    "role": "user",
-                    "content": markdown_content[:max_content_length],
-                }
-            ])
-            # 返回LLM处理后的内容
-            return response.get("content", "")
-        else:
-            # 没有LLM时直接返回截取后的Markdown内容
-            return markdown_content[:max_content_length]
-
-    async def _extract_interactive_elements(self) -> List[str]:
-        """提取当前页面上的可交互元素"""
-        # 确保页面已初始化
+    async def _evaluate_structured_page_data(self) -> dict[str, Any]:
         await self._ensure_page()
+        raw_data = await self.page.evaluate(GET_PAGE_STRUCTURED_DATA_FUNC)
+        return raw_data if isinstance(raw_data, dict) else {}
 
-        # 清空页面的交互元素缓存
-        self.page.interactive_elements_cache = []
+    @staticmethod
+    def _normalize_text(value: Any, *, max_chars: int = 0) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if max_chars > 0 and len(text) > max_chars:
+            return text[:max_chars - 3] + "..."
+        return text
 
-        # 执行JavaScript函数获取页面上所有可交互的元素
-        interactive_elements = await self.page.evaluate(GET_INTERACTIVE_ELEMENTS_FUNC)
+    @classmethod
+    def _normalize_card_items(cls, raw_cards: Any) -> List[BrowserCardItem]:
+        cards: List[BrowserCardItem] = []
+        for index, item in enumerate(list(raw_cards or [])):
+            if not isinstance(item, dict):
+                continue
+            title = cls._normalize_text(item.get("title"), max_chars=160)
+            url = cls._normalize_text(item.get("url"), max_chars=500)
+            if not title or not url:
+                continue
+            tags = [
+                cls._normalize_text(tag, max_chars=40)
+                for tag in list(item.get("tags") or [])
+                if cls._normalize_text(tag, max_chars=40)
+            ]
+            cards.append(
+                BrowserCardItem(
+                    index=int(item.get("index") or index),
+                    title=title,
+                    summary=cls._normalize_text(item.get("summary"), max_chars=240),
+                    url=url,
+                    tags=tags[:6],
+                )
+            )
+        return cards
 
-        # 将获取到的交互元素存储到页面缓存中
-        self.page.interactive_elements_cache = interactive_elements
+    @classmethod
+    def _normalize_actionable_elements(cls, raw_elements: Any) -> List[BrowserActionableElement]:
+        elements: List[BrowserActionableElement] = []
+        for index, item in enumerate(list(raw_elements or [])):
+            if not isinstance(item, dict):
+                continue
+            elements.append(
+                BrowserActionableElement(
+                    index=int(item.get("index") or index),
+                    tag=cls._normalize_text(item.get("tag"), max_chars=40),
+                    text=cls._normalize_text(item.get("text"), max_chars=120),
+                    role=cls._normalize_text(item.get("role"), max_chars=40),
+                    selector=cls._normalize_text(item.get("selector"), max_chars=160),
+                )
+            )
+        return elements
 
-        # 格式化交互元素列表，生成易于阅读的字符串格式
-        formatted_elements = []
-        for element in interactive_elements:
-            # 将每个元素格式化为"索引:<标签名>文本内容</标签名>"的形式
-            formatted_elements.append(f"{element['index']}:<{element['tag']}>{element['text']}</{element['tag']}>")
+    @classmethod
+    def _detect_page_type(
+            cls,
+            *,
+            url: str,
+            title: str,
+            main_text: str,
+            card_count: int,
+            form_count: int,
+            paragraph_count: int,
+    ) -> BrowserPageType:
+        normalized_url = url.lower()
+        normalized_title = title.lower()
+        if form_count > 0:
+            return BrowserPageType.FORM
+        if card_count >= 5:
+            if any(token in normalized_url or token in normalized_title for token in
+                   ("search", "result", "query", "q=")):
+                return BrowserPageType.SEARCH_RESULTS
+            return BrowserPageType.LISTING
+        if any(token in normalized_url or token in normalized_title for token in
+               ("docs", "documentation", "reference", "manual")):
+            return BrowserPageType.DOCUMENT
+        if paragraph_count >= 4 or len(main_text) >= 900:
+            return BrowserPageType.ARTICLE
+        return BrowserPageType.GENERIC
 
-        # 返回格式化后的交互元素列表
-        return formatted_elements
+    @classmethod
+    def _build_content_summary(
+            cls,
+            *,
+            main_text: str,
+            cards: List[BrowserCardItem],
+    ) -> str:
+        if main_text:
+            return cls._normalize_text(main_text, max_chars=CONTENT_SUMMARY_MAX_CHARS)
+        if cards:
+            return cls._normalize_text("；".join(card.title for card in cards[:4]), max_chars=CONTENT_SUMMARY_MAX_CHARS)
+        return ""
+
+    @classmethod
+    def _build_structured_result(cls, raw_data: dict[str, Any]) -> BrowserPageStructuredResult:
+        cards = cls._normalize_card_items(raw_data.get("card_candidates"))
+        actionable_elements = cls._normalize_actionable_elements(raw_data.get("actionable_elements"))
+        url = cls._normalize_text(raw_data.get("url"), max_chars=500)
+        title = cls._normalize_text(raw_data.get("title"), max_chars=200)
+        main_heading = cls._normalize_text(raw_data.get("main_heading"), max_chars=200)
+        main_text = cls._normalize_text(raw_data.get("main_text"), max_chars=MAIN_CONTENT_PREVIEW_MAX_CHARS)
+        page_type = cls._detect_page_type(
+            url=url,
+            title=title,
+            main_text=cls._normalize_text(raw_data.get("main_text"), max_chars=0),
+            card_count=len(cards),
+            form_count=int(raw_data.get("form_count") or 0),
+            paragraph_count=int(raw_data.get("paragraph_count") or 0),
+        )
+        return BrowserPageStructuredResult(
+            url=url,
+            title=title,
+            main_heading=main_heading,
+            page_type=page_type,
+            content_summary=cls._build_content_summary(
+                main_text=cls._normalize_text(raw_data.get("main_text"), max_chars=0),
+                cards=cards,
+            ),
+            main_content_preview=main_text,
+            cards=cards,
+            actionable_elements=actionable_elements,
+            should_continue_scrolling=bool(raw_data.get("should_continue_scrolling")),
+            scroll_progress=float(raw_data.get("scroll_progress") or 0.0),
+        )
+
+    @classmethod
+    def _build_main_content_result(cls, raw_data: dict[str, Any]) -> BrowserMainContentResult:
+        structured = cls._build_structured_result(raw_data)
+        raw_html = str(raw_data.get("main_html") or "").strip()
+        raw_main_text = cls._normalize_text(raw_data.get("main_text"), max_chars=0)
+        content = markdownify(raw_html) if raw_html else raw_main_text
+        content = cls._normalize_text(content, max_chars=MAIN_CONTENT_MAX_CHARS)
+        excerpt = cls._normalize_text(content, max_chars=CONTENT_SUMMARY_MAX_CHARS)
+        return BrowserMainContentResult(
+            url=structured.url,
+            title=structured.title,
+            page_type=structured.page_type,
+            content=content,
+            excerpt=excerpt,
+            content_length=len(content),
+            truncated=len(content) >= MAIN_CONTENT_MAX_CHARS,
+        )
+
+    @classmethod
+    def _build_card_result(cls, raw_data: dict[str, Any]) -> BrowserCardExtractionResult:
+        structured = cls._build_structured_result(raw_data)
+        return BrowserCardExtractionResult(
+            url=structured.url,
+            title=structured.title,
+            page_type=structured.page_type,
+            cards=structured.cards,
+            total_cards=len(structured.cards),
+        )
+
+    async def _refresh_interactive_elements_cache(self, structured: BrowserPageStructuredResult) -> None:
+        await self._ensure_page()
+        # 原子点击/输入仍基于页面缓存索引，因此高阶结构化提取后同步刷新缓存。
+        self.page.interactive_elements_cache = [item.model_dump(mode="json") for item in structured.actionable_elements]
+
+    async def _read_structured_result(self) -> BrowserPageStructuredResult:
+        await self.wait_for_page_load(timeout=8)
+        raw_data = await self._evaluate_structured_page_data()
+        structured = self._build_structured_result(raw_data)
+        await self._refresh_interactive_elements_cache(structured)
+        logger.info(
+            "浏览器结构化页面提取完成",
+            extra={
+                "url": structured.url,
+                "page_type": structured.page_type.value,
+                "card_count": len(structured.cards),
+                "actionable_count": len(structured.actionable_elements),
+                "scroll_progress": structured.scroll_progress,
+            },
+        )
+        return structured
+
+    async def read_current_page_structured(self) -> ToolResult[BrowserPageStructuredResult]:
+        try:
+            return ToolResult(success=True, data=await self._read_structured_result())
+        except Exception as e:
+            logger.warning("浏览器结构化页面提取失败: %s", e)
+            return ToolResult(success=False, message=f"读取当前页面结构化摘要失败: {e}")
+
+    async def extract_main_content(self) -> ToolResult[BrowserMainContentResult]:
+        try:
+            await self.wait_for_page_load(timeout=8)
+            raw_data = await self._evaluate_structured_page_data()
+            main_content = self._build_main_content_result(raw_data)
+            if not main_content.content:
+                return ToolResult(success=False, message="当前页面未提取到可用正文")
+            logger.info(
+                "浏览器正文提取完成",
+                extra={
+                    "url": main_content.url,
+                    "page_type": main_content.page_type.value,
+                    "content_length": main_content.content_length,
+                },
+            )
+            return ToolResult(success=True, data=main_content)
+        except Exception as e:
+            logger.warning("浏览器正文提取失败: %s", e)
+            return ToolResult(success=False, message=f"提取当前页面正文失败: {e}")
+
+    async def extract_cards(self) -> ToolResult[BrowserCardExtractionResult]:
+        try:
+            await self.wait_for_page_load(timeout=8)
+            raw_data = await self._evaluate_structured_page_data()
+            card_result = self._build_card_result(raw_data)
+            if len(card_result.cards) == 0:
+                return ToolResult(success=False, message="当前页面未提取到候选卡片")
+            logger.info(
+                "浏览器候选卡片提取完成",
+                extra={
+                    "url": card_result.url,
+                    "page_type": card_result.page_type.value,
+                    "card_count": card_result.total_cards,
+                },
+            )
+            return ToolResult(success=True, data=card_result)
+        except Exception as e:
+            logger.warning("浏览器候选卡片提取失败: %s", e)
+            return ToolResult(success=False, message=f"提取当前页面候选卡片失败: {e}")
+
+    async def find_link_by_text(self, text: str) -> ToolResult[BrowserLinkMatchResult]:
+        query = self._normalize_text(text, max_chars=120)
+        if not query:
+            return ToolResult(success=False, message="查找链接时缺少 text 参数")
+
+        try:
+            raw_data = await self._evaluate_structured_page_data()
+            cards = self._normalize_card_items(raw_data.get("card_candidates"))
+            actionable_elements = self._normalize_actionable_elements(raw_data.get("actionable_elements"))
+            normalized_query = query.lower()
+            best_card: Optional[BrowserCardItem] = None
+            best_score = -1
+            for card in cards:
+                haystack = f"{card.title} {card.summary}".lower()
+                score = 0
+                if normalized_query in haystack:
+                    score += 10
+                score += sum(2 for token in normalized_query.split() if token and token in haystack)
+                if score > best_score:
+                    best_score = score
+                    best_card = card
+            if best_card is None or best_score <= 0:
+                return ToolResult(success=False, message=f"当前页面未找到与“{query}”匹配的链接")
+            matched_selector = ""
+            matched_index: Optional[int] = None
+            normalized_card_title = best_card.title.lower()
+            for element in actionable_elements:
+                haystack = f"{element.text} {element.role}".lower()
+                if normalized_card_title and normalized_card_title in haystack:
+                    matched_selector = element.selector
+                    matched_index = element.index
+                    break
+                if normalized_query and normalized_query in haystack:
+                    matched_selector = element.selector
+                    matched_index = element.index
+                    break
+            return ToolResult(
+                success=True,
+                data=BrowserLinkMatchResult(
+                    query=query,
+                    matched_text=best_card.title,
+                    url=best_card.url,
+                    card=best_card,
+                    index=matched_index,
+                    selector=matched_selector,
+                ),
+            )
+        except Exception as e:
+            logger.warning("浏览器按文本查找链接失败: %s", e)
+            return ToolResult(success=False, message=f"按文本查找链接失败: {e}")
+
+    async def find_actionable_elements(self) -> ToolResult[BrowserActionableElementsResult]:
+        try:
+            structured = await self._read_structured_result()
+            return ToolResult(
+                success=True,
+                data=BrowserActionableElementsResult(
+                    url=structured.url,
+                    title=structured.title,
+                    page_type=structured.page_type,
+                    elements=structured.actionable_elements,
+                ),
+            )
+        except Exception as e:
+            logger.warning("浏览器可交互元素提取失败: %s", e)
+            return ToolResult(success=False, message=f"提取当前页面可交互元素失败: {e}")
 
     async def _get_element_by_id(self, index: int) -> Optional[Any]:
-        """根据索引获取页面上的交互元素"""
-        # 检查页面是否具有交互元素缓存、缓存是否为空或者索引是否超出范围
         if (
-                not hasattr(self.page, "interactive_elements_cache") or
-                not self.page.interactive_elements_cache or
-                index >= len(self.page.interactive_elements_cache)
+                not hasattr(self.page, "interactive_elements_cache")
+                or not self.page.interactive_elements_cache
+                or index >= len(self.page.interactive_elements_cache)
         ):
             return None
-        # 构造CSS选择器来定位具有特定data-manus-id属性的元素
         selector = f'[data-manus-id="manus-element-{index}"]'
-        # 使用选择器查询页面元素并返回
         return await self.page.query_selector(selector)
+
+    async def _build_post_action_result(self) -> ToolResult[BrowserPageStructuredResult]:
+        structured = await self._read_structured_result()
+        return ToolResult(success=True, data=structured)
+
+    async def initialize(self) -> bool:
+        max_retries = 5
+        retry_interval = 1
+        for attempt in range(max_retries):
+            try:
+                self.playwright = await async_playwright().start()
+                self.browser = await self.playwright.chromium.connect_over_cdp(self.cdp_url)
+                contexts = self.browser.contexts
+                if contexts and len(contexts[0].pages) == 1:
+                    page = contexts[0].pages[0]
+                    if page.url in {"about:blank", "chrome://newtab/", "chrome://new-tab-page/"} or not page.url:
+                        self.page = page
+                    else:
+                        self.page = await contexts[0].new_page()
+                else:
+                    context = contexts[0] if contexts else await self.browser.new_context()
+                    self.page = await context.new_page()
+                return True
+            except Exception as e:
+                await self.cleanup()
+                if attempt == max_retries - 1:
+                    logger.error("初始化浏览器服务失败，已重试 %s 次: %s", max_retries, e)
+                    return False
+                retry_interval = min(retry_interval * 2, 10)
+                logger.warning("初始化浏览器服务失败，准备重试(%s/%s)", attempt + 1, max_retries)
+                await asyncio.sleep(retry_interval)
+        return False
+
+    async def cleanup(self) -> None:
+        try:
+            if self.browser:
+                for context in self.browser.contexts:
+                    for page in context.pages:
+                        if not page.is_closed():
+                            await page.close()
+            if self.page and not self.page.is_closed():
+                await self.page.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+        except Exception as e:
+            logger.error("清理浏览器服务时发生错误: %s", e)
+        finally:
+            self.page = None
+            self.browser = None
+            self.playwright = None
+
+    async def wait_for_page_load(self, timeout: int = 15) -> bool:
+        await self._ensure_page()
+        start_time = asyncio.get_event_loop().time()
+        check_interval = 0.5
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            is_completed = await self.page.evaluate("""() => document.readyState === 'complete'""")
+            if is_completed:
+                return True
+            await asyncio.sleep(check_interval)
+        return False
+
+    async def navigate(self, url: str) -> ToolResult:
+        await self._ensure_page()
+        try:
+            self.page.interactive_elements_cache = []
+            await self.page.goto(url)
+            return await self._build_post_action_result()
+        except Exception as e:
+            return ToolResult(success=False, message=f"导航到 URL {url} 失败: {e}")
+
+    async def view_page(self) -> ToolResult:
+        return await self.read_current_page_structured()
 
     async def click(
             self,
@@ -133,196 +448,20 @@ class PlaywrightBrowser(BrowserProtocol):
             coordinate_x: Optional[float] = None,
             coordinate_y: Optional[float] = None,
     ) -> ToolResult:
-        """点击页面上的元素"""
         await self._ensure_page()
         if coordinate_x is not None and coordinate_y is not None:
-            # 根据坐标点击页面
             await self.page.mouse.click(coordinate_x, coordinate_y)
-        elif index is not None:
-            try:
-                # 根据索引点击页面
-                element = await self._get_element_by_id(index)
-                if not element:
-                    return ToolResult(
-                        success=False,
-                        message=f"未找到索引为 {index} 的元素",
-                    )
-                # 检查元素是否可见
-                is_visible = await self.page.evaluate("""(element) => {
-                                    if (!element) return false;
-                                    const rect = element.getBoundingClientRect();
-                                    const style = window.getComputedStyle(element);
-                                    return !(
-                                        rect.width === 0 ||
-                                        rect.height === 0 ||
-                                        style.display === 'none' ||
-                                        style.visibility === 'hidden' ||
-                                        style.opacity === '0'
-                                    );
-                                }""", element)
-
-                # 如果元素不可见，则将其滚动到视图中
-                if not is_visible:
-                    await self.page.evaluate("""(element) => {
-                                                        if (element) {
-                                                            element.scrollIntoView({behavior: 'smooth', block: 'center'})
-                                                        }
-                                                    }""", element)
-                    await asyncio.sleep(1)
-
-                # 点击元素
-                await element.click(timeout=5000)
-            except Exception as e:
-                return ToolResult(
-                    success=False,
-                    message=f"点击元素失败: {e}",
-                )
-        return ToolResult(
-            success=True,
-        )
-
-    async def initialize(self) -> bool:
-        """初始化浏览器服务"""
-        # 设置最大重试次数和初始重试间隔
-        max_retries = 5
-        retry_interval = 1
-
-        # 开始重试循环
-        for attempt in range(max_retries):
-            try:
-                # 启动playwright并连接到浏览器
-                self.playwright = await async_playwright().start()
-                self.browser = await self.playwright.chromium.connect_over_cdp(self.cdp_url)
-
-                # 获取浏览器上下文
-                contexts = self.browser.contexts
-
-                # 如果存在上下文且第一个上下文只有一个页面
-                if contexts and len(contexts[0].pages) == 1:
-                    page = contexts[0].pages[0]
-                    # 检查页面URL是否为初始状态页面
-                    if (
-                            page.url == "about:blank" or
-                            page.url == "chrome://newtab/" or
-                            page.url == "chrome://new-tab-page/" or
-                            not page.url
-                    ):
-                        # 如果是初始页面，则直接使用该页面
-                        self.page = page
-                    else:
-                        # 如果不是初始页面，则创建新页面
-                        self.page = await contexts[0].new_page()
-                else:
-                    # 如果没有上下文或上下文页面数不为1，则创建新的上下文和页面
-                    context = contexts[0] if contexts else await self.browser.new_context()
-                    self.page = await context.new_page()
-
-                # 初始化成功，返回True
-                return True
-
-            except Exception as e:
-                # 清理已创建的资源
-                await self.cleanup()
-
-                # 如果已经达到最大重试次数，则记录错误并返回False
-                if attempt == max_retries - 1:
-                    logger.error(
-                        f"初始化浏览器服务失败,已重试 {max_retries} 次,请检查CDP URL和浏览器服务是否正常启动：{e}")
-                    return False
-
-                # 计算下一次重试间隔（指数退避，最大不超过10秒）
-                retry_interval = min(retry_interval * 2, 10)
-                logger.warning(f"初始化浏览器服务失败,正在重试...(重试次数:{attempt + 1}/{max_retries})")
-
-                # 等待后继续重试
-                await asyncio.sleep(retry_interval)
-
-    async def cleanup(self) -> None:
-        """清理浏览器服务"""
+            return await self._build_post_action_result()
+        if index is None:
+            return ToolResult(success=False, message="点击元素失败，缺少 index 或坐标")
         try:
-            # 关闭所有页面
-            if self.browser:
-                contexts = self.browser.contexts
-                if contexts:
-                    for context in contexts:
-                        pages = context.pages
-                        if pages:
-                            for page in pages:
-                                if not page.is_closed():
-                                    await page.close()
-
-            # 确保当前页面关闭
-            if self.page and not self.page.is_closed():
-                await self.page.close()
-
-            # 关闭浏览器
-            if self.browser:
-                await self.browser.close()
-
-            # 停止playwright
-            if self.playwright:
-                await self.playwright.stop()
-
+            element = await self._get_element_by_id(index)
+            if not element:
+                return ToolResult(success=False, message=f"未找到索引为 {index} 的元素")
+            await element.click(timeout=5000)
+            return await self._build_post_action_result()
         except Exception as e:
-            logger.error(f"清理浏览器服务时发生错误: {e}")
-        finally:
-            # 重置所有引用
-            self.page = None
-            self.browser = None
-            self.playwright = None
-
-    async def wait_for_page_load(self, timeout: int = 15) -> bool:
-        """等待页面加载完成"""
-        # 确保页面已初始化
-        await self._ensure_page()
-
-        # 记录开始时间
-        start_time = asyncio.get_event_loop().time()
-        # 设置检查间隔为5秒
-        check_interval = 5
-        # 循环检查页面是否加载完成，直到超时
-        while asyncio.get_event_loop().time() - start_time < timeout:
-            # 通过执行JavaScript检查页面是否加载完成
-            is_completed = await self.page.evaluate("""() => document.readyState === 'complete'""")
-            if is_completed:
-                # 页面加载完成，返回True
-                return True
-            # 等待下次检查
-            await asyncio.sleep(check_interval)
-
-        # 超时未完成加载，返回False
-        return False
-
-    async def navigate(self, url: str) -> ToolResult:
-        """导航到指定URL"""
-        await self._ensure_page()
-
-        try:
-            self.page.interactive_elements_cache = []
-            await self.page.goto(url)
-            return ToolResult(
-                success=True,
-                data={"interactive_elements": await self._extract_interactive_elements()}
-            )
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                message=f"导航到URL {url} 失败: {str(e)}"
-            )
-
-    async def view_page(self) -> ToolResult:
-        """查看当前页面内容"""
-        await self._ensure_page()
-        await self.wait_for_page_load()
-
-        interactive_elements = await self._extract_interactive_elements()
-        return ToolResult(
-            success=True,
-            data={
-                "content": await self._extract_content(),
-                "interactive_elements": interactive_elements,
-            }
-        )
+            return ToolResult(success=False, message=f"点击元素失败: {e}")
 
     async def input(
             self,
@@ -332,130 +471,82 @@ class PlaywrightBrowser(BrowserProtocol):
             coordinate_x: Optional[float] = None,
             coordinate_y: Optional[float] = None,
     ) -> ToolResult:
-        """根据传递的文本+换行标识+索引+xy位置实现输入框文本输入"""
         await self._ensure_page()
-
-        # 根据提供的坐标或索引在相应元素上输入文本
-        if coordinate_x is not None and coordinate_y is not None:
-            # 如果提供了坐标，则在指定坐标位置点击并输入文本
-            await self.page.mouse.click(coordinate_x, coordinate_y)
-            await self.page.keyboard.type(text)
-        elif index is not None:
-            # 如果提供了索引，则查找对应元素并输入文本
-            try:
+        try:
+            if coordinate_x is not None and coordinate_y is not None:
+                await self.page.mouse.click(coordinate_x, coordinate_y)
+                await self.page.keyboard.type(text)
+            elif index is not None:
                 element = await self._get_element_by_id(index)
                 if not element:
-                    return ToolResult(success=False, message=f"输入文本失败, 该元素不存在")
-
-                try:
-                    # 清空元素现有内容并输入新文本
-                    await element.fill("")
-                    await element.type(text)
-                except Exception as e:
-                    await element.click()
-                    await element.type(text)
-            except Exception as e:
-                return ToolResult(success=False, message=f"输入文本失败: {str(e)}")
-
-        # 如果需要按下回车键，则执行回车操作
-        if press_enter:
-            await self.page.keyboard.press("Enter")
-
-        return ToolResult(success=True)
+                    return ToolResult(success=False, message="输入文本失败，目标元素不存在")
+                await element.fill("")
+                await element.type(text)
+            else:
+                return ToolResult(success=False, message="输入文本失败，缺少 index 或坐标")
+            if press_enter:
+                await self.page.keyboard.press("Enter")
+            return await self._build_post_action_result()
+        except Exception as e:
+            return ToolResult(success=False, message=f"输入文本失败: {e}")
 
     async def move_mouse(self, coordinate_x: float, coordinate_y: float) -> ToolResult:
-        """传递xy坐标移动鼠标"""
         await self._ensure_page()
         await self.page.mouse.move(coordinate_x, coordinate_y)
         return ToolResult(success=True)
 
     async def press_key(self, key: str) -> ToolResult:
-        """传递按键进行模拟"""
         await self._ensure_page()
         await self.page.keyboard.press(key)
-        return ToolResult(success=True)
+        return await self._build_post_action_result()
 
     async def select_option(self, index: int, option: int) -> ToolResult:
-        """传递索引+下拉菜单选项选择指定的菜单信息"""
         await self._ensure_page()
-
         try:
-            # 根据索引获取下拉菜单元素
             element = await self._get_element_by_id(index)
             if not element:
-                return ToolResult(success=False, message=f"使用索引[{index}]查找该下拉菜单元素不存在")
-
-            # 选择指定的选项
+                return ToolResult(success=False, message=f"索引[{index}]对应的下拉菜单不存在")
             await element.select_option(index=option)
-            return ToolResult(success=True)
+            return await self._build_post_action_result()
         except Exception as e:
-            # 处理选择下拉菜单选项时可能出现的异常
-            return ToolResult(success=False, message=f"选择下拉菜单选项失败: {str(e)}")
+            return ToolResult(success=False, message=f"选择下拉菜单选项失败: {e}")
 
     async def restart(self, url: str) -> ToolResult:
-        """重启浏览器并导航到指定URL"""
         await self.cleanup()
         return await self.navigate(url)
 
     async def scroll_up(self, to_top: Optional[bool] = None) -> ToolResult:
-        """向上滚动当前页面"""
         await self._ensure_page()
         if to_top:
             await self.page.evaluate("window.scrollTo(0, 0)")
         else:
             await self.page.evaluate("window.scrollBy(0, -window.innerHeight)")
-
-        return ToolResult(
-            success=True
-        )
+        return await self._build_post_action_result()
 
     async def scroll_down(self, to_bottom: Optional[bool] = None) -> ToolResult:
-        """向下滚动当前页面"""
         await self._ensure_page()
         if to_bottom:
             await self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         else:
             await self.page.evaluate("window.scrollBy(0, window.innerHeight)")
-
-        return ToolResult(
-            success=True
-        )
+        return await self._build_post_action_result()
 
     async def screenshot(self, full_page: Optional[bool] = None) -> bytes:
-        """获取当前页面截图"""
         await self._ensure_page()
-        screenshot_option = {
-            "full_page": full_page,
-            "type": "png",
-        }
-        return await self.page.screenshot(**screenshot_option)
+        return await self.page.screenshot(full_page=full_page, type="png")
 
     async def console_exec(self, javascript: str) -> ToolResult:
-        """在浏览器控制台执行 JavaScript 脚本"""
         await self._ensure_page()
         try:
             await self.page.evaluate(INJECT_CONSOLE_LOGS_FUNC)
         except Exception as e:
-            logger.warning(f"执行window.console.logs失败:{e}")
+            logger.warning("注入 console 日志捕获失败: %s", e)
         result = await self.page.evaluate(javascript)
-        return ToolResult(
-            success=True,
-            data={"result": result}
-        )
+        return ToolResult(success=True, data={"result": result})
 
     async def console_view(self, max_lines: Optional[int] = None) -> ToolResult:
-        """查看浏览器控制台输出"""
         await self._ensure_page()
-        # 从页面中获取控制台日志，如果不存在则返回空数组
-        logs = await self.page.evaluate("""() => {
-            return window.console.logs || [];
-        }""")
-
-        # 如果指定了最大行数，则只返回最后的max_lines条日志
+        logs = await self.page.evaluate("""() => window.console.logs || []""")
         if max_lines is not None:
             logs = logs[-max_lines:]
-
-        return ToolResult(
-            success=True,
-            data={"logs": logs}
-        )
+        return ToolResult(success=True, data={"logs": logs})

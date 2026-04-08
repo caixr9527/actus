@@ -20,8 +20,63 @@ class BrowserTool(BaseTool):
         self.browser = browser
 
     @tool(
+        name="browser_read_current_page_structured",
+        description="读取当前页面的结构化摘要。用于判断页面类型、主标题、候选卡片、可交互元素和是否需要继续滚动，是浏览器任务的默认入口。",
+        parameters={},
+        required=[],
+    )
+    async def browser_read_current_page_structured(self) -> ToolResult:
+        """读取当前页面的结构化摘要。"""
+        return await self.browser.read_current_page_structured()
+
+    @tool(
+        name="browser_extract_main_content",
+        description="提取当前页面的正文内容。适用于文章、博客、课程详情、文档页等阅读型页面，应优先于反复滚动查看。",
+        parameters={},
+        required=[],
+    )
+    async def browser_extract_main_content(self) -> ToolResult:
+        """提取当前页面的正文内容。"""
+        return await self.browser.extract_main_content()
+
+    @tool(
+        name="browser_extract_cards",
+        description="提取当前页面的候选卡片。适用于搜索结果页、列表页、导航页，应先抽取候选项再决定后续点击目标。",
+        parameters={},
+        required=[],
+    )
+    async def browser_extract_cards(self) -> ToolResult:
+        """提取当前页面的候选卡片。"""
+        return await self.browser.extract_cards()
+
+    @tool(
+        name="browser_find_link_by_text",
+        description="按文本在当前页面查找最匹配的链接。适用于已知目标标题或关键词，需要从列表中定位具体链接时使用。",
+        parameters={
+            "text": {
+                "type": "string",
+                "description": "要匹配的链接文本或关键词",
+            }
+        },
+        required=["text"],
+    )
+    async def browser_find_link_by_text(self, text: str) -> ToolResult:
+        """按文本在当前页面查找最匹配的链接。"""
+        return await self.browser.find_link_by_text(text)
+
+    @tool(
+        name="browser_find_actionable_elements",
+        description="提取当前页面的主要可交互元素。适用于登录、表单填写、按钮点击等交互任务，帮助在执行原子动作前先观察页面操作面。",
+        parameters={},
+        required=[],
+    )
+    async def browser_find_actionable_elements(self) -> ToolResult:
+        """提取当前页面的主要可交互元素。"""
+        return await self.browser.find_actionable_elements()
+
+    @tool(
         name="browser_view",
-        description="查看当前浏览器页面内容，用于确认已打开页面的最新状态。",
+        description="查看当前浏览器页面内容。仅在高阶页面阅读能力不适用时作为兜底观察工具使用。",
         parameters={},
         required=[],
     )
@@ -61,7 +116,7 @@ class BrowserTool(BaseTool):
 
     @tool(
         name="browser_click",
-        description="点击当前页面上的元素，当需要点击当前页面上的元素时使用",
+        description="点击当前页面上的元素。仅在已经通过高阶阅读/元素提取确认目标后，确实需要页面交互时使用。",
         parameters={
             "index": {
                 "type": "integer",
@@ -93,7 +148,7 @@ class BrowserTool(BaseTool):
 
     @tool(
         name="browser_input",
-        description="覆盖浏览器当前页面可编辑区域的文本(input/textarea输入框)，当需要填充输入文本时使用",
+        description="覆盖浏览器当前页面可编辑区域的文本。仅在已经确认当前是交互任务且知道目标输入位置时使用。",
         parameters={
             "text": {
                 "type": "string",
@@ -209,7 +264,7 @@ class BrowserTool(BaseTool):
 
     @tool(
         name="browser_scroll_up",
-        description="向上滚动当前浏览器页面，用于模拟用户向上滚动查看页面内容或返回页面顶部。",
+        description="向上滚动当前浏览器页面。仅在高阶正文抽取无法满足时作为兜底动作使用。",
         parameters={
             "to_top": {
                 "type": "boolean",
@@ -229,7 +284,7 @@ class BrowserTool(BaseTool):
 
     @tool(
         name="browser_scroll_down",
-        description="向下滚动当前浏览器页面，用于模拟用户向下滚动查看页面内容或返回页面底部。",
+        description="向下滚动当前浏览器页面。仅在高阶正文抽取或卡片提取无法满足时作为兜底动作使用。",
         parameters={
             "to_bottom": {
                 "type": "boolean",

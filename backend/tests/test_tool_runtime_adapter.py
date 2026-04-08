@@ -1,6 +1,9 @@
 import asyncio
 
 from app.domain.models import (
+    BrowserLinkMatchResult,
+    BrowserPageStructuredResult,
+    BrowserPageType,
     FetchPageToolContent,
     FetchedPage,
     MCPConfig,
@@ -247,6 +250,105 @@ def test_tool_runtime_adapter_should_keep_browser_event_usable_without_screensho
     assert handled is True
     assert event.tool_content is not None
     assert event.tool_content.screenshot == ""
+
+
+def test_tool_runtime_adapter_should_enrich_high_level_browser_event() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_read_current_page_structured",
+        function_args={},
+        function_result=ToolResult(
+            success=True,
+            data=BrowserPageStructuredResult(
+                url="https://example.com/docs/runtime",
+                title="Runtime Docs",
+                page_type=BrowserPageType.DOCUMENT,
+                content_summary="runtime summary",
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.url == "https://example.com/docs/runtime"
+    assert event.tool_content.page_type == "document"
+    assert event.tool_content.structured_page is not None
+
+
+def test_tool_runtime_adapter_should_expose_browser_degrade_reason() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_extract_main_content",
+        function_args={},
+        function_result=ToolResult(
+            success=False,
+            message="提取当前页面正文失败",
+            data={
+                "degrade_reason": "browser_extract_main_content_failed",
+                "page_type": "document",
+                "url": "https://example.com/docs/runtime",
+                "title": "Runtime Docs",
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.degrade_reason == "browser_extract_main_content_failed"
+    assert event.tool_content.page_type == "document"
+    assert event.tool_content.screenshot == ""
+
+
+def test_tool_runtime_adapter_should_expose_browser_link_match_position() -> None:
+    adapter = ToolRuntimeAdapter()
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_find_link_by_text",
+        function_args={"text": "Execution Model"},
+        function_result=ToolResult(
+            success=True,
+            data=BrowserLinkMatchResult(
+                query="Execution Model",
+                matched_text="Execution Model",
+                url="https://example.com/docs/execution",
+                index=1,
+                selector="[data-manus-id='manus-element-1']",
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.matched_link_text == "Execution Model"
+    assert event.tool_content.matched_link_url == "https://example.com/docs/execution"
+    assert event.tool_content.matched_link_index == 1
+    assert event.tool_content.matched_link_selector == "[data-manus-id='manus-element-1']"
 
 
 def test_tool_runtime_adapter_should_keep_shell_event_usable_without_shell_hook() -> None:
