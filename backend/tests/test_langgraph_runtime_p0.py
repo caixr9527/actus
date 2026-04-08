@@ -98,6 +98,54 @@ class _SearchTool(BaseTool):
         return ToolResult(success=True, data={"query": query, "results": [{"url": "https://example.com"}]})
 
 
+class _SearchFetchTool(BaseTool):
+    name = "search"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations: list[str] = []
+
+    @tool(
+        name="search_web",
+        description="搜索网页",
+        parameters={"query": {"type": "string"}},
+        required=["query"],
+    )
+    async def search_web(self, query: str):
+        self.invocations.append("search_web")
+        return ToolResult(
+            success=True,
+            data={
+                "query": query,
+                "results": [
+                    {
+                        "url": "https://example.com/article",
+                        "title": "Example Article",
+                        "content": "Example snippet",
+                    }
+                ],
+            },
+        )
+
+    @tool(
+        name="fetch_page",
+        description="读取网页正文",
+        parameters={"url": {"type": "string"}},
+        required=["url"],
+    )
+    async def fetch_page(self, url: str):
+        self.invocations.append("fetch_page")
+        return ToolResult(
+            success=True,
+            data={
+                "url": url,
+                "title": "Example Article",
+                "content": "Example article content",
+                "excerpt": "Example article content",
+            },
+        )
+
+
 class _RepeatedSearchLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         return {
@@ -111,6 +159,132 @@ class _RepeatedSearchLLM:
                     },
                 }
             ],
+        }
+
+
+class _FetchBeforeSearchLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-fetch-first",
+                        "function": {
+                            "name": "fetch_page",
+                            "arguments": json.dumps({"url": "https://example.com/article"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "result": "已按要求结束当前步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _SearchThenRepeatSearchLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search-first",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "openai docs"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        if self.calls == 2:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search-again",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "openai docs"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "result": "已停止重复搜索并结束步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _SearchThenSearchAndFetchLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search-first",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "openai docs"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        if self.calls == 2:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search-again",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "openai docs"}, ensure_ascii=False),
+                        },
+                    },
+                    {
+                        "id": "call-fetch-after-search",
+                        "function": {
+                            "name": "fetch_page",
+                            "arguments": json.dumps({"url": "https://example.com/article"}, ensure_ascii=False),
+                        },
+                    },
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "result": "已优先读取正文并结束步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
         }
 
 
@@ -364,6 +538,81 @@ def test_execute_step_with_prompt_should_block_browser_for_research_task() -> No
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
     assert "任务模式 research 不允许调用工具" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_fetch_page_before_search_for_research_task() -> None:
+    llm = _FetchBeforeSearchLLM()
+    search_fetch_tool = _SearchFetchTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="调研 OpenAI 文档并提炼要点"),
+            runtime_tools=[search_fetch_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请调研 OpenAI 文档并提炼要点"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已按要求结束当前步骤"
+    assert search_fetch_tool.invocations == []
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "fetch_page"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "请先调用 search_web 获取候选链接" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_repeated_search_before_fetch_page() -> None:
+    llm = _SearchThenRepeatSearchLLM()
+    search_fetch_tool = _SearchFetchTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="调研 OpenAI 文档并提炼要点"),
+            runtime_tools=[search_fetch_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请调研 OpenAI 文档并提炼要点"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已停止重复搜索并结束步骤"
+    assert search_fetch_tool.invocations == ["search_web"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 2
+    assert called_events[1].function_name == "search_web"
+    assert called_events[1].function_result is not None
+    assert called_events[1].function_result.success is False
+    assert "优先对搜索结果中的 URL 调用 fetch_page" in str(called_events[1].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_prefer_fetch_page_after_search_results_are_ready() -> None:
+    llm = _SearchThenSearchAndFetchLLM()
+    search_fetch_tool = _SearchFetchTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="调研 OpenAI 文档并提炼要点"),
+            runtime_tools=[search_fetch_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请调研 OpenAI 文档并提炼要点"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已优先读取正文并结束步骤"
+    assert search_fetch_tool.invocations == ["search_web", "fetch_page"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 2
+    assert [event.function_name for event in called_events] == ["search_web", "fetch_page"]
 
 
 def test_execute_step_with_prompt_should_break_on_repeated_search_query() -> None:

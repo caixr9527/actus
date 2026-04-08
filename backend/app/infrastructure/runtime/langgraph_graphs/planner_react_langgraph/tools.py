@@ -11,7 +11,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from app.domain.external import LLM
-from app.domain.models import Step, ToolEvent, ToolEventStatus, ToolResult
+from app.domain.models import SearchResults, Step, ToolEvent, ToolEventStatus, ToolResult
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.runtime.normalizers import truncate_text
 from app.domain.services.tools import BaseTool
@@ -253,8 +253,19 @@ def _extract_function_name(tool_schema: Dict[str, Any]) -> str:
     return str(function.get("name") or "").strip().lower()
 
 
-def _tool_call_priority(function_name: str) -> int:
+def _tool_call_priority(
+        function_name: str,
+        *,
+        preferred_function_names: Optional[Tuple[str, ...]] = None,
+) -> int:
     normalized_name = function_name.strip().lower()
+    preferred_names = tuple(
+        str(item or "").strip().lower()
+        for item in tuple(preferred_function_names or ())
+        if str(item or "").strip()
+    )
+    if normalized_name in preferred_names:
+        return -50 + preferred_names.index(normalized_name)
     if "search" in normalized_name:
         return 0
     if normalized_name == NOTIFY_USER_FUNCTION_NAME:
@@ -269,6 +280,8 @@ def _tool_call_priority(function_name: str) -> int:
 def pick_preferred_tool_call(
         tool_calls: List[Dict[str, Any]],
         available_tools: List[Dict[str, Any]],
+        *,
+        preferred_function_names: Optional[Tuple[str, ...]] = None,
 ) -> Optional[Dict[str, Any]]:
     """从同轮多个 tool_call 中挑选本轮优先执行的候选。"""
     if len(tool_calls) == 0:
@@ -294,7 +307,10 @@ def pick_preferred_tool_call(
             continue
 
         normalized_name = function_name.lower()
-        priority = _tool_call_priority(function_name)
+        priority = _tool_call_priority(
+            function_name,
+            preferred_function_names=preferred_function_names,
+        )
         if normalized_name not in available_function_names:
             priority += 1000
         ranked_candidates.append((priority, index, raw_call))
@@ -445,6 +461,58 @@ def _build_browser_observation_fingerprint(tool_result: ToolResult) -> str:
     )
 
 
+def _extract_text_from_user_content(user_content: Optional[List[Dict[str, Any]]]) -> str:
+    fragments: List[str] = []
+    for item in list(user_content or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip().lower() != "text":
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            fragments.append(text)
+    return "\n".join(fragments)
+
+
+def _step_or_user_content_has_url(step: Step, user_content: Optional[List[Dict[str, Any]]]) -> bool:
+    candidate_text = "\n".join(
+        [
+            _build_step_candidate_text(step),
+            _extract_text_from_user_content(user_content),
+        ]
+    )
+    return bool(URL_PATTERN.search(candidate_text))
+
+
+def _extract_search_result_urls(tool_result: ToolResult) -> List[str]:
+    data = tool_result.data
+    urls: List[str] = []
+
+    if isinstance(data, SearchResults):
+        for item in list(data.results or []):
+            url = str(getattr(item, "url", "") or "").strip()
+            if url:
+                urls.append(url)
+    elif isinstance(data, dict):
+        raw_results = data.get("results") or []
+        if isinstance(raw_results, list):
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if url:
+                    urls.append(url)
+
+    deduped_urls: List[str] = []
+    seen_urls: set[str] = set()
+    for url in urls:
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        deduped_urls.append(url)
+    return deduped_urls[:5]
+
+
 def _is_allowed_in_task_mode(function_name: str, task_mode: str) -> bool:
     normalized_name = function_name.strip().lower()
     allowed_functions = set(TASK_MODE_ALLOWED_FUNCTIONS.get(task_mode, TASK_MODE_ALLOWED_FUNCTIONS["general"]))
@@ -541,6 +609,18 @@ def _summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> 
             "dir_path": str(result_data.get("dir_path") or "").strip(),
             "files": [_truncate_tool_text(item, max_chars=200) for item in files[:TOOL_RESULT_MAX_LIST_ITEMS]],
         }
+    if normalized_name == "search_web" and isinstance(result_data, SearchResults):
+        return {
+            "query": str(result_data.query or "").strip(),
+            "results": [
+                {
+                    "title": _truncate_tool_text(item.title, max_chars=120),
+                    "url": _truncate_tool_text(item.url, max_chars=240),
+                    "snippet": _truncate_tool_text(item.snippet, max_chars=200),
+                }
+                for item in list(result_data.results or [])[:5]
+            ],
+        }
     return {"data": _compact_tool_value(result_data)}
 
 
@@ -593,6 +673,11 @@ async def execute_step_with_prompt(
         normalized_user_content = [{"type": "text", "text": prompt_text}]
 
     available_tools = collect_available_tools(runtime_tools)
+    available_function_names = {
+        _extract_function_name(tool_schema)
+        for tool_schema in available_tools
+        if _extract_function_name(tool_schema)
+    }
     blocked_function_names = _build_task_mode_disallowed_names(
         available_tools,
         task_mode=task_mode,
@@ -650,6 +735,17 @@ async def execute_step_with_prompt(
     llm_message: Dict[str, Any] = {}
     notify_user_sent = False
     allow_ask_user = task_mode == "human_wait" or _step_allows_user_wait(step, {})
+    research_route_enabled = (
+        task_mode in {"research", "web_reading"}
+        and {"search_web", "fetch_page"}.issubset(available_function_names)
+    )
+    research_has_explicit_url = research_route_enabled and _step_or_user_content_has_url(
+        step,
+        normalized_user_content,
+    )
+    research_search_ready = False
+    research_fetch_completed = False
+    research_candidate_urls: List[str] = []
     last_tool_fingerprint = ""
     same_tool_repeat_count = 0
     search_repeat_counter: Dict[str, int] = {}
@@ -715,6 +811,11 @@ async def execute_step_with_prompt(
         selected_tool_call = pick_preferred_tool_call(
             tool_calls=[item for item in tool_calls if isinstance(item, dict)],
             available_tools=iteration_tools,
+            preferred_function_names=(
+                ("fetch_page",)
+                if research_route_enabled and not research_fetch_completed and (research_search_ready or research_has_explicit_url)
+                else ()
+            ),
         )
         if selected_tool_call is None:
             continue
@@ -791,6 +892,28 @@ async def execute_step_with_prompt(
             tool_result = ToolResult(
                 success=False,
                 message=f"当前步骤的任务模式 {task_mode} 不允许调用工具: {function_name}",
+            )
+        elif research_route_enabled and normalized_function_name == "fetch_page" and not research_has_explicit_url and not research_search_ready:
+            loop_break_reason = "research_route_search_required"
+            tool_result = ToolResult(
+                success=False,
+                message="当前步骤属于检索/网页阅读任务，请先调用 search_web 获取候选链接，再使用 fetch_page 读取正文。",
+            )
+        elif research_route_enabled and normalized_function_name == "search_web" and research_has_explicit_url and not research_fetch_completed:
+            loop_break_reason = "research_route_fetch_required"
+            tool_result = ToolResult(
+                success=False,
+                message="当前步骤已提供明确 URL，请直接调用 fetch_page 读取页面正文，不要先重复搜索。",
+            )
+        elif research_route_enabled and normalized_function_name == "search_web" and research_search_ready and not research_fetch_completed:
+            loop_break_reason = "research_route_fetch_required"
+            candidate_hint = "；".join(research_candidate_urls[:3])
+            tool_result = ToolResult(
+                success=False,
+                message=(
+                    "已经拿到候选链接，请优先对搜索结果中的 URL 调用 fetch_page 读取正文。"
+                    + (f" 可用链接示例: {candidate_hint}" if candidate_hint else "")
+                ),
             )
         elif function_name == NOTIFY_USER_FUNCTION_NAME and notify_user_sent:
             log_runtime(
@@ -899,6 +1022,12 @@ async def execute_step_with_prompt(
             consecutive_failure_count = 0
         else:
             consecutive_failure_count += 1
+
+        if research_route_enabled and normalized_function_name == "search_web" and bool(tool_result.success):
+            research_candidate_urls = _extract_search_result_urls(tool_result)
+            research_search_ready = len(research_candidate_urls) > 0
+        elif research_route_enabled and normalized_function_name == "fetch_page" and bool(tool_result.success):
+            research_fetch_completed = True
 
         called_event = ToolEvent(
             tool_call_id=tool_call_id,
