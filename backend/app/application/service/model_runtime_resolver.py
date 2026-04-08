@@ -8,13 +8,12 @@
 from app.application.errors import ServerError
 from app.application.errors import error_keys
 from app.application.service.model_config_service import ModelConfigService
+from app.application.service.model_input_policy import normalize_supported_input_types
 from app.domain.models import Session, RuntimeLLMConfig, LLMModelConfig
 
 
 class ModelRuntimeResolver:
     """会话运行时模型解析器"""
-
-    _ALLOWED_SUPPORTED_INPUT_TYPES = {"image", "audio", "video", "file"}
 
     def __init__(self, model_config_service: ModelConfigService) -> None:
         self._model_config_service = model_config_service
@@ -46,20 +45,6 @@ class ModelRuntimeResolver:
         return resolved_model.id, self._build_runtime_llm_config(resolved_model)
 
     @staticmethod
-    def _normalize_supported_input_types(raw_supported: object) -> list[str]:
-        normalized_supported: list[str] = []
-        if not isinstance(raw_supported, list):
-            return normalized_supported
-
-        for item in raw_supported:
-            input_type = str(item or "").strip()
-            if not input_type or input_type not in ModelRuntimeResolver._ALLOWED_SUPPORTED_INPUT_TYPES:
-                continue
-            if input_type not in normalized_supported:
-                normalized_supported.append(input_type)
-        return normalized_supported
-
-    @staticmethod
     def _build_runtime_llm_config(model: LLMModelConfig) -> RuntimeLLMConfig:
         """把模型目录记录转换为运行时 LLM 配置。"""
         config = model.config or {}
@@ -72,7 +57,7 @@ class ModelRuntimeResolver:
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 8192),
                 multimodal=capabilities.get("multimodal", False),
-                supported=ModelRuntimeResolver._normalize_supported_input_types(
+                supported=normalize_supported_input_types(
                     capabilities.get("supported", [])
                 ),
             )

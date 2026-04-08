@@ -2,11 +2,8 @@
 # -*- coding: utf-8 -*-
 """Planner-ReAct LangGraph 纯函数解析与归一化工具。"""
 
-import json
-import logging
-import re
 import uuid
-from typing import Any, Dict, List
+from typing import Any, List
 
 from app.domain.models import (
     Step,
@@ -15,61 +12,7 @@ from app.domain.models import (
     ExecutionStatus,
     build_step_objective_key,
 )
-from .runtime_logging import log_runtime
-
-logger = logging.getLogger(__name__)
-
-
-def _normalize_text_list(raw: Any) -> List[str]:
-    if not isinstance(raw, list):
-        return []
-    normalized_items: List[str] = []
-    for item in raw:
-        normalized_item = str(item or "").strip()
-        if normalized_item and normalized_item not in normalized_items:
-            normalized_items.append(normalized_item)
-    return normalized_items
-
-
-def safe_parse_json(content: str | None) -> Dict[str, Any]:
-    """宽松解析模型 JSON 输出，兼容 fenced code 与前后赘述。"""
-    if not content:
-        return {}
-
-    candidates: List[str] = [content]
-
-    fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content, flags=re.IGNORECASE)
-    if fenced_match:
-        candidates.insert(0, fenced_match.group(1).strip())
-
-    start_index = content.find("{")
-    end_index = content.rfind("}")
-    if start_index != -1 and end_index != -1 and end_index > start_index:
-        candidates.append(content[start_index:end_index + 1])
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            continue
-
-    log_runtime(
-        logger,
-        logging.WARNING,
-        "模型结果JSON解析失败",
-        content_length=len(content or ""),
-    )
-    return {}
-
-
-def normalize_attachments(raw_attachments: Any) -> List[str]:
-    if isinstance(raw_attachments, str):
-        return [raw_attachments]
-    if isinstance(raw_attachments, list):
-        return [str(item) for item in raw_attachments if str(item).strip()]
-    return []
+from app.domain.services.runtime.normalizers import normalize_text_list
 
 
 def merge_attachment_paths(*path_groups: List[str]) -> List[str]:
@@ -134,7 +77,7 @@ def build_step_from_payload(payload: Any, fallback_index: int) -> Step:
         raw_title = str(payload.get("title") or "").strip()
         description = raw_description or raw_title or f"步骤{fallback_index + 1}"
         title = raw_title or description
-        success_criteria = _normalize_text_list(payload.get("success_criteria"))
+        success_criteria = normalize_text_list(payload.get("success_criteria"))
         return Step(
             id=step_id,
             title=title,
@@ -153,12 +96,6 @@ def build_step_from_payload(payload: Any, fallback_index: int) -> Step:
         success_criteria=[description],
         status=ExecutionStatus.PENDING,
     )
-
-
-def format_attachments_for_prompt(attachments: List[str]) -> str:
-    if not attachments:
-        return "无"
-    return "\n".join(f"- {item}" for item in attachments)
 
 
 def should_emit_planner_message(user_message: str, planner_message: str, steps: List[Step]) -> bool:

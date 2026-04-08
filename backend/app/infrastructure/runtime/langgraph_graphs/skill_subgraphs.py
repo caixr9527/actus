@@ -5,21 +5,22 @@
 @Author : caixiaorong01@outlook.com
 @File   : skill_subgraphs.py
 """
-import json
-import logging
-from typing import Any, Dict, List, TypedDict
+from typing import Any, List, TypedDict
 
 from pydantic import BaseModel, Field
 
 from app.domain.external import LLM
 from app.domain.services.prompts import EXECUTION_PROMPT
+from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
+    format_attachments_for_prompt,
+    normalize_attachments,
+    safe_parse_json,
+)
 from app.domain.services.runtime.skill_graph_registry import (
     SkillDefinition,
     SkillGraphRegistry,
     SkillRuntimePolicy,
 )
-
-logger = logging.getLogger(__name__)
 
 try:
     from langgraph.graph import StateGraph, START, END
@@ -60,40 +61,13 @@ class PlannerExecuteStepSkillState(TypedDict, total=False):
     attachments: List[str]
     success: bool
     result: str
-
-
-def _safe_parse_json(content: str | None) -> Dict[str, Any]:
-    if not content:
-        return {}
-    try:
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        logger.warning("Skill子图解析JSON失败，使用回退逻辑")
-        return {}
-
-
-def _normalize_attachments(raw_attachments: Any) -> List[str]:
-    if isinstance(raw_attachments, str):
-        return [raw_attachments] if raw_attachments.strip() else []
-    if isinstance(raw_attachments, list):
-        return [str(item) for item in raw_attachments if str(item).strip()]
-    return []
-
-
-def _format_attachments_for_prompt(attachments: List[str]) -> str:
-    if not attachments:
-        return "无"
-    return "\n".join(f"- {item}" for item in attachments)
-
-
 async def _execute_step_skill_node(
         state: PlannerExecuteStepSkillState,
         llm: LLM,
 ) -> PlannerExecuteStepSkillState:
     prompt = EXECUTION_PROMPT.format(
         message=state.get("user_message", ""),
-        attachments=_format_attachments_for_prompt(list(state.get("attachments") or [])),
+        attachments=format_attachments_for_prompt(list(state.get("attachments") or [])),
         language=str(state.get("language") or "zh"),
         step=str(state.get("step_description") or ""),
     )
@@ -102,14 +76,14 @@ async def _execute_step_skill_node(
         tools=[],
         response_format={"type": "json_object"},
     )
-    parsed = _safe_parse_json(llm_message.get("content"))
+    parsed = safe_parse_json(llm_message.get("content"))
 
     step_description = str(state.get("step_description") or "")
     return {
         **state,
         "success": bool(parsed.get("success", True)),
         "result": str(parsed.get("result") or f"已完成步骤：{step_description}"),
-        "attachments": _normalize_attachments(parsed.get("attachments")),
+        "attachments": normalize_attachments(parsed.get("attachments")),
     }
 
 

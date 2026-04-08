@@ -50,63 +50,48 @@ from app.domain.services.runtime.langgraph_state import (
     normalize_retrieved_memories,
     replace_graph_control,
 )
+from app.domain.services.runtime.normalizers import (
+    append_unique_text,
+    normalize_ref_list,
+    normalize_text_list,
+    truncate_text,
+)
 from app.domain.services.tools import BaseTool
+from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
+    format_attachments_for_prompt,
+    normalize_attachments,
+    safe_parse_json,
+)
 from .language_checker import build_direct_path_copy, infer_working_language_from_message
 from .live_events import emit_live_events
 from .parsers import (
     build_fallback_plan_title,
-    format_attachments_for_prompt,
     build_step_from_payload,
     extract_write_file_paths_from_tool_events,
     merge_attachment_paths,
-    normalize_attachments,
-    safe_parse_json,
 )
 from .runtime_logging import describe_llm_runtime, elapsed_ms, log_runtime, now_perf
+from .settings import (
+    CONVERSATION_SUMMARY_MAX_PARTS,
+    MEMORY_CANDIDATE_MIN_CONFIDENCE,
+    MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    MESSAGE_WINDOW_MAX_ITEMS,
+    MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+    PROMPT_CONTEXT_ARTIFACT_LIMIT,
+    PROMPT_CONTEXT_BRIEF_LIMIT,
+    PROMPT_CONTEXT_COMPLETED_STEP_LIMIT,
+    PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS,
+    PROMPT_CONTEXT_MEMORY_LIMIT,
+    PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS,
+    PROMPT_CONTEXT_MESSAGE_LIMIT,
+    PROMPT_CONTEXT_MESSAGE_MAX_CHARS,
+    PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
+    PROMPT_CONTEXT_SUMMARY_MAX_CHARS,
+    STEP_EXECUTION_TIMEOUT_SECONDS,
+)
 from .tools import classify_step_task_mode, execute_step_with_prompt, infer_entry_strategy
 
 logger = logging.getLogger(__name__)
-
-# 规划器执行步骤的技能 ID
-PLANNER_EXECUTE_STEP_SKILL_ID = "planner_react.execute_step"
-
-# 消息窗口最大条目数
-MESSAGE_WINDOW_MAX_ITEMS = 100
-# 单条消息最大字符数
-MESSAGE_WINDOW_MAX_MESSAGE_CHARS = 500
-# 消息中附件路径的最大数量
-MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS = 8
-
-# 记忆候选项的最小置信度阈值
-MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
-
-# 对话摘要的最大部分数
-CONVERSATION_SUMMARY_MAX_PARTS = 4
-
-# Prompt 上下文中最近运行简报的最大数量
-PROMPT_CONTEXT_BRIEF_LIMIT = 3
-# Prompt 上下文中产物引用的最大数量
-PROMPT_CONTEXT_ARTIFACT_LIMIT = 6
-# Prompt 上下文中检索记忆的最大数量
-PROMPT_CONTEXT_MEMORY_LIMIT = 6
-# Prompt 上下文中最近消息的最大数量
-PROMPT_CONTEXT_MESSAGE_LIMIT = 6
-# Prompt 上下文中已完成步骤的最大数量
-PROMPT_CONTEXT_COMPLETED_STEP_LIMIT = 5
-
-# Prompt 上下文中对话摘要的最大字符数
-PROMPT_CONTEXT_SUMMARY_MAX_CHARS = 400
-# Prompt 上下文中单条消息的最大字符数
-PROMPT_CONTEXT_MESSAGE_MAX_CHARS = 200
-# Prompt 上下文中记忆摘要的最大字符数
-PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS = 160
-# Prompt 上下文中记忆内容预览的最大字符数
-PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS = 240
-# Prompt 上下文中开放问题/阻碍项的最大数量
-PROMPT_CONTEXT_OPEN_ITEM_LIMIT = 8
-
-# 步骤执行的超时时间（秒）
-STEP_EXECUTION_TIMEOUT_SECONDS = 180 * 3
 
 
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -129,18 +114,11 @@ def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
 
 
 def _append_unique_text_item(items: List[Any], value: str) -> List[str]:
-    normalized_items = [str(item).strip() for item in items if str(item).strip()]
-    normalized_value = str(value).strip()
-    if normalized_value and normalized_value not in normalized_items:
-        normalized_items.append(normalized_value)
-    return normalized_items
+    return append_unique_text(items, value)
 
 
 def _truncate_text(value: Any, *, max_chars: int) -> str:
-    normalized_value = str(value or "").strip()
-    if len(normalized_value) <= max_chars:
-        return normalized_value
-    return normalized_value[:max_chars]
+    return truncate_text(value, max_chars=max_chars)
 
 
 def _normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
@@ -156,14 +134,7 @@ def _normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
 
 def _normalize_text_items(raw: Any) -> List[str]:
     """统一规整 LLM/工具返回的字符串列表。"""
-    if not isinstance(raw, list):
-        return []
-    normalized_items: List[str] = []
-    for item in raw:
-        normalized_item = str(item or "").strip()
-        if normalized_item and normalized_item not in normalized_items:
-            normalized_items.append(normalized_item)
-    return normalized_items
+    return normalize_text_list(raw)
 
 
 def _truncate_text_items(raw: Any, *, max_items: int, max_chars: int) -> List[str]:
@@ -174,14 +145,7 @@ def _truncate_text_items(raw: Any, *, max_items: int, max_chars: int) -> List[st
 
 
 def _normalize_context_artifact_refs(raw: Any) -> List[str]:
-    if isinstance(raw, str):
-        items = [raw]
-    elif isinstance(raw, list):
-        items = raw
-    else:
-        items = []
-    normalized_items = [str(item).strip() for item in items if str(item).strip()]
-    return list(dict.fromkeys(normalized_items))
+    return normalize_ref_list(raw)
 
 
 def _get_step_outcome_summary(step: Optional[Step]) -> str:
@@ -728,14 +692,7 @@ def _merge_replanned_steps_into_plan(plan: Plan, new_steps: List[Step]) -> Tuple
 
 
 def _normalize_attachment_paths(raw: Any) -> List[str]:
-    if isinstance(raw, str):
-        items = [raw]
-    elif isinstance(raw, list):
-        items = raw
-    else:
-        items = []
-    normalized_items = [str(item).strip() for item in items if str(item).strip()]
-    return list(dict.fromkeys(normalized_items))[:MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS]
+    return normalize_ref_list(raw, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
 
 
 def _normalize_message_window_entry(
@@ -850,14 +807,7 @@ def _build_memory_dedupe_key(*, namespace: str, memory_type: str, content: Dict[
 
 
 def _normalize_memory_fact_items(raw: Any) -> List[str]:
-    if not isinstance(raw, list):
-        return []
-    normalized_items: List[str] = []
-    for item in raw:
-        normalized_text = str(item or "").strip()
-        if normalized_text and normalized_text not in normalized_items:
-            normalized_items.append(normalized_text)
-    return normalized_items
+    return normalize_text_list(raw)
 
 
 def _normalize_memory_preferences(raw: Any) -> Dict[str, Any]:
@@ -1344,8 +1294,12 @@ def _resume_value_to_message(payload: Dict[str, Any], value: Any) -> str:
     return resolve_wait_resume_message(payload, value)
 
 
+def _build_step_label(step: Step, default: str = "当前步骤") -> str:
+    return str(step.title or step.description or default).strip() or default
+
+
 def _build_wait_resume_step_summary(step: Step, resumed_message: str) -> str:
-    step_label = str(step.title or step.description or "当前步骤").strip() or "当前步骤"
+    step_label = _build_step_label(step)
     normalized_message = str(resumed_message or "").strip()
     if normalized_message:
         return f"{step_label}已收到用户回复：{normalized_message}"
@@ -1353,7 +1307,7 @@ def _build_wait_resume_step_summary(step: Step, resumed_message: str) -> str:
 
 
 def _build_wait_cancel_step_summary(step: Step, resumed_message: str) -> str:
-    step_label = str(step.title or step.description or "当前步骤").strip() or "当前步骤"
+    step_label = _build_step_label(step)
     normalized_message = str(resumed_message or "").strip()
     if normalized_message:
         return f"{step_label}已被用户取消：{normalized_message}"
@@ -1382,7 +1336,7 @@ def _build_wait_resume_outcome(
         resumed_message: str,
 ) -> StepOutcome:
     """按恢复分支生成步骤结果，保证确认/选择/文本输入语义清晰。"""
-    step_label = str(step.title or step.description or "当前步骤").strip() or "当前步骤"
+    step_label = _build_step_label(step)
     normalized_message = str(resumed_message or "").strip()
 
     if branch == "confirm_continue":

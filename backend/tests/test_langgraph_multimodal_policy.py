@@ -1,11 +1,11 @@
 import asyncio
 
-from app.domain.models import Step, ToolEventStatus
-from app.domain.services.tools.base import BaseTool, tool
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.parsers import (
+from app.application.service.model_input_policy import (
     normalize_supported_input_types,
     resolve_model_input_policy,
 )
+from app.domain.models import Step, ToolEventStatus
+from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
     execute_step_with_prompt,
 )
@@ -202,8 +202,7 @@ def test_execute_step_with_prompt_should_send_multimodal_user_content_when_parts
         return payload
 
     payload = asyncio.run(_run())
-    first_user_message = llm.last_messages[0]
-    assert first_user_message["role"] == "user"
+    first_user_message = next(message for message in llm.last_messages if message["role"] == "user")
     assert first_user_message["content"][0] == {"type": "text", "text": "请识别图片内容"}
     assert first_user_message["content"][1] == {
         "type": "image",

@@ -13,146 +13,46 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from app.domain.external import LLM
 from app.domain.models import Step, ToolEvent, ToolEventStatus, ToolResult
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
+from app.domain.services.runtime.normalizers import truncate_text
 from app.domain.services.tools import BaseTool
-from .parsers import normalize_attachments, safe_parse_json
+from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
+    normalize_attachments,
+    safe_parse_json,
+)
 from .runtime_logging import elapsed_ms, log_runtime, now_perf
+from .settings import (
+    ABSOLUTE_PATH_PATTERN,
+    ACTION_PATTERN,
+    ASK_USER_FUNCTION_NAME,
+    BROWSER_INTERACTION_PATTERN,
+    BROWSER_NO_PROGRESS_LIMIT,
+    BROWSER_PROGRESS_FUNCTIONS,
+    CODING_PATTERN,
+    CODE_BLOCK_PATTERN,
+    FILE_FUNCTION_NAMES,
+    FILE_PATTERN,
+    NOTIFY_USER_FUNCTION_NAME,
+    NUMBERED_LIST_PATTERN,
+    PHATIC_PATTERN,
+    REPEAT_TOOL_LIMIT,
+    SEARCH_FUNCTION_NAMES,
+    SEARCH_PATTERN,
+    SEARCH_REPEAT_LIMIT,
+    SEQUENCE_PATTERN,
+    SHELL_COMMAND_PATTERN,
+    TASK_MODE_ALLOWED_FUNCTIONS,
+    TASK_MODE_ALLOWED_PREFIXES,
+    TOOL_FAILURE_LIMIT,
+    TOOL_REFERENCE_PATTERN,
+    TOOL_RESULT_MAX_DICT_ITEMS,
+    TOOL_RESULT_MAX_LIST_ITEMS,
+    TOOL_RESULT_MAX_TEXT_CHARS,
+    URL_PATTERN,
+    WAIT_PATTERN,
+    WEB_READING_PATTERN,
+)
 
 logger = logging.getLogger(__name__)
-
-NOTIFY_USER_FUNCTION_NAME = "message_notify_user"
-ASK_USER_FUNCTION_NAME = "message_ask_user"
-TOOL_RESULT_MAX_TEXT_CHARS = 2400
-TOOL_RESULT_MAX_LIST_ITEMS = 12
-TOOL_RESULT_MAX_DICT_ITEMS = 12
-
-BROWSER_PROGRESS_FUNCTIONS: tuple[str, ...] = ("browser_view", "browser_scroll_down", "browser_scroll_up")
-REPEAT_TOOL_LIMIT = 2
-SEARCH_REPEAT_LIMIT = 2
-BROWSER_NO_PROGRESS_LIMIT = 2
-TOOL_FAILURE_LIMIT = 3
-
-SEARCH_FUNCTION_NAMES: tuple[str, ...] = ("search_web", "fetch_page")
-READ_ONLY_FILE_FUNCTION_NAMES: tuple[str, ...] = (
-    "read_file",
-    "list_files",
-    "find_files",
-    "search_in_file",
-)
-FILE_FUNCTION_NAMES: tuple[str, ...] = (
-    *READ_ONLY_FILE_FUNCTION_NAMES,
-    "write_file",
-    "replace_in_file",
-)
-
-TASK_MODE_ALLOWED_PREFIXES: dict[str, tuple[str, ...]] = {
-    "research": (),
-    "web_reading": (),
-    "browser_interaction": ("browser_",),
-    "coding": ("shell_",),
-    "file_processing": (),
-    "human_wait": (),
-    "general": ("shell_",),
-}
-
-TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
-    "research": (
-        *SEARCH_FUNCTION_NAMES,
-        *READ_ONLY_FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-    "web_reading": (
-        *SEARCH_FUNCTION_NAMES,
-        *READ_ONLY_FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-    "browser_interaction": (
-        *SEARCH_FUNCTION_NAMES,
-        *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-    "coding": (
-        *SEARCH_FUNCTION_NAMES,
-        *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-    "file_processing": (
-        *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-    "human_wait": (
-        *SEARCH_FUNCTION_NAMES,
-        *READ_ONLY_FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-    "general": (
-        *SEARCH_FUNCTION_NAMES,
-        *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
-        ASK_USER_FUNCTION_NAME,
-    ),
-}
-
-URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
-ABSOLUTE_PATH_PATTERN = re.compile(r"(?<!\w)(/[A-Za-z0-9._/\-]+)")
-SHELL_COMMAND_PATTERN = re.compile(
-    r"(?:^|[\s`])(?:python3?|bash|sh|zsh|node|npm|pnpm|yarn|uv|pytest|git|make|docker|kubectl|cargo)\b",
-    re.IGNORECASE,
-)
-CODE_BLOCK_PATTERN = re.compile(r"```|`[^`]+`", re.MULTILINE)
-NUMBERED_LIST_PATTERN = re.compile(r"(^|\n)\s*(?:\d+[.)]|[-*])\s+", re.MULTILINE)
-SEQUENCE_PATTERN = re.compile(
-    r"(然后|之后|接着|再|最后|随后|分步骤|step\s*\d|next|then|after that|finally)",
-    re.IGNORECASE,
-)
-PHATIC_PATTERN = re.compile(
-    r"^(你好|您好|hi|hello|thanks|thank you|谢谢|再见|bye|早上好|晚上好|在吗|收到|ok|okay|好的)[!,.，。 ]*$",
-    re.IGNORECASE,
-)
-WAIT_PATTERN = re.compile(
-    r"((先|需要|等待|等我|请先).{0,12}(确认|审批|同意|允许|选择|回复|补充|输入|澄清))"
-    r"|((before|confirm|approval|approve|select|reply|input)\b)",
-    re.IGNORECASE,
-)
-BROWSER_INTERACTION_PATTERN = re.compile(
-    r"(登录|点击|滚动|输入|下拉|按钮|表单|提交|接管|验证码|上传|切换标签|勾选|同意)"
-    r"|(\bbrowser_(click|input|move_mouse|press_key|select_option|scroll_up|scroll_down|console_exec)\b)",
-    re.IGNORECASE,
-)
-WEB_READING_PATTERN = re.compile(
-    r"(网页|页面|站点|官网|文章|正文|文档页|详情页|链接信息|页面内容|read page|page content)"
-    r"|(\bbrowser_(view|navigate|restart|console_view)\b)",
-    re.IGNORECASE,
-)
-SEARCH_PATTERN = re.compile(
-    r"(搜索|检索|查找|调研|搜集|资料|文章|网页内容|链接信息)"
-    r"|(\b(search_web|fetch_page|search|research|lookup)\b)",
-    re.IGNORECASE,
-)
-FILE_PATTERN = re.compile(
-    r"(文件|目录|日志|附件|read_file|write_file|list_files|find_files|replace_in_file|search_in_file)"
-    r"|(\.(md|txt|json|yaml|yml|csv|log|py|ts|tsx|js|jsx)\b)",
-    re.IGNORECASE,
-)
-CODING_PATTERN = re.compile(
-    r"(代码|脚本|命令行|终端|测试|编译|运行命令|修复bug|修复测试|shell)"
-    r"|(\bshell_[a-z_]+\b)",
-    re.IGNORECASE,
-)
-ACTION_PATTERN = re.compile(
-    r"(搜索|读取|打开|访问|执行|运行|查看|创建|修改|写入|分析|调研|检索|浏览|打开页面)"
-    r"|(\b(search|read|open|visit|run|execute|write|analyze|inspect|browse|fetch)\b)",
-    re.IGNORECASE,
-)
-TOOL_REFERENCE_PATTERN = re.compile(
-    r"\b(search_web|fetch_page|browser_[a-z_]+|read_file|write_file|list_files|find_files|replace_in_file|search_in_file|shell_[a-z_]+)\b",
-    re.IGNORECASE,
-)
 
 
 def _normalize_intent_text(value: str) -> str:
@@ -232,10 +132,10 @@ def infer_entry_strategy(
         return "direct_answer"
 
     is_multi_step = (
-        signals["has_numbered_list"]
-        or signals["has_sequence_marker"]
-        or signals["clause_count"] >= 3
-        or signals["char_count"] >= 120
+            signals["has_numbered_list"]
+            or signals["has_sequence_marker"]
+            or signals["clause_count"] >= 3
+            or signals["char_count"] >= 120
     )
     has_direct_execution_signal = any(
         (
@@ -285,12 +185,7 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
 
 
 def classify_step_task_mode(step: Step) -> str:
-    candidate_parts = [
-        str(step.title or "").strip(),
-        str(step.description or "").strip(),
-        *[str(item or "").strip() for item in list(step.success_criteria or [])],
-    ]
-    signals = _analyze_text_intent(" ".join([part for part in candidate_parts if part]))
+    signals = _analyze_text_intent(_build_step_candidate_text(step))
 
     if signals["needs_human_wait"]:
         return "human_wait"
@@ -316,7 +211,8 @@ def classify_step_task_mode(step: Step) -> str:
     if signals["has_search_signal"]:
         scores["research"] += 3
     if signals["has_tool_reference"]:
-        if any(name in signals["text"] for name in ("browser_click", "browser_input", "browser_scroll", "browser_press_key", "browser_select_option")):
+        if any(name in signals["text"] for name in
+               ("browser_click", "browser_input", "browser_scroll", "browser_press_key", "browser_select_option")):
             scores["browser_interaction"] += 3
         if any(name in signals["text"] for name in ("browser_view", "browser_navigate", "browser_restart")):
             scores["web_reading"] += 2
@@ -452,15 +348,19 @@ def _step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
     if takeover == "browser":
         return True
 
+    candidate_text = _build_step_candidate_text(step)
+    if not candidate_text.strip():
+        return False
+    return bool(_analyze_text_intent(candidate_text)["needs_human_wait"])
+
+
+def _build_step_candidate_text(step: Step) -> str:
     candidate_parts = [
         str(step.title or "").strip(),
         str(step.description or "").strip(),
         *[str(item or "").strip() for item in list(step.success_criteria or [])],
     ]
-    candidate_text = " ".join([part for part in candidate_parts if part])
-    if not candidate_text.strip():
-        return False
-    return bool(_analyze_text_intent(candidate_text)["needs_human_wait"])
+    return " ".join([part for part in candidate_parts if part])
 
 
 def _filter_available_tools(
@@ -485,10 +385,7 @@ def _filter_available_tools(
 
 
 def _truncate_tool_text(value: Any, *, max_chars: int = TOOL_RESULT_MAX_TEXT_CHARS) -> str:
-    normalized_value = str(value or "").strip()
-    if len(normalized_value) <= max_chars:
-        return normalized_value
-    return normalized_value[:max_chars]
+    return truncate_text(value, max_chars=max_chars)
 
 
 def _compact_tool_value(value: Any, *, depth: int = 0) -> Any:

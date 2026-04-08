@@ -30,6 +30,11 @@ from app.domain.models import (
     WorkflowRunSummary,
     SessionContextSnapshot,
 )
+from app.domain.services.runtime.normalizers import (
+    merge_unique_strings,
+    normalize_ref_list,
+    normalize_text_list,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -318,16 +323,16 @@ class GraphStateContractMapper:
             summary = str(outcome.summary or "").strip()
             if summary:
                 normalized_outcome["summary"] = summary
-            produced_artifacts = cls._normalize_string_list(outcome.produced_artifacts)
+            produced_artifacts = normalize_ref_list(outcome.produced_artifacts)
             if produced_artifacts:
                 normalized_outcome["produced_artifacts"] = produced_artifacts
-            blockers = cls._normalize_string_list(outcome.blockers)
+            blockers = normalize_text_list(outcome.blockers)
             if blockers:
                 normalized_outcome["blockers"] = blockers
-            facts_learned = cls._normalize_string_list(outcome.facts_learned)
+            facts_learned = normalize_text_list(outcome.facts_learned)
             if facts_learned:
                 normalized_outcome["facts_learned"] = facts_learned
-            open_questions = cls._normalize_string_list(outcome.open_questions)
+            open_questions = normalize_text_list(outcome.open_questions)
             if open_questions:
                 normalized_outcome["open_questions"] = open_questions
             return normalized_outcome or None
@@ -339,16 +344,16 @@ class GraphStateContractMapper:
         summary = str(raw.get("summary") or "").strip()
         if summary:
             normalized_outcome["summary"] = summary
-        produced_artifacts = cls._normalize_string_list(raw.get("produced_artifacts"))
+        produced_artifacts = normalize_ref_list(raw.get("produced_artifacts"))
         if produced_artifacts:
             normalized_outcome["produced_artifacts"] = produced_artifacts
-        blockers = cls._normalize_string_list(raw.get("blockers"))
+        blockers = normalize_text_list(raw.get("blockers"))
         if blockers:
             normalized_outcome["blockers"] = blockers
-        facts_learned = cls._normalize_string_list(raw.get("facts_learned"))
+        facts_learned = normalize_text_list(raw.get("facts_learned"))
         if facts_learned:
             normalized_outcome["facts_learned"] = facts_learned
-        open_questions = cls._normalize_string_list(raw.get("open_questions"))
+        open_questions = normalize_text_list(raw.get("open_questions"))
         if open_questions:
             normalized_outcome["open_questions"] = open_questions
         return normalized_outcome or None
@@ -386,7 +391,7 @@ class GraphStateContractMapper:
             return None
 
         content = raw.get("content") if isinstance(raw.get("content"), dict) else {}
-        tags = cls._normalize_string_list(raw.get("tags"))
+        tags = normalize_text_list(raw.get("tags"))
         return {
             "id": memory_id,
             "memory_type": str(raw.get("memory_type") or "").strip(),
@@ -512,17 +517,6 @@ class GraphStateContractMapper:
     def _normalize_message_window(cls, raw: Any) -> List[Dict[str, Any]]:
         return cls._normalize_list_memory(raw)
 
-    @staticmethod
-    def _normalize_string_list(raw: Any) -> List[str]:
-        if not isinstance(raw, list):
-            return []
-        normalized_items: List[str] = []
-        for item in raw:
-            normalized_item = str(item or "").strip()
-            if normalized_item and normalized_item not in normalized_items:
-                normalized_items.append(normalized_item)
-        return normalized_items
-
     @classmethod
     def _normalize_recent_run_briefs(cls, raw: Any) -> List[Dict[str, Any]]:
         normalized_briefs: List[Dict[str, Any]] = []
@@ -544,16 +538,6 @@ class GraphStateContractMapper:
     @classmethod
     def _normalize_recent_attempt_briefs(cls, raw: Any) -> List[Dict[str, Any]]:
         return cls._normalize_recent_run_briefs(raw)
-
-    @staticmethod
-    def _merge_unique_strings(*groups: Any) -> List[str]:
-        merged_items: List[str] = []
-        for group in groups:
-            for item in list(group or []):
-                normalized_item = str(item or "").strip()
-                if normalized_item and normalized_item not in merged_items:
-                    merged_items.append(normalized_item)
-        return merged_items
 
     @staticmethod
     def _truncate_brief_summary(raw: Any, *, max_chars: int = 200) -> str:
@@ -589,10 +573,9 @@ class GraphStateContractMapper:
     ) -> List[str]:
         questions: List[str] = []
         for summary in list(summaries or []):
-            for item in list(getattr(summary, "open_questions", []) or []):
-                normalized_item = str(item or "").strip()
-                if normalized_item and normalized_item not in questions:
-                    questions.append(normalized_item)
+            if summary is None:
+                continue
+            questions = merge_unique_strings(questions, getattr(summary, "open_questions", []))
         return questions
 
     @classmethod
@@ -604,7 +587,7 @@ class GraphStateContractMapper:
         for summary in list(summaries or []):
             if summary is None:
                 continue
-            blockers = cls._merge_unique_strings(blockers, getattr(summary, "blockers", []))
+            blockers = merge_unique_strings(blockers, getattr(summary, "blockers", []))
         return blockers
 
     @classmethod
@@ -616,7 +599,7 @@ class GraphStateContractMapper:
         for summary in list(summaries or []):
             if summary is None:
                 continue
-            artifact_refs = cls._merge_unique_strings(artifact_refs, getattr(summary, "artifacts", []))
+            artifact_refs = merge_unique_strings(artifact_refs, normalize_ref_list(getattr(summary, "artifacts", [])))
         return artifact_refs
 
     @classmethod
@@ -636,16 +619,6 @@ class GraphStateContractMapper:
         if not isinstance(state, dict):
             return {}
         return cls._normalize_pending_interrupt(state.get("pending_interrupt"))
-
-    @staticmethod
-    def _normalize_artifact_refs(raw: Any) -> List[str]:
-        if not isinstance(raw, list):
-            return []
-        refs: List[str] = []
-        for item in raw:
-            if isinstance(item, str) and item.strip():
-                refs.append(item.strip())
-        return list(dict.fromkeys(refs))
 
     @classmethod
     def _normalize_last_executed_step(cls, raw: Any) -> Optional[Step]:
@@ -760,24 +733,24 @@ class GraphStateContractMapper:
         if not recent_attempt_briefs:
             recent_attempt_briefs = cls._build_briefs_from_summaries(recent_attempt_summaries)
 
-        session_open_questions = cls._normalize_string_list(graph_state_from_metadata.get("session_open_questions"))
+        session_open_questions = normalize_text_list(graph_state_from_metadata.get("session_open_questions"))
         if not session_open_questions:
-            session_open_questions = cls._merge_unique_strings(
+            session_open_questions = merge_unique_strings(
                 cls._build_open_questions_from_summaries(completed_run_summaries),
                 cls._build_open_questions_from_summaries(recent_attempt_summaries),
-                cls._normalize_string_list(getattr(session_context_snapshot, "open_questions", None)),
+                normalize_text_list(getattr(session_context_snapshot, "open_questions", None)),
             )
 
-        session_blockers = cls._normalize_string_list(graph_state_from_metadata.get("session_blockers"))
+        session_blockers = normalize_text_list(graph_state_from_metadata.get("session_blockers"))
         if not session_blockers:
             session_blockers = cls._build_blockers_from_summaries(recent_attempt_summaries)
 
-        selected_artifacts = cls._normalize_string_list(graph_state_from_metadata.get("selected_artifacts"))
+        selected_artifacts = normalize_ref_list(graph_state_from_metadata.get("selected_artifacts"))
 
-        historical_artifact_refs = cls._normalize_string_list(graph_state_from_metadata.get("historical_artifact_refs"))
+        historical_artifact_refs = normalize_ref_list(graph_state_from_metadata.get("historical_artifact_refs"))
         if not historical_artifact_refs:
-            historical_artifact_refs = cls._merge_unique_strings(
-                cls._normalize_string_list(getattr(session_context_snapshot, "artifact_refs", None)),
+            historical_artifact_refs = merge_unique_strings(
+                normalize_ref_list(getattr(session_context_snapshot, "artifact_refs", None)),
                 cls._build_artifact_refs_from_summaries(completed_run_summaries),
                 cls._build_artifact_refs_from_summaries(recent_attempt_summaries),
             )
@@ -829,7 +802,7 @@ class GraphStateContractMapper:
             "step_states": step_states,
             "pending_interrupt": cls._extract_pending_interrupt_from_metadata(graph_state_from_metadata),
             "graph_metadata": graph_metadata,
-            "artifact_refs": cls._normalize_artifact_refs(
+            "artifact_refs": normalize_ref_list(
                 (run.runtime_metadata or {}).get("artifacts") if run is not None else []
             ),
             "emitted_events": [],
@@ -985,7 +958,7 @@ class GraphStateContractMapper:
         if projection:
             next_graph_metadata["projection"] = projection
         next_state["graph_metadata"] = next_graph_metadata
-        next_state["artifact_refs"] = list(dict.fromkeys(artifact_refs))
+        next_state["artifact_refs"] = normalize_ref_list(artifact_refs)
         return next_state
 
     @classmethod

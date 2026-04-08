@@ -29,12 +29,12 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.langgraph_state import (
-    GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
     PlannerReActLangGraphState,
     get_graph_projection,
     replace_graph_projection,
 )
+from app.domain.services.runtime.normalizers import normalize_ref_list, normalize_text_list
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
@@ -315,15 +315,6 @@ class LangGraphRunEngine(RunEngine):
             }
 
     @staticmethod
-    def _dedupe_text_items(items: List[str]) -> List[str]:
-        deduped_items: List[str] = []
-        for item in items:
-            normalized_item = str(item or "").strip()
-            if normalized_item and normalized_item not in deduped_items:
-                deduped_items.append(normalized_item)
-        return deduped_items
-
-    @staticmethod
     def _build_step_ledger(state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
         return [
             dict(item)
@@ -425,12 +416,12 @@ class LangGraphRunEngine(RunEngine):
             total_steps=len(getattr(plan, "steps", []) or []),
             step_ledger=step_ledger,
             # 仅保留当前 run 明确选择/确认过的产物，避免把事件层噪音引用投影到历史上下文。
-            artifacts=cls._dedupe_text_items(
+            artifacts=normalize_ref_list(
                 [str(item) for item in list(state.get("selected_artifacts") or [])]
             ),
-            open_questions=cls._dedupe_text_items(open_questions),
-            blockers=cls._dedupe_text_items(blockers),
-            facts_learned=cls._dedupe_text_items(facts_learned),
+            open_questions=normalize_text_list(open_questions),
+            blockers=normalize_text_list(blockers),
+            facts_learned=normalize_text_list(facts_learned),
         )
 
     @classmethod
@@ -463,11 +454,11 @@ class LangGraphRunEngine(RunEngine):
                 for item in recent_summaries
             ],
             # 收集并去重所有运行中的待解决问题
-            open_questions=cls._dedupe_text_items(
+            open_questions=normalize_text_list(
                 [question for item in recent_summaries for question in list(item.open_questions or [])]
             ),
             # 收集并去重所有运行中产生的工件引用
-            artifact_refs=cls._dedupe_text_items(
+            artifact_refs=normalize_ref_list(
                 [artifact for item in recent_summaries for artifact in list(item.artifacts or [])]
             ),
         )
