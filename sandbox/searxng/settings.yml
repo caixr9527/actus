@@ -4,6 +4,24 @@ general:
   debug: false
   instance_name: "Actus Sandbox SearXNG"
 
+
+engines:
+  - name: baidu
+    engine: baidu
+    shortcut: bd
+    timeout: 4.0
+    disabled: false
+  - name: sogou
+    engine: sogou
+    shortcut: sg
+    timeout: 4.0
+    disabled: false
+  - name: bing
+    engine: bing
+    shortcut: bi
+    timeout: 4.0
+    disabled: false
+
 search:
   formats:
     - html
