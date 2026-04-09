@@ -13,6 +13,7 @@ from langgraph.types import interrupt
 from app.domain.external import LLM
 from app.domain.models import (
     DoneEvent,
+    ErrorEvent,
     ExecutionStatus,
     File,
     LongTermMemory,
@@ -89,7 +90,13 @@ from .settings import (
     PROMPT_CONTEXT_SUMMARY_MAX_CHARS,
     STEP_EXECUTION_TIMEOUT_SECONDS,
 )
-from .tools import classify_step_task_mode, execute_step_with_prompt, infer_entry_strategy
+from .tools import (
+    classify_confirmed_user_task_mode,
+    classify_step_task_mode,
+    execute_step_with_prompt,
+    has_available_file_context,
+    infer_entry_strategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +107,24 @@ def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
 
 def _replace_control_metadata(state: PlannerReActLangGraphState, control: Dict[str, Any]) -> Dict[str, Any]:
     return replace_graph_control(state.get("graph_metadata"), control)
+
+
+def _is_direct_wait_execute_step(step: Step, control: Dict[str, Any]) -> bool:
+    """识别 direct_wait 确认后的真实执行步骤。"""
+    return (
+        str(control.get("entry_strategy") or "").strip() == "direct_wait"
+        and str(step.id or "").strip() == "direct-wait-execute"
+    )
+
+
+def _clear_direct_wait_control_state(control: Dict[str, Any]) -> None:
+    """清理 direct_wait 专属控制字段，避免取消后误伤后续重规划链路。"""
+    if str(control.get("entry_strategy") or "").strip() == "direct_wait":
+        control.pop("entry_strategy", None)
+    control.pop("skip_replan_when_plan_finished", None)
+    control.pop("direct_wait_original_message", None)
+    control.pop("direct_wait_execute_task_mode", None)
+    control.pop("direct_wait_original_task_executed", None)
 
 
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -195,6 +220,18 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
         ]
     )
     return _merge_known_attachment_refs(*artifact_groups)
+
+
+def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> List[str]:
+    """统一收口当前运行里可直接消费的文件路径，供执行器判断是否允许文件工具。"""
+    return _merge_known_attachment_refs(
+        [
+            ref
+            for ref in list(state.get("selected_artifacts") or [])
+            if _is_attachment_filepath(ref)
+        ],
+        _collect_current_run_artifacts(state),
+    )
 
 
 def _resolve_summary_attachment_refs(
@@ -1447,16 +1484,23 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
     user_message = str(state.get("user_message") or "").strip()
     language = infer_working_language_from_message(user_message)
     direct_copy = build_direct_path_copy(language)
+    execute_task_mode = classify_confirmed_user_task_mode(user_message)
     step_wait = Step(
         id="direct-wait-confirm",
         title=direct_copy["direct_wait_title"],
         description=direct_copy["direct_wait_description"],
+        task_mode_hint="human_wait",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
         status=ExecutionStatus.RUNNING,
     )
     step_execute = Step(
         id="direct-wait-execute",
         title=direct_copy["direct_wait_execute_title"],
-        description=user_message,
+        # 第二步只表达“开始执行原任务”，不再把“先确认”语义写回步骤文本。
+        description=direct_copy["direct_wait_execute_title"],
+        output_mode="none",
+        artifact_policy="default",
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(
@@ -1470,6 +1514,12 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
     control = _get_control_metadata(state)
     control["entry_strategy"] = "direct_wait"
     control["skip_replan_when_plan_finished"] = True
+    # 保留原始请求，供确认后直接执行与最终总结使用。
+    control["direct_wait_original_message"] = user_message
+    # 在入口处就确定真实执行模式，避免确认后再次被等待语义误判。
+    control["direct_wait_execute_task_mode"] = execute_task_mode
+    # 只有真实执行步骤收尾后，才允许 direct_wait 路径进入总结。
+    control["direct_wait_original_task_executed"] = False
     events: List[Any] = [
         TitleEvent(title=plan.title),
         PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
@@ -1503,6 +1553,8 @@ async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReAct
         id="direct-execute-step",
         title=direct_copy["direct_execute_step_title"],
         description=user_message,
+        output_mode="none",
+        artifact_policy="default",
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(
@@ -1658,7 +1710,14 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             events=planner_events,
         )
     else:
-        steps = [build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
+        steps = [
+            build_step_from_payload(
+                item,
+                index,
+                user_message=user_message,
+            )
+            for index, item in enumerate(raw_steps)
+        ]
         log_runtime(
             logger,
             logging.INFO,
@@ -1716,7 +1775,10 @@ async def execute_step_node(
     if step is None:
         return state
 
-    task_mode = classify_step_task_mode(step)
+    control = _get_control_metadata(state)
+    is_direct_wait_execute_step = _is_direct_wait_execute_step(step, control)
+    explicit_direct_wait_task_mode = str(control.get("direct_wait_execute_task_mode") or "").strip()
+    task_mode = explicit_direct_wait_task_mode if is_direct_wait_execute_step and explicit_direct_wait_task_mode else classify_step_task_mode(step)
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     await emit_live_events(started_event)
@@ -1734,9 +1796,18 @@ async def execute_step_node(
     )
 
     user_message = str(state.get("user_message", ""))
+    if is_direct_wait_execute_step:
+        # 确认后的执行阶段必须继续消费原始请求，而不是“继续/确认”这类恢复文本。
+        user_message = str(control.get("direct_wait_original_message") or user_message).strip()
     language = plan.language or "zh"
     input_parts = list(state.get("input_parts") or [])
     attachments = [part.get("sandbox_filepath") for part in input_parts]
+    available_file_context_refs = _collect_available_file_context_refs(state)
+    available_file_context = has_available_file_context(
+        user_message=user_message,
+        attachment_paths=attachments,
+        artifact_paths=available_file_context_refs,
+    )
 
     user_message_prompt = EXECUTION_PROMPT.format(
         message=user_message,
@@ -1765,6 +1836,7 @@ async def execute_step_node(
                     task_mode=task_mode,
                     on_tool_event=emit_live_events,
                     user_content=user_content,
+                    has_available_file_context=available_file_context,
                 )
                 tool_cost_ms = elapsed_ms(tool_started_at)
 
@@ -1854,6 +1926,7 @@ async def execute_step_node(
             updates={
                 "plan": plan,
                 "current_step_id": step.id,
+                "user_message": user_message,
                 "graph_metadata": _replace_control_metadata(state, control),
                 "pending_interrupt": interrupt_request,
             },
@@ -1900,8 +1973,12 @@ async def execute_step_node(
 
     events: List[Any] = [started_event, *tool_events, *final_step_events]
     next_step = plan.get_next_step()
-    control = _get_control_metadata(state)
     control["step_reuse_hit"] = False
+    if is_direct_wait_execute_step:
+        # 只要真实执行步骤已经完成收尾，就视为原始任务已被实际执行过。
+        control["direct_wait_original_task_executed"] = True
+        control.pop("direct_wait_execute_task_mode", None)
+        control.pop("direct_wait_original_message", None)
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
         step.outcome,
@@ -1929,6 +2006,7 @@ async def execute_step_node(
             "last_executed_step": step.model_copy(deep=True),
             "execution_count": int(state.get("execution_count", 0)) + 1,
             "current_step_id": next_step.id if next_step is not None else None,
+            "user_message": user_message,
             "working_memory": working_memory,
             "graph_metadata": _replace_control_metadata(state, control),
             "final_message": step_summary,
@@ -2043,6 +2121,8 @@ async def wait_for_human_node(
             _ensure_working_memory(state),
             waiting_step.outcome,
         )
+        # direct_wait 已被用户取消，后续会转入新的重规划链路，必须清掉原链路的控制语义。
+        _clear_direct_wait_control_state(control)
         control["wait_resume_action"] = "replan"
         log_runtime(
             logger,
@@ -2083,6 +2163,10 @@ async def wait_for_human_node(
     )
     await emit_live_events(completed_event)
     next_step = plan.get_next_step()
+    next_user_message = resumed_message
+    if str(waiting_step.id or "").strip() == "direct-wait-confirm":
+        # synthetic confirm 只负责授权继续执行，后续节点仍应保留原始请求作为当前任务。
+        next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
         waiting_step.outcome,
@@ -2102,7 +2186,7 @@ async def wait_for_human_node(
         state,
         updates={
             "plan": plan,
-            "user_message": resumed_message,
+            "user_message": next_user_message,
             "input_parts": [],
             "message_window": message_window,
             "graph_metadata": _replace_control_metadata(state, control),
@@ -2227,7 +2311,15 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         )
         return state
 
-    new_steps = [build_step_from_payload(item, index) for index, item in enumerate(raw_steps)]
+    user_message = str(state.get("user_message") or getattr(plan, "goal", "") or "")
+    new_steps = [
+        build_step_from_payload(
+            item,
+            index,
+            user_message=user_message,
+        )
+        for index, item in enumerate(raw_steps)
+    ]
     updated_steps, merge_mode = _merge_replanned_steps_into_plan(plan, new_steps)
     plan.steps = updated_steps
 
@@ -2265,6 +2357,35 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     plan = state.get("plan")
     if plan is None:
         return state
+    control = _get_control_metadata(state)
+    if str(control.get("entry_strategy") or "").strip() == "direct_wait" and not bool(
+            control.get("direct_wait_original_task_executed")
+    ):
+        error_message = "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
+        plan.status = ExecutionStatus.FAILED
+        plan.error = error_message
+        final_events: List[Any] = [
+            ErrorEvent(error=error_message, error_key="direct_wait_unexecuted"),
+            MessageEvent(role="assistant", message=error_message, stage="final"),
+        ]
+        await emit_live_events(*final_events)
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "阻断未执行原任务的 direct_wait 错误总结",
+            state=state,
+            error_key="direct_wait_unexecuted",
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return _reduce_state_with_events(
+            state,
+            updates={
+                "plan": plan,
+                "current_step_id": None,
+                "final_message": error_message,
+            },
+            events=final_events,
+        )
     summary_plan_snapshot = _build_summary_plan_snapshot(
         plan,
         selected_artifacts=list(state.get("selected_artifacts") or []),

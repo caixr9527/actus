@@ -22,12 +22,15 @@ from app.domain.models import (
     BrowserPageType,
     SearchResults,
     Step,
+    StepArtifactPolicy,
+    StepOutputMode,
+    StepTaskModeHint,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
 )
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
-from app.domain.services.runtime.normalizers import truncate_text
+from app.domain.services.runtime.normalizers import normalize_controlled_value, truncate_text
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
     normalize_attachments,
@@ -50,6 +53,7 @@ from .settings import (
     NOTIFY_USER_FUNCTION_NAME,
     NUMBERED_LIST_PATTERN,
     PHATIC_PATTERN,
+    READ_ONLY_FILE_FUNCTION_NAMES,
     REPEAT_TOOL_LIMIT,
     SEARCH_FUNCTION_NAMES,
     SEARCH_PATTERN,
@@ -65,6 +69,7 @@ from .settings import (
     TOOL_RESULT_MAX_TEXT_CHARS,
     URL_PATTERN,
     WAIT_PATTERN,
+    WAIT_REQUEST_PATTERN,
     WEB_READING_PATTERN,
 )
 
@@ -73,6 +78,19 @@ logger = logging.getLogger(__name__)
 
 def _normalize_intent_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _has_explicit_wait_semantics(value: str) -> bool:
+    """统一判断文本是否明确表达“当前步骤要向用户等待确认/选择/输入”语义。"""
+    normalized_text = _normalize_intent_text(value)
+    if not normalized_text:
+        return False
+    # 两个 pattern 故意分开维护，但这里统一收口：
+    # WAIT_PATTERN 负责“直接等待语气”，WAIT_REQUEST_PATTERN 负责“请求式等待文案”。
+    return bool(
+        WAIT_PATTERN.search(normalized_text)
+        or WAIT_REQUEST_PATTERN.search(normalized_text)
+    )
 
 
 def _analyze_text_intent(value: str) -> Dict[str, Any]:
@@ -116,7 +134,7 @@ def _analyze_text_intent(value: str) -> Dict[str, Any]:
         "has_numbered_list": bool(NUMBERED_LIST_PATTERN.search(normalized_text)),
         "has_sequence_marker": bool(SEQUENCE_PATTERN.search(normalized_text)),
         "is_phatic": bool(PHATIC_PATTERN.match(normalized_text)),
-        "needs_human_wait": bool(WAIT_PATTERN.search(normalized_text)),
+        "needs_human_wait": _has_explicit_wait_semantics(normalized_text),
         "has_browser_interaction_signal": bool(BROWSER_INTERACTION_PATTERN.search(normalized_text)),
         "has_web_reading_signal": bool(WEB_READING_PATTERN.search(normalized_text)),
         "has_search_signal": bool(SEARCH_PATTERN.search(normalized_text)),
@@ -142,11 +160,6 @@ def infer_entry_strategy(
     signals = _analyze_text_intent(user_message)
     if signals["char_count"] == 0:
         return "recall_memory_context"
-    if signals["needs_human_wait"]:
-        return "direct_wait"
-    if signals["is_phatic"] and not signals["has_action_signal"] and not signals["has_tool_reference"]:
-        return "direct_answer"
-
     is_multi_step = (
             signals["has_numbered_list"]
             or signals["has_sequence_marker"]
@@ -163,9 +176,35 @@ def infer_entry_strategy(
             signals["has_action_signal"],
         )
     )
+    if signals["needs_human_wait"]:
+        # 只有“短且单一的前置确认请求”才走 direct_wait。
+        # 对包含明确执行目标、篇幅较长的新任务请求，保留给完整规划链路处理，避免一进来就弹出通用确认。
+        if has_direct_execution_signal and (is_multi_step or signals["char_count"] >= 48):
+            return "recall_memory_context"
+        return "direct_wait"
+    if signals["is_phatic"] and not signals["has_action_signal"] and not signals["has_tool_reference"]:
+        return "direct_answer"
     if has_direct_execution_signal and not is_multi_step:
         return "direct_execute"
     return "recall_memory_context"
+
+
+def has_available_file_context(
+        *,
+        user_message: str,
+        attachment_paths: Optional[List[str]] = None,
+        artifact_paths: Optional[List[str]] = None,
+) -> bool:
+    """统一判断当前步骤是否已经具备可消费的文件上下文。"""
+    normalized_paths = [
+        str(path or "").strip()
+        for path in [*(attachment_paths or []), *(artifact_paths or [])]
+        if str(path or "").strip()
+    ]
+    if len(normalized_paths) > 0:
+        return True
+    signals = _analyze_text_intent(user_message)
+    return bool(signals["has_absolute_path"] or signals["has_file_signal"])
 
 
 def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dict[str, Any]]:
@@ -202,12 +241,8 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
     return available_tools
 
 
-def classify_step_task_mode(step: Step) -> str:
-    signals = _analyze_text_intent(_build_step_candidate_text(step))
-
-    if signals["needs_human_wait"]:
-        return "human_wait"
-
+def _classify_task_mode_from_signals(signals: Dict[str, Any]) -> str:
+    """基于已解析的意图信号归类真实执行模式。"""
     scores = {
         "web_reading": 0,
         "browser_interaction": 0,
@@ -272,6 +307,23 @@ def classify_step_task_mode(step: Step) -> str:
     if ranked_modes and ranked_modes[0][1] > 0:
         return ranked_modes[0][0]
     return "general"
+
+
+def classify_step_task_mode(step: Step) -> str:
+    """基于步骤语义识别任务模式；结构化标记优先，文本规则仅兜底。"""
+    structured_hint = normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint)
+    if structured_hint:
+        return structured_hint
+    signals = _analyze_text_intent(_build_step_candidate_text(step))
+    if signals["needs_human_wait"]:
+        return "human_wait"
+    return _classify_task_mode_from_signals(signals)
+
+
+def classify_confirmed_user_task_mode(user_message: str) -> str:
+    """对已确认执行的原始请求做真实任务归类，不再被等待语义短路。"""
+    signals = _analyze_text_intent(user_message)
+    return _classify_task_mode_from_signals(signals)
 
 
 def _extract_function_name(tool_schema: Dict[str, Any]) -> str:
@@ -396,10 +448,24 @@ def _step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
     if takeover == "browser":
         return True
 
+    # 等待能力先信 planner/replan 的结构化标记，文本正则只保留为旧计划兼容兜底。
+    if normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint) == "human_wait":
+        return True
+
     candidate_text = _build_step_candidate_text(step)
     if not candidate_text.strip():
         return False
     return bool(_analyze_text_intent(candidate_text)["needs_human_wait"])
+
+
+def _step_forbids_file_output(step: Step) -> bool:
+    """结构化产物策略优先决定是否禁止当前步骤产出文件。"""
+    return normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy) == "forbid_file_output"
+
+
+def _step_outputs_inline_result(step: Step) -> bool:
+    """读取步骤的结构化输出模式，避免展示类步骤继续绕回文件系统。"""
+    return normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) == "inline"
 
 
 def _build_step_candidate_text(step: Step) -> str:
@@ -1050,6 +1116,7 @@ async def execute_step_with_prompt(
         task_mode: str = "general",
         on_tool_event: Optional[Callable[[ToolEvent], Optional[Awaitable[None]]]] = None,
         user_content: Optional[List[Dict[str, Any]]] = None,
+        has_available_file_context: bool = False,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。"""
     started_at = now_perf()
@@ -1094,9 +1161,43 @@ async def execute_step_with_prompt(
         available_tools,
         task_mode=task_mode,
     )
+    research_file_context_blocked_function_names: set[str] = set()
+    general_inline_blocked_function_names: set[str] = set()
+    artifact_policy_blocked_function_names: set[str] = set()
+    if task_mode == "research" and not has_available_file_context:
+        research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
+        blocked_function_names.update(research_file_context_blocked_function_names)
+    if task_mode == "general" and _step_outputs_inline_result(step) and not has_available_file_context:
+        # 展示型步骤应当直接把已有观察整理成文本，不要在无文件上下文时再试探读写文件。
+        general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
+        blocked_function_names.update(general_inline_blocked_function_names)
+    if _step_forbids_file_output(step):
+        artifact_policy_blocked_function_names.add("write_file")
+        blocked_function_names.update(artifact_policy_blocked_function_names)
     if task_mode in {"web_reading", "browser_interaction"} and not browser_route_enabled:
         for function_name in _build_browser_capability_gap_allowlist(task_mode=task_mode):
             blocked_function_names.discard(function_name)
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in research_file_context_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in general_inline_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in artifact_policy_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
     log_runtime(
         logger,
         logging.INFO,
@@ -1362,7 +1463,66 @@ async def execute_step_with_prompt(
             )
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
         elif normalized_function_name in iteration_blocked_function_names:
-            if browser_route_enabled and normalized_function_name.startswith("browser_"):
+            if normalized_function_name in research_file_context_blocked_function_names:
+                loop_break_reason = "research_file_context_required"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "缺少明确文件上下文，已拦截文件工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤属于检索任务，只有在用户消息或附件中出现明确文件路径/文件名时，才能调用文件工具。",
+                )
+            elif task_mode == "web_reading" and normalized_function_name in READ_ONLY_FILE_FUNCTION_NAMES:
+                loop_break_reason = "web_reading_file_tool_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "网页读取步骤已拦截文件工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤属于网页读取任务，请优先使用 search_web、fetch_page 或浏览器高阶读取工具，不要回退到文件工具。",
+                )
+            elif normalized_function_name in general_inline_blocked_function_names:
+                loop_break_reason = "general_inline_file_context_required"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "内联展示步骤缺少文件上下文，已拦截文件工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                    output_mode=str(getattr(step, "output_mode", "") or ""),
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤是直接内联展示结果的步骤，且没有可用文件上下文，请直接返回文本结果，不要继续读写文件。",
+                )
+            elif normalized_function_name in artifact_policy_blocked_function_names:
+                loop_break_reason = "artifact_policy_file_output_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "步骤产物策略拦截文件产出工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                    artifact_policy=str(getattr(step, "artifact_policy", "") or ""),
+                    output_mode=str(getattr(step, "output_mode", "") or ""),
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤的结构化产物策略禁止文件产出。请直接返回文本结果，或先通过重规划生成允许文件产出的步骤。",
+                )
+            elif browser_route_enabled and normalized_function_name.startswith("browser_"):
                 loop_break_reason = "browser_route_blocked"
                 log_runtime(
                     logger,

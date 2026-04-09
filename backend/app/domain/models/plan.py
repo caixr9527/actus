@@ -31,6 +31,35 @@ def build_step_objective_key(title: str, description: str) -> str:
     return hashlib.md5(source_text.encode("utf-8")).hexdigest()[:16]
 
 
+class StepTaskModeHint(str, Enum):
+    """步骤结构化任务模式。"""
+
+    GENERAL = "general"
+    RESEARCH = "research"
+    WEB_READING = "web_reading"
+    BROWSER_INTERACTION = "browser_interaction"
+    FILE_PROCESSING = "file_processing"
+    CODING = "coding"
+    HUMAN_WAIT = "human_wait"
+
+
+class StepOutputMode(str, Enum):
+    """步骤结构化输出模式。"""
+
+    NONE = "none"
+    INLINE = "inline"
+    FILE = "file"
+
+
+class StepArtifactPolicy(str, Enum):
+    """步骤结构化产物策略。"""
+
+    DEFAULT = "default"
+    FORBID_FILE_OUTPUT = "forbid_file_output"
+    ALLOW_FILE_OUTPUT = "allow_file_output"
+    REQUIRE_FILE_OUTPUT = "require_file_output"
+
+
 class ExecutionStatus(str, Enum):
     """执行状态"""
     PENDING = "pending"
@@ -60,6 +89,12 @@ class Step(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str = ""
     description: str = ""
+    # 结构化步骤模式优先，文本规则只做兜底。
+    task_mode_hint: Optional[StepTaskModeHint] = None
+    # 结构化输出模式，表示该步骤默认产出形态。
+    output_mode: Optional[StepOutputMode] = None
+    # 结构化产物策略，决定当前步骤是否允许或要求文件产出。
+    artifact_policy: Optional[StepArtifactPolicy] = None
     objective_key: str = ""
     success_criteria: List[str] = Field(default_factory=list)
     status: ExecutionStatus = ExecutionStatus.PENDING

@@ -106,7 +106,6 @@ TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "web_reading": (
         *SEARCH_FUNCTION_NAMES,
         *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
-        *READ_ONLY_FILE_FUNCTION_NAMES,
         NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
@@ -155,13 +154,24 @@ SEQUENCE_PATTERN = re.compile(
     r"(然后|之后|接着|再|最后|随后|分步骤|step\s*\d|next|then|after that|finally)",
     re.IGNORECASE,
 )
+# 直接寒暄/应答型输入，优先走 direct_answer。
 PHATIC_PATTERN = re.compile(
     r"^(你好|您好|hi|hello|thanks|thank you|谢谢|再见|bye|早上好|晚上好|在吗|收到|ok|okay|好的)[!,.，。 ]*$",
     re.IGNORECASE,
 )
+# 等待语义拆成两层：
+# 1. WAIT_PATTERN 识别用户原始消息里的“先确认/等待回复”这类直接等待语气；
+# 2. WAIT_REQUEST_PATTERN 识别 Planner 产出的“向用户请求确认/请求用户选择/向用户询问”这类请求式文案。
+# 两者最终都会被 _has_explicit_wait_semantics() 合并判断，分开定义只是为了区分来源语气，便于后续调试误判。
 WAIT_PATTERN = re.compile(
     r"((先|需要|等待|等我|请先).{0,12}(确认|审批|同意|允许|选择|回复|补充|输入|澄清))"
     r"|((before|confirm|approval|approve|select|reply|input)\b)",
+    re.IGNORECASE,
+)
+WAIT_REQUEST_PATTERN = re.compile(
+    r"((请求|征求).{0,10}(确认|审批|同意|允许|选择|回复|补充|输入|澄清|意见|反馈))"
+    r"|((向|请|让).{0,4}用户.{0,12}(确认|选择|回复|补充|输入|澄清|询问|提问|审批|同意|允许))"
+    r"|((等待).{0,4}用户.{0,12}(确认|选择|回复|补充|输入|澄清|反馈))",
     re.IGNORECASE,
 )
 BROWSER_INTERACTION_PATTERN = re.compile(

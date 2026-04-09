@@ -82,6 +82,9 @@ class GraphControlState(TypedDict, total=False):
     step_reuse_hit: bool
     wait_resume_action: str
     continued_from_cancelled_plan: bool
+    direct_wait_original_message: str
+    direct_wait_execute_task_mode: str
+    direct_wait_original_task_executed: bool
 
 
 class GraphProjectionState(TypedDict, total=False):
@@ -118,6 +121,14 @@ def normalize_graph_metadata(raw: Any) -> GraphMetadataState:
             control["wait_resume_action"] = wait_resume_action
         if "continued_from_cancelled_plan" in raw_control:
             control["continued_from_cancelled_plan"] = bool(raw_control.get("continued_from_cancelled_plan"))
+        direct_wait_original_message = str(raw_control.get("direct_wait_original_message") or "").strip()
+        if direct_wait_original_message:
+            control["direct_wait_original_message"] = direct_wait_original_message
+        direct_wait_execute_task_mode = str(raw_control.get("direct_wait_execute_task_mode") or "").strip()
+        if direct_wait_execute_task_mode:
+            control["direct_wait_execute_task_mode"] = direct_wait_execute_task_mode
+        if "direct_wait_original_task_executed" in raw_control:
+            control["direct_wait_original_task_executed"] = bool(raw_control.get("direct_wait_original_task_executed"))
         if control:
             metadata["control"] = control
 
