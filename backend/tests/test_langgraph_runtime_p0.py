@@ -34,6 +34,20 @@ class _DirectAnswerLLM:
         }
 
 
+class _InlineDeliveryLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "result": "这是完整的内联交付正文。",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _BrowserOnlyTool(BaseTool):
     name = "browser"
 
@@ -1010,6 +1024,58 @@ def test_execute_step_node_should_treat_selected_artifacts_as_available_file_con
     assert file_tool.invocations == ["/home/ubuntu/course-detail.md"]
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert next_state["final_message"] == "已结束步骤"
+
+
+def test_execute_step_node_should_store_final_delivery_payload_for_inline_step() -> None:
+    llm = _InlineDeliveryLLM()
+    plan = Plan(
+        title="生成内联结果",
+        goal="生成内联结果",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="整理最终答案",
+                description="整理最终答案并内联展示给用户",
+                output_mode="inline",
+                artifact_policy="default",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "input_parts": [],
+        "selected_artifacts": [],
+        "artifact_refs": [],
+        "step_states": [],
+        "pending_interrupt": {},
+        "retrieved_memories": [],
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "historical_artifact_refs": [],
+        "emitted_events": [],
+        "user_message": "请直接给我最终答案",
+        "current_step_id": None,
+        "final_message": "",
+        "thread_id": "thread-1",
+        "conversation_summary": "",
+    }
+
+    next_state = asyncio.run(execute_step_node(state, llm))
+
+    assert next_state["final_message"] == "这是完整的内联交付正文。"
+    assert next_state["working_memory"]["final_delivery_payload"] == {
+        "text": "这是完整的内联交付正文。",
+        "sections": [],
+        "source_refs": [],
+    }
 
 
 def test_execute_step_with_prompt_should_break_on_browser_no_progress() -> None:

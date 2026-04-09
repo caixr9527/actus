@@ -24,6 +24,7 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     Step,
+    StepOutputMode,
     StepOutcome,
     StepEvent,
     StepEventStatus,
@@ -53,8 +54,15 @@ from app.domain.services.runtime.langgraph_state import (
 )
 from app.domain.services.runtime.normalizers import (
     append_unique_text,
+    build_delivery_text,
+    is_attachment_filepath,
+    normalize_attachment_path_list,
+    normalize_controlled_value,
+    normalize_delivery_payload,
     normalize_ref_list,
+    normalize_step_result_text,
     normalize_text_list,
+    truncate_text_list,
     truncate_text,
 )
 from app.domain.services.tools import BaseTool
@@ -127,6 +135,7 @@ def _clear_direct_wait_control_state(control: Dict[str, Any]) -> None:
     control.pop("direct_wait_original_task_executed", None)
 
 
+# 状态与交付 helper：负责工作记忆默认结构，以及“轻 summary / 重交付正文”分轨。
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     working_memory = dict(state.get("working_memory") or {})
     working_memory.setdefault("goal", "")
@@ -135,102 +144,97 @@ def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     working_memory.setdefault("open_questions", [])
     working_memory.setdefault("user_preferences", {})
     working_memory.setdefault("facts_in_session", [])
+    # 轻 summary 与重交付正文分轨：最终长正文只放在 working_memory，不进入 final_message 热路径。
+    working_memory.setdefault(
+        "final_delivery_payload",
+        {
+            "text": "",
+            "sections": [],
+            "source_refs": [],
+        },
+    )
     return working_memory
-
-
-def _append_unique_text_item(items: List[Any], value: str) -> List[str]:
-    return append_unique_text(items, value)
 
 
 def _truncate_text(value: Any, *, max_chars: int) -> str:
     return truncate_text(value, max_chars=max_chars)
 
 
-def _normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
-    """统一规整步骤结果，避免把 None 写成字符串 'None'。"""
-    if value is None:
-        return str(fallback or "").strip()
+def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
+    """仅为内联交付步骤保留重正文，避免污染步骤摘要和轻量最终消息。"""
+    if step is None or step.outcome is None or not step.outcome.done:
+        return {}
+    outcome = step.outcome
 
-    normalized_value = str(value).strip()
-    if not normalized_value or normalized_value.lower() == "none":
-        return str(fallback or "").strip()
-    return normalized_value
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+    if output_mode != StepOutputMode.INLINE.value:
+        return {}
 
+    delivery_text = normalize_step_result_text(outcome.summary)
+    if not delivery_text:
+        return {}
 
-def _normalize_text_items(raw: Any) -> List[str]:
-    """统一规整 LLM/工具返回的字符串列表。"""
-    return normalize_text_list(raw)
-
-
-def _truncate_text_items(raw: Any, *, max_items: int, max_chars: int) -> List[str]:
-    return [
-        _truncate_text(item, max_chars=max_chars)
-        for item in _normalize_text_items(raw)[:max_items]
-    ]
-
-
-def _normalize_context_artifact_refs(raw: Any) -> List[str]:
-    return normalize_ref_list(raw)
-
-
-def _get_step_outcome_summary(step: Optional[Step]) -> str:
-    """读取步骤结果摘要。"""
-    if step is None or step.outcome is None:
-        return ""
-    return _normalize_step_result_text(step.outcome.summary)
+    return normalize_delivery_payload(
+        {
+            "text": delivery_text,
+            "sections": [],
+            "source_refs": normalize_attachment_path_list(
+                outcome.produced_artifacts,
+                max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+            ),
+        }
+    )
 
 
-def _get_step_artifacts(step: Optional[Step]) -> List[str]:
-    """读取步骤产物列表。"""
-    if step is None or step.outcome is None:
-        return []
-    return _normalize_attachment_paths(step.outcome.produced_artifacts)
-
-
-def _is_attachment_filepath(ref: Any) -> bool:
-    raw_ref = str(ref or "").strip()
-    return raw_ref.startswith("/")
-
-
-def _merge_known_attachment_refs(*path_groups: Any) -> List[str]:
-    normalized_groups = [_normalize_attachment_paths(group) for group in path_groups]
-    return _normalize_attachment_paths(merge_attachment_paths(*normalized_groups))
-
-
-def _extract_step_state_artifacts(step_state: Any) -> List[str]:
-    if not isinstance(step_state, dict):
-        return []
-    outcome = step_state.get("outcome")
-    if not isinstance(outcome, dict):
-        return []
-    return _normalize_attachment_paths(outcome.get("produced_artifacts"))
-
-
+# 附件 helper：只负责当前 run 内附件引用的收集、合并与最终交付选择。
 def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
     artifact_groups: List[List[str]] = [
-        _extract_step_state_artifacts(step_state)
+        normalize_attachment_path_list(
+            ((step_state.get("outcome") or {}).get("produced_artifacts"))
+            if isinstance(step_state, dict) and isinstance(step_state.get("outcome"), dict)
+            else [],
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
         for step_state in list(state.get("step_states") or [])
     ]
-    artifact_groups.append(_get_step_artifacts(state.get("last_executed_step")))
+    last_step = state.get("last_executed_step")
+    artifact_groups.append(
+        normalize_attachment_path_list(
+            last_step.outcome.produced_artifacts
+            if last_step is not None and last_step.outcome is not None
+            else [],
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
+    )
     artifact_groups.append(
         [
             str(ref).strip()
             for ref in list(state.get("artifact_refs") or [])
-            if _is_attachment_filepath(ref)
+            if is_attachment_filepath(ref)
         ]
     )
-    return _merge_known_attachment_refs(*artifact_groups)
+    normalized_groups = [
+        normalize_attachment_path_list(group, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
+        for group in artifact_groups
+    ]
+    return normalize_attachment_path_list(
+        merge_attachment_paths(*normalized_groups),
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
 
 
 def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> List[str]:
     """统一收口当前运行里可直接消费的文件路径，供执行器判断是否允许文件工具。"""
-    return _merge_known_attachment_refs(
-        [
-            ref
-            for ref in list(state.get("selected_artifacts") or [])
-            if _is_attachment_filepath(ref)
-        ],
-        _collect_current_run_artifacts(state),
+    return normalize_attachment_path_list(
+        merge_attachment_paths(
+            [
+                ref
+                for ref in list(state.get("selected_artifacts") or [])
+                if is_attachment_filepath(ref)
+            ],
+            _collect_current_run_artifacts(state),
+        ),
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
 
 
@@ -239,34 +243,49 @@ def _resolve_summary_attachment_refs(
         parsed_attachments: Any,
 ) -> List[str]:
     explicit_attachment_refs = normalize_attachments(parsed_attachments)
-    known_attachment_refs = _merge_known_attachment_refs(
-        _get_step_artifacts(state.get("last_executed_step")),
-        [
-            ref
-            for ref in list(state.get("selected_artifacts") or [])
-            if _is_attachment_filepath(ref)
-        ],
-        _collect_current_run_artifacts(state),
+    last_step = state.get("last_executed_step")
+    last_step_attachment_refs = normalize_attachment_path_list(
+        last_step.outcome.produced_artifacts
+        if last_step is not None and last_step.outcome is not None
+        else [],
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
+    known_attachment_refs = normalize_attachment_path_list(
+        merge_attachment_paths(
+            last_step_attachment_refs,
+            [
+                ref
+                for ref in list(state.get("selected_artifacts") or [])
+                if is_attachment_filepath(ref)
+            ],
+            _collect_current_run_artifacts(state),
+        ),
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     if len(explicit_attachment_refs) > 0:
         resolved_explicit_refs = [
-            ref for ref in _normalize_attachment_paths(explicit_attachment_refs)
+            ref for ref in normalize_attachment_path_list(
+                explicit_attachment_refs,
+                max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+            )
             if ref in known_attachment_refs
         ]
         if len(resolved_explicit_refs) > 0:
             return resolved_explicit_refs
 
-    last_step_attachment_refs = _get_step_artifacts(state.get("last_executed_step"))
     if len(last_step_attachment_refs) > 0:
         return last_step_attachment_refs
 
     selected_attachment_refs = [
         ref
         for ref in list(state.get("selected_artifacts") or [])
-        if _is_attachment_filepath(ref)
+        if is_attachment_filepath(ref)
     ]
     if len(selected_attachment_refs) > 0:
-        return _normalize_attachment_paths(selected_attachment_refs)
+        return normalize_attachment_path_list(
+            selected_attachment_refs,
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
 
     current_run_artifacts = _collect_current_run_artifacts(state)
     if len(current_run_artifacts) > 0:
@@ -314,15 +333,15 @@ def _build_summary_plan_snapshot(
     for step in list(plan.steps or []):
         if step.status == ExecutionStatus.COMPLETED:
             completed_step_summaries.append(
-                _normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
+                normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
             )
             continue
         if step.status == ExecutionStatus.FAILED:
             failed_step_summaries.append(
-                _normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
+                normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
             )
             continue
-        pending_title = _normalize_step_result_text(step.title, fallback=step.description)
+        pending_title = normalize_step_result_text(step.title, fallback=step.description)
         if pending_title:
             pending_step_titles.append(pending_title)
 
@@ -334,10 +353,33 @@ def _build_summary_plan_snapshot(
         "completed_step_summaries": completed_step_summaries[:5],
         "failed_step_summaries": failed_step_summaries[:3],
         "pending_step_titles": pending_step_titles[:5],
-        "selected_artifacts": _normalize_attachment_paths(list(selected_artifacts or []))[:6],
+        "selected_artifacts": normalize_attachment_path_list(
+            list(selected_artifacts or []),
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )[:6],
     }
 
 
+def _build_summary_delivery_payload(working_memory: Dict[str, Any]) -> Dict[str, Any]:
+    """总结阶段只读取压缩后的交付载荷，避免把长正文完整塞回轻量总结模型。"""
+    delivery_payload = normalize_delivery_payload(working_memory.get("final_delivery_payload"))
+    return {
+        "text": _truncate_text(delivery_payload.get("text"), max_chars=1600),
+        "sections": [
+            {
+                "title": _truncate_text(item.get("title"), max_chars=80),
+                "content": _truncate_text(item.get("content"), max_chars=600),
+            }
+            for item in list(delivery_payload.get("sections") or [])[:6]
+        ],
+        "source_refs": normalize_attachment_path_list(
+            delivery_payload.get("source_refs"),
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )[:6],
+    }
+
+
+# Summary helper：负责总结阶段的快照裁剪、结果复用和最终轻量输入构造。
 def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
     """把 dict/领域对象统一规整为 StepOutcome。"""
     if raw is None:
@@ -355,39 +397,68 @@ def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
 def _outcome_is_reusable(outcome: Optional[StepOutcome]) -> bool:
     if outcome is None or not outcome.done:
         return False
-    if _normalize_step_result_text(outcome.summary):
+    if normalize_step_result_text(outcome.summary):
         return True
-    return len(_normalize_attachment_paths(outcome.produced_artifacts)) > 0
+    return len(
+        normalize_attachment_path_list(
+            outcome.produced_artifacts,
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
+    ) > 0
 
 
 def _merge_step_outcome_into_working_memory(
         working_memory: Dict[str, Any],
-        outcome: StepOutcome,
+        *,
+        step: Optional[Step],
 ) -> Dict[str, Any]:
     """将步骤结果沉淀到工作记忆，供后续 step / replan 使用。"""
     updated_working_memory = dict(working_memory or {})
     updated_working_memory.setdefault("decisions", [])
     updated_working_memory.setdefault("open_questions", [])
     updated_working_memory.setdefault("facts_in_session", [])
+    updated_working_memory.setdefault(
+        "final_delivery_payload",
+        {
+            "text": "",
+            "sections": [],
+            "source_refs": [],
+        },
+    )
+    if step is None or step.outcome is None:
+        return updated_working_memory
+    outcome = step.outcome
 
-    summary = _normalize_step_result_text(outcome.summary)
+    summary = normalize_step_result_text(outcome.summary)
     if summary:
-        updated_working_memory["decisions"] = _append_unique_text_item(
+        updated_working_memory["decisions"] = append_unique_text(
             list(updated_working_memory.get("decisions") or []),
             summary,
         )
 
     for open_question in list(outcome.open_questions or []):
-        updated_working_memory["open_questions"] = _append_unique_text_item(
+        updated_working_memory["open_questions"] = append_unique_text(
             list(updated_working_memory.get("open_questions") or []),
             open_question,
         )
 
     for fact in list(outcome.facts_learned or []):
-        updated_working_memory["facts_in_session"] = _append_unique_text_item(
+        updated_working_memory["facts_in_session"] = append_unique_text(
             list(updated_working_memory.get("facts_in_session") or []),
             fact,
         )
+
+    delivery_payload = _build_step_delivery_payload(step)
+    if delivery_payload:
+        updated_working_memory["final_delivery_payload"] = delivery_payload
+    else:
+        output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+        if output_mode in {StepOutputMode.NONE.value, StepOutputMode.FILE.value}:
+            updated_working_memory["final_delivery_payload"] = {
+                "text": "",
+                "sections": [],
+                "source_refs": [],
+            }
     return updated_working_memory
 
 
@@ -400,12 +471,15 @@ def _build_reused_step_outcome(
     """为复用场景生成带来源标记的 outcome。"""
     return StepOutcome(
         done=True,
-        summary=_normalize_step_result_text(source_outcome.summary),
-        produced_artifacts=_normalize_attachment_paths(source_outcome.produced_artifacts),
-        blockers=_normalize_text_items(list(source_outcome.blockers or [])),
-        facts_learned=_normalize_text_items(list(source_outcome.facts_learned or [])),
-        open_questions=_normalize_text_items(list(source_outcome.open_questions or [])),
-        next_hint=_normalize_step_result_text(source_outcome.next_hint),
+        summary=normalize_step_result_text(source_outcome.summary),
+        produced_artifacts=normalize_attachment_path_list(
+            source_outcome.produced_artifacts,
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        ),
+        blockers=normalize_text_list(list(source_outcome.blockers or [])),
+        facts_learned=normalize_text_list(list(source_outcome.facts_learned or [])),
+        open_questions=normalize_text_list(list(source_outcome.open_questions or [])),
+        next_hint=normalize_step_result_text(source_outcome.next_hint),
         reused_from_run_id=reused_from_run_id,
         reused_from_step_id=reused_from_step_id,
     )
@@ -413,10 +487,16 @@ def _build_reused_step_outcome(
 
 def _find_reusable_step_outcome(
         state: PlannerReActLangGraphState,
-        step: Step,
-        plan: Plan,
 ) -> Optional[Tuple[StepOutcome, str, str]]:
     """仅在当前 run 内按 objective_key 查找可复用的步骤结果。"""
+    plan = state.get("plan")
+    if plan is None:
+        return None
+
+    step = plan.get_next_step()
+    if step is None:
+        return None
+
     if not str(step.objective_key or "").strip():
         return None
 
@@ -440,91 +520,6 @@ def _find_reusable_step_outcome(
     return None
 
 
-async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-    """在真实执行前做当前 run 内复用，命中时直接跳过执行节点。"""
-    plan = state.get("plan")
-    if plan is None:
-        return state
-
-    step = plan.get_next_step()
-    if step is None:
-        return state
-
-    log_runtime(
-        logger,
-        logging.INFO,
-        "开始检查步骤复用",
-        state=state,
-        step_id=str(step.id or ""),
-        objective_key=str(step.objective_key or ""),
-    )
-
-    reusable_step = _find_reusable_step_outcome(state=state, step=step, plan=plan)
-    control = _get_control_metadata(state)
-    control["step_reuse_hit"] = False
-
-    if reusable_step is None:
-        log_runtime(
-            logger,
-            logging.INFO,
-            "步骤复用未命中",
-            state=state,
-            step_id=str(step.id or ""),
-        )
-        return {
-            **state,
-            "graph_metadata": _replace_control_metadata(state, control),
-        }
-
-    source_outcome, reused_from_run_id, reused_from_step_id = reusable_step
-    step.outcome = _build_reused_step_outcome(
-        source_outcome,
-        reused_from_run_id=reused_from_run_id,
-        reused_from_step_id=reused_from_step_id,
-    )
-    step.status = ExecutionStatus.COMPLETED
-
-    completed_event = StepEvent(
-        step=step.model_copy(deep=True),
-        status=StepEventStatus.COMPLETED,
-    )
-
-    await emit_live_events(completed_event)
-
-    next_step = plan.get_next_step()
-    working_memory = _merge_step_outcome_into_working_memory(
-        _ensure_working_memory(state),
-        step.outcome,
-    )
-    control["step_reuse_hit"] = True
-    log_runtime(
-        logger,
-        logging.INFO,
-        "步骤复用命中",
-        state=state,
-        step_id=str(step.id or ""),
-        source_run_id=reused_from_run_id,
-        source_step_id=reused_from_step_id,
-        artifact_count=len(list(step.outcome.produced_artifacts or [])),
-    )
-
-    return _reduce_state_with_events(
-        state,
-        updates={
-            "plan": plan,
-            "last_executed_step": step.model_copy(deep=True),
-            "execution_count": int(state.get("execution_count", 0)) + 1,
-            "current_step_id": next_step.id if next_step is not None else None,
-            "working_memory": working_memory,
-            "graph_metadata": _replace_control_metadata(state, control),
-            "final_message": _normalize_step_result_text(step.outcome.summary),
-            "selected_artifacts": list(state.get("selected_artifacts") or []),
-            "pending_interrupt": {},
-        },
-        events=[completed_event],
-    )
-
-
 def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     """统一构造 planner / execute_step / replan 的结构化上下文块。"""
     step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
@@ -535,18 +530,18 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
     last_step = state.get("last_executed_step")
     working_memory = _ensure_working_memory(state)
 
-    open_questions = _normalize_text_items(state.get("session_open_questions"))
-    open_questions.extend(_normalize_text_items(working_memory.get("open_questions")))
+    open_questions = normalize_text_list(state.get("session_open_questions"))
+    open_questions.extend(normalize_text_list(working_memory.get("open_questions")))
     if last_step is not None and last_step.outcome is not None:
-        open_questions.extend(_normalize_text_items(last_step.outcome.open_questions))
+        open_questions.extend(normalize_text_list(last_step.outcome.open_questions))
 
-    blockers = _normalize_text_items(state.get("session_blockers"))
+    blockers = normalize_text_list(state.get("session_blockers"))
     if last_step is not None and last_step.outcome is not None:
-        blockers.extend(_normalize_text_items(last_step.outcome.blockers))
+        blockers.extend(normalize_text_list(last_step.outcome.blockers))
 
-    selected_artifacts = _normalize_context_artifact_refs(state.get("selected_artifacts"))
+    selected_artifacts = normalize_ref_list(state.get("selected_artifacts"))
     current_run_artifacts = _collect_current_run_artifacts(state)
-    historical_artifact_refs = _normalize_context_artifact_refs(state.get("historical_artifact_refs"))
+    historical_artifact_refs = normalize_ref_list(state.get("historical_artifact_refs"))
 
     recent_run_briefs = [
         {
@@ -660,14 +655,16 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
         ),
         "recent_messages": recent_messages,
         "completed_steps": sanitized_completed_steps,
-        "last_step_result": _get_step_outcome_summary(last_step),
+        "last_step_result": normalize_step_result_text(
+            last_step.outcome.summary if last_step is not None and last_step.outcome is not None else ""
+        ),
         "retrieved_memories": sanitized_memories,
-        "open_questions": _truncate_text_items(
+        "open_questions": truncate_text_list(
             list(dict.fromkeys(open_questions)),
             max_items=PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
             max_chars=120,
         ),
-        "blockers": _truncate_text_items(
+        "blockers": truncate_text_list(
             list(dict.fromkeys(blockers)),
             max_items=PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
             max_chars=120,
@@ -728,10 +725,6 @@ def _merge_replanned_steps_into_plan(plan: Plan, new_steps: List[Step]) -> Tuple
     return merged_steps, "replace_remaining_pending_steps"
 
 
-def _normalize_attachment_paths(raw: Any) -> List[str]:
-    return normalize_ref_list(raw, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
-
-
 def _normalize_message_window_entry(
         raw_entry: Dict[str, Any],
         *,
@@ -745,7 +738,10 @@ def _normalize_message_window_entry(
         raw_entry.get("message"),
         max_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
     )
-    normalized_attachments = _normalize_attachment_paths(raw_entry.get("attachment_paths"))
+    normalized_attachments = normalize_attachment_path_list(
+        raw_entry.get("attachment_paths"),
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
     input_part_count_raw = raw_entry.get("input_part_count")
     try:
         input_part_count = max(int(input_part_count_raw or 0), 0)
@@ -766,6 +762,7 @@ def _normalize_message_window_entry(
     return normalized_entry
 
 
+# 记忆 helper：负责总结后的事实/偏好提炼、候选规整与去重治理。
 def _build_memory_query(state: PlannerReActLangGraphState) -> str:
     working_memory = _ensure_working_memory(state)
     parts = [
@@ -881,7 +878,9 @@ def _build_outcome_fact_text(
         return decisions[-1]
 
     last_step = state.get("last_executed_step")
-    return _get_step_outcome_summary(last_step)
+    if last_step is None or last_step.outcome is None:
+        return ""
+    return normalize_step_result_text(last_step.outcome.summary)
 
 
 def _build_outcome_memory_candidate(
@@ -1398,6 +1397,7 @@ def _build_wait_resume_outcome(
     )
 
 
+# 入口路由节点：决定 direct_answer / direct_wait / direct_execute / planner 主链入口。
 async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
     """P0 入口轻路由：先判断是否需要完整记忆召回和 Planner。"""
     control = _get_control_metadata(state)
@@ -1584,6 +1584,73 @@ async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReAct
     )
 
 
+# 规划前置节点：先召回记忆，再创建或复用当前计划。
+async def recall_memory_context_node(
+        state: PlannerReActLangGraphState,
+        long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
+) -> PlannerReActLangGraphState:
+    """统一整理线程级短期记忆，为后续 planner/react 节点提供稳定输入。"""
+    started_at = now_perf()
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始召回记忆上下文",
+        state=state,
+        existing_memory_count=len(list(state.get("retrieved_memories") or [])),
+        has_repository=long_term_memory_repository is not None,
+    )
+    plan = state.get("plan")
+    working_memory = _ensure_working_memory(state)
+    if not str(working_memory.get("goal") or "").strip():
+        working_memory["goal"] = str(getattr(plan, "goal", "") or state.get("user_message") or "")
+    if not list(working_memory.get("open_questions") or []):
+        working_memory["open_questions"] = normalize_text_list(state.get("session_open_questions"))
+
+    retrieved_memories = list(state.get("retrieved_memories") or [])
+    recall_cost_ms = 0
+    if long_term_memory_repository is not None:
+        try:
+            recall_started_at = now_perf()
+            recalled_memories: List[LongTermMemory] = []
+            for query in _build_memory_recall_queries(state):
+                recalled_memories.extend(await long_term_memory_repository.search(query))
+            recalled_memories = _dedupe_recalled_memories(recalled_memories)
+            retrieved_memories = normalize_retrieved_memories(
+                [memory.model_dump(mode="json") for memory in recalled_memories]
+            )
+            recall_cost_ms = elapsed_ms(recall_started_at)
+        except Exception as e:
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "记忆召回失败，回退线程快照",
+                state=state,
+                error=str(e),
+                recall_elapsed_ms=recall_cost_ms,
+                elapsed_ms=elapsed_ms(started_at),
+            )
+    if not dict(working_memory.get("user_preferences") or {}):
+        working_memory["user_preferences"] = _extract_profile_preferences(retrieved_memories)
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "记忆召回完成",
+        state=state,
+        recalled_memory_count=len(retrieved_memories),
+        open_question_count=len(list(working_memory.get("open_questions") or [])),
+        preference_count=len(dict(working_memory.get("user_preferences") or {})),
+        recall_elapsed_ms=recall_cost_ms,
+        elapsed_ms=elapsed_ms(started_at),
+    )
+
+    return {
+        **state,
+        "working_memory": working_memory,
+        "retrieved_memories": retrieved_memories,
+    }
+
+
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     started_at = now_perf()
@@ -1758,6 +1825,93 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
         )
 
 
+# 步骤复用节点：在真实执行前先做当前 run 内的等价目标复用。
+async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+    """在真实执行前做当前 run 内复用，命中时直接跳过执行节点。"""
+    plan = state.get("plan")
+    if plan is None:
+        return state
+
+    step = plan.get_next_step()
+    if step is None:
+        return state
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始检查步骤复用",
+        state=state,
+        step_id=str(step.id or ""),
+        objective_key=str(step.objective_key or ""),
+    )
+
+    reusable_step = _find_reusable_step_outcome(state=state)
+    control = _get_control_metadata(state)
+    control["step_reuse_hit"] = False
+
+    if reusable_step is None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "步骤复用未命中",
+            state=state,
+            step_id=str(step.id or ""),
+        )
+        return {
+            **state,
+            "graph_metadata": _replace_control_metadata(state, control),
+        }
+
+    source_outcome, reused_from_run_id, reused_from_step_id = reusable_step
+    step.outcome = _build_reused_step_outcome(
+        source_outcome,
+        reused_from_run_id=reused_from_run_id,
+        reused_from_step_id=reused_from_step_id,
+    )
+    step.status = ExecutionStatus.COMPLETED
+
+    completed_event = StepEvent(
+        step=step.model_copy(deep=True),
+        status=StepEventStatus.COMPLETED,
+    )
+
+    await emit_live_events(completed_event)
+
+    next_step = plan.get_next_step()
+    working_memory = _merge_step_outcome_into_working_memory(
+        _ensure_working_memory(state),
+        step=step,
+    )
+    control["step_reuse_hit"] = True
+    log_runtime(
+        logger,
+        logging.INFO,
+        "步骤复用命中",
+        state=state,
+        step_id=str(step.id or ""),
+        source_run_id=reused_from_run_id,
+        source_step_id=reused_from_step_id,
+        artifact_count=len(list(step.outcome.produced_artifacts or [])),
+    )
+
+    return _reduce_state_with_events(
+        state,
+        updates={
+            "plan": plan,
+            "last_executed_step": step.model_copy(deep=True),
+            "execution_count": int(state.get("execution_count", 0)) + 1,
+            "current_step_id": next_step.id if next_step is not None else None,
+            "working_memory": working_memory,
+            "graph_metadata": _replace_control_metadata(state, control),
+            "final_message": normalize_step_result_text(step.outcome.summary),
+            "selected_artifacts": list(state.get("selected_artifacts") or []),
+            "pending_interrupt": {},
+        },
+        events=[completed_event],
+    )
+
+
+# 执行节点：负责单步工具执行与步骤结果落账。
 async def execute_step_node(
         state: PlannerReActLangGraphState,
         llm: LLM,
@@ -1934,24 +2088,24 @@ async def execute_step_node(
         )
 
     step_success = bool(llm_message.get("success", True))
-    step_summary = _normalize_step_result_text(
+    step_summary = normalize_step_result_text(
         llm_message.get("result"),
         fallback=f"已完成步骤：{step.description}" if step_success else f"步骤执行失败：{step.description}",
     )
     model_attachment_paths = normalize_attachments(llm_message.get("attachments"))
     tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
-    step_attachment_paths = _merge_known_attachment_refs(
-        model_attachment_paths,
-        tool_attachment_paths,
+    step_attachment_paths = normalize_attachment_path_list(
+        merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
         produced_artifacts=step_attachment_paths,
-        blockers=_normalize_text_items(llm_message.get("blockers")),
-        facts_learned=_normalize_text_items(llm_message.get("facts_learned")),
-        open_questions=_normalize_text_items(llm_message.get("open_questions")),
-        next_hint=_normalize_step_result_text(llm_message.get("next_hint")),
+        blockers=normalize_text_list(llm_message.get("blockers")),
+        facts_learned=normalize_text_list(llm_message.get("facts_learned")),
+        open_questions=normalize_text_list(llm_message.get("open_questions")),
+        next_hint=normalize_step_result_text(llm_message.get("next_hint")),
     )
     step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
 
@@ -1981,7 +2135,7 @@ async def execute_step_node(
         control.pop("direct_wait_original_message", None)
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
-        step.outcome,
+        step=step,
     )
     log_runtime(
         logger,
@@ -2017,6 +2171,7 @@ async def execute_step_node(
     )
 
 
+# 等待恢复节点：负责 human_wait 的暂停恢复与后续链路衔接。
 async def wait_for_human_node(
         state: PlannerReActLangGraphState,
 ) -> PlannerReActLangGraphState:
@@ -2119,7 +2274,7 @@ async def wait_for_human_node(
         await emit_live_events(cancelled_event)
         working_memory = _merge_step_outcome_into_working_memory(
             _ensure_working_memory(state),
-            waiting_step.outcome,
+            step=waiting_step,
         )
         # direct_wait 已被用户取消，后续会转入新的重规划链路，必须清掉原链路的控制语义。
         _clear_direct_wait_control_state(control)
@@ -2146,7 +2301,7 @@ async def wait_for_human_node(
                 "execution_count": int(state.get("execution_count", 0)) + 1,
                 "current_step_id": None,
                 "working_memory": working_memory,
-                "final_message": _normalize_step_result_text(waiting_step.outcome.summary),
+                "final_message": normalize_step_result_text(waiting_step.outcome.summary),
             },
             events=[cancelled_event],
         )
@@ -2169,7 +2324,7 @@ async def wait_for_human_node(
         next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
-        waiting_step.outcome,
+        step=waiting_step,
     )
     log_runtime(
         logger,
@@ -2195,78 +2350,13 @@ async def wait_for_human_node(
             "execution_count": int(state.get("execution_count", 0)) + 1,
             "current_step_id": next_step.id if next_step is not None else None,
             "working_memory": working_memory,
-            "final_message": _normalize_step_result_text(waiting_step.outcome.summary),
+            "final_message": normalize_step_result_text(waiting_step.outcome.summary),
         },
         events=[completed_event],
     )
 
 
-async def recall_memory_context_node(
-        state: PlannerReActLangGraphState,
-        long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
-) -> PlannerReActLangGraphState:
-    """统一整理线程级短期记忆，为后续 planner/react 节点提供稳定输入。"""
-    started_at = now_perf()
-    log_runtime(
-        logger,
-        logging.INFO,
-        "开始召回记忆上下文",
-        state=state,
-        existing_memory_count=len(list(state.get("retrieved_memories") or [])),
-        has_repository=long_term_memory_repository is not None,
-    )
-    plan = state.get("plan")
-    working_memory = _ensure_working_memory(state)
-    if not str(working_memory.get("goal") or "").strip():
-        working_memory["goal"] = str(getattr(plan, "goal", "") or state.get("user_message") or "")
-    if not list(working_memory.get("open_questions") or []):
-        working_memory["open_questions"] = _normalize_text_items(state.get("session_open_questions"))
-
-    retrieved_memories = list(state.get("retrieved_memories") or [])
-    recall_cost_ms = 0
-    if long_term_memory_repository is not None:
-        try:
-            recall_started_at = now_perf()
-            recalled_memories: List[LongTermMemory] = []
-            for query in _build_memory_recall_queries(state):
-                recalled_memories.extend(await long_term_memory_repository.search(query))
-            recalled_memories = _dedupe_recalled_memories(recalled_memories)
-            retrieved_memories = normalize_retrieved_memories(
-                [memory.model_dump(mode="json") for memory in recalled_memories]
-            )
-            recall_cost_ms = elapsed_ms(recall_started_at)
-        except Exception as e:
-            log_runtime(
-                logger,
-                logging.WARNING,
-                "记忆召回失败，回退线程快照",
-                state=state,
-                error=str(e),
-                recall_elapsed_ms=recall_cost_ms,
-                elapsed_ms=elapsed_ms(started_at),
-            )
-    if not dict(working_memory.get("user_preferences") or {}):
-        working_memory["user_preferences"] = _extract_profile_preferences(retrieved_memories)
-
-    log_runtime(
-        logger,
-        logging.INFO,
-        "记忆召回完成",
-        state=state,
-        recalled_memory_count=len(retrieved_memories),
-        open_question_count=len(list(working_memory.get("open_questions") or [])),
-        preference_count=len(dict(working_memory.get("user_preferences") or {})),
-        recall_elapsed_ms=recall_cost_ms,
-        elapsed_ms=elapsed_ms(started_at),
-    )
-
-    return {
-        **state,
-        "working_memory": working_memory,
-        "retrieved_memories": retrieved_memories,
-    }
-
-
+# 重规划节点：当前批次跑完后再决定下一批步骤。
 async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """在当前批次执行完成后，基于最新结果生成下一批步骤。"""
     started_at = now_perf()
@@ -2351,6 +2441,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     )
 
 
+# 总结节点：生成轻 summary，并输出最终重交付正文与附件。
 async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """在所有步骤完成后汇总结果。"""
     started_at = now_perf()
@@ -2390,6 +2481,8 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         plan,
         selected_artifacts=list(state.get("selected_artifacts") or []),
     )
+    working_memory = _ensure_working_memory(state)
+    summary_delivery_payload = _build_summary_delivery_payload(working_memory)
     final_message = str(state.get("final_message") or "")
     user_message = str(state.get("user_message") or "")
     execution_count = int(state.get("execution_count") or 0)
@@ -2397,6 +2490,10 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     summarize_prompt = SUMMARIZE_PROMPT.format(user_message=user_message,
                                                execution_count=execution_count,
                                                final_message=final_message,
+                                               final_delivery_payload=json.dumps(
+                                                   summary_delivery_payload,
+                                                   ensure_ascii=False,
+                                               ),
                                                plan_snapshot=json.dumps(summary_plan_snapshot, ensure_ascii=False))
     log_runtime(
         logger,
@@ -2418,7 +2515,7 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     )
     llm_cost_ms = elapsed_ms(llm_started_at)
     parsed = safe_parse_json(llm_message.get("content"))
-    summary_message = str(parsed.get("message") or "")
+    summary_message = str(parsed.get("message") or final_message or "").strip()
     extracted_facts = _normalize_memory_fact_items(parsed.get("facts_in_session"))
     extracted_preferences = _normalize_memory_preferences(parsed.get("user_preferences"))
     model_memory_candidates = _build_model_memory_candidates(
@@ -2435,7 +2532,11 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     final_events: List[Any] = [
         MessageEvent(
             role="assistant",
-            message=summary_message,
+            # 用户最终看到重交付正文；轻量 summary 仅保留在 state.final_message 与运行摘要中。
+            message=build_delivery_text(
+                working_memory.get("final_delivery_payload"),
+                fallback=summary_message,
+            ),
             attachments=summary_attachment_paths,
             stage="final",
         )]
@@ -2444,10 +2545,9 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
 
     await emit_live_events(*final_events)
-    working_memory = _ensure_working_memory(state)
     working_memory["facts_in_session"] = list(working_memory.get("facts_in_session") or [])
     for fact in extracted_facts:
-        working_memory["facts_in_session"] = _append_unique_text_item(
+        working_memory["facts_in_session"] = append_unique_text(
             list(working_memory.get("facts_in_session") or []),
             fact,
         )
@@ -2499,6 +2599,7 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     )
 
 
+# 记忆节点：收敛消息窗口与长期记忆候选。
 async def consolidate_memory_node(
         state: PlannerReActLangGraphState,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
@@ -2567,7 +2668,7 @@ async def consolidate_memory_node(
             trimmed_message_count=trimmed_message_count,
         ),
         "pending_memory_writes": remaining_memory_writes,
-        "selected_artifacts": _normalize_context_artifact_refs(state.get("selected_artifacts")),
+        "selected_artifacts": normalize_ref_list(state.get("selected_artifacts")),
     }
     log_runtime(
         logger,
@@ -2585,6 +2686,7 @@ async def consolidate_memory_node(
     return next_state
 
 
+# 收尾节点：统一补发 done 事件。
 async def finalize_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
     """结束节点，追加 done 事件。"""
     started_at = now_perf()

@@ -394,6 +394,11 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
             "goal": "整理上下文",
             "facts_in_session": ["已经确认问题边界"],
             "open_questions": ["还需确认最终输出"],
+            "final_delivery_payload": {
+                "text": "这是最终交付正文。",
+                "sections": [],
+                "source_refs": [],
+            },
         },
         "selected_artifacts": ["artifact-1"],
         "artifact_refs": ["artifact-1", "noise-artifact"],
@@ -426,6 +431,7 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
     synced_summary = workflow_run_summary_repo.upsert.await_args.args[0]
     assert synced_summary.run_id == "run-1"
     assert synced_summary.final_answer_summary == "最终总结"
+    assert synced_summary.final_answer_text == "这是最终交付正文。"
     assert synced_summary.artifacts == ["artifact-1"]
 
     synced_snapshot = session_context_snapshot_repo.upsert.await_args.args[0]
