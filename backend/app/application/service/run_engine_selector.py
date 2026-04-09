@@ -37,26 +37,26 @@ def _maybe_clone_llm_for_stage(
 
 def _build_stage_llms(llm: LLM) -> Dict[str, LLM]:
     stage_specs: Dict[str, Dict[str, str | int | None]] = {
-        # todo 临时使用 LLM 模型名称，后续会支持自定义，不要对这处进行修改【重点】
+        # todo 临时使用 LLM 模型名称及max_tokens，后续会支持自定义，不要对这处进行修改【重点】
         "router": {
             "model_name": llm.model_name,
-            "max_tokens": min(int(getattr(llm, "max_tokens", 2048) or 2048), 768),
+            "max_tokens": getattr(llm, "max_tokens", 2048),
         },
         "planner": {
             "model_name": llm.model_name,
-            "max_tokens": min(int(getattr(llm, "max_tokens", 4096) or 4096), 2048),
+            "max_tokens": getattr(llm, "max_tokens", 4096),
         },
         "executor": {
             "model_name": llm.model_name,
-            "max_tokens": int(getattr(llm, "max_tokens", 8192) or 8192),
+            "max_tokens": getattr(llm, "max_tokens", 8192),
         },
         "replan": {
             "model_name": llm.model_name,
-            "max_tokens": min(int(getattr(llm, "max_tokens", 4096) or 4096), 1536),
+            "max_tokens": getattr(llm, "max_tokens", 4096),
         },
         "summary": {
             "model_name": llm.model_name,
-            "max_tokens": min(int(getattr(llm, "max_tokens", 4096) or 4096), 2048),
+            "max_tokens": getattr(llm, "max_tokens", 4096),
         },
     }
     stage_llms: Dict[str, LLM] = {}
