@@ -1,19 +1,22 @@
 import asyncio
 import json
 
-from app.domain.models import ExecutionStatus, Step, ToolEventStatus, ToolResult
+from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus, ToolResult
 from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+    create_or_reuse_plan_node,
     direct_answer_node,
     direct_execute_node,
     direct_wait_node,
     entry_router_node,
+    execute_step_node,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.language_checker import (
     build_direct_path_copy,
     infer_working_language_from_message,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
+    classify_confirmed_user_task_mode,
     classify_step_task_mode,
     execute_step_with_prompt,
 )
@@ -98,6 +101,30 @@ class _SearchTool(BaseTool):
         return ToolResult(success=True, data={"query": query, "results": [{"url": "https://example.com"}]})
 
 
+class _ReadFileTool(BaseTool):
+    name = "file"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations: list[str] = []
+
+    @tool(
+        name="read_file",
+        description="读取文件内容",
+        parameters={"filepath": {"type": "string"}},
+        required=["filepath"],
+    )
+    async def read_file(self, filepath: str):
+        self.invocations.append(filepath)
+        return ToolResult(
+            success=True,
+            data={
+                "filepath": filepath,
+                "content": "example content",
+            },
+        )
+
+
 class _SearchFetchTool(BaseTool):
     name = "search"
 
@@ -159,6 +186,38 @@ class _RepeatedSearchLLM:
                     },
                 }
             ],
+        }
+
+
+class _ReadFileThenFinishLLM:
+    def __init__(self, filepath: str) -> None:
+        self.filepath = filepath
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read-file",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"filepath": self.filepath}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "result": "已结束步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
         }
 
 
@@ -342,6 +401,28 @@ class _BrowserNoProgressLLM:
         }
 
 
+class _PlannerResearchDriftLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "已生成计划",
+                    "goal": "先从慕课网上找三门关于AI Agent的课程名称",
+                    "title": "课程检索任务",
+                    "language": "zh",
+                    "steps": [
+                        {
+                            "id": "1",
+                            "description": "访问搜索结果中的多个页面，提取至少三门课程的名称，并将这些名称保存到临时文件中以备后续使用。",
+                            "task_mode_hint": "research",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 def test_entry_router_node_should_route_direct_answer_for_greeting() -> None:
     state = asyncio.run(
         entry_router_node(
@@ -366,6 +447,19 @@ def test_entry_router_node_should_route_direct_wait_for_preconfirm_request() -> 
     )
 
     assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_wait"
+
+
+def test_entry_router_node_should_not_route_long_mixed_request_to_direct_wait() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "先简单从慕课网(imooc.com)上找三门关于AI Agent的课程名称，使用搜索工具前先让我确认",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
 
 
 def test_entry_router_node_should_route_direct_execute_for_simple_tool_task() -> None:
@@ -412,6 +506,46 @@ def test_classify_step_task_mode_should_prefer_web_reading_over_browser_interact
     ) == "browser_interaction"
 
 
+def test_classify_confirmed_user_task_mode_should_ignore_wait_signal() -> None:
+    user_message = "先让我确认后再继续搜索课程"
+
+    assert classify_step_task_mode(Step(description=user_message)) == "human_wait"
+    assert classify_confirmed_user_task_mode(user_message) == "research"
+
+
+def test_classify_step_task_mode_should_detect_planner_wait_phrases() -> None:
+    assert classify_step_task_mode(
+        Step(description="向用户请求确认是否开始使用搜索工具查找慕课网上的AI Agent课程。")
+    ) == "human_wait"
+    assert classify_step_task_mode(
+        Step(description="向用户展示找到的三门课程名称，并请求用户选择其中感兴趣的一门。")
+    ) == "human_wait"
+    assert classify_step_task_mode(
+        Step(description="如有疑问，向用户询问并基于反馈决定后续步骤。")
+    ) == "human_wait"
+    assert classify_step_task_mode(
+        Step(description="用户确认后，使用搜索工具搜索课程并整理结果。")
+    ) == "research"
+    assert classify_step_task_mode(
+        Step(description="用户选择课程后，使用浏览器工具访问选定页面查看详情。")
+    ) == "web_reading"
+
+
+def test_classify_step_task_mode_should_prioritize_structured_task_mode_hint() -> None:
+    assert classify_step_task_mode(
+        Step(
+            description="根据用户选择继续处理课程详情。",
+            task_mode_hint="human_wait",
+        )
+    ) == "human_wait"
+    assert classify_step_task_mode(
+        Step(
+            description="请确认是否继续执行当前任务。",
+            task_mode_hint="research",
+        )
+    ) == "research"
+
+
 def test_language_checker_should_infer_working_language_from_user_message() -> None:
     assert infer_working_language_from_message("请用中文总结这个页面") == "zh"
     assert infer_working_language_from_message("Read this file and summarize in English") == "en"
@@ -448,10 +582,11 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
 
 
 def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
+    user_message = "先让我确认后再继续搜索课程"
     state = asyncio.run(
         direct_wait_node(
             {
-                "user_message": "先让我确认后再继续搜索课程",
+                "user_message": user_message,
                 "graph_metadata": {},
             }
         )
@@ -460,8 +595,12 @@ def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
     assert state["plan"] is not None
     assert state["plan"].language == "zh"
     assert [step.id for step in state["plan"].steps] == ["direct-wait-confirm", "direct-wait-execute"]
+    assert state["plan"].steps[1].description == "执行原始任务"
     assert state["pending_interrupt"]["kind"] == "confirm"
     assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
+    assert state["graph_metadata"]["control"]["direct_wait_original_message"] == user_message
+    assert state["graph_metadata"]["control"]["direct_wait_execute_task_mode"] == "research"
+    assert state["graph_metadata"]["control"]["direct_wait_original_task_executed"] is False
 
 
 def test_direct_execute_node_should_build_single_step_plan() -> None:
@@ -497,6 +636,44 @@ def test_direct_wait_node_should_preserve_english_working_language() -> None:
     assert state["pending_interrupt"]["prompt"] == "Please confirm whether execution is allowed before continuing this task."
     assert state["pending_interrupt"]["confirm_label"] == "Continue"
     assert state["pending_interrupt"]["cancel_label"] == "Cancel"
+
+
+def test_create_or_reuse_plan_node_should_default_research_step_to_forbid_file_output() -> None:
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "先简单从慕课网上找三门关于AI Agent的课程名称",
+                "graph_metadata": {},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_refs": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "artifact_refs": [],
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _PlannerResearchDriftLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert "临时文件" in state["plan"].steps[0].description
+    assert state["plan"].steps[0].output_mode == "none"
+    assert state["plan"].steps[0].artifact_policy == "forbid_file_output"
 
 
 def test_direct_execute_node_should_preserve_english_working_language() -> None:
@@ -635,6 +812,204 @@ def test_execute_step_with_prompt_should_break_on_repeated_search_query() -> Non
     assert search_tool.invoked == 2
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 3
+
+
+def test_execute_step_with_prompt_should_block_read_file_without_explicit_file_context_in_research() -> None:
+    llm = _ReadFileThenFinishLLM("/home/ubuntu/report.md")
+    file_tool = _ReadFileTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="调研慕课网 AI Agent 课程信息"),
+            runtime_tools=[file_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请调研慕课网 AI Agent 课程信息"}],
+            has_available_file_context=False,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已结束步骤"
+    assert file_tool.invocations == []
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "read_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "明确文件路径/文件名" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_allow_read_file_with_explicit_file_context_in_research() -> None:
+    llm = _ReadFileThenFinishLLM("/home/ubuntu/upload/course.txt")
+    file_tool = _ReadFileTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="读取课程附件并结合检索结果整理摘要"),
+            runtime_tools=[file_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请读取 /home/ubuntu/upload/course.txt 并整理课程摘要"}],
+            has_available_file_context=True,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已结束步骤"
+    assert file_tool.invocations == ["/home/ubuntu/upload/course.txt"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "read_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is True
+
+
+def test_execute_step_with_prompt_should_block_read_file_in_web_reading() -> None:
+    llm = _ReadFileThenFinishLLM("/home/ubuntu/course-detail.md")
+    file_tool = _ReadFileTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="读取当前课程页面详情"),
+            runtime_tools=[file_tool],
+            task_mode="web_reading",
+            user_content=[{"type": "text", "text": "请读取当前课程页面详情"}],
+            has_available_file_context=True,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已结束步骤"
+    assert file_tool.invocations == []
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "read_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "网页读取任务" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_file_tools_for_inline_general_without_file_context() -> None:
+    llm = _ReadFileThenFinishLLM("/home/ubuntu/course-detail.md")
+    file_tool = _ReadFileTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="将课程详情直接展示给用户",
+                output_mode="inline",
+                artifact_policy="default",
+            ),
+            runtime_tools=[file_tool],
+            task_mode="general",
+            user_content=[{"type": "text", "text": "请直接展示课程详情"}],
+            has_available_file_context=False,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已结束步骤"
+    assert file_tool.invocations == []
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "read_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "内联展示结果" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_with_file_context() -> None:
+    llm = _ReadFileThenFinishLLM("/home/ubuntu/course-detail.md")
+    file_tool = _ReadFileTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="基于已有课程详情文件整理内联摘要",
+                output_mode="inline",
+                artifact_policy="default",
+            ),
+            runtime_tools=[file_tool],
+            task_mode="general",
+            user_content=[{"type": "text", "text": "请基于已有课程详情文件整理摘要"}],
+            has_available_file_context=True,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已结束步骤"
+    assert file_tool.invocations == ["/home/ubuntu/course-detail.md"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "read_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is True
+
+
+def test_execute_step_node_should_treat_selected_artifacts_as_available_file_context() -> None:
+    llm = _ReadFileThenFinishLLM("/home/ubuntu/course-detail.md")
+    file_tool = _ReadFileTool()
+    plan = Plan(
+        title="课程详情展示",
+        goal="展示课程详情",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="展示课程详情",
+                description="基于已有课程详情文件整理内联摘要",
+                output_mode="inline",
+                artifact_policy="default",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+
+    state = {
+        "plan": plan,
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "input_parts": [],
+        "selected_artifacts": ["/home/ubuntu/course-detail.md"],
+        "artifact_refs": [],
+        "step_states": [],
+        "pending_interrupt": {},
+        "retrieved_memories": [],
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "historical_artifact_refs": [],
+        "emitted_events": [],
+        "user_message": "请直接展示课程详情",
+        "current_step_id": None,
+        "final_message": "",
+        "thread_id": "thread-1",
+        "conversation_summary": "",
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm,
+            runtime_tools=[file_tool],
+        )
+    )
+
+    assert file_tool.invocations == ["/home/ubuntu/course-detail.md"]
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert next_state["final_message"] == "已结束步骤"
 
 
 def test_execute_step_with_prompt_should_break_on_browser_no_progress() -> None:

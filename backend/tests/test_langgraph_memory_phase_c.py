@@ -20,11 +20,13 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph i
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
     _build_execution_context_block,
     consolidate_memory_node,
+    direct_wait_node,
     execute_step_node,
     guard_step_reuse_node,
     recall_memory_context_node,
     replan_node,
     summarize_node,
+    wait_for_human_node,
 )
 
 
@@ -119,6 +121,15 @@ class _CaptureSummaryPromptLLM:
                 ensure_ascii=False,
             )
         }
+
+
+class _FailIfCalledSummaryLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools, response_format):
+        self.calls += 1
+        raise AssertionError("direct_wait 未执行原任务时不应调用总结模型")
 
 
 class _FakeReplanLLM:
@@ -694,6 +705,119 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
     assert '"selected_artifacts": ["/home/ubuntu/final.md"]' in llm.last_prompt
     assert '"objective_key"' not in llm.last_prompt
     assert '"success_criteria"' not in llm.last_prompt
+
+
+def test_summarize_should_block_direct_wait_without_original_execution(monkeypatch) -> None:
+    llm = _FailIfCalledSummaryLLM()
+    captured_events = []
+
+    async def _capture_events(*events):
+        captured_events.extend(events)
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.emit_live_events",
+        _capture_events,
+    )
+
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "继续",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "direct-wait-confirm",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证 direct_wait 错误总结阻断",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {
+            "control": {
+                "entry_strategy": "direct_wait",
+                "direct_wait_original_task_executed": False,
+            }
+        },
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert llm.calls == 0
+    assert summarized_state["plan"].status == ExecutionStatus.FAILED
+    assert summarized_state["plan"].error == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
+    assert summarized_state["final_message"] == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
+    assert any(getattr(event, "type", "") == "error" for event in captured_events)
+    assert any(
+        getattr(event, "type", "") == "error"
+        and getattr(event, "error_key", "") == "direct_wait_unexecuted"
+        for event in captured_events
+    )
+    assert any(
+        getattr(event, "type", "") == "message"
+        and getattr(event, "stage", "") == "final"
+        for event in captured_events
+    )
+
+
+def test_summarize_should_not_block_after_direct_wait_cancel_and_replan(monkeypatch) -> None:
+    llm = _FakeLLM()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        lambda payload: False,
+    )
+
+    waiting_state = asyncio.run(
+        direct_wait_node(
+            {
+                "session_id": "session-1",
+                "user_id": "user-1",
+                "run_id": "run-1",
+                "thread_id": "thread-1",
+                "user_message": "先让我确认后再继续搜索课程",
+                "graph_metadata": {},
+                "message_window": [],
+                "working_memory": {},
+                "execution_count": 0,
+            }
+        )
+    )
+    cancelled_state = asyncio.run(wait_for_human_node(waiting_state))
+    replanned_state = asyncio.run(
+        replan_node(
+            cancelled_state,
+            _FakeReplanLLM(
+                steps=[
+                    {
+                        "title": "按新的计划继续执行",
+                        "description": "按新的计划继续执行",
+                    }
+                ]
+            ),
+        )
+    )
+    replanned_plan = _build_plan()
+    replanned_plan.steps[0].status = ExecutionStatus.COMPLETED
+    replanned_plan.steps[0].outcome = StepOutcome(done=True, summary="重规划后的步骤已完成")
+    replanned_state["plan"] = replanned_plan
+    replanned_state["user_message"] = "按新的计划继续执行"
+    replanned_state["final_message"] = "重规划后的步骤已完成"
+
+    summarized_state = asyncio.run(summarize_node(replanned_state, llm))
+
+    control = (summarized_state.get("graph_metadata") or {}).get("control") or {}
+    assert summarized_state["plan"].status == ExecutionStatus.COMPLETED
+    assert summarized_state["final_message"] == "最终总结"
+    assert "wait_resume_action" not in control
+    assert "entry_strategy" not in control
 
 
 def test_consolidate_memory_should_trim_message_window_and_update_summary() -> None:

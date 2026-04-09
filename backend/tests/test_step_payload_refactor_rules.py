@@ -34,6 +34,52 @@ def test_build_step_from_payload_should_fallback_description_to_title() -> None:
     assert step.objective_key == build_step_objective_key("整理需求", "整理需求")
 
 
+def test_build_step_from_payload_should_normalize_task_mode_hint() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "等待用户选择课程",
+            "task_mode_hint": " HUMAN_WAIT ",
+        },
+        fallback_index=0,
+    )
+
+    assert step.task_mode_hint == "human_wait"
+    assert step.output_mode == "none"
+    assert step.artifact_policy == "forbid_file_output"
+
+
+def test_build_step_from_payload_should_default_research_step_to_forbid_file_output() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "访问搜索结果中的多个页面，提取至少三门课程的名称，并将这些名称保存到临时文件中以备后续使用。",
+            "task_mode_hint": "research",
+        },
+        fallback_index=0,
+        user_message="先简单从慕课网上找三门关于AI Agent的课程名称",
+    )
+
+    assert step.description == "访问搜索结果中的多个页面，提取至少三门课程的名称，并将这些名称保存到临时文件中以备后续使用。"
+    assert step.output_mode == "none"
+    assert step.artifact_policy == "forbid_file_output"
+
+
+def test_build_step_from_payload_should_keep_file_output_when_user_explicitly_requests_it() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "搜索网页并把结果保存到临时文件中。",
+            "task_mode_hint": "research",
+            "output_mode": "file",
+            "artifact_policy": "require_file_output",
+        },
+        fallback_index=0,
+        user_message="搜索网页后把结果保存到文件里",
+    )
+
+    assert step.description == "搜索网页并把结果保存到临时文件中。"
+    assert step.output_mode == "file"
+    assert step.artifact_policy == "require_file_output"
+
+
 def test_migration_should_normalize_legacy_step_payload_into_outcome() -> None:
     migration = _load_refactor_migration_module()
 
