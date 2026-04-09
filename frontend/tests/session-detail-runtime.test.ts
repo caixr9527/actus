@@ -32,7 +32,7 @@ test('reduceSessionRuntimeStateOnEvent should process a complex event sequence',
   assert.deepEqual(state, { status: 'completed', streaming: false })
 })
 
-test('reduceSessionRuntimeStateOnEvent should switch to waiting on ask-user tool call', () => {
+test('reduceSessionRuntimeStateOnEvent should not switch to waiting on ask-user tool calling event alone', () => {
   const event = eventOf('tool', {
     function: 'message_ask_user',
     status: 'calling',
@@ -42,7 +42,7 @@ test('reduceSessionRuntimeStateOnEvent should switch to waiting on ask-user tool
     { status: 'running', streaming: true },
     event,
   )
-  assert.deepEqual(next, { status: 'waiting', streaming: false })
+  assert.deepEqual(next, { status: 'running', streaming: true })
 })
 
 test('reduceSessionRuntimeStateOnEvent should switch to cancelled on cancelled step event', () => {

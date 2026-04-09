@@ -64,13 +64,6 @@ export function reduceSessionRuntimeStateOnEvent(
         nextStreaming = false
       }
     },
-    tool: (toolEvent) => {
-      const toolData = toolEvent.data as { function?: string; status?: string }
-      if (toolData.function === 'message_ask_user' && toolData.status === 'calling') {
-        nextStatus = 'waiting'
-        nextStreaming = false
-      }
-    },
     wait: () => {
       nextStatus = 'waiting'
       nextStreaming = false
