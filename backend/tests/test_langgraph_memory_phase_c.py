@@ -551,6 +551,7 @@ def test_execution_context_block_should_separate_current_and_historical_context(
                 "goal": "整理上下文",
                 "status": "completed",
                 "final_answer_summary": f"总结{index}" * 60,
+                "final_answer_text_excerpt": f"重交付正文摘录{index}" * 40,
             }
             for index in range(6)
         ],
@@ -561,6 +562,7 @@ def test_execution_context_block_should_separate_current_and_historical_context(
                 "goal": "尝试执行",
                 "status": "failed",
                 "final_answer_summary": f"失败总结{index}" * 60,
+                "final_answer_text_excerpt": f"失败重交付摘录{index}" * 40,
             }
             for index in range(6)
         ],
@@ -580,6 +582,8 @@ def test_execution_context_block_should_separate_current_and_historical_context(
     assert len(context_block["recent_attempt_briefs"]) == 3
     assert "总结0总结0" in context_block["recent_run_briefs"][0]["final_answer_summary"]
     assert len(context_block["recent_run_briefs"][0]["final_answer_summary"]) <= 120
+    assert "重交付正文摘录0" in context_block["recent_run_briefs"][0]["final_answer_text_excerpt"]
+    assert len(context_block["recent_run_briefs"][0]["final_answer_text_excerpt"]) <= 160
     assert context_block["blockers"] == ["阻塞1"]
     assert context_block["open_questions"] == ["问题1", "问题2", "问题3"]
     assert context_block["recent_messages"] == [
@@ -774,6 +778,255 @@ def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_
     assert message_event.type == "message"
     assert message_event.stage == "final"
     assert message_event.message == "这是用户最终应该看到的完整攻略正文。"
+
+
+def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep_light_summary() -> None:
+    llm = _FakeSummaryAttachmentLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成最终文档",
+            description="生成最终文档",
+            objective_key="objective-step-1",
+            success_criteria=["最终文档生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成最终文档",
+                produced_artifacts=["/home/ubuntu/final-output.md"],
+            ),
+        ),
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成最终文档",
+                    "produced_artifacts": ["/home/ubuntu/final-output.md"],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证最终交付正文与附件一并输出",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是用户最终应该看到的完整攻略正文。",
+                "sections": [],
+                "source_refs": ["/home/ubuntu/final-output.md"],
+            },
+        },
+        "selected_artifacts": ["/home/ubuntu/final-output.md"],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "artifact_refs": ["/home/ubuntu/final-output.md"],
+        "emitted_events": [],
+        "final_message": "最近一步结果的短摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["final_message"] == "最终总结"
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.type == "message"
+    assert message_event.stage == "final"
+    assert message_event.message == "这是用户最终应该看到的完整攻略正文。"
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+
+
+def test_summarize_should_use_final_delivery_source_refs_as_attachment_truth_source() -> None:
+    llm = _FakeLightSummaryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "step_states": [],
+        "working_memory": {
+            "goal": "验证最终交付来源附件",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是用户最终应该看到的完整攻略正文。",
+                "sections": [],
+                "source_refs": [
+                    "/home/ubuntu/final-output.md",
+                    "/home/ubuntu/final-checklist.md",
+                ],
+            },
+        },
+        "selected_artifacts": [],
+        "artifact_refs": [],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最近一步结果的短摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["selected_artifacts"] == [
+        "/home/ubuntu/final-output.md",
+        "/home/ubuntu/final-checklist.md",
+    ]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == [
+        "/home/ubuntu/final-output.md",
+        "/home/ubuntu/final-checklist.md",
+    ]
+
+
+def test_summarize_should_filter_non_file_refs_from_final_delivery_source_refs() -> None:
+    llm = _FakeLightSummaryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "step_states": [],
+        "working_memory": {
+            "goal": "验证最终附件过滤",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是用户最终应该看到的完整攻略正文。",
+                "sections": [],
+                "source_refs": [
+                    "artifact-id-1",
+                    "https://example.com/final.md",
+                    "final-output.md",
+                    "/home/ubuntu/final-output.md",
+                ],
+            },
+        },
+        "selected_artifacts": [],
+        "artifact_refs": ["artifact-id-1", "https://example.com/final.md", "/home/ubuntu/final-output.md"],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最近一步结果的短摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+
+
+def test_summarize_should_not_emit_non_file_refs_as_attachments() -> None:
+    llm = _FakeLightSummaryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "step_states": [],
+        "working_memory": {
+            "goal": "验证非文件引用不会变成附件",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是用户最终应该看到的完整攻略正文。",
+                "sections": [],
+                "source_refs": [
+                    "artifact-id-1",
+                    "https://example.com/final.md",
+                    "final-output.md",
+                ],
+            },
+        },
+        "selected_artifacts": ["artifact-id-2"],
+        "artifact_refs": ["artifact-id-1", "https://example.com/final.md"],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最近一步结果的短摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["selected_artifacts"] == []
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.attachments == []
+
+
+def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> None:
+    llm = _FakeUnknownSummaryAttachmentLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成真实附件",
+                    "produced_artifacts": [
+                        "/home/ubuntu/final-output.md",
+                        "/home/ubuntu/final-checklist.md",
+                    ],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证当前 run 多附件回退",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "selected_artifacts": [],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "artifact_refs": [],
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["selected_artifacts"] == [
+        "/home/ubuntu/final-output.md",
+        "/home/ubuntu/final-checklist.md",
+    ]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == [
+        "/home/ubuntu/final-output.md",
+        "/home/ubuntu/final-checklist.md",
+    ]
 
 
 def test_summarize_should_block_direct_wait_without_original_execution(monkeypatch) -> None:

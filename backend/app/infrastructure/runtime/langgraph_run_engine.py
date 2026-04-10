@@ -34,7 +34,12 @@ from app.domain.services.runtime.langgraph_state import (
     get_graph_projection,
     replace_graph_projection,
 )
-from app.domain.services.runtime.normalizers import build_delivery_text, normalize_ref_list, normalize_text_list
+from app.domain.services.runtime.normalizers import (
+    build_delivery_text,
+    normalize_file_path_list,
+    normalize_ref_list,
+    normalize_text_list,
+)
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
@@ -330,6 +335,7 @@ class LangGraphRunEngine(RunEngine):
             "goal": summary.goal,
             "status": summary.status.value,
             "final_answer_summary": str(summary.final_answer_summary or "").strip()[:200],
+            "final_answer_text_excerpt": str(summary.final_answer_text or "").strip()[:200],
         }
 
     @classmethod
@@ -418,7 +424,7 @@ class LangGraphRunEngine(RunEngine):
             step_ledger=step_ledger,
             # 仅保留当前 run 明确选择/确认过的产物，避免把事件层噪音引用投影到历史上下文。
             artifacts=normalize_ref_list(
-                [str(item) for item in list(state.get("selected_artifacts") or [])]
+                normalize_file_path_list(state.get("selected_artifacts"))
             ),
             open_questions=normalize_text_list(open_questions),
             blockers=normalize_text_list(blockers),
@@ -437,9 +443,9 @@ class LangGraphRunEngine(RunEngine):
 
         # 提取非空的摘要文本或标题，用于构建简短的上下文概览
         summary_text_parts = [
-            str(item.final_answer_summary or item.title or "").strip()
+            str(item.final_answer_summary or item.final_answer_text or item.title or "").strip()[:200]
             for item in recent_summaries
-            if str(item.final_answer_summary or item.title or "").strip()
+            if str(item.final_answer_summary or item.final_answer_text or item.title or "").strip()
         ]
 
         return SessionContextSnapshot(
@@ -584,7 +590,31 @@ class LangGraphRunEngine(RunEngine):
         values = getattr(snapshot, "values", None)
         if not isinstance(values, dict):
             return None
-        return dict(values)
+        # checkpoint 入口直接收口脏状态，后续链路只消费统一规整后的 graph state。
+        return GraphStateContractMapper.normalize_runtime_state(dict(values))
+
+    async def _persist_normalized_checkpoint_state(
+            self,
+            *,
+            invoke_config: Dict[str, Dict[str, str]],
+            checkpoint_state: Optional[PlannerReActLangGraphState],
+    ) -> Dict[str, Dict[str, str]]:
+        """resume 前先把清洗后的 checkpoint 写回图状态，确保真正执行态不再吃旧脏值。"""
+        if checkpoint_state is None:
+            return invoke_config
+
+        async_update_state = getattr(self._graph, "aupdate_state", None)
+        if callable(async_update_state):
+            updated_config = await async_update_state(invoke_config, checkpoint_state)
+        else:
+            update_state = getattr(self._graph, "update_state", None)
+            if not callable(update_state):
+                raise RuntimeError("当前 LangGraph 图不支持 update_state，无法在 resume 前收口 checkpoint 状态")
+            updated_config = update_state(invoke_config, checkpoint_state)
+
+        if not isinstance(updated_config, dict) or not isinstance(updated_config.get("configurable"), dict):
+            raise RuntimeError("LangGraph update_state 返回了无效配置，无法继续 resume")
+        return updated_config
 
     async def inspect_resume_checkpoint(self) -> ResumeCheckpointInspection:
         """读取当前恢复点的 checkpoint 状态，不推进图执行。"""
@@ -685,6 +715,7 @@ class LangGraphRunEngine(RunEngine):
     ) -> AsyncGenerator[BaseEvent, None]:
         started_at = now_perf()
         state: Optional[PlannerReActLangGraphState] = None
+        wait_events: List[WaitEvent] = []
         deduplicator = _EventDeduplicator()
         live_event_queue: "asyncio.Queue[BaseEvent]" = asyncio.Queue()
         input_state = graph_input if isinstance(graph_input, dict) else fallback_state
@@ -818,6 +849,10 @@ class LangGraphRunEngine(RunEngine):
         started_at = now_perf()
         invoke_config, run_id = await self._resolve_invoke_context()
         checkpoint_state = await self._load_checkpoint_state(invoke_config=invoke_config)
+        invoke_config = await self._persist_normalized_checkpoint_state(
+            invoke_config=invoke_config,
+            checkpoint_state=checkpoint_state,
+        )
         trace_token = bind_trace_id(build_trace_id(self._session_id, run_id))
         try:
             log_runtime(

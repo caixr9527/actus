@@ -24,8 +24,11 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     Step,
+    StepDeliveryContextState,
+    StepDeliveryRole,
     StepOutputMode,
     StepOutcome,
+    StepTaskModeHint,
     StepEvent,
     StepEventStatus,
     TitleEvent,
@@ -56,9 +59,11 @@ from app.domain.services.runtime.normalizers import (
     append_unique_text,
     build_delivery_text,
     is_attachment_filepath,
-    normalize_attachment_path_list,
+    normalize_message_window_entry,
     normalize_controlled_value,
     normalize_delivery_payload,
+    normalize_execution_response,
+    normalize_file_path_list,
     normalize_ref_list,
     normalize_step_result_text,
     normalize_text_list,
@@ -161,7 +166,7 @@ def _truncate_text(value: Any, *, max_chars: int) -> str:
 
 
 def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
-    """仅为内联交付步骤保留重正文，避免污染步骤摘要和轻量最终消息。"""
+    """仅为显式 final 交付步骤保留重正文，避免中间内联步骤误覆盖最终正文。"""
     if step is None or step.outcome is None or not step.outcome.done:
         return {}
     outcome = step.outcome
@@ -169,8 +174,11 @@ def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
     output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
     if output_mode != StepOutputMode.INLINE.value:
         return {}
+    delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
+    if delivery_role != StepDeliveryRole.FINAL.value:
+        return {}
 
-    delivery_text = normalize_step_result_text(outcome.summary)
+    delivery_text = normalize_step_result_text(outcome.delivery_text)
     if not delivery_text:
         return {}
 
@@ -178,7 +186,7 @@ def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
         {
             "text": delivery_text,
             "sections": [],
-            "source_refs": normalize_attachment_path_list(
+            "source_refs": normalize_file_path_list(
                 outcome.produced_artifacts,
                 max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
             ),
@@ -189,7 +197,7 @@ def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
 # 附件 helper：只负责当前 run 内附件引用的收集、合并与最终交付选择。
 def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
     artifact_groups: List[List[str]] = [
-        normalize_attachment_path_list(
+        normalize_file_path_list(
             ((step_state.get("outcome") or {}).get("produced_artifacts"))
             if isinstance(step_state, dict) and isinstance(step_state.get("outcome"), dict)
             else [],
@@ -199,7 +207,7 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
     ]
     last_step = state.get("last_executed_step")
     artifact_groups.append(
-        normalize_attachment_path_list(
+        normalize_file_path_list(
             last_step.outcome.produced_artifacts
             if last_step is not None and last_step.outcome is not None
             else [],
@@ -214,10 +222,10 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
         ]
     )
     normalized_groups = [
-        normalize_attachment_path_list(group, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
+        normalize_file_path_list(group, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
         for group in artifact_groups
     ]
-    return normalize_attachment_path_list(
+    return normalize_file_path_list(
         merge_attachment_paths(*normalized_groups),
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
@@ -225,7 +233,7 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
 
 def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> List[str]:
     """统一收口当前运行里可直接消费的文件路径，供执行器判断是否允许文件工具。"""
-    return normalize_attachment_path_list(
+    return normalize_file_path_list(
         merge_attachment_paths(
             [
                 ref
@@ -238,20 +246,32 @@ def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> L
     )
 
 
+def _resolve_final_delivery_source_refs(state: PlannerReActLangGraphState) -> List[str]:
+    """最终重交付正文的附件来源以 final_delivery_payload 为真相源。"""
+    working_memory = _ensure_working_memory(state)
+    delivery_payload = normalize_delivery_payload(working_memory.get("final_delivery_payload"))
+    return normalize_file_path_list(
+        delivery_payload.get("source_refs"),
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
+
+
 def _resolve_summary_attachment_refs(
         state: PlannerReActLangGraphState,
         parsed_attachments: Any,
 ) -> List[str]:
     explicit_attachment_refs = normalize_attachments(parsed_attachments)
+    final_delivery_source_refs = _resolve_final_delivery_source_refs(state)
     last_step = state.get("last_executed_step")
-    last_step_attachment_refs = normalize_attachment_path_list(
+    last_step_attachment_refs = normalize_file_path_list(
         last_step.outcome.produced_artifacts
         if last_step is not None and last_step.outcome is not None
         else [],
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
-    known_attachment_refs = normalize_attachment_path_list(
+    known_attachment_refs = normalize_file_path_list(
         merge_attachment_paths(
+            final_delivery_source_refs,
             last_step_attachment_refs,
             [
                 ref
@@ -264,7 +284,7 @@ def _resolve_summary_attachment_refs(
     )
     if len(explicit_attachment_refs) > 0:
         resolved_explicit_refs = [
-            ref for ref in normalize_attachment_path_list(
+            ref for ref in normalize_file_path_list(
                 explicit_attachment_refs,
                 max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
             )
@@ -272,6 +292,9 @@ def _resolve_summary_attachment_refs(
         ]
         if len(resolved_explicit_refs) > 0:
             return resolved_explicit_refs
+
+    if len(final_delivery_source_refs) > 0:
+        return final_delivery_source_refs
 
     if len(last_step_attachment_refs) > 0:
         return last_step_attachment_refs
@@ -282,14 +305,14 @@ def _resolve_summary_attachment_refs(
         if is_attachment_filepath(ref)
     ]
     if len(selected_attachment_refs) > 0:
-        return normalize_attachment_path_list(
+        return normalize_file_path_list(
             selected_attachment_refs,
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )
 
     current_run_artifacts = _collect_current_run_artifacts(state)
     if len(current_run_artifacts) > 0:
-        return current_run_artifacts[-1:]
+        return current_run_artifacts
 
     return []
 
@@ -317,6 +340,14 @@ def _build_direct_plan_title(user_message: str, fallback: str) -> str:
     if not normalized_message:
         return fallback
     return normalized_message[:40]
+
+
+def _resolve_direct_delivery_context_state(task_mode: str) -> str:
+    """直达路径下，只有纯 general 任务才可直接组织最终正文，其余模式需先准备上下文。"""
+    normalized_task_mode = normalize_controlled_value(task_mode, StepTaskModeHint)
+    if normalized_task_mode == StepTaskModeHint.GENERAL.value:
+        return StepDeliveryContextState.READY.value
+    return StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
 def _build_summary_plan_snapshot(
@@ -353,7 +384,7 @@ def _build_summary_plan_snapshot(
         "completed_step_summaries": completed_step_summaries[:5],
         "failed_step_summaries": failed_step_summaries[:3],
         "pending_step_titles": pending_step_titles[:5],
-        "selected_artifacts": normalize_attachment_path_list(
+        "selected_artifacts": normalize_file_path_list(
             list(selected_artifacts or []),
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )[:6],
@@ -372,7 +403,7 @@ def _build_summary_delivery_payload(working_memory: Dict[str, Any]) -> Dict[str,
             }
             for item in list(delivery_payload.get("sections") or [])[:6]
         ],
-        "source_refs": normalize_attachment_path_list(
+        "source_refs": normalize_file_path_list(
             delivery_payload.get("source_refs"),
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )[:6],
@@ -399,8 +430,10 @@ def _outcome_is_reusable(outcome: Optional[StepOutcome]) -> bool:
         return False
     if normalize_step_result_text(outcome.summary):
         return True
+    if normalize_step_result_text(outcome.delivery_text):
+        return True
     return len(
-        normalize_attachment_path_list(
+        normalize_file_path_list(
             outcome.produced_artifacts,
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )
@@ -451,14 +484,6 @@ def _merge_step_outcome_into_working_memory(
     delivery_payload = _build_step_delivery_payload(step)
     if delivery_payload:
         updated_working_memory["final_delivery_payload"] = delivery_payload
-    else:
-        output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
-        if output_mode in {StepOutputMode.NONE.value, StepOutputMode.FILE.value}:
-            updated_working_memory["final_delivery_payload"] = {
-                "text": "",
-                "sections": [],
-                "source_refs": [],
-            }
     return updated_working_memory
 
 
@@ -472,7 +497,8 @@ def _build_reused_step_outcome(
     return StepOutcome(
         done=True,
         summary=normalize_step_result_text(source_outcome.summary),
-        produced_artifacts=normalize_attachment_path_list(
+        delivery_text=normalize_step_result_text(source_outcome.delivery_text),
+        produced_artifacts=normalize_file_path_list(
             source_outcome.produced_artifacts,
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         ),
@@ -539,7 +565,7 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
     if last_step is not None and last_step.outcome is not None:
         blockers.extend(normalize_text_list(last_step.outcome.blockers))
 
-    selected_artifacts = normalize_ref_list(state.get("selected_artifacts"))
+    selected_artifacts = normalize_file_path_list(state.get("selected_artifacts"))
     current_run_artifacts = _collect_current_run_artifacts(state)
     historical_artifact_refs = normalize_ref_list(state.get("historical_artifact_refs"))
 
@@ -550,6 +576,7 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
             "goal": str(item.get("goal") or "").strip(),
             "status": str(item.get("status") or "").strip(),
             "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=120),
+            "final_answer_text_excerpt": _truncate_text(item.get("final_answer_text_excerpt"), max_chars=160),
         }
         for item in list(state.get("recent_run_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
         if isinstance(item, dict) and str(item.get("run_id") or "").strip()
@@ -561,6 +588,7 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
             "goal": str(item.get("goal") or "").strip(),
             "status": str(item.get("status") or "").strip(),
             "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=120),
+            "final_answer_text_excerpt": _truncate_text(item.get("final_answer_text_excerpt"), max_chars=160),
         }
         for item in list(state.get("recent_attempt_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
         if isinstance(item, dict) and str(item.get("run_id") or "").strip()
@@ -568,7 +596,12 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
 
     recent_messages: List[Dict[str, Any]] = []
     for item in list(state.get("message_window") or [])[-PROMPT_CONTEXT_MESSAGE_LIMIT:]:
-        normalized_item = _normalize_message_window_entry(item, default_role="assistant")
+        normalized_item = normalize_message_window_entry(
+            item,
+            default_role="assistant",
+            max_message_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+            max_attachment_paths=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
         if normalized_item is None:
             continue
         recent_messages.append(
@@ -723,43 +756,6 @@ def _merge_replanned_steps_into_plan(plan: Plan, new_steps: List[Step]) -> Tuple
     # 若仍存在未完成步骤，则从首个未完成步骤开始整体替换，避免旧步骤残留。
     merged_steps.extend(_dedupe_replanned_steps(preserved_steps, new_steps))
     return merged_steps, "replace_remaining_pending_steps"
-
-
-def _normalize_message_window_entry(
-        raw_entry: Dict[str, Any],
-        *,
-        default_role: str,
-) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw_entry, dict):
-        return None
-
-    normalized_role = str(raw_entry.get("role") or default_role).strip() or default_role
-    normalized_message = _truncate_text(
-        raw_entry.get("message"),
-        max_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
-    )
-    normalized_attachments = normalize_attachment_path_list(
-        raw_entry.get("attachment_paths"),
-        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-    )
-    input_part_count_raw = raw_entry.get("input_part_count")
-    try:
-        input_part_count = max(int(input_part_count_raw or 0), 0)
-    except Exception:
-        input_part_count = 0
-
-    if not normalized_message and len(normalized_attachments) == 0 and input_part_count == 0:
-        return None
-
-    normalized_entry: Dict[str, Any] = {
-        "role": normalized_role,
-        "message": normalized_message,
-    }
-    if len(normalized_attachments) > 0:
-        normalized_entry["attachment_paths"] = normalized_attachments
-    if input_part_count > 0:
-        normalized_entry["input_part_count"] = input_part_count
-    return normalized_entry
 
 
 # 记忆 helper：负责总结后的事实/偏好提炼、候选规整与去重治理。
@@ -1207,13 +1203,15 @@ def _append_message_window_entry(
         message: str,
         attachments: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    next_entry = _normalize_message_window_entry(
+    next_entry = normalize_message_window_entry(
         {
             "role": role,
             "message": message,
             "attachment_paths": list(attachments or []),
         },
         default_role=role,
+        max_message_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+        max_attachment_paths=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     if next_entry is None:
         return list(message_window)
@@ -1223,9 +1221,11 @@ def _append_message_window_entry(
 
     # 检查是否与最后一条消息完全重复（角色、内容、附件均一致），若是则避免重复添加
     if updated_window:
-        latest_entry = _normalize_message_window_entry(
+        latest_entry = normalize_message_window_entry(
             dict(updated_window[-1]),
             default_role=role,
+            max_message_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+            max_attachment_paths=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )
         if latest_entry == next_entry:
             return updated_window
@@ -1240,7 +1240,12 @@ def _compact_message_window(
 ) -> Tuple[List[Dict[str, Any]], int]:
     normalized_window: List[Dict[str, Any]] = []
     for item in list(message_window or []):
-        normalized_item = _normalize_message_window_entry(item, default_role="assistant")
+        normalized_item = normalize_message_window_entry(
+            item,
+            default_role="assistant",
+            max_message_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+            max_attachment_paths=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
         if normalized_item is None:
             continue
         if normalized_window and normalized_window[-1] == normalized_item:
@@ -1492,6 +1497,7 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
         task_mode_hint="human_wait",
         output_mode="none",
         artifact_policy="forbid_file_output",
+        delivery_role="none",
         status=ExecutionStatus.RUNNING,
     )
     step_execute = Step(
@@ -1499,8 +1505,13 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
         title=direct_copy["direct_wait_execute_title"],
         # 第二步只表达“开始执行原任务”，不再把“先确认”语义写回步骤文本。
         description=direct_copy["direct_wait_execute_title"],
-        output_mode="none",
+        task_mode_hint=execute_task_mode,
+        # direct_wait 的真实执行步骤本身就承担最终正文，不应再丢回轻摘要链路。
+        output_mode="inline",
         artifact_policy="default",
+        delivery_role="final",
+        # direct_wait 的真实执行步骤可能仍需先搜索/读取页面；是否可直接交付由 readiness 决定。
+        delivery_context_state=_resolve_direct_delivery_context_state(execute_task_mode),
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(
@@ -1549,12 +1560,18 @@ async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReAct
     user_message = str(state.get("user_message") or "").strip()
     language = infer_working_language_from_message(user_message)
     direct_copy = build_direct_path_copy(language)
+    execute_task_mode = classify_confirmed_user_task_mode(user_message)
     step = Step(
         id="direct-execute-step",
         title=direct_copy["direct_execute_step_title"],
         description=user_message,
-        output_mode="none",
+        task_mode_hint=execute_task_mode,
+        # direct_execute 是单步执行路径，本步骤直接承担最终正文交付。
+        output_mode="inline",
         artifact_policy="default",
+        delivery_role="final",
+        # 单步直达路径也可能要先检索/读取再输出最终正文，不能一律当成已准备好上下文。
+        delivery_context_state=_resolve_direct_delivery_context_state(execute_task_mode),
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(
@@ -1968,6 +1985,8 @@ async def execute_step_node(
         attachments=format_attachments_for_prompt(attachments),
         language=language,
         step=step.description,
+        delivery_role=str(getattr(step, "delivery_role", "") or "none"),
+        delivery_context_state=str(getattr(step, "delivery_context_state", "") or "none"),
     )
     user_message_prompt = _append_execution_context_to_prompt(user_message_prompt, state)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
@@ -1979,13 +1998,14 @@ async def execute_step_node(
 
     try:
         async with asyncio.timeout(STEP_EXECUTION_TIMEOUT_SECONDS):
-            # 若运行时已注入工具能力，则优先走“提示词 + 工具循环”路径。
-            if runtime_tools:
+            # 只要执行器能力已初始化（即便当前列表为空），都统一走 execute_step_with_prompt，
+            # 这样“无工具纯文本完成”分支才能真正生效。
+            if runtime_tools is not None:
                 tool_started_at = now_perf()
                 llm_message, tool_events = await execute_step_with_prompt(
                     llm=llm,
                     step=step,
-                    runtime_tools=runtime_tools,
+                    runtime_tools=runtime_tools or [],
                     max_tool_iterations=max_tool_iterations,
                     task_mode=task_mode,
                     on_tool_event=emit_live_events,
@@ -2047,7 +2067,8 @@ async def execute_step_node(
         )
         llm_message = {
             "success": False,
-            "result": f"步骤执行超时：{step.description}",
+            "summary": f"步骤执行超时：{step.description}",
+            "delivery_text": "",
             "attachments": [],
             "blockers": [f"当前步骤超过 {STEP_EXECUTION_TIMEOUT_SECONDS} 秒未完成"],
             "next_hint": "请缩小当前步骤范围后重试",
@@ -2056,7 +2077,8 @@ async def execute_step_node(
     if llm_message is None:
         llm_message = {
             "success": False,
-            "result": f"步骤执行失败：{step.description}",
+            "summary": f"步骤执行失败：{step.description}",
+            "delivery_text": "",
             "attachments": [],
         }
 
@@ -2087,25 +2109,38 @@ async def execute_step_node(
             events=[started_event, *tool_events],
         )
 
-    step_success = bool(llm_message.get("success", True))
+    normalized_execution = normalize_execution_response(llm_message)
+    step_success = bool(normalized_execution.get("success", True))
     step_summary = normalize_step_result_text(
-        llm_message.get("result"),
+        normalized_execution.get("summary"),
         fallback=f"已完成步骤：{step.description}" if step_success else f"步骤执行失败：{step.description}",
     )
-    model_attachment_paths = normalize_attachments(llm_message.get("attachments"))
+    step_delivery_text = normalize_step_result_text(
+        normalized_execution.get("delivery_text"),
+        fallback=(
+            step_summary
+            if normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
+               == StepDeliveryRole.FINAL.value
+            and normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+               == StepOutputMode.INLINE.value
+            else ""
+        ),
+    )
+    model_attachment_paths = normalize_attachments(normalized_execution.get("attachments"))
     tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
-    step_attachment_paths = normalize_attachment_path_list(
+    step_attachment_paths = normalize_file_path_list(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
+        delivery_text=step_delivery_text,
         produced_artifacts=step_attachment_paths,
-        blockers=normalize_text_list(llm_message.get("blockers")),
-        facts_learned=normalize_text_list(llm_message.get("facts_learned")),
-        open_questions=normalize_text_list(llm_message.get("open_questions")),
-        next_hint=normalize_step_result_text(llm_message.get("next_hint")),
+        blockers=normalize_text_list(normalized_execution.get("blockers")),
+        facts_learned=normalize_text_list(normalized_execution.get("facts_learned")),
+        open_questions=normalize_text_list(normalized_execution.get("open_questions")),
+        next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),
     )
     step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
 
@@ -2668,7 +2703,7 @@ async def consolidate_memory_node(
             trimmed_message_count=trimmed_message_count,
         ),
         "pending_memory_writes": remaining_memory_writes,
-        "selected_artifacts": normalize_ref_list(state.get("selected_artifacts")),
+        "selected_artifacts": normalize_file_path_list(state.get("selected_artifacts")),
     }
     log_runtime(
         logger,

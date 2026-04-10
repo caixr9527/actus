@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any, Dict, List
 
-from app.domain.services.runtime.normalizers import normalize_ref_list
+from app.domain.services.runtime.normalizers import normalize_file_path_list
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,8 @@ def safe_parse_json(content: str | None) -> Dict[str, Any]:
 
 
 def normalize_attachments(raw_attachments: Any) -> List[str]:
-    return normalize_ref_list(raw_attachments)
+    """模型 attachments 字段只接受可直接交付的文件路径。"""
+    return normalize_file_path_list(raw_attachments)
 
 
 def format_attachments_for_prompt(attachments: List[str]) -> str:

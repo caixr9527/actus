@@ -26,6 +26,7 @@ from app.domain.models import (
     WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
+from app.domain.services.runtime.normalizers import normalize_step_outcome_payload
 from app.domain.repositories import WorkflowRunRepository
 from app.infrastructure.models import WorkflowRunModel, WorkflowRunEventModel, WorkflowRunStepModel
 
@@ -123,7 +124,7 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         step = event.step
         step_record = await self._get_step_record_with_lock(run_id=run_id, step_id=step.id)
         if step_record is None:
-            # 步骤不存在时创建快照，尽量保持与计划中的顺序一致。
+            # 步骤不存在时创建快照，并把运行时结构化语义一并落库，避免恢复时再丢字段。
             step_record = WorkflowRunStepModel(
                 run_id=run_id,
                 step_id=step.id,
@@ -133,18 +134,36 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                 objective_key=step.objective_key,
                 success_criteria=list(step.success_criteria or []),
                 status=step.status.value,
-                outcome=step.outcome.model_dump(mode="json") if step.outcome is not None else None,
+                task_mode_hint=step.task_mode_hint.value if step.task_mode_hint is not None else None,
+                output_mode=step.output_mode.value if step.output_mode is not None else None,
+                artifact_policy=step.artifact_policy.value if step.artifact_policy is not None else None,
+                delivery_role=step.delivery_role.value if step.delivery_role is not None else None,
+                delivery_context_state=(
+                    step.delivery_context_state.value
+                    if step.delivery_context_state is not None
+                    else None
+                ),
+                outcome=normalize_step_outcome_payload(step.outcome),
                 error=step.error,
             )
             self.db_session.add(step_record)
         else:
-            # 步骤已存在时仅做字段收敛，避免覆盖既有顺序。
+            # 步骤已存在时仅更新内容与结构化语义，不改既有顺序。
             step_record.title = step.title
             step_record.description = step.description
             step_record.objective_key = step.objective_key
             step_record.success_criteria = list(step.success_criteria or [])
             step_record.status = step.status.value
-            step_record.outcome = step.outcome.model_dump(mode="json") if step.outcome is not None else None
+            step_record.task_mode_hint = step.task_mode_hint.value if step.task_mode_hint is not None else None
+            step_record.output_mode = step.output_mode.value if step.output_mode is not None else None
+            step_record.artifact_policy = step.artifact_policy.value if step.artifact_policy is not None else None
+            step_record.delivery_role = step.delivery_role.value if step.delivery_role is not None else None
+            step_record.delivery_context_state = (
+                step.delivery_context_state.value
+                if step.delivery_context_state is not None
+                else None
+            )
+            step_record.outcome = normalize_step_outcome_payload(step.outcome)
             step_record.error = step.error
 
         if step.status in {ExecutionStatus.RUNNING, ExecutionStatus.PENDING}:
@@ -265,7 +284,16 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                     objective_key=step.objective_key,
                     success_criteria=list(step.success_criteria or []),
                     status=step.status.value,
-                    outcome=step.outcome.model_dump(mode="json") if step.outcome is not None else None,
+                    task_mode_hint=step.task_mode_hint.value if step.task_mode_hint is not None else None,
+                    output_mode=step.output_mode.value if step.output_mode is not None else None,
+                    artifact_policy=step.artifact_policy.value if step.artifact_policy is not None else None,
+                    delivery_role=step.delivery_role.value if step.delivery_role is not None else None,
+                    delivery_context_state=(
+                        step.delivery_context_state.value
+                        if step.delivery_context_state is not None
+                        else None
+                    ),
+                    outcome=normalize_step_outcome_payload(step.outcome),
                     error=step.error,
                 )
             )

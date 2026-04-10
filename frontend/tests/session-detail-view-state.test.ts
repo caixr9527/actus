@@ -46,6 +46,7 @@ test('resolveStepExpandedState should auto expand running step and collapse when
 
 test('shouldAutoCloseTaskPreview should only close preview when running task completes', () => {
   assert.equal(shouldAutoCloseTaskPreview('running', 'completed'), true)
+  assert.equal(shouldAutoCloseTaskPreview('running', 'failed'), true)
   assert.equal(shouldAutoCloseTaskPreview('running', 'cancelled'), true)
   assert.equal(shouldAutoCloseTaskPreview('running', 'waiting'), false)
   assert.equal(shouldAutoCloseTaskPreview('completed', 'completed'), false)

@@ -9,6 +9,8 @@ from typing import Any, List
 from app.domain.models import (
     Step,
     StepArtifactPolicy,
+    StepDeliveryContextState,
+    StepDeliveryRole,
     StepOutputMode,
     StepTaskModeHint,
     ToolEvent,
@@ -89,17 +91,23 @@ def _resolve_step_artifact_strategy(
         task_mode_hint: Any,
         raw_output_mode: Any,
         raw_artifact_policy: Any,
+        raw_delivery_role: Any,
         user_message: str,
 ) -> tuple[str, str]:
     """按任务模式与用户原始诉求收敛结构化产物策略。"""
     output_mode = normalize_controlled_value(raw_output_mode, StepOutputMode)
     artifact_policy = normalize_controlled_value(raw_artifact_policy, StepArtifactPolicy)
+    delivery_role = normalize_controlled_value(raw_delivery_role, StepDeliveryRole)
     user_requests_file_output = _user_explicitly_requests_file_output(user_message)
 
     # 等待步骤和默认检索步骤都不应该再依赖 write_file 产出临时文件。
     if task_mode_hint == "human_wait":
         return "none", "forbid_file_output"
     if task_mode_hint in {"research", "web_reading"} and not user_requests_file_output:
+        if output_mode == StepOutputMode.INLINE.value and delivery_role == StepDeliveryRole.FINAL.value:
+            # 允许“同一步先检索/读取，再交付最终正文”的 final 步骤保留 inline，
+            # 避免这类结构化语义被错误收敛回纯中间步骤。
+            return StepOutputMode.INLINE.value, artifact_policy or StepArtifactPolicy.DEFAULT.value
         return "none", "forbid_file_output"
 
     if artifact_policy == "require_file_output":
@@ -112,6 +120,52 @@ def _resolve_step_artifact_strategy(
         output_mode = "file" if artifact_policy in {"allow_file_output", "require_file_output"} else "none"
 
     return output_mode or "none", artifact_policy or "default"
+
+
+def _resolve_step_delivery_role(
+        *,
+        task_mode_hint: Any,
+        output_mode: str,
+        raw_delivery_role: Any,
+) -> str:
+    """按结构化输出模式收敛交付角色，避免把最终正文职责落到错误步骤上。"""
+    delivery_role = normalize_controlled_value(raw_delivery_role, StepDeliveryRole)
+
+    if task_mode_hint == "human_wait":
+        return StepDeliveryRole.NONE.value
+    if output_mode != StepOutputMode.INLINE.value:
+        return StepDeliveryRole.NONE.value
+    if delivery_role == StepDeliveryRole.FINAL.value:
+        return StepDeliveryRole.FINAL.value
+    if delivery_role == StepDeliveryRole.INTERMEDIATE.value:
+        return StepDeliveryRole.INTERMEDIATE.value
+    return StepDeliveryRole.INTERMEDIATE.value
+
+
+def _resolve_step_delivery_context_state(
+        *,
+        task_mode_hint: Any,
+        output_mode: str,
+        delivery_role: str,
+        raw_delivery_context_state: Any,
+) -> str:
+    """按最终交付职责收敛上下文准备状态，避免把“可直接交付”和“仍需准备上下文”混为一谈。"""
+    delivery_context_state = normalize_controlled_value(
+        raw_delivery_context_state,
+        StepDeliveryContextState,
+    )
+
+    if task_mode_hint == StepTaskModeHint.HUMAN_WAIT.value:
+        return StepDeliveryContextState.NONE.value
+    if output_mode != StepOutputMode.INLINE.value:
+        return StepDeliveryContextState.NONE.value
+    if delivery_role != StepDeliveryRole.FINAL.value:
+        return StepDeliveryContextState.NONE.value
+    if delivery_context_state:
+        return delivery_context_state
+    if task_mode_hint == StepTaskModeHint.GENERAL.value:
+        return StepDeliveryContextState.READY.value
+    return StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
 def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: str = "") -> Step:
@@ -131,7 +185,19 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
             task_mode_hint=task_mode_hint,
             raw_output_mode=payload.get("output_mode"),
             raw_artifact_policy=payload.get("artifact_policy"),
+            raw_delivery_role=payload.get("delivery_role"),
             user_message=user_message,
+        )
+        delivery_role = _resolve_step_delivery_role(
+            task_mode_hint=task_mode_hint,
+            output_mode=output_mode,
+            raw_delivery_role=payload.get("delivery_role"),
+        )
+        delivery_context_state = _resolve_step_delivery_context_state(
+            task_mode_hint=task_mode_hint,
+            output_mode=output_mode,
+            delivery_role=delivery_role,
+            raw_delivery_context_state=payload.get("delivery_context_state"),
         )
         return Step(
             id=step_id,
@@ -140,6 +206,8 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
             task_mode_hint=task_mode_hint,
             output_mode=output_mode,
             artifact_policy=artifact_policy,
+            delivery_role=delivery_role,
+            delivery_context_state=delivery_context_state,
             objective_key=str(payload.get("objective_key") or build_step_objective_key(title, description)),
             success_criteria=success_criteria or [description],
             status=ExecutionStatus.PENDING,
@@ -152,6 +220,8 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
         description=description,
         output_mode="none",
         artifact_policy="default",
+        delivery_role="none",
+        delivery_context_state="none",
         objective_key=build_step_objective_key(description, description),
         success_criteria=[description],
         status=ExecutionStatus.PENDING,

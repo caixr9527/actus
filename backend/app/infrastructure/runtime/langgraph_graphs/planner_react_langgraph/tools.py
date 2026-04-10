@@ -23,6 +23,8 @@ from app.domain.models import (
     SearchResults,
     Step,
     StepArtifactPolicy,
+    StepDeliveryContextState,
+    StepDeliveryRole,
     StepOutputMode,
     StepTaskModeHint,
     ToolEvent,
@@ -30,7 +32,12 @@ from app.domain.models import (
     ToolResult,
 )
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
-from app.domain.services.runtime.normalizers import normalize_controlled_value, truncate_text
+from app.domain.services.runtime.normalizers import (
+    normalize_controlled_value,
+    normalize_execution_response,
+    normalize_file_path_list,
+    truncate_text,
+)
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
     normalize_attachments,
@@ -195,16 +202,12 @@ def has_available_file_context(
         attachment_paths: Optional[List[str]] = None,
         artifact_paths: Optional[List[str]] = None,
 ) -> bool:
-    """统一判断当前步骤是否已经具备可消费的文件上下文。"""
-    normalized_paths = [
-        str(path or "").strip()
-        for path in [*(attachment_paths or []), *(artifact_paths or [])]
-        if str(path or "").strip()
-    ]
+    """统一判断当前步骤是否已经具备真实可读的文件上下文。"""
+    normalized_paths = normalize_file_path_list([*(attachment_paths or []), *(artifact_paths or [])])
     if len(normalized_paths) > 0:
         return True
     signals = _analyze_text_intent(user_message)
-    return bool(signals["has_absolute_path"] or signals["has_file_signal"])
+    return bool(signals["has_absolute_path"])
 
 
 def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dict[str, Any]]:
@@ -466,6 +469,35 @@ def _step_forbids_file_output(step: Step) -> bool:
 def _step_outputs_inline_result(step: Step) -> bool:
     """读取步骤的结构化输出模式，避免展示类步骤继续绕回文件系统。"""
     return normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) == "inline"
+
+
+def _step_owns_final_delivery(step: Step) -> bool:
+    """显式 final 交付步骤负责最终重正文，不应再漂移回检索链路。"""
+    return normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole) == "final"
+
+
+def _resolve_step_delivery_context_state(step: Step, *, task_mode: str) -> str:
+    """统一解析最终交付上下文状态；缺失时按当前步骤语义做结构化推断。"""
+    delivery_context_state = normalize_controlled_value(
+        getattr(step, "delivery_context_state", None),
+        StepDeliveryContextState,
+    )
+    if delivery_context_state:
+        return delivery_context_state
+    if not _step_owns_final_delivery(step):
+        return StepDeliveryContextState.NONE.value
+    inferred_task_mode = (
+        normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint)
+        or normalize_controlled_value(task_mode, StepTaskModeHint)
+    )
+    if inferred_task_mode == StepTaskModeHint.GENERAL.value:
+        return StepDeliveryContextState.READY.value
+    return StepDeliveryContextState.NEEDS_PREPARATION.value
+
+
+def _step_final_delivery_context_ready(step: Step, *, task_mode: str) -> bool:
+    """只有上下文已准备好的 final 步骤，才应该被禁止继续检索页面。"""
+    return _resolve_step_delivery_context_state(step, task_mode=task_mode) == StepDeliveryContextState.READY.value
 
 
 def _build_step_candidate_text(step: Step) -> str:
@@ -1031,9 +1063,22 @@ def _build_loop_break_payload(
     )
     return {
         "success": False,
+        "summary": f"当前步骤暂时未能完成：{step.description}",
         "result": f"当前步骤暂时未能完成：{step.description}",
+        "delivery_text": "",
         "attachments": [],
+        "blockers": [blocker],
+        "next_hint": next_hint,
     }
+
+
+def _normalize_execution_payload(parsed: Dict[str, Any], *, default_summary: str) -> Dict[str, Any]:
+    """统一构造执行器返回值，避免工具循环各出口重复拼字段。"""
+    payload = normalize_execution_response(parsed)
+    if not str(payload.get("summary") or "").strip():
+        payload["summary"] = default_summary
+        payload["result"] = default_summary
+    return payload
 
 
 def _summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
@@ -1164,6 +1209,7 @@ async def execute_step_with_prompt(
     research_file_context_blocked_function_names: set[str] = set()
     general_inline_blocked_function_names: set[str] = set()
     artifact_policy_blocked_function_names: set[str] = set()
+    final_delivery_search_blocked_function_names: set[str] = set()
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
@@ -1171,6 +1217,13 @@ async def execute_step_with_prompt(
         # 展示型步骤应当直接把已有观察整理成文本，不要在无文件上下文时再试探读写文件。
         general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
         blocked_function_names.update(general_inline_blocked_function_names)
+    if _step_outputs_inline_result(step) and _step_owns_final_delivery(step) and _step_final_delivery_context_ready(
+            step,
+            task_mode=task_mode,
+    ):
+        # 最终交付步骤只负责组织已准备好的上下文，不再重新发起搜索/页面读取。
+        final_delivery_search_blocked_function_names.update(SEARCH_FUNCTION_NAMES)
+        blocked_function_names.update(final_delivery_search_blocked_function_names)
     if _step_forbids_file_output(step):
         artifact_policy_blocked_function_names.add("write_file")
         blocked_function_names.update(artifact_policy_blocked_function_names)
@@ -1195,6 +1248,13 @@ async def execute_step_with_prompt(
         {
             function_name
             for function_name in artifact_policy_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in final_delivery_search_blocked_function_names
             if function_name not in available_function_names
         }
     )
@@ -1237,11 +1297,10 @@ async def execute_step_with_prompt(
             elapsed_ms=elapsed_ms(started_at),
             attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         )
-        return {
-            "success": bool(parsed.get("success", True)),
-            "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
-            "attachments": normalize_attachments(parsed.get("attachments")),
-        }, []
+        return _normalize_execution_payload(
+            parsed,
+            default_summary=f"已完成步骤：{step.description}",
+        ), []
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT + REACT_SYSTEM_PROMPT},
@@ -1352,7 +1411,10 @@ async def execute_step_with_prompt(
         if len(tool_calls) == 0:
             parsed = safe_parse_json(llm_message.get("content"))
             # 如果模型返回结果为空，则尝试重新执行
-            if parsed.get("success", True) and str(parsed.get("result", "")).strip() == '':
+            parsed_execution = normalize_execution_response(parsed)
+            has_summary = bool(str(parsed_execution.get("summary") or "").strip())
+            has_delivery_text = bool(str(parsed_execution.get("delivery_text") or "").strip())
+            if parsed_execution.get("success", True) and not has_summary and not has_delivery_text:
                 log_runtime(
                     logger,
                     logging.WARNING,
@@ -1374,11 +1436,10 @@ async def execute_step_with_prompt(
                 llm_elapsed_ms=llm_cost_ms,
                 elapsed_ms=elapsed_ms(started_at),
             )
-            return {
-                "success": bool(parsed.get("success", True)),
-                "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
-                "attachments": normalize_attachments(parsed.get("attachments")),
-            }, emitted_tool_events
+            return _normalize_execution_payload(
+                parsed,
+                default_summary=f"已完成步骤：{step.description}",
+            ), emitted_tool_events
 
         selected_tool_call = pick_preferred_tool_call(
             tool_calls=[item for item in tool_calls if isinstance(item, dict)],
@@ -1521,6 +1582,21 @@ async def execute_step_with_prompt(
                 tool_result = ToolResult(
                     success=False,
                     message="当前步骤的结构化产物策略禁止文件产出。请直接返回文本结果，或先通过重规划生成允许文件产出的步骤。",
+                )
+            elif normalized_function_name in final_delivery_search_blocked_function_names:
+                loop_break_reason = "final_delivery_search_drift_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "最终交付步骤已拦截检索漂移",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                    delivery_role=str(getattr(step, "delivery_role", "") or ""),
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤负责最终交付正文，请直接基于已知上下文组织答案，不要重新调用 search_web 或 fetch_page。",
                 )
             elif browser_route_enabled and normalized_function_name.startswith("browser_"):
                 loop_break_reason = "browser_route_blocked"
@@ -1892,7 +1968,9 @@ async def execute_step_with_prompt(
             return {
                 "success": True,
                 "interrupt_request": interrupt_request,
+                "summary": "",
                 "result": "",
+                "delivery_text": "",
                 "attachments": [],
             }, emitted_tool_events
         if function_name == NOTIFY_USER_FUNCTION_NAME and bool(tool_result.success):
@@ -1947,8 +2025,7 @@ async def execute_step_with_prompt(
         attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         elapsed_ms=elapsed_ms(started_at),
     )
-    return {
-        "success": bool(parsed.get("success", True)),
-        "result": str(parsed.get("result") or f"已完成步骤：{step.description}"),
-        "attachments": normalize_attachments(parsed.get("attachments")),
-    }, emitted_tool_events
+    return _normalize_execution_payload(
+        parsed,
+        default_summary=f"已完成步骤：{step.description}",
+    ), emitted_tool_events

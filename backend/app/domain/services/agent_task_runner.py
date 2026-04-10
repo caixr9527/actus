@@ -398,13 +398,22 @@ class AgentTaskRunner(TaskRunner):
                 logger.info("接收到空附件路径，跳过附件同步")
                 return None
 
-            # 先校验沙箱路径是否存在，避免模型幻觉附件触发不必要的沙箱下载。
-            if not await self._check_sandbox_file_exists(filepath=filepath):
-                return None
-
             # 根据文件路径从会话存储中获取旧文件信息（如存在）
             async with self._uow_factory() as uow:
                 old_file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
+                # 中途事件附件允许复用既有文件对象，避免重复上传同一路径的中间产物。
+                if old_file is not None and stage != "final":
+                    return old_file
+
+            sandbox_file_exists = await self._check_sandbox_file_exists(filepath=filepath)
+            if not sandbox_file_exists:
+                # final 附件必须优先代表“当前沙箱里的最终版本”。
+                # 只有最终文件已经从沙箱消失时，才允许回退复用同路径旧文件对象，避免把旧内容误当成最终产物。
+                if old_file is not None and stage == "final":
+                    async with self._uow_factory() as uow:
+                        await uow.session.add_final_files(session_id=self._session_id, file=old_file)
+                    return old_file
+                return None
 
             # 从沙箱环境中下载文件数据
             file_data = await self._sandbox.download_file(file_path=filepath)
@@ -423,7 +432,7 @@ class AgentTaskRunner(TaskRunner):
             new_file = await self._file_storage.upload_file(upload_file=upload_file, user_id=self._user_id)
             new_file.filepath = filepath
 
-            # 原子更新会话文件索引：删除旧引用（若存在）并新增新引用
+            # 原子更新会话文件索引：final 阶段即使命中旧路径，也要替换成刚同步的最新文件对象。
             async with self._uow_factory() as uow:
                 if old_file:
                     await uow.session.remove_file(session_id=self._session_id, file_id=old_file.id)
@@ -542,6 +551,14 @@ class AgentTaskRunner(TaskRunner):
             # 兜底再失败时保留错误日志，便于后续排障或离线修复。
             logger.error(f"会话[{self._session_id}]在{scene}状态兜底失败: {fallback_err}")
 
+    async def _mark_session_failed_fallback(self, scene: str) -> None:
+        """在错误收敛失败时至少落地 session 的 failed 状态。"""
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.FAILED)
+        except Exception as fallback_err:
+            logger.error(f"会话[{self._session_id}]在{scene}失败兜底失败: {fallback_err}")
+
     async def _mark_session_cancelled_fallback(self, scene: str) -> None:
         """在取消收敛失败时至少落地 session/run 的 cancelled 状态。"""
         try:
@@ -607,6 +624,7 @@ class AgentTaskRunner(TaskRunner):
 
     async def invoke(self, task: Task) -> None:
         active_request_id: Optional[str] = None
+        terminal_session_status: Optional[SessionStatus] = None
         try:
             # 记录任务开始执行的日志
             logger.info(f"开始执行任务: {task.id}")
@@ -687,6 +705,7 @@ class AgentTaskRunner(TaskRunner):
                             event=event,
                             status=SessionStatus.WAITING,
                         )
+                        terminal_session_status = SessionStatus.WAITING
                         await self._emit_request_finished(
                             task=task,
                             request_id=active_request_id,
@@ -703,11 +722,13 @@ class AgentTaskRunner(TaskRunner):
                         # Done事件优先走原子提交：
                         # 当输入队列已空时，和COMPLETED状态一并落库，避免事件/状态分叉。
                         has_more_input = not await task.input_stream.is_empty()
+                        done_status = None if has_more_input else SessionStatus.COMPLETED
                         await self._put_and_add_event(
                             task=task,
                             event=event,
-                            status=None if has_more_input else SessionStatus.COMPLETED,
+                            status=done_status,
                         )
+                        terminal_session_status = done_status
                         await self._emit_request_finished(
                             task=task,
                             request_id=active_request_id,
@@ -716,7 +737,15 @@ class AgentTaskRunner(TaskRunner):
                         active_request_id = None
                         break
                     elif isinstance(event, ErrorEvent):
-                        await self._put_and_add_event(task=task, event=event)
+                        # 错误事件必须直接收敛为 failed，并把列表摘要同步成失败原因。
+                        await self._put_and_add_event(
+                            task=task,
+                            event=event,
+                            latest_message=event.error,
+                            latest_message_at=event.created_at,
+                            status=SessionStatus.FAILED,
+                        )
+                        terminal_session_status = SessionStatus.FAILED
                         await self._emit_request_finished(
                             task=task,
                             request_id=active_request_id,
@@ -733,9 +762,10 @@ class AgentTaskRunner(TaskRunner):
                         await self._put_and_add_event(task=task, event=event)
 
             # 所有事件处理完成后，执行一次状态兜底：
-            # 正常情况下Done事件已将状态置为COMPLETED，这里仅作为防御性保障。
-            async with self._uow_factory() as uow:
-                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+            # 这里只兜底正常完成路径，不能覆盖 wait/failed 等已真实收敛的终态。
+            if terminal_session_status in {None, SessionStatus.COMPLETED}:
+                async with self._uow_factory() as uow:
+                    await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
         except asyncio.CancelledError:
             # 处理任务被取消的情况
             logger.info(f"AgentTaskRunner任务运行取消")
@@ -752,12 +782,15 @@ class AgentTaskRunner(TaskRunner):
         except Exception as e:
             # 处理其他异常情况
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
-            # 异常时优先提交“错误事件 + 状态完成”，失败时降级为状态兜底更新。
+            # 异常时优先提交“错误事件 + failed状态”，失败时降级为 failed 兜底更新。
             try:
+                error_event = ErrorEvent(error=f"{str(e)}")
                 await self._put_and_add_event(
                     task=task,
-                    event=ErrorEvent(error=f"{str(e)}"),
-                    status=SessionStatus.COMPLETED,
+                    event=error_event,
+                    latest_message=error_event.error,
+                    latest_message_at=error_event.created_at,
+                    status=SessionStatus.FAILED,
                 )
                 if active_request_id is not None:
                     await self._emit_request_finished(
@@ -772,7 +805,7 @@ class AgentTaskRunner(TaskRunner):
                 )
             except Exception as error_event_err:
                 logger.error(f"异常分支写入Error事件失败: {error_event_err}")
-                await self._mark_session_completed_fallback(scene="异常分支")
+                await self._mark_session_failed_fallback(scene="异常分支")
         finally:
             # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamablehttp_client内部使用anyio.create_task_group()，

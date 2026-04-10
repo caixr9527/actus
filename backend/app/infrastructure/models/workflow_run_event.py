@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.models import WorkflowRunEventRecord, Event
+from app.domain.services.runtime.normalizers import normalize_event_payload
 from .base import Base
 
 
@@ -79,7 +80,8 @@ class WorkflowRunEventModel(Base):
         )
 
     def to_domain(self) -> WorkflowRunEventRecord:
-        event = TypeAdapter(Event).validate_python(self.event_payload)
+        # 历史事件读取边界统一规整 step/plan 载荷，避免旧脏值继续透传到回放与 SSE。
+        event = normalize_event_payload(TypeAdapter(Event).validate_python(self.event_payload))
         return WorkflowRunEventRecord(
             id=self.id,
             run_id=self.run_id,
@@ -89,4 +91,3 @@ class WorkflowRunEventModel(Base):
             event_payload=event,
             created_at=self.created_at,
         )
-

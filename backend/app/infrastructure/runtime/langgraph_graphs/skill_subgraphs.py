@@ -16,6 +16,7 @@ from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
+from app.domain.services.runtime.normalizers import normalize_execution_response
 from app.domain.services.runtime.skill_graph_registry import (
     SkillDefinition,
     SkillGraphRegistry,
@@ -70,6 +71,8 @@ async def _execute_step_skill_node(
         attachments=format_attachments_for_prompt(list(state.get("attachments") or [])),
         language=str(state.get("language") or "zh"),
         step=str(state.get("step_description") or ""),
+        delivery_role="none",
+        delivery_context_state="none",
     )
     llm_message = await llm.invoke(
         messages=[{"role": "user", "content": prompt}],
@@ -77,13 +80,14 @@ async def _execute_step_skill_node(
         response_format={"type": "json_object"},
     )
     parsed = safe_parse_json(llm_message.get("content"))
+    parsed_execution = normalize_execution_response(parsed)
 
     step_description = str(state.get("step_description") or "")
     return {
         **state,
-        "success": bool(parsed.get("success", True)),
-        "result": str(parsed.get("result") or f"已完成步骤：{step_description}"),
-        "attachments": normalize_attachments(parsed.get("attachments")),
+        "success": bool(parsed_execution.get("success", True)),
+        "result": str(parsed_execution.get("summary") or f"已完成步骤：{step_description}"),
+        "attachments": normalize_attachments(parsed_execution.get("attachments")),
     }
 
 

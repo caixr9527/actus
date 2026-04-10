@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,11 +11,17 @@ from app.domain.models import (
     PlanEventStatus,
     Session,
     Step,
+    StepArtifactPolicy,
+    StepDeliveryContextState,
+    StepDeliveryRole,
     StepEvent,
     StepEventStatus,
     StepOutcome,
+    StepOutputMode,
+    StepTaskModeHint,
     WorkflowRunEventRecord,
 )
+from app.infrastructure.models.workflow_run_step import WorkflowRunStepModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 
 
@@ -114,6 +121,11 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
             id="step-2",
             title="增量步骤",
             description="增量步骤",
+            task_mode_hint=StepTaskModeHint.RESEARCH,
+            output_mode=StepOutputMode.NONE,
+            artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
+            delivery_role=StepDeliveryRole.FINAL,
+            delivery_context_state=StepDeliveryContextState.NEEDS_PREPARATION,
             objective_key="objective-step-2",
             success_criteria=["增量步骤完成"],
             status=ExecutionStatus.RUNNING,
@@ -131,6 +143,11 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
     assert step_record.step_index == 2
     assert step_record.objective_key == "objective-step-2"
     assert step_record.status == ExecutionStatus.RUNNING.value
+    assert step_record.task_mode_hint == StepTaskModeHint.RESEARCH.value
+    assert step_record.output_mode == StepOutputMode.NONE.value
+    assert step_record.artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value
+    assert step_record.delivery_role == StepDeliveryRole.FINAL.value
+    assert step_record.delivery_context_state == StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
 def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_current_step() -> None:
@@ -147,6 +164,11 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         objective_key="objective-old",
         success_criteria=[],
         status=ExecutionStatus.RUNNING.value,
+        task_mode_hint=None,
+        output_mode=None,
+        artifact_policy=None,
+        delivery_role=None,
+        delivery_context_state=None,
         outcome=None,
         error=None,
     )
@@ -158,13 +180,18 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
             id="step-3",
             title="新描述",
             description="新描述",
+            task_mode_hint=StepTaskModeHint.GENERAL,
+            output_mode=StepOutputMode.INLINE,
+            artifact_policy=StepArtifactPolicy.DEFAULT,
+            delivery_role=StepDeliveryRole.FINAL,
+            delivery_context_state=StepDeliveryContextState.READY,
             objective_key="objective-step-3",
             success_criteria=["新描述完成"],
             status=ExecutionStatus.COMPLETED,
             outcome=StepOutcome(
                 done=True,
                 summary="完成",
-                produced_artifacts=["file-1"],
+                produced_artifacts=["artifact-id-1", "https://example.com/file.md", "file-1", "/tmp/file-1.md"],
             ),
         ),
         status=StepEventStatus.COMPLETED,
@@ -177,10 +204,16 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     assert existing_step_record.description == "新描述"
     assert existing_step_record.objective_key == "objective-step-3"
     assert existing_step_record.status == ExecutionStatus.COMPLETED.value
+    assert existing_step_record.task_mode_hint == StepTaskModeHint.GENERAL.value
+    assert existing_step_record.output_mode == StepOutputMode.INLINE.value
+    assert existing_step_record.artifact_policy == StepArtifactPolicy.DEFAULT.value
+    assert existing_step_record.delivery_role == StepDeliveryRole.FINAL.value
+    assert existing_step_record.delivery_context_state == StepDeliveryContextState.READY.value
     assert existing_step_record.outcome == {
         "done": True,
         "summary": "完成",
-        "produced_artifacts": ["file-1"],
+        "delivery_text": "",
+        "produced_artifacts": ["/tmp/file-1.md"],
         "blockers": [],
         "facts_learned": [],
         "open_questions": [],
@@ -188,6 +221,44 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         "reused_from_run_id": None,
         "reused_from_step_id": None,
     }
+
+
+def test_workflow_run_step_model_to_domain_should_filter_non_file_artifacts_from_outcome() -> None:
+    record = WorkflowRunStepModel(
+        id="record-1",
+        run_id="run-1",
+        step_id="step-1",
+        step_index=0,
+        title="步骤1",
+        description="步骤1",
+        objective_key="objective-step-1",
+        success_criteria=["步骤1完成"],
+        status=ExecutionStatus.COMPLETED.value,
+        updated_at=datetime(2026, 4, 10, 12, 0, 0),
+        created_at=datetime(2026, 4, 10, 12, 0, 0),
+        outcome={
+            "done": True,
+            "summary": "完成",
+            "delivery_text": "",
+            "produced_artifacts": [
+                "artifact-id-1",
+                "https://example.com/file.md",
+                "file-1",
+                "/tmp/file-1.md",
+            ],
+            "blockers": [],
+            "facts_learned": [],
+            "open_questions": [],
+            "next_hint": None,
+            "reused_from_run_id": None,
+            "reused_from_step_id": None,
+        },
+    )
+
+    domain_record = record.to_domain()
+
+    assert domain_record.outcome is not None
+    assert domain_record.outcome.produced_artifacts == ["/tmp/file-1.md"]
 
 
 def test_list_events_should_return_empty_when_run_id_missing() -> None:

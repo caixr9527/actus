@@ -72,6 +72,15 @@ test('reduceSessionRuntimeStateOnEvent should keep cancelled as terminal status'
   assert.deepEqual(next, { status: 'cancelled', streaming: false })
 })
 
+test('reduceSessionRuntimeStateOnEvent should switch to failed on error event', () => {
+  const next = reduceSessionRuntimeStateOnEvent(
+    { status: 'running', streaming: true },
+    eventOf('error', { error: 'boom' }),
+  )
+
+  assert.deepEqual(next, { status: 'failed', streaming: false })
+})
+
 test('getSessionEventId and collectSessionEventIds should normalize event ids for dedupe', () => {
   const events = [
     eventOf('message', { event_id: ' evt-1 ' }),

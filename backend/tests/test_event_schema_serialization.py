@@ -18,6 +18,7 @@ from app.interfaces.schemas.event import (
     CommonEventData,
     EventMapper,
 )
+from app.infrastructure.models.workflow_run_event import WorkflowRunEventModel
 
 
 def test_base_event_data_created_at_serialized_as_timestamp() -> None:
@@ -145,6 +146,128 @@ def test_step_sse_event_should_include_step_outcome() -> None:
     assert payload["data"]["outcome"]["summary"] == "步骤执行超时：执行步骤1"
     assert payload["data"]["outcome"]["blockers"] == ["当前步骤超过 180 秒未完成"]
     assert payload["data"]["outcome"]["next_hint"] == "请缩小当前步骤范围后重试"
+
+
+def test_event_mapper_should_normalize_live_step_event_outcome_before_sse() -> None:
+    event = StepEvent(
+        id="evt-step-live",
+        created_at=datetime(2026, 3, 11, 12, 0, 7),
+        status=StepEventStatus.COMPLETED,
+        step=Step(
+            id="step-1",
+            title="生成文件",
+            description="生成文件",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成",
+                produced_artifacts=["artifact-id-1", "https://example.com/file.md", "/tmp/final.md"],
+            ),
+        ),
+    )
+
+    sse_event = EventMapper.event_to_sse_event(event)
+    payload = sse_event.model_dump(mode="json")
+
+    assert payload["data"]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
+
+
+def test_event_mapper_should_normalize_live_plan_event_outcomes_before_sse() -> None:
+    event = PlanEvent(
+        id="evt-plan-live",
+        created_at=datetime(2026, 3, 11, 12, 0, 7),
+        status=PlanEventStatus.UPDATED,
+        plan=Plan(
+            title="测试计划",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="生成文件",
+                    description="生成文件",
+                    status=ExecutionStatus.COMPLETED,
+                    outcome=StepOutcome(
+                        done=True,
+                        summary="已生成",
+                        produced_artifacts=["artifact-id-1", "/tmp/final.md"],
+                    ),
+                )
+            ],
+        ),
+    )
+
+    sse_event = EventMapper.event_to_sse_event(event)
+    payload = sse_event.model_dump(mode="json")
+
+    assert payload["data"]["steps"][0]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
+
+
+def test_workflow_run_event_model_should_normalize_historical_step_event_outcome_on_read() -> None:
+    event = StepEvent(
+        id="evt-step-dirty",
+        step=Step(
+            id="step-1",
+            title="生成文件",
+            description="生成文件",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成",
+                produced_artifacts=["artifact-id-1", "https://example.com/final.md", "/tmp/final.md"],
+            ),
+        ),
+        status=StepEventStatus.COMPLETED,
+    )
+    record = WorkflowRunEventModel(
+        id="record-1",
+        run_id="run-1",
+        session_id="session-1",
+        event_id=event.id,
+        event_type=event.type,
+        event_payload=event.model_dump(mode="json"),
+        created_at=datetime(2026, 3, 11, 12, 0, 8),
+    )
+
+    domain_record = record.to_domain()
+
+    assert isinstance(domain_record.event_payload, StepEvent)
+    assert domain_record.event_payload.step.outcome.produced_artifacts == ["/tmp/final.md"]
+
+
+def test_workflow_run_event_model_should_normalize_historical_plan_event_outcome_on_read() -> None:
+    event = PlanEvent(
+        id="evt-plan-dirty",
+        plan=Plan(
+            title="测试计划",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="生成文件",
+                    description="生成文件",
+                    status=ExecutionStatus.COMPLETED,
+                    outcome=StepOutcome(
+                        done=True,
+                        summary="已生成",
+                        produced_artifacts=["artifact-id-1", "/tmp/final.md"],
+                    ),
+                )
+            ],
+        ),
+        status=PlanEventStatus.COMPLETED,
+    )
+    record = WorkflowRunEventModel(
+        id="record-2",
+        run_id="run-1",
+        session_id="session-1",
+        event_id=event.id,
+        event_type=event.type,
+        event_payload=event.model_dump(mode="json"),
+        created_at=datetime(2026, 3, 11, 12, 0, 9),
+    )
+
+    domain_record = record.to_domain()
+
+    assert isinstance(domain_record.event_payload, PlanEvent)
+    assert domain_record.event_payload.plan.steps[0].outcome.produced_artifacts == ["/tmp/final.md"]
 
 
 def test_wait_sse_event_should_include_interrupt_payload() -> None:

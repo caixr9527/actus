@@ -91,6 +91,8 @@ EXECUTION_PROMPT = """
 - 已有明确 URL，或刚拿到搜索结果中的候选链接，需要读取页面标题或正文
   → 优先使用 `fetch_page`
 - 对于检索 / 网页读取类任务，在已经拿到候选链接后，不要继续重复 `search_web`
+- 如果当前步骤被标记为最终交付步骤，且交付上下文状态为 `ready`，应直接消费已有上下文组织最终正文，不要重新发起 `search_web` / `fetch_page`
+- 如果当前步骤被标记为最终交付步骤，但交付上下文状态为 `needs_preparation`，可以先继续检索 / 读取 / 操作，再在同一步中产出最终正文
 
 ### 4.2 浏览器读取与交互
 
@@ -118,16 +120,33 @@ interface Response {{
   success: boolean;
 
   /**
-   * 面向用户的自然语言结果描述
-   * 无结果时填空字符串 ""
+   * 轻量步骤摘要，供运行链路、重规划和最终 summary 使用
    */
-  result: string;
+  summary: string;
+
+  /**
+   * 仅当当前步骤承担最终重交付正文时填写
+   * 其他步骤必须返回空字符串 ""
+   */
+  delivery_text: string;
 
   /**
    * 沙箱中需交付给用户的文件路径数组
    * 无附件时填 []，不填 null
    */
   attachments: string[];
+
+  /** 当前步骤的阻塞项；没有则返回 [] */
+  blockers?: string[];
+
+  /** 当前步骤沉淀出的事实；没有则返回 [] */
+  facts_learned?: string[];
+
+  /** 当前步骤遗留的开放问题；没有则返回 [] */
+  open_questions?: string[];
+
+  /** 给后续步骤/重规划的提示；没有则返回 "" */
+  next_hint?: string;
 }}
 ```
 
@@ -136,10 +155,15 @@ interface Response {{
 ```json
 {{
   "success": true,
-  "result": "数据清洗任务已完成，并生成了摘要文件。",
+  "summary": "当前步骤已完成数据清洗。",
+  "delivery_text": "",
   "attachments": [
     "/home/ubuntu/report.md"
-  ]
+  ],
+  "blockers": [],
+  "facts_learned": [],
+  "open_questions": [],
+  "next_hint": ""
 }}
 ```
 
@@ -156,6 +180,8 @@ interface Response {{
 | 输入附件 | {attachments} |
 | 工作语言 | {language} |
 | 当前任务 | {step} |
+| 当前步骤交付角色 | {delivery_role} |
+| 当前步骤交付上下文状态 | {delivery_context_state} |
 """
 
 DIRECT_ANSWER_PROMPT = """

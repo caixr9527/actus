@@ -7,6 +7,7 @@ import pytest
 from app.domain.models import (
     ContinueCancelledTaskInput,
     DoneEvent,
+    ErrorEvent,
     ExecutionStatus,
     File,
     MessageCommand,
@@ -36,6 +37,9 @@ class _DummySessionRepo:
         return None
 
     async def add_file(self, session_id: str, file: File) -> None:
+        return None
+
+    async def add_final_files(self, session_id: str, file: File) -> None:
         return None
 
 
@@ -103,9 +107,11 @@ class _NoopA2ATool:
 class _InvokeSessionRepo:
     def __init__(self) -> None:
         self.updated_status: Optional[SessionStatus] = None
+        self.updated_statuses: list[SessionStatus] = []
 
     async def update_status(self, session_id: str, status: SessionStatus) -> None:
         self.updated_status = status
+        self.updated_statuses.append(status)
 
 
 class _InvokeUoW:
@@ -207,6 +213,113 @@ def test_sync_file_to_storage_should_skip_when_file_not_exists() -> None:
     synced = asyncio.run(runner._sync_file_to_storage("/tmp/not_exists.txt"))
 
     assert synced is None
+
+
+class _ExistingFileSessionRepo:
+    def __init__(self, file: File) -> None:
+        self._file = file
+        self.removed_file_ids: list[str] = []
+        self.added_files: list[File] = []
+        self.added_final_files: list[File] = []
+
+    async def get_file_by_path(self, session_id: str, filepath: str):
+        return self._file if filepath == self._file.filepath else None
+
+    async def remove_file(self, session_id: str, file_id: str) -> None:
+        self.removed_file_ids.append(file_id)
+
+    async def add_file(self, session_id: str, file: File) -> None:
+        self.added_files.append(file)
+
+    async def add_final_files(self, session_id: str, file: File) -> None:
+        self.added_final_files.append(file)
+
+
+class _ExistingFileUoW:
+    def __init__(self, session_repo: _ExistingFileSessionRepo) -> None:
+        self.session = session_repo
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ForbiddenFileStorage:
+    async def upload_file(self, upload_file, user_id=None):
+        raise AssertionError("存在会话文件时不应重新上传文件")
+
+
+class _FreshFinalSandbox:
+    async def check_file_exists(self, file_path: str):
+        return ToolResult(success=True, data=True)
+
+    async def download_file(self, file_path: str):
+        return io.BytesIO(b"final-version")
+
+
+class _FreshFinalFileStorage:
+    def __init__(self) -> None:
+        self.upload_payloads: list[object] = []
+
+    async def upload_file(self, upload_file, user_id=None):
+        self.upload_payloads.append(upload_file)
+        return File(id="file-final-2", filename="final.md", extension="md", size=13)
+
+
+def test_sync_file_to_storage_should_refresh_final_attachment_from_sandbox_when_same_path_exists() -> None:
+    existing_file = File(
+        id="file-final-1",
+        filename="final.md",
+        filepath="/tmp/final.md",
+        extension="md",
+        size=12,
+    )
+    session_repo = _ExistingFileSessionRepo(existing_file)
+    file_storage = _FreshFinalFileStorage()
+    runner = object.__new__(AgentTaskRunner)
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _ExistingFileUoW(session_repo)
+    runner._sandbox = _FreshFinalSandbox()
+    runner._file_storage = file_storage
+
+    synced = asyncio.run(runner._sync_file_to_storage("/tmp/final.md", stage="final"))
+
+    assert synced is not None
+    assert synced.id == "file-final-2"
+    assert synced.filepath == "/tmp/final.md"
+    assert session_repo.removed_file_ids == ["file-final-1"]
+    assert session_repo.added_files == [synced]
+    assert session_repo.added_final_files == [synced]
+    payload = file_storage.upload_payloads[0]
+    assert getattr(payload, "filename") == "final.md"
+    assert getattr(payload, "file").read() == b"final-version"
+
+
+def test_sync_file_to_storage_should_fallback_to_existing_final_attachment_when_sandbox_file_missing() -> None:
+    existing_file = File(
+        id="file-final-1",
+        filename="final.md",
+        filepath="/tmp/final.md",
+        extension="md",
+        size=12,
+    )
+    session_repo = _ExistingFileSessionRepo(existing_file)
+    runner = object.__new__(AgentTaskRunner)
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _ExistingFileUoW(session_repo)
+    runner._sandbox = _MissingFileSandbox()
+    runner._file_storage = _ForbiddenFileStorage()
+
+    synced = asyncio.run(runner._sync_file_to_storage("/tmp/final.md", stage="final"))
+
+    assert synced == existing_file
+    assert session_repo.removed_file_ids == []
+    assert session_repo.added_files == []
+    assert session_repo.added_final_files == [existing_file]
 
 
 def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
@@ -342,6 +455,118 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
         ("DoneEvent", SessionStatus.COMPLETED),
     ]
     assert session_repo.updated_status == SessionStatus.COMPLETED
+    assert session_repo.updated_statuses == [SessionStatus.COMPLETED]
+
+
+def test_invoke_should_keep_failed_status_after_error_event() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    emitted_pairs: list[tuple[str, Optional[SessionStatus], Optional[str]]] = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(
+            request_id=f"req-{message_event.message}",
+            payload=message_event,
+        )
+
+    async def _run_flow(_message):
+        yield ErrorEvent(error="boom")
+
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
+        emitted_pairs.append((type(event).__name__, status, latest_message))
+        if status is not None:
+            session_repo.updated_status = status
+            session_repo.updated_statuses.append(status)
+
+    async def _emit_request_started(*, task, request_id):
+        return None
+
+    async def _emit_request_finished(*, task, request_id, terminal_event_type):
+        return None
+
+    async def _reject_pending_requests(*, task, message, error_key=None):
+        return None
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._emit_request_started = _emit_request_started
+    runner._emit_request_finished = _emit_request_finished
+    runner._reject_pending_requests = _reject_pending_requests
+
+    asyncio.run(runner.invoke(task))
+
+    assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "boom")]
+    assert session_repo.updated_status == SessionStatus.FAILED
+    assert session_repo.updated_statuses == [SessionStatus.FAILED]
+
+
+def test_invoke_should_project_latest_message_when_exception_falls_back_to_error_event() -> None:
+    runner = object.__new__(AgentTaskRunner)
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    emitted_pairs: list[tuple[str, Optional[SessionStatus], Optional[str]]] = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(
+            request_id=f"req-{message_event.message}",
+            payload=message_event,
+        )
+
+    async def _run_flow(_message):
+        raise RuntimeError("fatal boom")
+        yield  # pragma: no cover
+
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
+        emitted_pairs.append((type(event).__name__, status, latest_message))
+        if status is not None:
+            session_repo.updated_status = status
+            session_repo.updated_statuses.append(status)
+
+    async def _emit_request_started(*, task, request_id):
+        return None
+
+    async def _emit_request_finished(*, task, request_id, terminal_event_type):
+        return None
+
+    async def _reject_pending_requests(*, task, message, error_key=None):
+        return None
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._emit_request_started = _emit_request_started
+    runner._emit_request_finished = _emit_request_finished
+    runner._reject_pending_requests = _reject_pending_requests
+
+    asyncio.run(runner.invoke(task))
+
+    assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "fatal boom")]
+    assert session_repo.updated_status == SessionStatus.FAILED
+    assert session_repo.updated_statuses == [SessionStatus.FAILED]
 
 
 class _BrowserScreenshot:

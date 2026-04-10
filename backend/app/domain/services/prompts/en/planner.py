@@ -103,20 +103,25 @@ Answer directly when any of these is true:
 
 For research-style tasks, prefer: `research` first, then `web_reading` if needed. Do not default to `browser_interaction`.
 
-## `output_mode` and `artifact_policy`
+## `output_mode`, `artifact_policy`, `delivery_role`, and `delivery_context_state`
 
-| Scenario | output_mode | artifact_policy |
-|------|------|------|
-| Intermediate step, no need to show output yet | `none` | `forbid_file_output` |
-| Result should be shown inline to the user | `inline` | `default` |
-| User explicitly asked for a file output | `file` | `require_file_output` |
-| File output is allowed but not mandatory | `file` | `allow_file_output` |
+| Scenario | output_mode | artifact_policy | delivery_role | delivery_context_state |
+|------|------|------|------|------|
+| Intermediate step, no need to show output yet | `none` | `forbid_file_output` | `none` | `none` |
+| Inline preview or candidate result | `inline` | `default` | `intermediate` | `none` |
+| Final heavy-delivery text can be organized directly from existing context | `inline` | `default` | `final` | `ready` |
+| Final heavy-delivery text is still owned by this step, but context must be prepared first | `inline` | `default` | `final` | `needs_preparation` |
+| User explicitly asked for a file output | `file` | `require_file_output` | `none` | `none` |
+| File output is allowed but not mandatory | `file` | `allow_file_output` | `none` | `none` |
 
 Additional rules:
-- For `research`, `web_reading`, and `human_wait` steps, if the user did not explicitly request a file output, you must use `output_mode="none"` and `artifact_policy="forbid_file_output"`
+- For `research`, `web_reading`, and `human_wait` steps, if the user did not explicitly request a file output, default to `output_mode="none"` and `artifact_policy="forbid_file_output"`; however, if that same step owns the final heavy delivery and must continue searching/reading before answering, you may use `output_mode="inline" + delivery_role="final" + delivery_context_state="needs_preparation"`
 - Only use `output_mode="file"` when the user clearly asked for saving, exporting, or generating a file such as markdown/json/csv
 - `web_reading` steps must prefer `search_web`, `fetch_page`, or high-level browser reading. Do not plan them as file-reading steps
 - If a `general` step uses `output_mode="inline"` and does not depend on clear file context, attachments, or prior artifacts, it should return inline text directly instead of reading or writing files
+- Use `delivery_role="final"` only for the step that owns the final heavy-delivery text. A plan should usually contain at most one `final` step
+- Use `delivery_context_state="ready"` only when that final step should directly organize the answer from already-prepared context
+- Use `delivery_context_state="needs_preparation"` when the same final step still needs to search, read, or interact before producing the final heavy delivery
 
 ---
 
@@ -151,6 +156,10 @@ interface CreatePlanResponse {{
     output_mode: string;
     /** Artifact policy: default | forbid_file_output | allow_file_output | require_file_output */
     artifact_policy: string;
+    /** Delivery role: none | intermediate | final */
+    delivery_role: string;
+    /** Delivery context state: none | needs_preparation | ready */
+    delivery_context_state: string;
   }}>;
   /** Overall goal */
   goal: string;
@@ -171,21 +180,27 @@ Example:
       "description": "Search for mainstream AI coding tools and gather their names, features, and pricing",
       "task_mode_hint": "research",
       "output_mode": "none",
-      "artifact_policy": "forbid_file_output"
+      "artifact_policy": "forbid_file_output",
+      "delivery_role": "none",
+      "delivery_context_state": "none"
     }},
     {{
       "id": "2",
       "description": "Read selected official pages or review pages to enrich the comparison details",
       "task_mode_hint": "web_reading",
       "output_mode": "none",
-      "artifact_policy": "forbid_file_output"
+      "artifact_policy": "forbid_file_output",
+      "delivery_role": "none",
+      "delivery_context_state": "none"
     }},
     {{
       "id": "3",
       "description": "Summarize the findings and present the comparison inline to the user",
       "task_mode_hint": "general",
       "output_mode": "inline",
-      "artifact_policy": "default"
+      "artifact_policy": "default",
+      "delivery_role": "intermediate",
+      "delivery_context_state": "none"
     }}
   ]
 }}
@@ -244,20 +259,25 @@ You are a task replanner. Your job is to update the remaining plan based on the 
 | `coding` | Writing or executing code |
 | `human_wait` | Waiting for user input, confirmation, or selection |
 
-## `output_mode` and `artifact_policy`
+## `output_mode`, `artifact_policy`, `delivery_role`, and `delivery_context_state`
 
-| Scenario | output_mode | artifact_policy |
-|------|------|------|
-| Intermediate step, no need to show output yet | `none` | `forbid_file_output` |
-| Result should be shown inline to the user | `inline` | `default` |
-| User explicitly asked for a file output | `file` | `require_file_output` |
-| File output is allowed but not mandatory | `file` | `allow_file_output` |
+| Scenario | output_mode | artifact_policy | delivery_role | delivery_context_state |
+|------|------|------|------|------|
+| Intermediate step, no need to show output yet | `none` | `forbid_file_output` | `none` | `none` |
+| Inline preview or candidate result | `inline` | `default` | `intermediate` | `none` |
+| Final heavy-delivery text can be organized directly from existing context | `inline` | `default` | `final` | `ready` |
+| Final heavy-delivery text is still owned by this step, but context must be prepared first | `inline` | `default` | `final` | `needs_preparation` |
+| User explicitly asked for a file output | `file` | `require_file_output` | `none` | `none` |
+| File output is allowed but not mandatory | `file` | `allow_file_output` | `none` | `none` |
 
 Additional rules:
-- For `research`, `web_reading`, and `human_wait` steps, if the user did not explicitly request a file output, you must use `output_mode="none"` and `artifact_policy="forbid_file_output"`
+- For `research`, `web_reading`, and `human_wait` steps, if the user did not explicitly request a file output, default to `output_mode="none"` and `artifact_policy="forbid_file_output"`; however, if that same step owns the final heavy delivery and must continue searching/reading before answering, you may use `output_mode="inline" + delivery_role="final" + delivery_context_state="needs_preparation"`
 - Only use `output_mode="file"` when the user clearly asked for saving, exporting, or generating a file
 - `web_reading` steps must prefer `search_web`, `fetch_page`, or high-level browser reading. Do not turn them into file-reading steps
 - If a `general` step uses `output_mode="inline"` and does not depend on clear file context, attachments, or prior artifacts, it should return inline text directly instead of reading or writing files
+- Use `delivery_role="final"` only for the step that owns the final heavy-delivery text. A plan should usually contain at most one `final` step
+- Use `delivery_context_state="ready"` only when that final step should directly organize the answer from already-prepared context
+- Use `delivery_context_state="needs_preparation"` when the same final step still needs to search, read, or interact before producing the final heavy delivery
 
 ---
 
@@ -279,6 +299,10 @@ interface UpdatePlanResponse {{
     output_mode: string;
     /** Artifact policy: default | forbid_file_output | allow_file_output | require_file_output */
     artifact_policy: string;
+    /** Delivery role: none | intermediate | final */
+    delivery_role: string;
+    /** Delivery context state: none | needs_preparation | ready */
+    delivery_context_state: string;
   }}>;
 }}
 ```
@@ -291,14 +315,18 @@ Example:
       "description": "Show the shortlisted courses to the user and wait for a selection",
       "task_mode_hint": "human_wait",
       "output_mode": "none",
-      "artifact_policy": "forbid_file_output"
+      "artifact_policy": "forbid_file_output",
+      "delivery_role": "none",
+      "delivery_context_state": "none"
     }},
     {{
       "id": "2",
-      "description": "Read the selected course detail page and summarize the key information inline",
+      "description": "Continue reading the selected course details and produce the final user-facing answer inline in the same step",
       "task_mode_hint": "web_reading",
       "output_mode": "inline",
-      "artifact_policy": "default"
+      "artifact_policy": "default",
+      "delivery_role": "final",
+      "delivery_context_state": "needs_preparation"
     }}
   ]
 }}

@@ -22,6 +22,7 @@ from app.domain.models import (
     PlanEventStatus,
     StepEvent,
 )
+from app.domain.services.runtime.normalizers import normalize_event_payload
 
 class BaseEventData(BaseModel):
     """基础事件数据"""
@@ -343,6 +344,8 @@ class EventMapper:
     @staticmethod
     def event_to_sse_event(event: Event) -> AgentSSEEvent:
         """将领域事件转换为Agent流式事件模型"""
+        # live SSE 与历史回放统一吃同一份干净事件，避免再出现事件层 outcome 旁路。
+        event = normalize_event_payload(event)
         # 获取事件类型到SSE事件类的映射关系
         event_type_mapping = EventMapper._get_event_type_mapping()
 

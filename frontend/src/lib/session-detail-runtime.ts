@@ -73,7 +73,8 @@ export function reduceSessionRuntimeStateOnEvent(
       nextStreaming = false
     },
     error: () => {
-      nextStatus = 'completed'
+      // error 代表本轮执行以失败终止，不能再伪装成 completed。
+      nextStatus = 'failed'
       nextStreaming = false
     },
   })

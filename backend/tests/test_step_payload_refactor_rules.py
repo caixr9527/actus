@@ -46,6 +46,7 @@ def test_build_step_from_payload_should_normalize_task_mode_hint() -> None:
     assert step.task_mode_hint == "human_wait"
     assert step.output_mode == "none"
     assert step.artifact_policy == "forbid_file_output"
+    assert step.delivery_role == "none"
 
 
 def test_build_step_from_payload_should_default_research_step_to_forbid_file_output() -> None:
@@ -61,6 +62,7 @@ def test_build_step_from_payload_should_default_research_step_to_forbid_file_out
     assert step.description == "访问搜索结果中的多个页面，提取至少三门课程的名称，并将这些名称保存到临时文件中以备后续使用。"
     assert step.output_mode == "none"
     assert step.artifact_policy == "forbid_file_output"
+    assert step.delivery_role == "none"
 
 
 def test_build_step_from_payload_should_keep_file_output_when_user_explicitly_requests_it() -> None:
@@ -78,6 +80,79 @@ def test_build_step_from_payload_should_keep_file_output_when_user_explicitly_re
     assert step.description == "搜索网页并把结果保存到临时文件中。"
     assert step.output_mode == "file"
     assert step.artifact_policy == "require_file_output"
+    assert step.delivery_role == "none"
+
+
+def test_build_step_from_payload_should_keep_final_delivery_role_for_inline_step() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "基于前序检索结果整理最终旅游攻略",
+            "task_mode_hint": "general",
+            "output_mode": "inline",
+            "artifact_policy": "default",
+            "delivery_role": "final",
+        },
+        fallback_index=0,
+    )
+
+    assert step.output_mode == "inline"
+    assert step.artifact_policy == "default"
+    assert step.delivery_role == "final"
+    assert step.delivery_context_state == "ready"
+
+
+def test_build_step_from_payload_should_default_inline_step_to_intermediate_delivery_role() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "展示候选城市供用户选择",
+            "task_mode_hint": "general",
+            "output_mode": "inline",
+            "artifact_policy": "default",
+        },
+        fallback_index=0,
+    )
+
+    assert step.delivery_role == "intermediate"
+    assert step.delivery_context_state == "none"
+
+
+def test_build_step_from_payload_should_default_non_general_final_inline_step_to_needs_preparation() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "读取课程详情页并直接作为最终交付",
+            "task_mode_hint": "web_reading",
+            "output_mode": "inline",
+            "artifact_policy": "default",
+            "delivery_role": "final",
+        },
+        fallback_index=0,
+    )
+
+    assert step.task_mode_hint == "web_reading"
+    assert step.output_mode == "inline"
+    assert step.artifact_policy == "default"
+    assert step.delivery_role == "final"
+    assert step.delivery_context_state == "needs_preparation"
+
+
+def test_build_step_from_payload_should_mark_non_general_final_inline_step_as_needs_preparation() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "继续读取页面并在同一步中输出最终课程详情",
+            "task_mode_hint": "web_reading",
+            "output_mode": "inline",
+            "artifact_policy": "default",
+            "delivery_role": "final",
+            "delivery_context_state": "needs_preparation",
+        },
+        fallback_index=0,
+    )
+
+    assert step.task_mode_hint == "web_reading"
+    assert step.output_mode == "inline"
+    assert step.artifact_policy == "default"
+    assert step.delivery_role == "final"
+    assert step.delivery_context_state == "needs_preparation"
 
 
 def test_migration_should_normalize_legacy_step_payload_into_outcome() -> None:

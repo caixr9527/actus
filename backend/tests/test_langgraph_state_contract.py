@@ -11,9 +11,14 @@ from app.domain.models import (
     PlanEventStatus,
     Session,
     Step,
+    StepArtifactPolicy,
+    StepDeliveryContextState,
+    StepDeliveryRole,
     StepEvent,
     StepEventStatus,
     StepOutcome,
+    StepOutputMode,
+    StepTaskModeHint,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
@@ -42,6 +47,11 @@ def _build_plan(step_status: ExecutionStatus = ExecutionStatus.PENDING) -> Plan:
                 id="step-1",
                 title="执行第一步",
                 description="执行第一步",
+                task_mode_hint=StepTaskModeHint.RESEARCH,
+                output_mode=StepOutputMode.NONE,
+                artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
+                delivery_role=StepDeliveryRole.FINAL,
+                delivery_context_state=StepDeliveryContextState.NEEDS_PREPARATION,
                 objective_key="objective-step-1",
                 success_criteria=["执行第一步完成"],
                 status=step_status,
@@ -67,6 +77,16 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                     "current_step_id": "step-1",
                     "message_window": [
                         {"role": "user", "message": "上一次用户输入", "input_part_count": 0},
+                        {
+                            "role": "assistant",
+                            "message": "上一轮输出过附件",
+                            "attachment_paths": [
+                                "artifact-id-1",
+                                "https://example.com/final.md",
+                                "final.md",
+                                "/tmp/final.md",
+                            ],
+                        },
                     ],
                     "conversation_summary": "历史对话摘要",
                     "working_memory": {
@@ -79,7 +99,12 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                     "pending_memory_writes": [
                         {"id": "pending-1", "summary": "待写入事实"},
                     ],
-                    "selected_artifacts": ["/tmp/final.md"],
+                    "selected_artifacts": [
+                        "artifact-id-1",
+                        "https://example.com/final.md",
+                        "final.md",
+                        "/tmp/final.md",
+                    ],
                     "pending_interrupt": {
                         "kind": "input_text",
                         "prompt": "请补充上下文",
@@ -87,6 +112,15 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                         "response_key": "message",
                     },
                     "metadata": {"control": {"entry_strategy": "recall_memory_context"}},
+                    "step_states": [
+                        {
+                            "step_id": "step-1",
+                            "step_index": 0,
+                            "title": "执行第一步",
+                            "description": "执行第一步",
+                            "status": ExecutionStatus.PENDING.value,
+                        }
+                    ],
                 }
             },
             "artifacts": ["file-1", "file-1", "file-2"],
@@ -103,6 +137,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                 status=WorkflowRunStatus.COMPLETED,
                 title="已完成运行",
                 final_answer_summary="已经输出过结论",
+                final_answer_text="这是历史运行里真正交付的完整正文。",
                 open_questions=["已完成运行待确认"],
                 artifacts=["history-artifact"],
             )
@@ -140,6 +175,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["thread_id"] == "thread-1"
     assert state["current_step_id"] == "step-1"
     assert state["message_window"][0]["message"] == "上一次用户输入"
+    assert state["message_window"][1]["attachment_paths"] == ["/tmp/final.md"]
     assert state["message_window"][-1]["message"] == "你好"
     assert state["conversation_summary"] == "历史对话摘要"
     assert state["working_memory"]["goal"] == "验证状态契约"
@@ -147,6 +183,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["pending_memory_writes"][0]["id"] == "pending-1"
     assert state["recent_run_briefs"][0]["run_id"] == "run-completed"
     assert state["recent_run_briefs"][0]["final_answer_summary"] == "已经输出过结论"
+    assert state["recent_run_briefs"][0]["final_answer_text_excerpt"] == "这是历史运行里真正交付的完整正文。"
     assert state["recent_attempt_briefs"][0]["run_id"] == "run-failed"
     assert state["recent_attempt_briefs"][0]["status"] == WorkflowRunStatus.FAILED.value
     assert state["session_open_questions"] == ["已完成运行待确认", "失败运行待确认", "还需确认范围"]
@@ -156,7 +193,20 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
-    assert sorted(state["step_states"][0].keys()) == ["description", "status", "step_id", "step_index", "title"]
+    assert sorted(state["step_states"][0].keys()) == [
+        "artifact_policy",
+        "delivery_context_state",
+        "delivery_role",
+        "description",
+        "output_mode",
+        "status",
+        "step_id",
+        "step_index",
+        "task_mode_hint",
+        "title",
+    ]
+    assert state["step_states"][0]["task_mode_hint"] == StepTaskModeHint.RESEARCH.value
+    assert state["step_states"][0]["delivery_context_state"] == StepDeliveryContextState.NEEDS_PREPARATION.value
     assert sorted(state["retrieved_memories"][0].keys()) == ["content", "id", "memory_type", "summary", "tags"]
     assert state["pending_interrupt"]["prompt"] == "请补充上下文"
     assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
@@ -290,18 +340,12 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
         checkpoint_id="cp-1",
     )
     created_plan = _build_plan(step_status=ExecutionStatus.PENDING)
-    completed_step = Step(
-        id="step-1",
-        title="执行第一步",
-        description="执行第一步",
-        objective_key="objective-step-1",
-        success_criteria=["执行第一步完成"],
-        status=ExecutionStatus.COMPLETED,
-        outcome=StepOutcome(
-            done=True,
-            summary="完成第一步",
-            produced_artifacts=["file-1"],
-        ),
+    completed_step = created_plan.steps[0].model_copy(deep=True)
+    completed_step.status = ExecutionStatus.COMPLETED
+    completed_step.outcome = StepOutcome(
+        done=True,
+        summary="完成第一步",
+        produced_artifacts=["/tmp/file-1.md"],
     )
 
     wait_event = WaitEvent.from_interrupt(
@@ -361,7 +405,17 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     ]
     state["message_window"] = [
         {"role": "user", "message": "帮我调研一下", "input_part_count": 0},
-        {"role": "assistant", "message": "计划已生成", "input_part_count": 0},
+        {
+            "role": "assistant",
+            "message": "计划已生成",
+            "attachment_paths": [
+                "artifact-id-1",
+                "https://example.com/final.md",
+                "final.md",
+                "/tmp/final.md",
+            ],
+            "input_part_count": 0,
+        },
     ]
     state["conversation_summary"] = "用户希望调研 LangGraph 持久化"
     state["working_memory"] = {
@@ -374,14 +428,19 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     state["pending_memory_writes"] = [
         {"id": "pending-1", "summary": "需要沉淀的后端约束"},
     ]
-    state["selected_artifacts"] = ["/tmp/final.md"]
+    state["selected_artifacts"] = [
+        "artifact-id-1",
+        "https://example.com/final.md",
+        "final.md",
+        "/tmp/final.md",
+    ]
     state["graph_metadata"] = {}
 
     reduced_state = GraphStateContractMapper.apply_emitted_events(state=state)
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(reduced_state)
 
     assert reduced_state["current_step_id"] is None
-    assert reduced_state["artifact_refs"] == ["file-1"]
+    assert reduced_state["artifact_refs"] == ["/tmp/file-1.md"]
     assert reduced_state["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert reduced_state["pending_interrupt"]["attachments"] == ["/tmp/reference.md"]
     assert reduced_state["pending_interrupt"]["suggest_user_takeover"] == "browser"
@@ -392,6 +451,7 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["audit"]["event_count"] == len(state["emitted_events"])
     assert contract["graph_state"]["current_step_id"] is None
     assert contract["graph_state"]["message_window"][0]["message"] == "帮我调研一下"
+    assert contract["graph_state"]["message_window"][1]["attachment_paths"] == ["/tmp/final.md"]
     assert contract["graph_state"]["conversation_summary"] == "用户希望调研 LangGraph 持久化"
     assert contract["graph_state"]["working_memory"]["goal"] == "调研 LangGraph 持久化"
     assert contract["graph_state"]["retrieved_memories"][0]["id"] == "mem-1"
@@ -405,11 +465,16 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["pending_memory_writes"][0]["id"] == "pending-1"
     assert contract["graph_state"]["selected_artifacts"] == ["/tmp/final.md"]
     assert sorted(contract["graph_state"]["step_states"][0].keys()) == [
+        "artifact_policy",
+        "delivery_context_state",
+        "delivery_role",
         "description",
         "outcome",
+        "output_mode",
         "status",
         "step_id",
         "step_index",
+        "task_mode_hint",
         "title",
     ]
     assert sorted(contract["graph_state"]["step_states"][0]["outcome"].keys()) == [
@@ -426,6 +491,47 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert memory_metadata["recall_ids"] == ["mem-1"]
     assert memory_metadata["write_count"] == 1
     assert memory_metadata["write_ids"] == ["pending-1"]
+
+
+def test_build_initial_state_should_rebuild_step_states_from_plan_when_metadata_step_states_are_stale() -> None:
+    session = Session(id="session-1", current_run_id="run-1")
+    plan = _build_plan()
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        runtime_metadata={
+            "graph_state_contract": {
+                "graph_state": {
+                    "plan": plan.model_dump(mode="json"),
+                    "step_states": [
+                        {
+                            "step_id": "step-1",
+                            "step_index": 0,
+                            "title": "执行第一步",
+                            "description": "执行第一步",
+                            "status": ExecutionStatus.PENDING.value,
+                        }
+                    ],
+                }
+            }
+        },
+    )
+
+    state = GraphStateContractMapper.build_initial_state(
+        session=session,
+        run=run,
+        completed_run_summaries=[],
+        recent_attempt_summaries=[],
+        session_context_snapshot=None,
+        user_message="继续",
+        thread_id="thread-1",
+    )
+
+    assert state["step_states"][0]["task_mode_hint"] == StepTaskModeHint.RESEARCH.value
+    assert state["step_states"][0]["output_mode"] == StepOutputMode.NONE.value
+    assert state["step_states"][0]["artifact_policy"] == StepArtifactPolicy.FORBID_FILE_OUTPUT.value
+    assert state["step_states"][0]["delivery_role"] == StepDeliveryRole.FINAL.value
+    assert state["step_states"][0]["delivery_context_state"] == StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
 def test_apply_emitted_events_should_collect_browser_screenshot_artifact_refs() -> None:
@@ -522,3 +628,124 @@ def test_apply_emitted_events_should_keep_plan_in_sync_after_step_completed() ->
     assert reduced_state["plan"].steps[1].status == ExecutionStatus.PENDING
     assert reduced_state["plan"].get_next_step() is not None
     assert reduced_state["plan"].get_next_step().id == "step-2"
+
+
+def test_graph_state_contract_should_normalize_plan_and_last_step_payload_when_building_runtime_metadata() -> None:
+    dirty_outcome = StepOutcome(
+        done=True,
+        summary="结果已生成",
+        produced_artifacts=["artifact-id-1", "/tmp/final.md"],
+    )
+    state = {
+        "session_id": "session-1",
+        "thread_id": "thread-1",
+        "plan": Plan(
+            title="生成最终结果",
+            goal="输出最终正文",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="整理正文",
+                    description="整理正文",
+                    objective_key="objective-step-1",
+                    success_criteria=["输出最终正文"],
+                    status=ExecutionStatus.COMPLETED,
+                    outcome=dirty_outcome.model_copy(deep=True),
+                )
+            ],
+        ),
+        "last_executed_step": Step(
+            id="step-1",
+            title="整理正文",
+            description="整理正文",
+            objective_key="objective-step-1",
+            success_criteria=["输出最终正文"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=dirty_outcome.model_copy(deep=True),
+        ),
+        "step_states": [],
+        "message_window": [],
+        "conversation_summary": "",
+        "working_memory": {},
+        "retrieved_memories": [],
+        "pending_memory_writes": [],
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "selected_artifacts": [],
+        "historical_artifact_refs": [],
+        "current_step_id": None,
+        "execution_count": 1,
+        "max_execution_steps": 20,
+        "pending_interrupt": {},
+        "graph_metadata": {},
+        "artifact_refs": [],
+        "emitted_events": [],
+        "input_parts": [],
+        "user_id": None,
+        "run_id": None,
+        "user_message": "",
+        "final_message": "",
+    }
+
+    runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
+    graph_state = runtime_metadata["graph_state_contract"]["graph_state"]
+
+    assert graph_state["plan"]["steps"][0]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
+    assert graph_state["last_executed_step"]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
+
+
+def test_normalize_runtime_state_should_rebuild_step_states_and_current_step_from_plan() -> None:
+    normalized_state = GraphStateContractMapper.normalize_runtime_state(
+        {
+            "session_id": "session-1",
+            "plan": {
+                "title": "测试计划",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "title": "第一步",
+                        "description": "第一步",
+                        "status": ExecutionStatus.COMPLETED.value,
+                        "task_mode_hint": StepTaskModeHint.RESEARCH.value,
+                        "output_mode": StepOutputMode.NONE.value,
+                        "artifact_policy": StepArtifactPolicy.FORBID_FILE_OUTPUT.value,
+                        "delivery_role": StepDeliveryRole.INTERMEDIATE.value,
+                        "delivery_context_state": StepDeliveryContextState.NONE.value,
+                        "outcome": {
+                            "done": True,
+                            "summary": "第一步完成",
+                            "produced_artifacts": ["artifact-id-1", "/tmp/first.md"],
+                        },
+                    },
+                    {
+                        "id": "step-2",
+                        "title": "第二步",
+                        "description": "第二步",
+                        "status": ExecutionStatus.PENDING.value,
+                        "task_mode_hint": StepTaskModeHint.GENERAL.value,
+                        "output_mode": StepOutputMode.INLINE.value,
+                        "artifact_policy": StepArtifactPolicy.DEFAULT.value,
+                        "delivery_role": StepDeliveryRole.FINAL.value,
+                        "delivery_context_state": StepDeliveryContextState.READY.value,
+                    },
+                ],
+            },
+            "step_states": [
+                {
+                    "step_id": "stale-step",
+                    "title": "旧步骤",
+                    "description": "旧步骤",
+                    "status": ExecutionStatus.COMPLETED.value,
+                }
+            ],
+            "current_step_id": "stale-step",
+        }
+    )
+
+    assert normalized_state["current_step_id"] == "step-2"
+    assert len(normalized_state["step_states"]) == 2
+    assert normalized_state["step_states"][0]["step_id"] == "step-1"
+    assert normalized_state["step_states"][0]["outcome"]["produced_artifacts"] == ["/tmp/first.md"]
+    assert normalized_state["step_states"][1]["step_id"] == "step-2"

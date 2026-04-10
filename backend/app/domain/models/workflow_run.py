@@ -13,7 +13,15 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from .event import Event
-from .plan import ExecutionStatus, StepOutcome
+from .plan import (
+    ExecutionStatus,
+    StepArtifactPolicy,
+    StepDeliveryContextState,
+    StepDeliveryRole,
+    StepOutcome,
+    StepOutputMode,
+    StepTaskModeHint,
+)
 
 
 class WorkflowRunStatus(str, Enum):
@@ -65,6 +73,12 @@ class WorkflowRunStepRecord(BaseModel):
     description: str = ""
     objective_key: str = ""
     success_criteria: List[str] = Field(default_factory=list)
+    # 步骤快照需要保留结构化语义，避免恢复/排障时丢失运行时决策上下文。
+    task_mode_hint: Optional[StepTaskModeHint] = None
+    output_mode: Optional[StepOutputMode] = None
+    artifact_policy: Optional[StepArtifactPolicy] = None
+    delivery_role: Optional[StepDeliveryRole] = None
+    delivery_context_state: Optional[StepDeliveryContextState] = None
     status: ExecutionStatus = ExecutionStatus.PENDING
     outcome: Optional[StepOutcome] = None
     error: Optional[str] = None

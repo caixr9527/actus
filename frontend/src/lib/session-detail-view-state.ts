@@ -55,7 +55,7 @@ export function shouldAutoCloseTaskPreview(
 ): boolean {
   return (
     previousStatus === 'running'
-    && (nextStatus === 'completed' || nextStatus === 'cancelled')
+    && (nextStatus === 'completed' || nextStatus === 'failed' || nextStatus === 'cancelled')
   )
 }
 

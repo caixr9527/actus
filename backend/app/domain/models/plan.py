@@ -60,6 +60,22 @@ class StepArtifactPolicy(str, Enum):
     REQUIRE_FILE_OUTPUT = "require_file_output"
 
 
+class StepDeliveryRole(str, Enum):
+    """步骤结构化交付角色。"""
+
+    NONE = "none"
+    INTERMEDIATE = "intermediate"
+    FINAL = "final"
+
+
+class StepDeliveryContextState(str, Enum):
+    """最终交付上下文准备状态。"""
+
+    NONE = "none"
+    NEEDS_PREPARATION = "needs_preparation"
+    READY = "ready"
+
+
 class ExecutionStatus(str, Enum):
     """执行状态"""
     PENDING = "pending"
@@ -74,6 +90,8 @@ class StepOutcome(BaseModel):
 
     done: bool = False
     summary: str = ""
+    # 重交付正文只在明确需要时写入，避免和轻量 summary 混用。
+    delivery_text: str = ""
     produced_artifacts: List[str] = Field(default_factory=list)
     blockers: List[str] = Field(default_factory=list)
     facts_learned: List[str] = Field(default_factory=list)
@@ -95,6 +113,12 @@ class Step(BaseModel):
     output_mode: Optional[StepOutputMode] = None
     # 结构化产物策略，决定当前步骤是否允许或要求文件产出。
     artifact_policy: Optional[StepArtifactPolicy] = None
+    # 结构化交付角色，显式标记该步骤是否承担最终重交付正文。
+    delivery_role: Optional[StepDeliveryRole] = None
+    # 结构化交付上下文状态，仅在 final 步骤下有意义。
+    # needs_preparation 表示本步骤仍需先检索/读取/操作，再输出最终正文；
+    # ready 表示前序上下文已准备好，本步骤应直接组织最终正文。
+    delivery_context_state: Optional[StepDeliveryContextState] = None
     objective_key: str = ""
     success_criteria: List[str] = Field(default_factory=list)
     status: ExecutionStatus = ExecutionStatus.PENDING
