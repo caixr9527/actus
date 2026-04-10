@@ -1081,6 +1081,16 @@ def _normalize_execution_payload(parsed: Dict[str, Any], *, default_summary: str
     return payload
 
 
+def _build_human_wait_missing_interrupt_payload(step: Step, *, reason: str) -> Dict[str, Any]:
+    """等待步骤必须显式进入 interrupt，不能用普通成功结果冒充完成。"""
+    return _build_loop_break_payload(
+        step=step,
+        loop_break_reason=reason,
+        blocker="当前步骤需要等待用户确认/选择，但尚未成功发起等待请求。",
+        next_hint="请调用 message_ask_user 发起确认/选择，不要继续搜索、读取或直接结束当前步骤。",
+    )
+
+
 def _summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
     normalized_name = function_name.strip().lower()
     result_data = tool_result.data
@@ -1258,6 +1268,19 @@ async def execute_step_with_prompt(
             if function_name not in available_function_names
         }
     )
+    if task_mode == "human_wait" and ASK_USER_FUNCTION_NAME not in available_function_names:
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "等待步骤缺少 ask_user 工具",
+            step_id=str(step.id or ""),
+        )
+        return _build_loop_break_payload(
+            step=step,
+            loop_break_reason="human_wait_tool_missing",
+            blocker="当前等待步骤缺少可用的 message_ask_user 工具，无法向用户发起确认或选择。",
+            next_hint="请先为当前运行时注入 message_ask_user 工具，再重新执行该等待步骤。",
+        ), emitted_tool_events
     log_runtime(
         logger,
         logging.INFO,
@@ -1412,6 +1435,20 @@ async def execute_step_with_prompt(
             parsed = safe_parse_json(llm_message.get("content"))
             # 如果模型返回结果为空，则尝试重新执行
             parsed_execution = normalize_execution_response(parsed)
+            if task_mode == "human_wait":
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "等待步骤未发起 interrupt，已拒绝直接完成",
+                    step_id=str(step.id or ""),
+                    iteration=index,
+                    llm_elapsed_ms=llm_cost_ms,
+                    elapsed_ms=elapsed_ms(started_at),
+                )
+                return _build_human_wait_missing_interrupt_payload(
+                    step,
+                    reason="human_wait_missing_interrupt",
+                ), emitted_tool_events
             has_summary = bool(str(parsed_execution.get("summary") or "").strip())
             has_delivery_text = bool(str(parsed_execution.get("delivery_text") or "").strip())
             if parsed_execution.get("success", True) and not has_summary and not has_delivery_text:
@@ -1524,7 +1561,20 @@ async def execute_step_with_prompt(
             )
             tool_result = ToolResult(success=False, message=f"无效工具: {function_name}")
         elif normalized_function_name in iteration_blocked_function_names:
-            if normalized_function_name in research_file_context_blocked_function_names:
+            if task_mode == "human_wait" and function_name != ASK_USER_FUNCTION_NAME:
+                loop_break_reason = "human_wait_non_interrupt_tool_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "等待步骤已拦截非等待工具",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤是等待用户确认/选择的步骤，只允许调用 message_ask_user 发起等待。",
+                )
+            elif normalized_function_name in research_file_context_blocked_function_names:
                 loop_break_reason = "research_file_context_required"
                 log_runtime(
                     logger,
@@ -2013,6 +2063,19 @@ async def execute_step_with_prompt(
             ), emitted_tool_events
 
     parsed = safe_parse_json(llm_message.get("content"))
+    if task_mode == "human_wait":
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "等待步骤达到最大轮次仍未进入等待",
+            step_id=str(step.id or ""),
+            iteration_count=max(1, int(max_tool_iterations)),
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return _build_human_wait_missing_interrupt_payload(
+            step,
+            reason="human_wait_max_tool_iterations",
+        ), emitted_tool_events
     log_runtime(
         logger,
         logging.INFO,

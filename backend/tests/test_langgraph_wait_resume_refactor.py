@@ -1,6 +1,7 @@
 import asyncio
+import json
 
-from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus
+from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus, ToolResult
 from app.domain.services.tools.base import BaseTool, tool
 from app.domain.services.tools.message import MessageTool
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
@@ -44,6 +45,32 @@ class _WriteFileTool(BaseTool):
     )
     async def write_file(self, filepath: str, content: str):
         return {"success": True, "data": {"filepath": filepath, "content": content}}
+
+
+class _SearchTool(BaseTool):
+    name = "search"
+
+    @tool(
+        name="search_web",
+        description="search web",
+        parameters={"query": {"type": "string"}},
+        required=["query"],
+    )
+    async def search_web(self, query: str):
+        return ToolResult(success=True, data={"query": query, "results": [{"url": "https://example.com"}]})
+
+
+class _NonInterruptMessageTool(BaseTool):
+    name = "message"
+
+    @tool(
+        name="message_ask_user",
+        description="ask user without interrupt",
+        parameters={"text": {"type": "string"}},
+        required=["text"],
+    )
+    async def message_ask_user(self, text: str):
+        return ToolResult(success=True, message=text, data={"ack": True})
 
 
 class _FinalResultLLM:
@@ -130,6 +157,51 @@ class _WriteFileAttemptLLM:
         return {
             "role": "assistant",
             "content": '{"success": true, "result": "当前步骤已改为直接返回文本结果", "attachments": []}',
+        }
+
+
+class _HumanWaitSearchDriftLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search",
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "imooc ai agent"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "role": "assistant",
+            "content": '{"success": true, "result": "已直接结束等待步骤", "attachments": []}',
+        }
+
+
+class _HumanWaitAskUserWithoutInterruptLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-ask-user-no-interrupt",
+                    "type": "function",
+                    "function": {
+                        "name": "message_ask_user",
+                        "arguments": json.dumps({"text": "请选择课程"}, ensure_ascii=False),
+                    },
+                }
+            ],
         }
 
 
@@ -258,6 +330,62 @@ def test_execute_step_with_prompt_should_block_write_file_when_artifact_policy_f
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
     assert "结构化产物策略禁止文件产出" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_non_interrupt_tool_for_human_wait_step() -> None:
+    llm = _HumanWaitSearchDriftLLM()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="等待用户从候选课程中选择一门",
+                task_mode_hint="human_wait",
+            ),
+            runtime_tools=[_SearchTool(), MessageTool()],
+            max_tool_iterations=3,
+            task_mode="human_wait",
+            on_tool_event=None,
+            user_content=[{"type": "text", "text": "仅执行当前等待步骤"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is False
+    assert payload["blockers"] == ["当前步骤需要等待用户确认/选择，但尚未成功发起等待请求。"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "search_web"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "只允许调用 message_ask_user" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_fail_human_wait_step_without_interrupt_even_if_ask_user_called() -> None:
+    llm = _HumanWaitAskUserWithoutInterruptLLM()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="等待用户选择课程",
+                task_mode_hint="human_wait",
+            ),
+            runtime_tools=[_NonInterruptMessageTool()],
+            max_tool_iterations=2,
+            task_mode="human_wait",
+            on_tool_event=None,
+            user_content=[{"type": "text", "text": "仅执行当前等待步骤"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is False
+    assert payload["blockers"] == ["当前步骤需要等待用户确认/选择，但尚未成功发起等待请求。"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 2
+    assert all(event.function_name == "message_ask_user" for event in called_events)
+    assert all(event.function_result is not None and event.function_result.success is True for event in called_events)
 
 
 def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypatch) -> None:

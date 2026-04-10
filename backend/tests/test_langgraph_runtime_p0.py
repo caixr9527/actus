@@ -1,8 +1,9 @@
 import asyncio
 import json
 
-from app.domain.models import ExecutionStatus, Plan, Step, StepOutcome, ToolEventStatus, ToolResult
+from app.domain.models import ExecutionStatus, MessageEvent, Plan, Step, StepOutcome, ToolEventStatus, ToolResult
 from app.domain.services.tools.base import BaseTool, tool
+from app.infrastructure.runtime.langgraph_graphs import bind_live_event_sink, unbind_live_event_sink
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
     create_or_reuse_plan_node,
     direct_answer_node,
@@ -49,6 +50,21 @@ class _InlineDeliveryLLM:
         }
 
 
+class _IntermediateInlineDeliveryLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已展示候选课程",
+                    "delivery_text": "候选课程 A、候选课程 B、候选课程 C。",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _SplitSummaryDeliveryLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         return {
@@ -78,6 +94,21 @@ class _SplitSummaryDeliveryWithMixedAttachmentsLLM:
                         "final-output.md",
                         "/home/ubuntu/final-output.md",
                     ],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _LeakyNonInlineDeliveryLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已完成搜索步骤",
+                    "delivery_text": "这段正文不应在非 inline 步骤中被保留。",
+                    "attachments": [],
                 },
                 ensure_ascii=False,
             )
@@ -1498,6 +1529,118 @@ def test_execute_step_node_should_not_overwrite_final_delivery_payload_for_inter
 
     assert next_state["final_message"] == "这是完整的内联交付正文。"
     assert next_state["working_memory"]["final_delivery_payload"] == existing_payload
+
+
+def test_execute_step_node_should_emit_intermediate_message_for_inline_candidate_step() -> None:
+    llm = _IntermediateInlineDeliveryLLM()
+    search_tool = _SearchTool()
+    plan = Plan(
+        title="生成候选课程",
+        goal="生成候选课程",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="展示候选课程",
+                description="展示候选课程并等待用户选择",
+                task_mode_hint="general",
+                output_mode="inline",
+                artifact_policy="default",
+                delivery_role="intermediate",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "input_parts": [],
+        "selected_artifacts": [],
+        "artifact_refs": [],
+        "step_states": [],
+        "pending_interrupt": {},
+        "retrieved_memories": [],
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "historical_artifact_refs": [],
+        "emitted_events": [],
+        "user_message": "请展示候选课程",
+        "current_step_id": None,
+        "final_message": "",
+        "thread_id": "thread-1",
+        "conversation_summary": "",
+    }
+    emitted_events = []
+
+    async def _sink(event):
+        emitted_events.append(event)
+
+    token = bind_live_event_sink(_sink)
+    try:
+        next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[search_tool]))
+    finally:
+        unbind_live_event_sink(token)
+
+    intermediate_events = [event for event in emitted_events if isinstance(event, MessageEvent)]
+    assert len(intermediate_events) == 1
+    assert intermediate_events[0].stage == "intermediate"
+    assert intermediate_events[0].message == "候选课程 A、候选课程 B、候选课程 C。"
+    assert next_state["final_message"] == "已展示候选课程"
+
+
+def test_execute_step_node_should_drop_delivery_text_for_non_inline_step() -> None:
+    llm = _LeakyNonInlineDeliveryLLM()
+    plan = Plan(
+        title="搜索课程",
+        goal="搜索课程",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="搜索课程",
+                description="搜索课程信息",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                delivery_role="none",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "input_parts": [],
+        "selected_artifacts": [],
+        "artifact_refs": [],
+        "step_states": [],
+        "pending_interrupt": {},
+        "retrieved_memories": [],
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "historical_artifact_refs": [],
+        "emitted_events": [],
+        "user_message": "请先搜索课程",
+        "current_step_id": None,
+        "final_message": "",
+        "thread_id": "thread-1",
+        "conversation_summary": "",
+    }
+
+    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[]))
+
+    assert next_state["last_executed_step"].outcome is not None
+    assert next_state["last_executed_step"].outcome.delivery_text == ""
+    assert next_state["final_message"] == "已完成搜索步骤"
 
 
 def test_execute_step_with_prompt_should_break_on_browser_no_progress() -> None:

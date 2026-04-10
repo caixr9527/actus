@@ -125,8 +125,8 @@ def _replace_control_metadata(state: PlannerReActLangGraphState, control: Dict[s
 def _is_direct_wait_execute_step(step: Step, control: Dict[str, Any]) -> bool:
     """识别 direct_wait 确认后的真实执行步骤。"""
     return (
-        str(control.get("entry_strategy") or "").strip() == "direct_wait"
-        and str(step.id or "").strip() == "direct-wait-execute"
+            str(control.get("entry_strategy") or "").strip() == "direct_wait"
+            and str(step.id or "").strip() == "direct-wait-execute"
     )
 
 
@@ -191,6 +191,46 @@ def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
                 max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
             ),
         }
+    )
+
+
+def _sanitize_step_delivery_text(step: Step, raw_delivery_text: Any) -> str:
+    """只有显式 inline 交付步骤才允许保留 delivery_text。"""
+    delivery_text = normalize_step_result_text(raw_delivery_text)
+    if not delivery_text:
+        return ""
+
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+    delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
+    if output_mode != StepOutputMode.INLINE.value:
+        return ""
+    if delivery_role not in {
+        StepDeliveryRole.INTERMEDIATE.value,
+        StepDeliveryRole.FINAL.value,
+    }:
+        return ""
+    return delivery_text
+
+
+def _build_intermediate_step_message_event(step: Step) -> Optional[MessageEvent]:
+    """中间候选结果必须以消息事件投递给前端，不能只留在步骤快照里。"""
+    if step.outcome is None or not step.outcome.done:
+        return None
+    if normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) != StepOutputMode.INLINE.value:
+        return None
+    if normalize_controlled_value(getattr(step, "delivery_role", None),
+                                  StepDeliveryRole) != StepDeliveryRole.INTERMEDIATE.value:
+        return None
+
+    delivery_text = normalize_step_result_text(step.outcome.delivery_text)
+    if not delivery_text:
+        return None
+
+    return MessageEvent(
+        role="assistant",
+        message=delivery_text,
+        attachments=[File(filepath=filepath) for filepath in step.outcome.produced_artifacts],
+        stage="intermediate",
     )
 
 
@@ -627,6 +667,10 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
                     outcome.get("summary"),
                     max_chars=160,
                 ),
+                "delivery_preview": _truncate_text(
+                    outcome.get("delivery_text"),
+                    max_chars=200,
+                ),
             }
         )
 
@@ -690,6 +734,10 @@ def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[st
         "completed_steps": sanitized_completed_steps,
         "last_step_result": normalize_step_result_text(
             last_step.outcome.summary if last_step is not None and last_step.outcome is not None else ""
+        ),
+        "last_step_delivery_preview": _truncate_text(
+            last_step.outcome.delivery_text if last_step is not None and last_step.outcome is not None else "",
+            max_chars=320,
         ),
         "retrieved_memories": sanitized_memories,
         "open_questions": truncate_text_list(
@@ -1949,7 +1997,8 @@ async def execute_step_node(
     control = _get_control_metadata(state)
     is_direct_wait_execute_step = _is_direct_wait_execute_step(step, control)
     explicit_direct_wait_task_mode = str(control.get("direct_wait_execute_task_mode") or "").strip()
-    task_mode = explicit_direct_wait_task_mode if is_direct_wait_execute_step and explicit_direct_wait_task_mode else classify_step_task_mode(step)
+    task_mode = explicit_direct_wait_task_mode if is_direct_wait_execute_step and explicit_direct_wait_task_mode else classify_step_task_mode(
+        step)
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     await emit_live_events(started_event)
@@ -2116,12 +2165,12 @@ async def execute_step_node(
         fallback=f"已完成步骤：{step.description}" if step_success else f"步骤执行失败：{step.description}",
     )
     step_delivery_text = normalize_step_result_text(
-        normalized_execution.get("delivery_text"),
+        _sanitize_step_delivery_text(step, normalized_execution.get("delivery_text")),
         fallback=(
             step_summary
             if normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
                == StepDeliveryRole.FINAL.value
-            and normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+               and normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
                == StepOutputMode.INLINE.value
             else ""
         ),
@@ -2149,14 +2198,10 @@ async def execute_step_node(
         status=step.status,
     )
     final_step_events: List[Any] = [completed_event]
-    # if step.outcome is not None and step.outcome.summary:
-    #     final_step_events.append(
-    #         MessageEvent(
-    #             role="assistant",
-    #             message=step.outcome.summary,
-    #             attachments=[File(filepath=filepath) for filepath in step.outcome.produced_artifacts],
-    #         )
-    #     )
+    # 中间步骤消息 不推送给前端
+    # intermediate_message_event = _build_intermediate_step_message_event(step)
+    # if intermediate_message_event is not None:
+    #     final_step_events.append(intermediate_message_event)
 
     await emit_live_events(*final_step_events)
 

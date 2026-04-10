@@ -128,9 +128,6 @@ TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
         ASK_USER_FUNCTION_NAME,
     ),
     "human_wait": (
-        *SEARCH_FUNCTION_NAMES,
-        *READ_ONLY_FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "general": (
