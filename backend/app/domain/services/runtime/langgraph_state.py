@@ -50,8 +50,8 @@ from app.domain.services.runtime.normalizers import (
 logger = logging.getLogger(__name__)
 
 # BE-LG-04 契约版本。
-# v6 让 step_states 与 plan.steps 保持同源，并补齐步骤结构化语义，避免恢复后丢失 delivery 上下文。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v6"
+# v7 为 P2 增加 task_mode 与 digest 状态面，确保恢复链路与 Prompt 上下文使用同一份摘要真相源。
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v7"
 
 
 class StepState(TypedDict, total=False):
@@ -88,6 +88,13 @@ class RetrievedMemoryState(TypedDict, total=False):
     summary: str
     content: Dict[str, Any]
     tags: List[str]
+
+
+class RuntimeDigestState(TypedDict, total=False):
+    """按 task_mode 包装的运行时 digest。"""
+
+    task_mode: str
+    payload: Dict[str, Any]
 
 
 class GraphControlState(TypedDict, total=False):
@@ -215,6 +222,14 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     conversation_summary: str
     """当前运行的工作记忆；用于沉淀 goal、事实、偏好、开放问题等可变上下文。"""
     working_memory: Dict[str, Any]
+    """当前阶段采用的真实任务模式；作为上下文工程与执行路由的主索引字段。"""
+    task_mode: str
+    """环境层摘要；用于 Prompt 快速理解当前环境状态，而不是回放原始轨迹。"""
+    environment_digest: RuntimeDigestState
+    """最近有效观察摘要；用于 Prompt 快速理解已经看到了什么。"""
+    observation_digest: RuntimeDigestState
+    """最近动作与失败/等待摘要；用于 Prompt 快速理解刚做过什么、不该再做什么。"""
+    recent_action_digest: RuntimeDigestState
     """本轮召回的长期记忆快照；用于 prompt 注入和偏好提取。"""
     retrieved_memories: List[RetrievedMemoryState]
     """待写入长期记忆仓库的候选项；用于总结后统一治理、落库或重试。"""
@@ -268,6 +283,10 @@ class GraphStateContractMapper:
         "message_window",
         "conversation_summary",
         "working_memory",
+        "task_mode",
+        "environment_digest",
+        "observation_digest",
+        "recent_action_digest",
         "retrieved_memories",
         "pending_memory_writes",
         "recent_run_briefs",
@@ -543,6 +562,28 @@ class GraphStateContractMapper:
         if not isinstance(raw, dict):
             return {}
         return cls._to_json_safe(raw)
+
+    @classmethod
+    def _normalize_task_mode(cls, raw: Any) -> str:
+        return normalize_controlled_value(raw, StepTaskModeHint)
+
+    @classmethod
+    def _normalize_runtime_digest(cls, raw: Any) -> RuntimeDigestState:
+        """统一规整 digest 包装结构，避免旧字段残留再次流回主链。"""
+        if not isinstance(raw, dict):
+            return {}
+
+        task_mode = cls._normalize_task_mode(raw.get("task_mode"))
+        payload = cls._normalize_dict_memory(raw.get("payload"))
+        if not task_mode and not payload:
+            return {}
+
+        normalized_digest: RuntimeDigestState = {}
+        if task_mode:
+            normalized_digest["task_mode"] = task_mode
+        if payload:
+            normalized_digest["payload"] = payload
+        return normalized_digest
 
     @classmethod
     def _normalize_list_memory(cls, raw: Any) -> List[Dict[str, Any]]:
@@ -844,6 +885,10 @@ class GraphStateContractMapper:
             ),
             "conversation_summary": conversation_summary,
             "working_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("working_memory")),
+            "task_mode": cls._normalize_task_mode(graph_state_from_metadata.get("task_mode")),
+            "environment_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("environment_digest")),
+            "observation_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("observation_digest")),
+            "recent_action_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("recent_action_digest")),
             "retrieved_memories": cls._normalize_retrieved_memories(
                 graph_state_from_metadata.get("retrieved_memories")),
             "pending_memory_writes": cls._normalize_list_memory(graph_state_from_metadata.get("pending_memory_writes")),
@@ -1046,6 +1091,10 @@ class GraphStateContractMapper:
         normalized_state["message_window"] = cls._normalize_message_window(raw.get("message_window"))
         normalized_state["conversation_summary"] = cls._normalize_text(raw.get("conversation_summary"))
         normalized_state["working_memory"] = cls._normalize_dict_memory(raw.get("working_memory"))
+        normalized_state["task_mode"] = cls._normalize_task_mode(raw.get("task_mode"))
+        normalized_state["environment_digest"] = cls._normalize_runtime_digest(raw.get("environment_digest"))
+        normalized_state["observation_digest"] = cls._normalize_runtime_digest(raw.get("observation_digest"))
+        normalized_state["recent_action_digest"] = cls._normalize_runtime_digest(raw.get("recent_action_digest"))
         normalized_state["retrieved_memories"] = cls._normalize_retrieved_memories(raw.get("retrieved_memories"))
         normalized_state["pending_memory_writes"] = cls._normalize_list_memory(raw.get("pending_memory_writes"))
         normalized_state["recent_run_briefs"] = cls._normalize_recent_run_briefs(raw.get("recent_run_briefs"))
@@ -1124,6 +1173,16 @@ class GraphStateContractMapper:
                     "message_window": cls._to_json_safe(cls._normalize_message_window(state.get("message_window"))),
                     "conversation_summary": str(state.get("conversation_summary") or ""),
                     "working_memory": cls._to_json_safe(state.get("working_memory") or {}),
+                    "task_mode": cls._normalize_task_mode(state.get("task_mode")),
+                    "environment_digest": cls._to_json_safe(
+                        cls._normalize_runtime_digest(state.get("environment_digest"))
+                    ),
+                    "observation_digest": cls._to_json_safe(
+                        cls._normalize_runtime_digest(state.get("observation_digest"))
+                    ),
+                    "recent_action_digest": cls._to_json_safe(
+                        cls._normalize_runtime_digest(state.get("recent_action_digest"))
+                    ),
                     "retrieved_memories": cls._to_json_safe(retrieved_memories),
                     "pending_memory_writes": cls._to_json_safe(state.get("pending_memory_writes") or []),
                     "recent_run_briefs": cls._to_json_safe(state.get("recent_run_briefs") or []),

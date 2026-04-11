@@ -46,6 +46,7 @@ from app.domain.services.prompts import (
     SYSTEM_PROMPT,
     UPDATE_PLAN_PROMPT,
 )
+from app.domain.services.runtime_context import RuntimeContextService
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import (
@@ -64,10 +65,8 @@ from app.domain.services.runtime.normalizers import (
     normalize_delivery_payload,
     normalize_execution_response,
     normalize_file_path_list,
-    normalize_ref_list,
     normalize_step_result_text,
     normalize_text_list,
-    truncate_text_list,
     truncate_text,
 )
 from app.domain.services.tools import BaseTool
@@ -91,16 +90,6 @@ from .settings import (
     MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     MESSAGE_WINDOW_MAX_ITEMS,
     MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
-    PROMPT_CONTEXT_ARTIFACT_LIMIT,
-    PROMPT_CONTEXT_BRIEF_LIMIT,
-    PROMPT_CONTEXT_COMPLETED_STEP_LIMIT,
-    PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS,
-    PROMPT_CONTEXT_MEMORY_LIMIT,
-    PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS,
-    PROMPT_CONTEXT_MESSAGE_LIMIT,
-    PROMPT_CONTEXT_MESSAGE_MAX_CHARS,
-    PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
-    PROMPT_CONTEXT_SUMMARY_MAX_CHARS,
     STEP_EXECUTION_TIMEOUT_SECONDS,
 )
 from .tools import (
@@ -112,6 +101,7 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
+_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
 
 
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -163,6 +153,33 @@ def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
 
 def _truncate_text(value: Any, *, max_chars: int) -> str:
     return truncate_text(value, max_chars=max_chars)
+
+
+def _build_prompt_context_packet(
+        *,
+        stage: str,
+        state: PlannerReActLangGraphState,
+        step: Optional[Step] = None,
+        task_mode: str = "",
+) -> Dict[str, Any]:
+    """统一从上下文服务构造 Prompt 数据包。"""
+    return _RUNTIME_CONTEXT_SERVICE.build_packet(
+        stage=stage,  # type: ignore[arg-type]
+        state=state,
+        step=step,
+        task_mode=task_mode,
+    )
+
+
+def _extract_prompt_context_state_updates(context_packet: Dict[str, Any]) -> Dict[str, Any]:
+    """只回写 digest 与 task_mode，避免节点直接操心字段细节。"""
+    return _RUNTIME_CONTEXT_SERVICE.extract_state_updates(context_packet)
+
+
+def _append_prompt_context_to_prompt(prompt: str, context_packet: Dict[str, Any]) -> str:
+    """将结构化 context packet 追加到 Prompt，避免节点手写上下文拼装。"""
+    context_json = json.dumps(context_packet, ensure_ascii=False, indent=2)
+    return f"{prompt}\n\n已知上下文:\n```json\n{context_json}\n```"
 
 
 def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
@@ -390,66 +407,6 @@ def _resolve_direct_delivery_context_state(task_mode: str) -> str:
     return StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
-def _build_summary_plan_snapshot(
-        plan: Optional[Plan],
-        *,
-        selected_artifacts: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    if plan is None:
-        return {}
-
-    completed_step_summaries: List[str] = []
-    failed_step_summaries: List[str] = []
-    pending_step_titles: List[str] = []
-    for step in list(plan.steps or []):
-        if step.status == ExecutionStatus.COMPLETED:
-            completed_step_summaries.append(
-                normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
-            )
-            continue
-        if step.status == ExecutionStatus.FAILED:
-            failed_step_summaries.append(
-                normalize_step_result_text(step.outcome.summary if step.outcome is not None else step.title)
-            )
-            continue
-        pending_title = normalize_step_result_text(step.title, fallback=step.description)
-        if pending_title:
-            pending_step_titles.append(pending_title)
-
-    return {
-        "title": str(plan.title or "").strip(),
-        "goal": str(plan.goal or "").strip(),
-        "status": str(plan.status.value if hasattr(plan.status, "value") else plan.status or "").strip(),
-        "step_count": len(list(plan.steps or [])),
-        "completed_step_summaries": completed_step_summaries[:5],
-        "failed_step_summaries": failed_step_summaries[:3],
-        "pending_step_titles": pending_step_titles[:5],
-        "selected_artifacts": normalize_file_path_list(
-            list(selected_artifacts or []),
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        )[:6],
-    }
-
-
-def _build_summary_delivery_payload(working_memory: Dict[str, Any]) -> Dict[str, Any]:
-    """总结阶段只读取压缩后的交付载荷，避免把长正文完整塞回轻量总结模型。"""
-    delivery_payload = normalize_delivery_payload(working_memory.get("final_delivery_payload"))
-    return {
-        "text": _truncate_text(delivery_payload.get("text"), max_chars=1600),
-        "sections": [
-            {
-                "title": _truncate_text(item.get("title"), max_chars=80),
-                "content": _truncate_text(item.get("content"), max_chars=600),
-            }
-            for item in list(delivery_payload.get("sections") or [])[:6]
-        ],
-        "source_refs": normalize_file_path_list(
-            delivery_payload.get("source_refs"),
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        )[:6],
-    }
-
-
 # Summary helper：负责总结阶段的快照裁剪、结果复用和最终轻量输入构造。
 def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
     """把 dict/领域对象统一规整为 StepOutcome。"""
@@ -584,185 +541,6 @@ def _find_reusable_step_outcome(
         return candidate_outcome, current_run_id, str(candidate.id)
 
     return None
-
-
-def _build_execution_context_block(state: PlannerReActLangGraphState) -> Dict[str, Any]:
-    """统一构造 planner / execute_step / replan 的结构化上下文块。"""
-    step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
-    completed_steps = [
-                          item for item in step_states
-                          if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
-                      ][-PROMPT_CONTEXT_COMPLETED_STEP_LIMIT:]
-    last_step = state.get("last_executed_step")
-    working_memory = _ensure_working_memory(state)
-
-    open_questions = normalize_text_list(state.get("session_open_questions"))
-    open_questions.extend(normalize_text_list(working_memory.get("open_questions")))
-    if last_step is not None and last_step.outcome is not None:
-        open_questions.extend(normalize_text_list(last_step.outcome.open_questions))
-
-    blockers = normalize_text_list(state.get("session_blockers"))
-    if last_step is not None and last_step.outcome is not None:
-        blockers.extend(normalize_text_list(last_step.outcome.blockers))
-
-    selected_artifacts = normalize_file_path_list(state.get("selected_artifacts"))
-    current_run_artifacts = _collect_current_run_artifacts(state)
-    historical_artifact_refs = normalize_ref_list(state.get("historical_artifact_refs"))
-
-    recent_run_briefs = [
-        {
-            "run_id": str(item.get("run_id") or "").strip(),
-            "title": str(item.get("title") or "").strip(),
-            "goal": str(item.get("goal") or "").strip(),
-            "status": str(item.get("status") or "").strip(),
-            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=120),
-            "final_answer_text_excerpt": _truncate_text(item.get("final_answer_text_excerpt"), max_chars=160),
-        }
-        for item in list(state.get("recent_run_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
-        if isinstance(item, dict) and str(item.get("run_id") or "").strip()
-    ]
-    recent_attempt_briefs = [
-        {
-            "run_id": str(item.get("run_id") or "").strip(),
-            "title": str(item.get("title") or "").strip(),
-            "goal": str(item.get("goal") or "").strip(),
-            "status": str(item.get("status") or "").strip(),
-            "final_answer_summary": _truncate_text(item.get("final_answer_summary"), max_chars=120),
-            "final_answer_text_excerpt": _truncate_text(item.get("final_answer_text_excerpt"), max_chars=160),
-        }
-        for item in list(state.get("recent_attempt_briefs") or [])[:PROMPT_CONTEXT_BRIEF_LIMIT]
-        if isinstance(item, dict) and str(item.get("run_id") or "").strip()
-    ]
-
-    recent_messages: List[Dict[str, Any]] = []
-    for item in list(state.get("message_window") or [])[-PROMPT_CONTEXT_MESSAGE_LIMIT:]:
-        normalized_item = normalize_message_window_entry(
-            item,
-            default_role="assistant",
-            max_message_chars=MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
-            max_attachment_paths=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        )
-        if normalized_item is None:
-            continue
-        recent_messages.append(
-            {
-                **normalized_item,
-                "message": _truncate_text(
-                    normalized_item.get("message"),
-                    max_chars=PROMPT_CONTEXT_MESSAGE_MAX_CHARS,
-                ),
-            }
-        )
-
-    sanitized_completed_steps: List[Dict[str, Any]] = []
-    for item in completed_steps:
-        outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
-        sanitized_completed_steps.append(
-            {
-                "step_id": str(item.get("step_id") or "").strip(),
-                "title": _truncate_text(item.get("title"), max_chars=80),
-                "description": _truncate_text(item.get("description"), max_chars=120),
-                "status": str(item.get("status") or "").strip(),
-                "summary": _truncate_text(
-                    outcome.get("summary"),
-                    max_chars=160,
-                ),
-                "delivery_preview": _truncate_text(
-                    outcome.get("delivery_text"),
-                    max_chars=200,
-                ),
-            }
-        )
-
-    sanitized_memories: List[Dict[str, Any]] = []
-    for item in list(state.get("retrieved_memories") or [])[:PROMPT_CONTEXT_MEMORY_LIMIT]:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content") if isinstance(item.get("content"), dict) else {}
-        content_fragments: List[str] = []
-        for key in list(content.keys()):
-            normalized_key = str(key or "").strip().lower()
-            if normalized_key in {"embedding", "vector", "source", "score", "similarity", "distance"}:
-                continue
-            value = content.get(key)
-            if isinstance(value, (str, int, float, bool)):
-                text = str(value).strip()
-                if text:
-                    content_fragments.append(
-                        _truncate_text(
-                            text if normalized_key in {"text", "content"} else f"{key}: {text}",
-                            max_chars=80,
-                        )
-                    )
-            elif isinstance(value, list):
-                items = [str(entry).strip() for entry in value if str(entry).strip()]
-                if items:
-                    content_fragments.append(
-                        _truncate_text(
-                            f"{key}: {', '.join(items[:4])}",
-                            max_chars=80,
-                        )
-                    )
-            if len(content_fragments) >= 3:
-                break
-        sanitized_memories.append(
-            {
-                "id": str(item.get("id") or "").strip(),
-                "memory_type": str(item.get("memory_type") or "").strip(),
-                "summary": _truncate_text(
-                    item.get("summary"),
-                    max_chars=PROMPT_CONTEXT_MEMORY_SUMMARY_MAX_CHARS,
-                ),
-                "content_preview": _truncate_text(
-                    " | ".join(content_fragments),
-                    max_chars=PROMPT_CONTEXT_MEMORY_CONTENT_MAX_CHARS,
-                ),
-                "tags": [
-                    _truncate_text(tag, max_chars=40)
-                    for tag in list(item.get("tags") or [])[:6]
-                    if str(tag or "").strip()
-                ],
-            }
-        )
-
-    return {
-        "conversation_summary": _truncate_text(
-            state.get("conversation_summary"),
-            max_chars=PROMPT_CONTEXT_SUMMARY_MAX_CHARS,
-        ),
-        "recent_messages": recent_messages,
-        "completed_steps": sanitized_completed_steps,
-        "last_step_result": normalize_step_result_text(
-            last_step.outcome.summary if last_step is not None and last_step.outcome is not None else ""
-        ),
-        "last_step_delivery_preview": _truncate_text(
-            last_step.outcome.delivery_text if last_step is not None and last_step.outcome is not None else "",
-            max_chars=320,
-        ),
-        "retrieved_memories": sanitized_memories,
-        "open_questions": truncate_text_list(
-            list(dict.fromkeys(open_questions)),
-            max_items=PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
-            max_chars=120,
-        ),
-        "blockers": truncate_text_list(
-            list(dict.fromkeys(blockers)),
-            max_items=PROMPT_CONTEXT_OPEN_ITEM_LIMIT,
-            max_chars=120,
-        ),
-        "selected_artifacts": list(dict.fromkeys(selected_artifacts))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
-        "current_run_artifacts": current_run_artifacts[-PROMPT_CONTEXT_ARTIFACT_LIMIT:],
-        "historical_artifact_refs": list(dict.fromkeys(historical_artifact_refs))[:PROMPT_CONTEXT_ARTIFACT_LIMIT],
-        "recent_run_briefs": recent_run_briefs,
-        "recent_attempt_briefs": recent_attempt_briefs,
-    }
-
-
-def _append_execution_context_to_prompt(prompt: str, state: PlannerReActLangGraphState) -> str:
-    """将统一上下文块追加到 prompt，避免各节点各自拼装 ad hoc 文本。"""
-    context_block = _build_execution_context_block(state)
-    context_json = json.dumps(context_block, ensure_ascii=False, indent=2)
-    return f"{prompt}\n\n已知上下文:\n```json\n{context_json}\n```"
 
 
 def _dedupe_replanned_steps(existing_steps: List[Step], new_steps: List[Step]) -> List[Step]:
@@ -1763,11 +1541,16 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
 
     input_parts = list(state.get("input_parts") or [])
     attachments = [part.get("sandbox_filepath") for part in input_parts]
+    planner_context_packet = _build_prompt_context_packet(
+        stage="planner",
+        state=state,
+    )
+    planner_context_updates = _extract_prompt_context_state_updates(planner_context_packet)
     user_message_prompt = CREATE_PLAN_PROMPT.format(
         message=user_message,
         attachments=format_attachments_for_prompt(attachments),
     )
-    user_message_prompt = _append_execution_context_to_prompt(user_message_prompt, state)
+    user_message_prompt = _append_prompt_context_to_prompt(user_message_prompt, planner_context_packet)
 
     user_content = await _build_message(llm, user_message_prompt, input_parts)
     llm_runtime = describe_llm_runtime(llm)
@@ -1834,6 +1617,7 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             updates={
                 "plan": plan,
                 "working_memory": working_memory,
+                **planner_context_updates,
                 "current_step_id": None,
                 "final_message": planner_message,
                 "graph_metadata": dict(state.get("graph_metadata") or {}),
@@ -1883,6 +1667,7 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
             updates={
                 "plan": plan,
                 "working_memory": working_memory,
+                **planner_context_updates,
                 "current_step_id": next_step.id if next_step is not None else None,
                 "graph_metadata": dict(state.get("graph_metadata") or {}),
             },
@@ -2037,7 +1822,14 @@ async def execute_step_node(
         delivery_role=str(getattr(step, "delivery_role", "") or "none"),
         delivery_context_state=str(getattr(step, "delivery_context_state", "") or "none"),
     )
-    user_message_prompt = _append_execution_context_to_prompt(user_message_prompt, state)
+    execute_context_packet = _build_prompt_context_packet(
+        stage="execute",
+        state=state,
+        step=step,
+        task_mode=task_mode,
+    )
+    execute_context_updates = _extract_prompt_context_state_updates(execute_context_packet)
+    user_message_prompt = _append_prompt_context_to_prompt(user_message_prompt, execute_context_packet)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
 
     llm_message: Optional[Dict[str, Any]] = None
@@ -2083,7 +1875,7 @@ async def execute_step_node(
             #                 "step_description": step.description,
             #                 "language": language,
             #                 "attachments": attachments,
-            #                 "execution_context": _build_execution_context_block(state),
+            #                 "execution_context": execute_context_packet,
             #             },
             #         )
             #         skill_cost_ms = elapsed_ms(skill_started_at)
@@ -2131,6 +1923,9 @@ async def execute_step_node(
             "attachments": [],
         }
 
+    runtime_recent_action = _RUNTIME_CONTEXT_SERVICE.normalize_runtime_recent_action(
+        llm_message.get("runtime_recent_action")
+    )
     interrupt_request = _normalize_interrupt_request(llm_message.get("interrupt_request"))
     if interrupt_request:
         log_runtime(
@@ -2146,10 +1941,32 @@ async def execute_step_node(
         )
         control = _get_control_metadata(state)
         control["step_reuse_hit"] = False
+        interrupt_context_packet = _build_prompt_context_packet(
+            stage="execute",
+            state={
+                **state,
+                **_RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
+                    state_updates=execute_context_updates,
+                    task_mode=task_mode,
+                    runtime_recent_action=runtime_recent_action,
+                ),
+                "plan": plan,
+                "current_step_id": step.id,
+                "pending_interrupt": interrupt_request,
+            },
+            step=step,
+            task_mode=task_mode,
+        )
+        interrupt_context_updates = _RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
+            state_updates=_extract_prompt_context_state_updates(interrupt_context_packet),
+            task_mode=task_mode,
+            runtime_recent_action=runtime_recent_action,
+        )
         return _reduce_state_with_events(
             state,
             updates={
                 "plan": plan,
+                **interrupt_context_updates,
                 "current_step_id": step.id,
                 "user_message": user_message,
                 "graph_metadata": _replace_control_metadata(state, control),
@@ -2198,10 +2015,10 @@ async def execute_step_node(
         status=step.status,
     )
     final_step_events: List[Any] = [completed_event]
-    # 中间步骤消息 不推送给前端
-    # intermediate_message_event = _build_intermediate_step_message_event(step)
-    # if intermediate_message_event is not None:
-    #     final_step_events.append(intermediate_message_event)
+    # 中间候选结果需要显式投递给前端，不能只停留在 step outcome 中。
+    intermediate_message_event = _build_intermediate_step_message_event(step)
+    if intermediate_message_event is not None:
+        final_step_events.append(intermediate_message_event)
 
     await emit_live_events(*final_step_events)
 
@@ -2233,10 +2050,35 @@ async def execute_step_node(
         skill_elapsed_ms=skill_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
     )
+    completed_context_packet = _build_prompt_context_packet(
+            stage="execute",
+            state={
+                **state,
+                **_RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
+                    state_updates=execute_context_updates,
+                    task_mode=task_mode,
+                    runtime_recent_action=runtime_recent_action,
+                ),
+                "plan": plan,
+            "last_executed_step": step.model_copy(deep=True),
+            "working_memory": working_memory,
+            "final_message": step_summary,
+            "pending_interrupt": {},
+            "emitted_events": append_events(state.get("emitted_events"), *events),
+        },
+        step=step,
+        task_mode=task_mode,
+    )
+    completed_context_updates = _RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
+        state_updates=_extract_prompt_context_state_updates(completed_context_packet),
+        task_mode=task_mode,
+        runtime_recent_action=runtime_recent_action,
+    )
     return _reduce_state_with_events(
         state,
         updates={
             "plan": plan,
+            **completed_context_updates,
             "last_executed_step": step.model_copy(deep=True),
             "execution_count": int(state.get("execution_count", 0)) + 1,
             "current_step_id": next_step.id if next_step is not None else None,
@@ -2445,8 +2287,18 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     if plan is None or last_step is None:
         return state
 
+    replan_context_packet = _build_prompt_context_packet(
+        stage="replan",
+        state=state,
+        step=last_step,
+        task_mode=state.get("task_mode") or normalize_controlled_value(
+            getattr(last_step, "task_mode_hint", None),
+            StepTaskModeHint,
+        ),
+    )
+    replan_context_updates = _extract_prompt_context_state_updates(replan_context_packet)
     prompt = UPDATE_PLAN_PROMPT.format(step=last_step.model_dump_json(), plan=plan.model_dump_json())
-    prompt = _append_execution_context_to_prompt(prompt, state)
+    prompt = _append_prompt_context_to_prompt(prompt, replan_context_packet)
     llm_runtime = describe_llm_runtime(llm)
     log_runtime(
         logger,
@@ -2514,6 +2366,7 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         state,
         updates={
             "plan": plan,
+            **replan_context_updates,
             "current_step_id": next_step.id if next_step is not None else None,
             "graph_metadata": _replace_control_metadata(state, control),
         },
@@ -2557,24 +2410,21 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
             },
             events=final_events,
         )
-    summary_plan_snapshot = _build_summary_plan_snapshot(
-        plan,
-        selected_artifacts=list(state.get("selected_artifacts") or []),
-    )
     working_memory = _ensure_working_memory(state)
-    summary_delivery_payload = _build_summary_delivery_payload(working_memory)
     final_message = str(state.get("final_message") or "")
-    user_message = str(state.get("user_message") or "")
-    execution_count = int(state.get("execution_count") or 0)
+    summary_context_packet = _build_prompt_context_packet(
+        stage="summary",
+        state=state,
+        task_mode=state.get("task_mode") or normalize_controlled_value(
+            getattr(state.get("last_executed_step"), "task_mode_hint", None),
+            StepTaskModeHint,
+        ),
+    )
+    summary_context_updates = _extract_prompt_context_state_updates(summary_context_packet)
     llm_runtime = describe_llm_runtime(llm)
-    summarize_prompt = SUMMARIZE_PROMPT.format(user_message=user_message,
-                                               execution_count=execution_count,
-                                               final_message=final_message,
-                                               final_delivery_payload=json.dumps(
-                                                   summary_delivery_payload,
-                                                   ensure_ascii=False,
-                                               ),
-                                               plan_snapshot=json.dumps(summary_plan_snapshot, ensure_ascii=False))
+    summarize_prompt = SUMMARIZE_PROMPT.format(
+        context_packet=json.dumps(summary_context_packet, ensure_ascii=False)
+    )
     log_runtime(
         logger,
         logging.INFO,
@@ -2583,7 +2433,7 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         stage_name="summary",
         model_name=llm_runtime["model_name"],
         max_tokens=llm_runtime["max_tokens"],
-        execution_count=execution_count,
+        execution_count=int(state.get("execution_count") or 0),
         step_count=len(list(plan.steps or [])),
         final_message_length=len(final_message),
     )
@@ -2666,6 +2516,7 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         state,
         updates={
             "plan": plan,
+            **summary_context_updates,
             "current_step_id": None,
             "final_message": summary_message,
             "working_memory": working_memory,

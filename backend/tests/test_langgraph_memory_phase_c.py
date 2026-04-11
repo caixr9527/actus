@@ -9,8 +9,10 @@ from app.domain.models import (
     Plan,
     Step,
     StepOutcome,
+    StepTaskModeHint,
     ToolResult,
 )
+from app.domain.services.runtime_context import RuntimeContextService
 from app.domain.services.tools import BaseTool, MessageTool
 from app.domain.services.tools.base import tool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
@@ -18,7 +20,6 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph i
     build_planner_react_langgraph_graph,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
-    _build_execution_context_block,
     consolidate_memory_node,
     direct_wait_node,
     execute_step_node,
@@ -232,6 +233,44 @@ class _FakeToolLoopLLM:
                 {
                     "success": True,
                     "result": "报告已生成",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            ),
+            "tool_calls": [],
+        }
+
+
+class _BlockedThenCompleteLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools, tool_choice=None, response_format=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-write",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps(
+                                {
+                                    "filepath": "/home/ubuntu/report.md",
+                                    "content": "# 报告\n\n测试内容。",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已整理完成",
                     "attachments": [],
                 },
                 ensure_ascii=False,
@@ -515,7 +554,8 @@ def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
     assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is False
 
 
-def test_execution_context_block_should_separate_current_and_historical_context() -> None:
+def test_runtime_context_service_should_build_structured_packet_with_separated_context() -> None:
+    context_service = RuntimeContextService()
     state = {
         "conversation_summary": "会话摘要",
         "retrieved_memories": [
@@ -571,29 +611,269 @@ def test_execution_context_block_should_separate_current_and_historical_context(
             {"role": "user", "message": "第一轮问题"},
             {"role": "assistant", "message": "第一轮回答"},
         ],
+        "pending_interrupt": {
+            "kind": "confirm",
+            "prompt": "请确认是否继续调研",
+            "confirm_label": "继续",
+            "cancel_label": "取消",
+        },
     }
 
-    context_block = _build_execution_context_block(state)
+    context_packet = context_service.build_packet(
+        stage="execute",
+        state=state,
+        task_mode="research",
+    )
 
-    assert context_block["selected_artifacts"] == [f"/tmp/current-{index}.md" for index in range(6)]
-    assert context_block["current_run_artifacts"] == [f"/tmp/generated-{index}.md" for index in range(2, 8)]
-    assert context_block["historical_artifact_refs"] == [f"/tmp/history-{index}.md" for index in range(6)]
-    assert len(context_block["recent_run_briefs"]) == 3
-    assert len(context_block["recent_attempt_briefs"]) == 3
-    assert "总结0总结0" in context_block["recent_run_briefs"][0]["final_answer_summary"]
-    assert len(context_block["recent_run_briefs"][0]["final_answer_summary"]) <= 120
-    assert "重交付正文摘录0" in context_block["recent_run_briefs"][0]["final_answer_text_excerpt"]
-    assert len(context_block["recent_run_briefs"][0]["final_answer_text_excerpt"]) <= 160
-    assert context_block["blockers"] == ["阻塞1"]
-    assert context_block["open_questions"] == ["问题1", "问题2", "问题3"]
-    assert context_block["recent_messages"] == [
-        {"role": "user", "message": "第一轮问题"},
-        {"role": "assistant", "message": "第一轮回答"},
+    assert context_packet["stage"] == "execute"
+    assert context_packet["task_mode"] == "research"
+    assert context_packet["open_questions"] == ["问题1", "问题2", "问题3"]
+    assert context_packet["pending_confirmation"]["prompt"] == "请确认是否继续调研"
+    assert len(context_packet["stable_background"]["recent_run_briefs"]) == 3
+    assert len(context_packet["stable_background"]["recent_attempt_briefs"]) == 3
+    assert "总结0总结0" in context_packet["stable_background"]["recent_run_briefs"][0]["final_answer_summary"]
+    assert len(context_packet["stable_background"]["recent_run_briefs"][0]["final_answer_summary"]) <= 120
+    assert "重交付正文摘录0" in context_packet["stable_background"]["recent_run_briefs"][0][
+        "final_answer_text_excerpt"
     ]
-    assert context_block["retrieved_memories"][0]["memory_type"] == "profile"
-    assert context_block["retrieved_memories"][0]["summary"] == "偏好中文"
-    assert context_block["retrieved_memories"][0]["content_preview"] == "language: zh"
-    assert "embedding" not in context_block["retrieved_memories"][0]
+    assert len(context_packet["stable_background"]["recent_run_briefs"][0]["final_answer_text_excerpt"]) <= 160
+    assert "recent_messages" not in context_packet["stable_background"]
+    assert context_packet["retrieved_memory_digest"][0]["memory_type"] == "profile"
+    assert context_packet["retrieved_memory_digest"][0]["summary"] == "偏好中文"
+    assert context_packet["retrieved_memory_digest"][0]["content_preview"] == "language: zh"
+    assert "embedding" not in context_packet["retrieved_memory_digest"][0]
+    assert "candidate_links" not in context_packet["environment_digest"]
+
+
+def test_runtime_context_service_should_clear_previous_mode_digest_when_switching_to_coding() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "working_memory": {"goal": "继续完成 backend 改造"},
+        "selected_artifacts": ["/tmp/result.md"],
+        "environment_digest": {
+            "task_mode": StepTaskModeHint.RESEARCH.value,
+            "payload": {
+                "candidate_links": [{"title": "文档", "url": "https://example.com"}],
+                "read_page_summaries": [{"title": "调研页", "url": "https://example.com/doc"}],
+                "current_page": {"url": "https://example.com/doc", "title": "调研页"},
+            },
+        },
+        "observation_digest": {
+            "task_mode": StepTaskModeHint.RESEARCH.value,
+            "payload": {
+                "latest_fetch_page": {"title": "调研页"},
+                "latest_browser_observation": {"url": "https://example.com/doc"},
+            },
+        },
+        "recent_action_digest": {
+            "task_mode": StepTaskModeHint.RESEARCH.value,
+            "payload": {
+                "recent_search_queries": ["runtime context p2"],
+                "last_failed_action": {
+                    "function_name": "search_web",
+                    "message": "搜索失败",
+                },
+                "last_blocked_tool_call": {
+                    "function_name": "fetch_page",
+                    "reason": "research_route_fetch_required",
+                    "message": "请先读取候选链接",
+                },
+                "last_no_progress_reason": "还没确认实现边界",
+            },
+        },
+    }
+
+    context_packet = context_service.build_packet(
+        stage="execute",
+        state=state,
+        task_mode=StepTaskModeHint.CODING.value,
+    )
+    state_updates = context_service.extract_state_updates(context_packet)
+
+    assert context_packet["task_mode"] == StepTaskModeHint.CODING.value
+    assert context_packet["environment_digest"] == {
+        "available_artifacts": ["/tmp/result.md"],
+    }
+    assert "latest_fetch_page" not in context_packet["observation_digest"]
+    assert "latest_browser_observation" not in context_packet["observation_digest"]
+    assert "recent_search_queries" not in context_packet["recent_action_digest"]
+    assert "last_failed_action" not in context_packet["recent_action_digest"]
+    assert "last_blocked_tool_call" not in context_packet["recent_action_digest"]
+    assert state_updates["environment_digest"] == {
+        "task_mode": StepTaskModeHint.CODING.value,
+        "payload": {"available_artifacts": ["/tmp/result.md"]},
+    }
+
+
+def test_runtime_context_service_should_hide_observation_digest_in_human_wait_mode() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "task_mode": StepTaskModeHint.BROWSER_INTERACTION.value,
+        "working_memory": {"goal": "等待用户确认后继续"},
+        "pending_interrupt": {
+            "kind": "select",
+            "prompt": "请选择下一步",
+            "options": [
+                {"label": "继续调研", "resume_value": "research"},
+                {"label": "直接总结", "resume_value": "summary"},
+            ],
+        },
+        "observation_digest": {
+            "task_mode": StepTaskModeHint.BROWSER_INTERACTION.value,
+            "payload": {
+                "latest_fetch_page": {"title": "调研页"},
+                "latest_browser_observation": {"url": "https://example.com/doc"},
+                "latest_shell_result": {"function_name": "shell_exec"},
+            },
+        },
+        "recent_action_digest": {
+            "task_mode": StepTaskModeHint.BROWSER_INTERACTION.value,
+            "payload": {
+                "last_failed_action": {
+                    "function_name": "browser_click",
+                    "message": "点击失败",
+                },
+                "last_blocked_tool_call": {
+                    "function_name": "browser_click",
+                    "reason": "browser_route_blocked",
+                    "message": "当前页面不允许直接点击",
+                },
+            },
+        },
+    }
+
+    context_packet = context_service.build_packet(
+        stage="execute",
+        state=state,
+        task_mode=StepTaskModeHint.HUMAN_WAIT.value,
+    )
+
+    assert context_packet["task_mode"] == StepTaskModeHint.HUMAN_WAIT.value
+    assert "observation_digest" not in context_packet
+    assert context_packet["environment_digest"]["wait_kind"] == "select"
+    assert context_packet["recent_action_digest"]["last_user_wait_reason"] == "请选择下一步"
+    assert "last_failed_action" not in context_packet["recent_action_digest"]
+    assert "last_blocked_tool_call" not in context_packet["recent_action_digest"]
+
+
+def test_runtime_context_service_should_not_inherit_previous_task_mode_in_planner_stage() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "task_mode": StepTaskModeHint.CODING.value,
+        "working_memory": {"goal": "重新规划下一批任务"},
+        "environment_digest": {
+            "task_mode": StepTaskModeHint.CODING.value,
+            "payload": {"cwd": "/workspace/project"},
+        },
+        "retrieved_memories": [
+            {
+                "id": "mem-1",
+                "memory_type": "instruction",
+                "summary": "保持 backend 结构清晰",
+                "content": {"text": "保持 backend 结构清晰"},
+                "tags": ["backend"],
+            }
+        ],
+    }
+
+    context_packet = context_service.build_packet(
+        stage="planner",
+        state=state,
+    )
+
+    assert context_packet["task_mode"] == StepTaskModeHint.GENERAL.value
+    assert "environment_digest" not in context_packet
+    assert "observation_digest" not in context_packet
+    assert context_packet["retrieved_memory_digest"][0]["memory_type"] == "instruction"
+
+
+def test_runtime_context_service_should_hide_execute_only_fields_in_summary_stage() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "working_memory": {
+            "goal": "输出总结",
+            "final_delivery_payload": {
+                "text": "最终交付正文",
+                "sections": [],
+                "source_refs": ["/tmp/final.md"],
+            },
+        },
+        "environment_digest": {
+            "task_mode": StepTaskModeHint.RESEARCH.value,
+            "payload": {"candidate_links": [{"title": "文档"}]},
+        },
+        "observation_digest": {
+            "task_mode": StepTaskModeHint.RESEARCH.value,
+            "payload": {"latest_browser_observation": {"url": "https://example.com/doc"}},
+        },
+        "recent_action_digest": {
+            "task_mode": StepTaskModeHint.RESEARCH.value,
+            "payload": {"recent_search_queries": ["runtime context p2"]},
+        },
+        "selected_artifacts": ["/tmp/final.md"],
+        "execution_count": 2,
+    }
+
+    context_packet = context_service.build_packet(
+        stage="summary",
+        state=state,
+    )
+
+    assert context_packet["stage"] == "summary"
+    assert "environment_digest" not in context_packet
+    assert "observation_digest" not in context_packet
+    assert "recent_action_digest" not in context_packet
+    assert "open_questions" not in context_packet
+    assert context_packet["working_memory_digest"]["final_delivery_payload"]["source_refs"] == ["/tmp/final.md"]
+
+
+def test_execute_step_node_should_persist_current_mode_recent_action_digest() -> None:
+    llm = _BlockedThenCompleteLLM()
+    state = {
+        "session_id": "session-1",
+        "user_message": "请继续调研并整理结果",
+        "plan": Plan(
+            title="执行测试",
+            goal="验证 recent action 沉淀",
+            language="zh",
+            message="执行当前步骤",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="整理调研结论",
+                    description="整理调研结论",
+                    objective_key="objective-step-1",
+                    success_criteria=["整理完成"],
+                    task_mode_hint=StepTaskModeHint.RESEARCH,
+                    status=ExecutionStatus.PENDING,
+                )
+            ],
+        ),
+        "input_parts": [],
+        "working_memory": {},
+        "graph_metadata": {},
+        "selected_artifacts": [],
+        "artifact_refs": [],
+        "emitted_events": [],
+        "recent_action_digest": {},
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm=llm,
+            runtime_tools=[_FakeWriteFileTool()],
+            max_tool_iterations=3,
+        )
+    )
+
+    assert next_state["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert next_state["recent_action_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert next_state["recent_action_digest"]["payload"]["last_failed_action"]["function_name"] == "write_file"
+    assert next_state["recent_action_digest"]["payload"]["last_blocked_tool_call"]["function_name"] == "write_file"
+    assert next_state["recent_action_digest"]["payload"]["last_blocked_tool_call"]["reason"] == "task_mode_tool_blocked"
 
 
 def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assumption() -> None:
@@ -730,9 +1010,9 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
 
     asyncio.run(summarize_node(state, llm))
 
-    assert "计划摘要快照(JSON)" in llm.last_prompt
-    assert "最终交付载荷(JSON)" in llm.last_prompt
-    assert '"completed_step_summaries"' in llm.last_prompt
+    assert "上下文数据包(JSON)" in llm.last_prompt
+    assert '"plan_snapshot"' in llm.last_prompt
+    assert '"final_delivery_payload"' in llm.last_prompt
     assert '"selected_artifacts": ["/home/ubuntu/final.md"]' in llm.last_prompt
     assert '"objective_key"' not in llm.last_prompt
     assert '"success_criteria"' not in llm.last_prompt

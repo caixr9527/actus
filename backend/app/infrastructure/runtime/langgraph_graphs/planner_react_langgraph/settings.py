@@ -181,9 +181,26 @@ WEB_READING_PATTERN = re.compile(
     r"|(\bbrowser_(view|navigate|restart|console_view|read_current_page_structured|extract_main_content|extract_cards|find_link_by_text|find_actionable_elements)\b)",
     re.IGNORECASE,
 )
+READ_ACTION_PATTERN = re.compile(
+    r"(阅读|读取|查看.{0,8}(页面|正文|内容|文档)?|看一下.{0,8}(页面|正文|内容|文档)?|提取.{0,8}(正文|内容))"
+    r"|(\b(read|fetch|inspect)\b)",
+    re.IGNORECASE,
+)
 SEARCH_PATTERN = re.compile(
     r"(搜索|检索|查找|调研|搜集|资料|文章|网页内容|链接信息)"
     r"|(\b(search_web|fetch_page|search|research|lookup)\b)",
+    re.IGNORECASE,
+)
+PLANNING_PATTERN = re.compile(
+    r"(规划|计划|安排|方案|步骤|拆解|roadmap|plan\b|step\b)",
+    re.IGNORECASE,
+)
+SYNTHESIS_PATTERN = re.compile(
+    r"(整理|总结|归纳|提炼|梳理|关键点|要点|结论|摘要)",
+    re.IGNORECASE,
+)
+COMPARISON_PATTERN = re.compile(
+    r"(比较|对比|推荐|优缺点|区别|怎么选|选哪个)",
     re.IGNORECASE,
 )
 FILE_PATTERN = re.compile(

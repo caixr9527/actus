@@ -601,6 +601,45 @@ def test_entry_router_node_should_route_direct_execute_for_url_request_without_t
     assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
 
 
+def test_entry_router_node_should_route_search_read_and_summarize_request_to_planner() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "帮我搜索并阅读 OpenAI 官网关于 Agents 的文档，整理关键点。",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+
+
+def test_entry_router_node_should_route_explicit_plan_request_to_planner() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+
+
+def test_entry_router_node_should_keep_single_file_read_request_on_direct_execute() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "读取 /tmp/backend.log 并整理错误摘要",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
+
+
 def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> None:
     assert classify_step_task_mode(
         Step(description="执行 `pytest backend/tests/test_run_engine_selector.py -q` 并修复失败")

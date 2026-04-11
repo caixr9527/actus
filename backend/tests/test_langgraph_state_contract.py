@@ -93,6 +93,19 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                         "goal": "验证状态契约",
                         "constraints": ["保持兼容"],
                     },
+                    "task_mode": "research",
+                    "environment_digest": {
+                        "task_mode": "research",
+                        "payload": {"recent_search_queries": ["langgraph persistence"]},
+                    },
+                    "observation_digest": {
+                        "task_mode": "research",
+                        "payload": {"last_step_result": "已完成上一轮检索"},
+                    },
+                    "recent_action_digest": {
+                        "task_mode": "research",
+                        "payload": {"last_user_wait_reason": "请补充上下文"},
+                    },
                     "retrieved_memories": [
                         {"id": "mem-1", "summary": "用户偏好中文"},
                     ],
@@ -179,6 +192,11 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["message_window"][-1]["message"] == "你好"
     assert state["conversation_summary"] == "历史对话摘要"
     assert state["working_memory"]["goal"] == "验证状态契约"
+    assert state["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert state["environment_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert state["environment_digest"]["payload"]["recent_search_queries"] == ["langgraph persistence"]
+    assert state["observation_digest"]["payload"]["last_step_result"] == "已完成上一轮检索"
+    assert state["recent_action_digest"]["payload"]["last_user_wait_reason"] == "请补充上下文"
     assert state["retrieved_memories"][0]["id"] == "mem-1"
     assert state["pending_memory_writes"][0]["id"] == "pending-1"
     assert state["recent_run_briefs"][0]["run_id"] == "run-completed"
@@ -422,6 +440,19 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
         "goal": "调研 LangGraph 持久化",
         "constraints": ["仅看后端"],
     }
+    state["task_mode"] = StepTaskModeHint.RESEARCH.value
+    state["environment_digest"] = {
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "payload": {"recent_search_queries": ["langgraph persistence"]},
+    }
+    state["observation_digest"] = {
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "payload": {"last_step_result": "完成第一步"},
+    }
+    state["recent_action_digest"] = {
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "payload": {"last_user_wait_reason": "请确认是否继续？"},
+    }
     state["retrieved_memories"] = [
         {"id": "mem-1", "summary": "用户偏好中文回复"},
     ]
@@ -454,6 +485,11 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["message_window"][1]["attachment_paths"] == ["/tmp/final.md"]
     assert contract["graph_state"]["conversation_summary"] == "用户希望调研 LangGraph 持久化"
     assert contract["graph_state"]["working_memory"]["goal"] == "调研 LangGraph 持久化"
+    assert contract["graph_state"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert contract["graph_state"]["environment_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert contract["graph_state"]["environment_digest"]["payload"]["recent_search_queries"] == ["langgraph persistence"]
+    assert contract["graph_state"]["observation_digest"]["payload"]["last_step_result"] == "完成第一步"
+    assert contract["graph_state"]["recent_action_digest"]["payload"]["last_user_wait_reason"] == "请确认是否继续？"
     assert contract["graph_state"]["retrieved_memories"][0]["id"] == "mem-1"
     assert sorted(contract["graph_state"]["retrieved_memories"][0].keys()) == [
         "content",
@@ -667,6 +703,19 @@ def test_graph_state_contract_should_normalize_plan_and_last_step_payload_when_b
         "message_window": [],
         "conversation_summary": "",
         "working_memory": {},
+        "task_mode": "research",
+        "environment_digest": {
+            "task_mode": "research",
+            "payload": {"recent_search_queries": ["langgraph persistence"]},
+        },
+        "observation_digest": {
+            "task_mode": "research",
+            "payload": {"last_step_result": "结果已生成"},
+        },
+        "recent_action_digest": {
+            "task_mode": "research",
+            "payload": {"last_user_wait_reason": "请确认"},
+        },
         "retrieved_memories": [],
         "pending_memory_writes": [],
         "recent_run_briefs": [],
@@ -694,12 +743,30 @@ def test_graph_state_contract_should_normalize_plan_and_last_step_payload_when_b
 
     assert graph_state["plan"]["steps"][0]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
     assert graph_state["last_executed_step"]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
+    assert graph_state["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert graph_state["environment_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert graph_state["environment_digest"]["payload"]["recent_search_queries"] == ["langgraph persistence"]
+    assert graph_state["observation_digest"]["payload"]["last_step_result"] == "结果已生成"
+    assert graph_state["recent_action_digest"]["payload"]["last_user_wait_reason"] == "请确认"
 
 
 def test_normalize_runtime_state_should_rebuild_step_states_and_current_step_from_plan() -> None:
     normalized_state = GraphStateContractMapper.normalize_runtime_state(
         {
             "session_id": "session-1",
+            "task_mode": "research",
+            "environment_digest": {
+                "task_mode": "research",
+                "payload": {"recent_search_queries": ["langgraph persistence"]},
+            },
+            "observation_digest": {
+                "task_mode": "research",
+                "payload": {"last_step_result": "第一步完成"},
+            },
+            "recent_action_digest": {
+                "task_mode": "research",
+                "payload": {"last_user_wait_reason": "请确认"},
+            },
             "plan": {
                 "title": "测试计划",
                 "steps": [
@@ -749,3 +816,8 @@ def test_normalize_runtime_state_should_rebuild_step_states_and_current_step_fro
     assert normalized_state["step_states"][0]["step_id"] == "step-1"
     assert normalized_state["step_states"][0]["outcome"]["produced_artifacts"] == ["/tmp/first.md"]
     assert normalized_state["step_states"][1]["step_id"] == "step-2"
+    assert normalized_state["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert normalized_state["environment_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert normalized_state["environment_digest"]["payload"]["recent_search_queries"] == ["langgraph persistence"]
+    assert normalized_state["observation_digest"]["payload"]["last_step_result"] == "第一步完成"
+    assert normalized_state["recent_action_digest"]["payload"]["last_user_wait_reason"] == "请确认"

@@ -53,6 +53,7 @@ from .settings import (
     BROWSER_INTERACTION_PATTERN,
     BROWSER_NO_PROGRESS_LIMIT,
     BROWSER_PROGRESS_FUNCTIONS,
+    COMPARISON_PATTERN,
     CODING_PATTERN,
     CODE_BLOCK_PATTERN,
     FILE_FUNCTION_NAMES,
@@ -60,6 +61,8 @@ from .settings import (
     NOTIFY_USER_FUNCTION_NAME,
     NUMBERED_LIST_PATTERN,
     PHATIC_PATTERN,
+    PLANNING_PATTERN,
+    READ_ACTION_PATTERN,
     READ_ONLY_FILE_FUNCTION_NAMES,
     REPEAT_TOOL_LIMIT,
     SEARCH_FUNCTION_NAMES,
@@ -67,6 +70,7 @@ from .settings import (
     SEARCH_REPEAT_LIMIT,
     SEQUENCE_PATTERN,
     SHELL_COMMAND_PATTERN,
+    SYNTHESIS_PATTERN,
     TASK_MODE_ALLOWED_FUNCTIONS,
     TASK_MODE_ALLOWED_PREFIXES,
     TOOL_FAILURE_LIMIT,
@@ -81,6 +85,21 @@ from .settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BLOCKED_TOOL_LOOP_BREAK_REASONS = {
+    "human_wait_non_interrupt_tool_blocked",
+    "research_file_context_required",
+    "web_reading_file_tool_blocked",
+    "general_inline_file_context_required",
+    "artifact_policy_file_output_blocked",
+    "final_delivery_search_drift_blocked",
+    "browser_route_blocked",
+    "task_mode_tool_blocked",
+    "research_route_search_required",
+    "research_route_fetch_required",
+    "browser_click_target_blocked",
+    "browser_high_level_retry_blocked",
+}
 
 
 def _normalize_intent_text(value: str) -> str:
@@ -116,7 +135,11 @@ def _analyze_text_intent(value: str) -> Dict[str, Any]:
             "needs_human_wait": False,
             "has_browser_interaction_signal": False,
             "has_web_reading_signal": False,
+            "has_read_action_signal": False,
             "has_search_signal": False,
+            "has_planning_signal": False,
+            "has_synthesis_signal": False,
+            "has_comparison_signal": False,
             "has_file_signal": False,
             "has_coding_signal": False,
             "has_action_signal": False,
@@ -144,13 +167,58 @@ def _analyze_text_intent(value: str) -> Dict[str, Any]:
         "needs_human_wait": _has_explicit_wait_semantics(normalized_text),
         "has_browser_interaction_signal": bool(BROWSER_INTERACTION_PATTERN.search(normalized_text)),
         "has_web_reading_signal": bool(WEB_READING_PATTERN.search(normalized_text)),
+        "has_read_action_signal": bool(READ_ACTION_PATTERN.search(normalized_text)),
         "has_search_signal": bool(SEARCH_PATTERN.search(normalized_text)),
+        "has_planning_signal": bool(PLANNING_PATTERN.search(normalized_text)),
+        "has_synthesis_signal": bool(SYNTHESIS_PATTERN.search(normalized_text)),
+        "has_comparison_signal": bool(COMPARISON_PATTERN.search(normalized_text)),
         "has_file_signal": bool(FILE_PATTERN.search(normalized_text)),
         "has_coding_signal": bool(CODING_PATTERN.search(normalized_text)),
         "has_action_signal": bool(ACTION_PATTERN.search(normalized_text)),
         "has_tool_reference": bool(TOOL_REFERENCE_PATTERN.search(normalized_text)),
         "clause_count": clause_count,
     }
+
+
+def _has_direct_execution_need(signals: Dict[str, Any]) -> bool:
+    """只识别真正需要工具/环境的请求，避免把泛动作词直接当成可直达执行。"""
+    return any(
+        (
+            signals["has_tool_reference"],
+            signals["has_url"],
+            signals["has_absolute_path"],
+            signals["has_shell_command"],
+            signals["has_code_block"],
+            signals["has_browser_interaction_signal"],
+            signals["has_web_reading_signal"],
+            signals["has_search_signal"],
+            signals["has_file_signal"],
+            signals["has_coding_signal"],
+        )
+    )
+
+
+def _should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
+    """显式识别需要拆解/归纳的任务，避免误落到 direct_execute。"""
+    if signals["has_planning_signal"] or signals["has_comparison_signal"]:
+        return True
+    if signals["has_search_signal"] and signals["has_synthesis_signal"]:
+        return True
+    if signals["has_search_signal"] and signals["has_read_action_signal"]:
+        return True
+    if signals["has_web_reading_signal"] and signals["has_synthesis_signal"] and not (
+            signals["has_url"] or signals["has_tool_reference"]
+    ):
+        # “打开这个 URL 看一下当前页面”仍应允许直达；但“阅读网页并整理关键点”属于检索归纳任务。
+        return True
+    if signals["clause_count"] >= 3 and (
+            signals["has_search_signal"]
+            or signals["has_web_reading_signal"]
+            or signals["has_planning_signal"]
+            or signals["has_comparison_signal"]
+    ):
+        return True
+    return False
 
 
 def infer_entry_strategy(
@@ -167,31 +235,23 @@ def infer_entry_strategy(
     signals = _analyze_text_intent(user_message)
     if signals["char_count"] == 0:
         return "recall_memory_context"
-    is_multi_step = (
+    needs_planner = _should_force_planner_for_tool_task(signals)
+    is_structurally_multi_step = (
             signals["has_numbered_list"]
             or signals["has_sequence_marker"]
             or signals["clause_count"] >= 3
             or signals["char_count"] >= 120
     )
-    has_direct_execution_signal = any(
-        (
-            signals["has_tool_reference"],
-            signals["has_url"],
-            signals["has_absolute_path"],
-            signals["has_shell_command"],
-            signals["has_code_block"],
-            signals["has_action_signal"],
-        )
-    )
+    has_direct_execution_need = _has_direct_execution_need(signals)
     if signals["needs_human_wait"]:
         # 只有“短且单一的前置确认请求”才走 direct_wait。
         # 对包含明确执行目标、篇幅较长的新任务请求，保留给完整规划链路处理，避免一进来就弹出通用确认。
-        if has_direct_execution_signal and (is_multi_step or signals["char_count"] >= 48):
+        if has_direct_execution_need and ((needs_planner or is_structurally_multi_step) or signals["char_count"] >= 48):
             return "recall_memory_context"
         return "direct_wait"
     if signals["is_phatic"] and not signals["has_action_signal"] and not signals["has_tool_reference"]:
         return "direct_answer"
-    if has_direct_execution_signal and not is_multi_step:
+    if has_direct_execution_need and not needs_planner and not is_structurally_multi_step:
         return "direct_execute"
     return "recall_memory_context"
 
@@ -1050,6 +1110,7 @@ def _build_loop_break_payload(
         loop_break_reason: str,
         blocker: str,
         next_hint: str,
+        runtime_recent_action: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     log_runtime(
         logger,
@@ -1061,7 +1122,7 @@ def _build_loop_break_payload(
         error=blocker,
         next_hint=next_hint,
     )
-    return {
+    payload = {
         "success": False,
         "summary": f"当前步骤暂时未能完成：{step.description}",
         "result": f"当前步骤暂时未能完成：{step.description}",
@@ -1070,6 +1131,11 @@ def _build_loop_break_payload(
         "blockers": [blocker],
         "next_hint": next_hint,
     }
+    merged_recent_action = dict(runtime_recent_action or {})
+    merged_recent_action["last_no_progress_reason"] = blocker
+    if merged_recent_action:
+        payload["runtime_recent_action"] = merged_recent_action
+    return payload
 
 
 def _normalize_execution_payload(parsed: Dict[str, Any], *, default_summary: str) -> Dict[str, Any]:
@@ -1078,17 +1144,48 @@ def _normalize_execution_payload(parsed: Dict[str, Any], *, default_summary: str
     if not str(payload.get("summary") or "").strip():
         payload["summary"] = default_summary
         payload["result"] = default_summary
+    runtime_recent_action = parsed.get("runtime_recent_action")
+    if isinstance(runtime_recent_action, dict) and runtime_recent_action:
+        payload["runtime_recent_action"] = runtime_recent_action
     return payload
 
 
-def _build_human_wait_missing_interrupt_payload(step: Step, *, reason: str) -> Dict[str, Any]:
+def _build_human_wait_missing_interrupt_payload(
+        step: Step,
+        *,
+        reason: str,
+        runtime_recent_action: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """等待步骤必须显式进入 interrupt，不能用普通成功结果冒充完成。"""
     return _build_loop_break_payload(
         step=step,
         loop_break_reason=reason,
         blocker="当前步骤需要等待用户确认/选择，但尚未成功发起等待请求。",
         next_hint="请调用 message_ask_user 发起确认/选择，不要继续搜索、读取或直接结束当前步骤。",
+        runtime_recent_action=runtime_recent_action,
     )
+
+
+def _build_recent_failed_action(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
+    return {
+        "function_name": str(function_name or "").strip(),
+        "message": _truncate_tool_text(tool_result.message, max_chars=120),
+    }
+
+
+def _build_recent_blocked_tool_call(
+        *,
+        function_name: str,
+        tool_result: ToolResult,
+        loop_break_reason: str,
+) -> Dict[str, Any]:
+    if loop_break_reason not in _BLOCKED_TOOL_LOOP_BREAK_REASONS:
+        return {}
+    return {
+        "function_name": str(function_name or "").strip(),
+        "reason": loop_break_reason,
+        "message": _truncate_tool_text(tool_result.message, max_chars=160),
+    }
 
 
 def _summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
@@ -1361,6 +1458,7 @@ async def execute_step_with_prompt(
     browser_no_progress_count = 0
     failed_browser_high_level_keys: set[str] = set()
     consecutive_failure_count = 0
+    runtime_recent_action: Dict[str, Any] = {}
 
     for index in range(max(1, int(max_tool_iterations))):
         # 每轮都先根据“当前页面状态”生成一个 route key。
@@ -1448,6 +1546,7 @@ async def execute_step_with_prompt(
                 return _build_human_wait_missing_interrupt_payload(
                     step,
                     reason="human_wait_missing_interrupt",
+                    runtime_recent_action=runtime_recent_action,
                 ), emitted_tool_events
             has_summary = bool(str(parsed_execution.get("summary") or "").strip())
             has_delivery_text = bool(str(parsed_execution.get("delivery_text") or "").strip())
@@ -1474,7 +1573,10 @@ async def execute_step_with_prompt(
                 elapsed_ms=elapsed_ms(started_at),
             )
             return _normalize_execution_payload(
-                parsed,
+                {
+                    **parsed,
+                    "runtime_recent_action": runtime_recent_action,
+                },
                 default_summary=f"已完成步骤：{step.description}",
             ), emitted_tool_events
 
@@ -1903,6 +2005,17 @@ async def execute_step_with_prompt(
         if bool(tool_result.success):
             consecutive_failure_count = 0
         else:
+            runtime_recent_action["last_failed_action"] = _build_recent_failed_action(
+                function_name=function_name,
+                tool_result=tool_result,
+            )
+            blocked_tool_call = _build_recent_blocked_tool_call(
+                function_name=function_name,
+                tool_result=tool_result,
+                loop_break_reason=loop_break_reason,
+            )
+            if blocked_tool_call:
+                runtime_recent_action["last_blocked_tool_call"] = blocked_tool_call
             consecutive_failure_count += 1
             if (
                     normalized_function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES
@@ -2022,6 +2135,7 @@ async def execute_step_with_prompt(
                 "result": "",
                 "delivery_text": "",
                 "attachments": [],
+                "runtime_recent_action": runtime_recent_action,
             }, emitted_tool_events
         if function_name == NOTIFY_USER_FUNCTION_NAME and bool(tool_result.success):
             notify_user_sent = True
@@ -2039,6 +2153,7 @@ async def execute_step_with_prompt(
                 loop_break_reason=loop_break_reason,
                 blocker="同一工具及参数被重复调用过多次，当前步骤已被强制收敛。",
                 next_hint="请改用其他工具、调整参数，或将当前步骤拆小后再执行。",
+                runtime_recent_action=runtime_recent_action,
             ), emitted_tool_events
         if loop_break_reason == "search_repeat":
             return _build_loop_break_payload(
@@ -2046,6 +2161,7 @@ async def execute_step_with_prompt(
                 loop_break_reason=loop_break_reason,
                 blocker="同一搜索查询已重复触发多次，当前检索路径没有继续收获。",
                 next_hint="请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。",
+                runtime_recent_action=runtime_recent_action,
             ), emitted_tool_events
         if loop_break_reason == "browser_no_progress":
             return _build_loop_break_payload(
@@ -2053,6 +2169,7 @@ async def execute_step_with_prompt(
                 loop_break_reason=loop_break_reason,
                 blocker="浏览器连续观察未发现新的有效信息，当前页面路径已无进展。",
                 next_hint="请更换页面、改用搜索/正文读取，或重新规划当前步骤。",
+                runtime_recent_action=runtime_recent_action,
             ), emitted_tool_events
         if consecutive_failure_count >= TOOL_FAILURE_LIMIT:
             return _build_loop_break_payload(
@@ -2060,6 +2177,7 @@ async def execute_step_with_prompt(
                 loop_break_reason="tool_failure_limit",
                 blocker="连续工具调用失败次数过多，当前步骤已停止继续重试。",
                 next_hint="请检查参数、改换工具，或将当前步骤拆小后再执行。",
+                runtime_recent_action=runtime_recent_action,
             ), emitted_tool_events
 
     parsed = safe_parse_json(llm_message.get("content"))
@@ -2075,6 +2193,7 @@ async def execute_step_with_prompt(
         return _build_human_wait_missing_interrupt_payload(
             step,
             reason="human_wait_max_tool_iterations",
+            runtime_recent_action=runtime_recent_action,
         ), emitted_tool_events
     log_runtime(
         logger,
@@ -2089,6 +2208,9 @@ async def execute_step_with_prompt(
         elapsed_ms=elapsed_ms(started_at),
     )
     return _normalize_execution_payload(
-        parsed,
+        {
+            **parsed,
+            "runtime_recent_action": runtime_recent_action,
+        },
         default_summary=f"已完成步骤：{step.description}",
     ), emitted_tool_events
