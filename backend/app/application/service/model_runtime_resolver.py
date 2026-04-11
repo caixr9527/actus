@@ -56,6 +56,7 @@ class ModelRuntimeResolver:
                 model_name=model.model_name,
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 8192),
+                api_style=capabilities.get("api_style", "chat_completions"),
                 multimodal=capabilities.get("multimodal", False),
                 supported=normalize_supported_input_types(
                     capabilities.get("supported", [])

@@ -205,6 +205,42 @@ class _HumanWaitAskUserWithoutInterruptLLM:
         }
 
 
+class _ReasoningToolReplayLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "这段推理字段必须在下一轮保留",
+                "tool_calls": [
+                    {
+                        "id": "tool-msg-1",
+                        "call_id": "tool-call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "imooc ai agent"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+
+        assistant_message = next(item for item in messages if item.get("role") == "assistant")
+        tool_message = next(item for item in messages if item.get("role") == "tool")
+        assert assistant_message["reasoning_content"] == "这段推理字段必须在下一轮保留"
+        assert assistant_message["tool_calls"][0]["call_id"] == "tool-call-1"
+        assert tool_message["tool_call_id"] == "tool-msg-1"
+        assert tool_message["call_id"] == "tool-call-1"
+        return {
+            "role": "assistant",
+            "content": '{"success": true, "result": "已完成课程检索", "attachments": []}',
+        }
+
+
 def test_execute_step_with_prompt_should_return_final_result_without_redundant_iterations() -> None:
     llm = _FinalResultLLM()
 
@@ -386,6 +422,25 @@ def test_execute_step_with_prompt_should_fail_human_wait_step_without_interrupt_
     assert len(called_events) == 2
     assert all(event.function_name == "message_ask_user" for event in called_events)
     assert all(event.function_result is not None and event.function_result.success is True for event in called_events)
+
+
+def test_execute_step_with_prompt_should_preserve_assistant_reasoning_fields_during_tool_replay() -> None:
+    llm = _ReasoningToolReplayLLM()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="搜索课程"),
+            runtime_tools=[_SearchTool()],
+            max_tool_iterations=3,
+            on_tool_event=None,
+            user_content=[{"type": "text", "text": "查一下课程"}],
+        )
+
+    payload, _ = asyncio.run(_run())
+
+    assert payload["success"] is True
+    assert payload["result"] == "已完成课程检索"
 
 
 def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypatch) -> None:

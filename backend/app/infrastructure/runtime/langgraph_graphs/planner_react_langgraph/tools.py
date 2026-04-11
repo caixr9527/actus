@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import uuid
+from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
@@ -514,6 +515,20 @@ def _parse_tool_call_args(raw_arguments: Any) -> Dict[str, Any]:
             )
             return {}
     return {}
+
+
+def _build_assistant_tool_call_message(
+        llm_message: Dict[str, Any],
+        *,
+        selected_tool_call: Dict[str, Any],
+) -> Dict[str, Any]:
+    """回放 assistant tool-call 消息时保留所有未知字段，避免推理态信息被裁掉。"""
+    assistant_message = deepcopy(llm_message if isinstance(llm_message, dict) else {})
+    assistant_message["role"] = "assistant"
+    assistant_message["tool_calls"] = [deepcopy(selected_tool_call)]
+    if "content" not in assistant_message:
+        assistant_message["content"] = llm_message.get("content")
+    return assistant_message
 
 
 def _step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
@@ -1609,11 +1624,10 @@ async def execute_step_with_prompt(
             continue
 
         messages.append(
-            {
-                "role": "assistant",
-                "content": llm_message.get("content"),
-                "tool_calls": [selected_tool_call],
-            }
+            _build_assistant_tool_call_message(
+                llm_message,
+                selected_tool_call=selected_tool_call,
+            )
         )
 
         function = selected_tool_call.get("function")
@@ -1624,7 +1638,8 @@ async def execute_step_with_prompt(
         if not function_name:
             continue
         normalized_function_name = function_name.lower()
-        tool_call_id = str(selected_tool_call.get("id") or uuid.uuid4())
+        tool_call_id = str(selected_tool_call.get("id") or selected_tool_call.get("call_id") or uuid.uuid4())
+        tool_call_ref = str(selected_tool_call.get("call_id") or tool_call_id)
         function_args = _parse_tool_call_args(function.get("arguments"))
         tool_fingerprint = _build_tool_fingerprint(normalized_function_name, function_args)
         if tool_fingerprint == last_tool_fingerprint:
@@ -2133,6 +2148,7 @@ async def execute_step_with_prompt(
             {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
+                "call_id": tool_call_ref,
                 "function_name": function_name,
                 "content": _build_tool_feedback_content(function_name, tool_result),
             }
