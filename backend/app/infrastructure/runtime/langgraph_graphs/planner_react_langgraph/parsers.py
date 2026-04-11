@@ -25,6 +25,12 @@ _EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN = re.compile(
     r"|((文件|文档|txt|md|markdown|json|csv).{0,10}(保存|写入|导出|输出|生成|创建|落盘))",
     re.IGNORECASE,
 )
+_EXPLICIT_INTERMEDIATE_PREVIEW_PATTERN = re.compile(
+    r"((草稿|预览|候选|初稿|先看|给我看看|过目).{0,8}(确认|反馈|意见)?)"
+    r"|((先|先给).{0,8}(我|用户)?.{0,6}(看|确认|预览))"
+    r"|(\b(draft|preview|candidate)\b)",
+    re.IGNORECASE,
+)
 
 
 def merge_attachment_paths(*path_groups: List[str]) -> List[str]:
@@ -86,6 +92,11 @@ def _user_explicitly_requests_file_output(user_message: str) -> bool:
     return bool(_EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(str(user_message or "").strip()))
 
 
+def _user_explicitly_requests_intermediate_preview(user_message: str) -> bool:
+    """仅识别用户自己明确要求“先看草稿/预览/候选”的场景。"""
+    return bool(_EXPLICIT_INTERMEDIATE_PREVIEW_PATTERN.search(str(user_message or "").strip()))
+
+
 def _resolve_step_artifact_strategy(
         *,
         task_mode_hint: Any,
@@ -127,8 +138,9 @@ def _resolve_step_delivery_role(
         task_mode_hint: Any,
         output_mode: str,
         raw_delivery_role: Any,
+        user_message: str,
 ) -> str:
-    """按结构化输出模式收敛交付角色，避免把最终正文职责落到错误步骤上。"""
+    """按结构化输出模式收敛交付角色，默认不把中间草稿投递成用户正文。"""
     delivery_role = normalize_controlled_value(raw_delivery_role, StepDeliveryRole)
 
     if task_mode_hint == "human_wait":
@@ -137,9 +149,11 @@ def _resolve_step_delivery_role(
         return StepDeliveryRole.NONE.value
     if delivery_role == StepDeliveryRole.FINAL.value:
         return StepDeliveryRole.FINAL.value
-    if delivery_role == StepDeliveryRole.INTERMEDIATE.value:
+    if delivery_role == StepDeliveryRole.INTERMEDIATE.value and _user_explicitly_requests_intermediate_preview(
+            user_message
+    ):
         return StepDeliveryRole.INTERMEDIATE.value
-    return StepDeliveryRole.INTERMEDIATE.value
+    return StepDeliveryRole.NONE.value
 
 
 def _resolve_step_delivery_context_state(
@@ -192,6 +206,7 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
             task_mode_hint=task_mode_hint,
             output_mode=output_mode,
             raw_delivery_role=payload.get("delivery_role"),
+            user_message=user_message,
         )
         delivery_context_state = _resolve_step_delivery_context_state(
             task_mode_hint=task_mode_hint,

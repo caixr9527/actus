@@ -12,6 +12,7 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes i
     entry_router_node,
     execute_step_node,
 )
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing import route_after_plan
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.language_checker import (
     build_direct_path_copy,
     infer_working_language_from_message,
@@ -536,6 +537,41 @@ class _PlannerResearchDriftLLM:
         }
 
 
+class _PlanOnlyPlannerLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "好的，我将先给出执行步骤，不直接开始执行。",
+                    "goal": "规划北京三日游",
+                    "title": "北京三日游计划",
+                    "language": "zh",
+                    "steps": [
+                        {
+                            "id": "1",
+                            "description": "检索北京主要景点、交通与住宿信息",
+                            "task_mode_hint": "research",
+                            "output_mode": "none",
+                            "artifact_policy": "forbid_file_output",
+                            "delivery_role": "none",
+                            "delivery_context_state": "none",
+                        },
+                        {
+                            "id": "2",
+                            "description": "整理成三天行程草案",
+                            "task_mode_hint": "general",
+                            "output_mode": "inline",
+                            "artifact_policy": "default",
+                            "delivery_role": "intermediate",
+                            "delivery_context_state": "none",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 def test_entry_router_node_should_route_direct_answer_for_greeting() -> None:
     state = asyncio.run(
         entry_router_node(
@@ -625,6 +661,20 @@ def test_entry_router_node_should_route_explicit_plan_request_to_planner() -> No
     )
 
     assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+
+
+def test_entry_router_node_should_mark_plan_only_request_in_control_metadata() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+    assert state["graph_metadata"]["control"]["plan_only"] is True
 
 
 def test_entry_router_node_should_keep_single_file_read_request_on_direct_execute() -> None:
@@ -848,6 +898,44 @@ def test_direct_execute_node_should_preserve_english_working_language() -> None:
     assert state["plan"].language == "en"
     assert state["plan"].message == "Entered direct execution path."
     assert state["plan"].steps[0].title == "Execute the user request directly"
+
+
+def test_create_or_reuse_plan_node_should_stop_after_planning_for_plan_only_request() -> None:
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。",
+                "graph_metadata": {"control": {"plan_only": True}},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_refs": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "artifact_refs": [],
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _PlanOnlyPlannerLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert state["current_step_id"] is None
+    assert state["final_message"] == "好的，我将先给出执行步骤，不直接开始执行。"
+    assert route_after_plan(state) == "consolidate_memory"
 
 
 def test_execute_step_with_prompt_should_block_browser_for_research_task() -> None:
@@ -1570,7 +1658,7 @@ def test_execute_step_node_should_not_overwrite_final_delivery_payload_for_inter
     assert next_state["working_memory"]["final_delivery_payload"] == existing_payload
 
 
-def test_execute_step_node_should_emit_intermediate_message_for_inline_candidate_step() -> None:
+def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candidate_step() -> None:
     llm = _IntermediateInlineDeliveryLLM()
     search_tool = _SearchTool()
     plan = Plan(
@@ -1626,9 +1714,9 @@ def test_execute_step_node_should_emit_intermediate_message_for_inline_candidate
         unbind_live_event_sink(token)
 
     intermediate_events = [event for event in emitted_events if isinstance(event, MessageEvent)]
-    assert len(intermediate_events) == 1
-    assert intermediate_events[0].stage == "intermediate"
-    assert intermediate_events[0].message == "候选课程 A、候选课程 B、候选课程 C。"
+    assert len(intermediate_events) == 0
+    assert next_state["plan"].steps[0].outcome is not None
+    assert next_state["plan"].steps[0].outcome.delivery_text == "候选课程 A、候选课程 B、候选课程 C。"
     assert next_state["final_message"] == "已展示候选课程"
 
 

@@ -84,8 +84,17 @@ def _route_after_completed_step(
 def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:
     """规划阶段后的分支路由。"""
     plan = state.get("plan")
+    control = get_graph_control(state.get("graph_metadata"))
 
     if plan is None or plan.status == ExecutionStatus.COMPLETED:
+        return "consolidate_memory"
+    if bool(control.get("plan_only")):
+        log_runtime(
+            logger,
+            logging.INFO,
+            "命中仅规划模式，跳过执行与总结",
+            state=state,
+        )
         return "consolidate_memory"
 
     if _has_reached_execution_limit(state):

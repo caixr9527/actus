@@ -101,6 +101,7 @@ class GraphControlState(TypedDict, total=False):
     """图运行中的控制状态。"""
 
     entry_strategy: str
+    plan_only: bool
     skip_replan_when_plan_finished: bool
     step_reuse_hit: bool
     wait_resume_action: str
@@ -135,6 +136,8 @@ def normalize_graph_metadata(raw: Any) -> GraphMetadataState:
         entry_strategy = str(raw_control.get("entry_strategy") or "").strip()
         if entry_strategy:
             control["entry_strategy"] = entry_strategy
+        if "plan_only" in raw_control:
+            control["plan_only"] = bool(raw_control.get("plan_only"))
         if "skip_replan_when_plan_finished" in raw_control:
             control["skip_replan_when_plan_finished"] = bool(raw_control.get("skip_replan_when_plan_finished"))
         if "step_reuse_hit" in raw_control:
@@ -1011,6 +1014,7 @@ class GraphStateContractMapper:
         artifact_refs = list(next_state.get("artifact_refs") or [])
         pending_interrupt = cls._normalize_pending_interrupt(next_state.get("pending_interrupt"))
         waiting_for_replan = control.get("wait_resume_action") == "replan"
+        plan_only = bool(control.get("plan_only"))
 
         for event in events:
             artifact_refs.extend(cls._extract_artifact_refs_from_event(event))
@@ -1018,14 +1022,14 @@ class GraphStateContractMapper:
             if isinstance(event, PlanEvent):
                 plan = event.plan.model_copy(deep=True)
                 step_states = cls._build_step_states_from_plan(plan)
-                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(
+                next_state["current_step_id"] = None if (waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
                     plan)
                 continue
 
             if isinstance(event, StepEvent):
                 step_states = cls._upsert_step_state(step_states=step_states, step=event.step)
                 plan = cls._upsert_step_into_plan(plan=plan, step=event.step, step_states=step_states)
-                next_state["current_step_id"] = None if waiting_for_replan else cls._derive_current_step_id_from_plan(
+                next_state["current_step_id"] = None if (waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
                     plan)
                 continue
 
@@ -1043,9 +1047,9 @@ class GraphStateContractMapper:
                 pending_interrupt = {}
 
         next_state["plan"] = plan
-        if not next_state.get("current_step_id") and not waiting_for_replan:
+        if not next_state.get("current_step_id") and not waiting_for_replan and not plan_only:
             next_state["current_step_id"] = cls._derive_current_step_id_from_plan(plan)
-        if not next_state.get("current_step_id") and not waiting_for_replan:
+        if not next_state.get("current_step_id") and not waiting_for_replan and not plan_only:
             for step_state in step_states:
                 if str(step_state.get("status")) == ExecutionStatus.RUNNING.value:
                     next_state["current_step_id"] = str(step_state.get("step_id") or "")

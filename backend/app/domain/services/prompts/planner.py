@@ -89,6 +89,8 @@ CREATE_PLAN_PROMPT = """
 - 步骤总数不超过 10 步；过细的操作应合并为一步
 - 涉及"让用户确认 / 选择 / 补充信息"的操作，必须单独拆成一步，并将 `task_mode_hint` 设为 `human_wait`
 - `human_wait` 步骤之后的执行步骤，必须标注真实执行模式，不得继续标为 `human_wait`
+- 除非用户明确要求“先看草稿 / 预览 / 候选结果再决定”，否则不要规划中间预览步骤；默认只保留步骤过程与最终交付
+- 如果用户明确说“先不要执行 / 只给步骤 / 只出计划”，只负责生成计划步骤，不要为了等待确认再插入额外的草稿预览步骤
 
 ## task_mode_hint 枚举说明
 
@@ -109,7 +111,7 @@ CREATE_PLAN_PROMPT = """
 | 场景 | output_mode | artifact_policy | delivery_role | delivery_context_state |
 |------|-------------|-----------------|---------------|------------------------|
 | 中间过程步骤，无需展示 | `none` | `forbid_file_output` | `none` | `none` |
-| 中间预览/候选结果需内联展示 | `inline` | `default` | `intermediate` | `none` |
+| 用户明确要求中间预览/候选结果 | `inline` | `default` | `intermediate` | `none` |
 | 最终重交付正文可直接基于现有上下文组织 | `inline` | `default` | `final` | `ready` |
 | 最终重交付正文由当前步骤负责，但仍需先检索/读取/操作 | `inline` | `default` | `final` | `needs_preparation` |
 | 用户明确要求导出文件 | `file` | `require_file_output` | `none` | `none` |
@@ -120,6 +122,7 @@ CREATE_PLAN_PROMPT = """
 - 只有用户明确要求"保存到文件 / 导出文档 / 生成 markdown/json/csv"等文件产物时，相关步骤才允许使用 `output_mode="file"`
 - `web_reading` 步骤必须优先通过 `search_web`、`fetch_page` 或浏览器高阶读取工具完成，不要规划成依赖文件工具读取页面内容
 - `general` 步骤若 `output_mode="inline"` 且当前不依赖明确文件/附件/上一步产物上下文，应直接内联返回文本，不要再读写文件
+- `delivery_role="intermediate"` 只在用户明确要求“先看草稿/预览/候选结果”时使用；普通执行链路不要插入中间 AI 正文消息
 - `delivery_role="final"` 只用于“承担最终重交付正文”的步骤；同一条计划里通常最多只有一个 `final`
 - `delivery_context_state="ready"` 只用于“当前步骤应直接组织最终正文”的场景；这种步骤不要继续发起新的 `search_web` / `fetch_page`
 - `delivery_context_state="needs_preparation"` 只用于“当前步骤最终仍要交付正文，但还要先继续准备上下文”的场景
@@ -182,7 +185,7 @@ interface CreatePlanResponse {{
   "steps": []
 }}
 ```
-### 示例二：多步骤规划（含检索、等待用户、编码、文件导出）
+### 示例二：多步骤规划（含检索、读取、文件导出）
 用户消息：`"帮我调研当前主流的 AI 编程工具，整理对比后导出为 markdown 文件"`
 ```json
 {{
@@ -211,25 +214,16 @@ interface CreatePlanResponse {{
     }},
     {{
       "id": "3",
-      "description": "整理所有信息，生成包含工具名称、核心功能、优缺点、定价的对比分析内容，内联展示供用户确认",
+      "description": "整理所有信息，生成包含工具名称、核心功能、优缺点、定价的对比分析内容，作为最终 Markdown 报告的正文草稿",
       "task_mode_hint": "general",
-      "output_mode": "inline",
-      "artifact_policy": "default",
-      "delivery_role": "intermediate",
-      "delivery_context_state": "none"
-    }},
-    {{
-      "id": "4",
-      "description": "询问用户是否需要调整对比维度或补充特定工具，等待用户确认或修改意见",
-      "task_mode_hint": "human_wait",
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
       "delivery_role": "none",
       "delivery_context_state": "none"
     }},
     {{
-      "id": "5",
-      "description": "根据用户反馈调整内容，将最终对比报告导出为 Markdown 文件",
+      "id": "4",
+      "description": "将最终对比报告导出为 Markdown 文件",
       "task_mode_hint": "coding",
       "output_mode": "file",
       "artifact_policy": "require_file_output",
@@ -296,6 +290,7 @@ UPDATE_PLAN_PROMPT = """
 - 涉及“让用户确认 / 选择 / 补充信息”的操作，必须单独拆成一步，并将 `task_mode_hint` 设为 `human_wait`
 - `human_wait` 步骤之后的执行步骤，必须标注真实执行模式，不得继续标为 `human_wait`
 - 检索类任务优先规划为：先 `research` 搜索，再按需 `web_reading` 读取页面，不要默认规划为 `browser_interaction`
+- 除非用户明确要求“先看草稿 / 预览 / 候选结果再决定”，否则不要新增中间预览步骤；默认只保留步骤过程与最终交付
 
 ## task_mode_hint 枚举说明
 
@@ -314,7 +309,7 @@ UPDATE_PLAN_PROMPT = """
 | 场景 | output_mode | artifact_policy | delivery_role | delivery_context_state |
 |------|-------------|-----------------|---------------|------------------------|
 | 中间过程步骤，无需展示 | `none` | `forbid_file_output` | `none` | `none` |
-| 中间预览/候选结果需内联展示 | `inline` | `default` | `intermediate` | `none` |
+| 用户明确要求中间预览/候选结果 | `inline` | `default` | `intermediate` | `none` |
 | 最终重交付正文可直接基于现有上下文组织 | `inline` | `default` | `final` | `ready` |
 | 最终重交付正文由当前步骤负责，但仍需先检索/读取/操作 | `inline` | `default` | `final` | `needs_preparation` |
 | 用户明确要求导出文件 | `file` | `require_file_output` | `none` | `none` |
@@ -325,6 +320,7 @@ UPDATE_PLAN_PROMPT = """
 - 只有用户明确要求"保存到文件 / 导出文档 / 生成 markdown/json/csv"等文件产物时，相关步骤才允许使用 `output_mode="file"`
 - `web_reading` 步骤必须优先通过 `search_web`、`fetch_page` 或浏览器高阶读取工具完成，不要规划成依赖文件工具读取页面内容
 - `general` 步骤若 `output_mode="inline"` 且当前不依赖明确文件/附件/上一步产物上下文，应直接内联返回文本，不要再读写文件
+- `delivery_role="intermediate"` 只在用户明确要求“先看草稿/预览/候选结果”时使用；普通执行链路不要插入中间 AI 正文消息
 - `delivery_role="final"` 只用于“承担最终重交付正文”的步骤；同一条计划里通常最多只有一个 `final`
 - `delivery_context_state="ready"` 只用于“当前步骤应直接组织最终正文”的场景；这种步骤不要继续发起新的 `search_web` / `fetch_page`
 - `delivery_context_state="needs_preparation"` 只用于“当前步骤最终仍要交付正文，但还要先继续准备上下文”的场景

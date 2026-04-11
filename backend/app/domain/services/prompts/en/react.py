@@ -40,11 +40,9 @@ EXECUTION_PROMPT = """
 
 ### 2.1 Progress updates (`message_notify_user`)
 
-You may call `message_notify_user` at most once in the current step, and only when both conditions are true:
-- the step is about to start its first meaningful action, or a key milestone needs to be stated
-- no progress update has been sent in this step yet
-
-Keep the message to one sentence and avoid exposing full file paths.
+- The current runtime does not expose extra progress messages from ordinary execution steps.
+- Do not call `message_notify_user`.
+- Step progress is conveyed by step events themselves; only wait cards and final summaries are shown as standalone user-facing messages.
 
 ### 2.2 User input requests (`message_ask_user`)
 

@@ -62,6 +62,7 @@ from .settings import (
     NUMBERED_LIST_PATTERN,
     PHATIC_PATTERN,
     PLANNING_PATTERN,
+    PLAN_ONLY_PATTERN,
     READ_ACTION_PATTERN,
     READ_ONLY_FILE_FUNCTION_NAMES,
     REPEAT_TOOL_LIMIT,
@@ -138,6 +139,7 @@ def _analyze_text_intent(value: str) -> Dict[str, Any]:
             "has_read_action_signal": False,
             "has_search_signal": False,
             "has_planning_signal": False,
+            "has_plan_only_signal": False,
             "has_synthesis_signal": False,
             "has_comparison_signal": False,
             "has_file_signal": False,
@@ -170,6 +172,7 @@ def _analyze_text_intent(value: str) -> Dict[str, Any]:
         "has_read_action_signal": bool(READ_ACTION_PATTERN.search(normalized_text)),
         "has_search_signal": bool(SEARCH_PATTERN.search(normalized_text)),
         "has_planning_signal": bool(PLANNING_PATTERN.search(normalized_text)),
+        "has_plan_only_signal": bool(PLAN_ONLY_PATTERN.search(normalized_text)),
         "has_synthesis_signal": bool(SYNTHESIS_PATTERN.search(normalized_text)),
         "has_comparison_signal": bool(COMPARISON_PATTERN.search(normalized_text)),
         "has_file_signal": bool(FILE_PATTERN.search(normalized_text)),
@@ -200,6 +203,8 @@ def _has_direct_execution_need(signals: Dict[str, Any]) -> bool:
 
 def _should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
     """显式识别需要拆解/归纳的任务，避免误落到 direct_execute。"""
+    if signals["has_plan_only_signal"]:
+        return True
     if signals["has_planning_signal"] or signals["has_comparison_signal"]:
         return True
     if signals["has_search_signal"] and signals["has_synthesis_signal"]:
@@ -219,6 +224,11 @@ def _should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
     ):
         return True
     return False
+
+
+def requests_plan_only(user_message: str) -> bool:
+    """识别“先只给计划/步骤，不要执行”的请求。"""
+    return bool(_analyze_text_intent(user_message)["has_plan_only_signal"])
 
 
 def infer_entry_strategy(
@@ -573,7 +583,6 @@ def _filter_available_tools(
         available_tools: List[Dict[str, Any]],
         *,
         disallowed_function_names: Optional[set[str]] = None,
-        allow_notify_user: bool,
         allow_ask_user: bool,
 ) -> List[Dict[str, Any]]:
     filtered_tools: List[Dict[str, Any]] = []
@@ -581,8 +590,6 @@ def _filter_available_tools(
     for tool_schema in available_tools:
         function_name = _extract_function_name(tool_schema)
         if function_name in blocked_names:
-            continue
-        if function_name == NOTIFY_USER_FUNCTION_NAME and not allow_notify_user:
             continue
         if function_name == ASK_USER_FUNCTION_NAME and not allow_ask_user:
             continue
@@ -1428,7 +1435,6 @@ async def execute_step_with_prompt(
     ]
 
     llm_message: Dict[str, Any] = {}
-    notify_user_sent = False
     allow_ask_user = task_mode == "human_wait" or _step_allows_user_wait(step, {})
     research_route_enabled = (
             task_mode in {"research", "web_reading"}
@@ -1509,7 +1515,6 @@ async def execute_step_with_prompt(
         iteration_tools = _filter_available_tools(
             available_tools,
             disallowed_function_names=iteration_blocked_function_names,
-            allow_notify_user=not notify_user_sent,
             allow_ask_user=allow_ask_user,
         )
         log_runtime(
@@ -1815,19 +1820,6 @@ async def execute_step_with_prompt(
                         "已经拿到候选链接，请优先对搜索结果中的 URL 调用 fetch_page 读取正文。"
                         + (f" 可用链接示例: {candidate_hint}" if candidate_hint else "")
                 ),
-            )
-        elif function_name == NOTIFY_USER_FUNCTION_NAME and notify_user_sent:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "重复进度通知已收敛",
-                step_id=str(step.id or ""),
-                function_name=function_name,
-            )
-            tool_result = ToolResult(
-                success=True,
-                message="当前步骤已发送过进度通知，请继续调用实际工具或直接完成当前步骤。",
-                data="Continue",
             )
         elif function_name == ASK_USER_FUNCTION_NAME and not _step_allows_user_wait(step, function_args):
             log_runtime(
@@ -2137,8 +2129,6 @@ async def execute_step_with_prompt(
                 "attachments": [],
                 "runtime_recent_action": runtime_recent_action,
             }, emitted_tool_events
-        if function_name == NOTIFY_USER_FUNCTION_NAME and bool(tool_result.success):
-            notify_user_sent = True
         messages.append(
             {
                 "role": "tool",

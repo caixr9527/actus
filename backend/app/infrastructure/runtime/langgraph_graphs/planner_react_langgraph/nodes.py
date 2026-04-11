@@ -98,6 +98,7 @@ from .tools import (
     execute_step_with_prompt,
     has_available_file_context,
     infer_entry_strategy,
+    requests_plan_only,
 )
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,11 @@ def _clear_direct_wait_control_state(control: Dict[str, Any]) -> None:
     control.pop("direct_wait_original_message", None)
     control.pop("direct_wait_execute_task_mode", None)
     control.pop("direct_wait_original_task_executed", None)
+
+
+def _clear_plan_only_control_state(control: Dict[str, Any]) -> None:
+    """清理仅规划模式的控制字段，避免跨 run 残留。"""
+    control.pop("plan_only", None)
 
 
 # 状态与交付 helper：负责工作记忆默认结构，以及“轻 summary / 重交付正文”分轨。
@@ -229,26 +235,35 @@ def _sanitize_step_delivery_text(step: Step, raw_delivery_text: Any) -> str:
     return delivery_text
 
 
-def _build_intermediate_step_message_event(step: Step) -> Optional[MessageEvent]:
-    """中间候选结果必须以消息事件投递给前端，不能只留在步骤快照里。"""
-    if step.outcome is None or not step.outcome.done:
-        return None
-    if normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) != StepOutputMode.INLINE.value:
-        return None
-    if normalize_controlled_value(getattr(step, "delivery_role", None),
-                                  StepDeliveryRole) != StepDeliveryRole.INTERMEDIATE.value:
-        return None
-
-    delivery_text = normalize_step_result_text(step.outcome.delivery_text)
-    if not delivery_text:
-        return None
-
-    return MessageEvent(
-        role="assistant",
-        message=delivery_text,
-        attachments=[File(filepath=filepath) for filepath in step.outcome.produced_artifacts],
-        stage="intermediate",
+def _is_intermediate_delivery_step(step: Optional[Step]) -> bool:
+    """识别“预览/草稿”类中间交付步骤。"""
+    if step is None:
+        return False
+    return normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole) == (
+        StepDeliveryRole.INTERMEDIATE.value
     )
+
+
+def _build_intermediate_round_summary_prompt(context_packet: Dict[str, Any]) -> str:
+    """预览/草稿轮仍需进入 summary，但只允许输出轻量收尾。"""
+    return SUMMARIZE_PROMPT.format(
+        context_packet=json.dumps(context_packet, ensure_ascii=False)
+    ) + """
+
+补充限制：
+- 当前这轮的最后一步属于“预览/草稿”步骤，不是最终定稿。
+- `message` 只能写 1 到 2 句轻量收尾，说明“已生成草稿/预览”，并提示用户下一轮可以继续提出修改意见。
+- 不要重复草稿正文，不要把步骤结果重新展开成大段内容。
+- 如果存在历史最终正文载荷，也不要复用为本轮给用户的最终消息。
+"""
+
+
+def _build_intermediate_round_summary_fallback(step: Optional[Step]) -> str:
+    """给预览/草稿轮提供稳定的轻量收尾兜底文案。"""
+    step_label = str(getattr(step, "title", None) or getattr(step, "description", None) or "").strip()
+    if step_label:
+        return f"已生成{step_label}，如需调整方向或补充要求，请直接告诉我。"
+    return "已生成预览草稿，如需调整方向或补充要求，请直接告诉我。"
 
 
 # 附件 helper：只负责当前 run 内附件引用的收集、合并与最终交付选择。
@@ -1232,12 +1247,18 @@ def _build_wait_resume_outcome(
 async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
     """P0 入口轻路由：先判断是否需要完整记忆召回和 Planner。"""
     control = _get_control_metadata(state)
+    user_message = str(state.get("user_message") or "")
     plan = state.get("plan")
     control["entry_strategy"] = infer_entry_strategy(
-        user_message=str(state.get("user_message") or ""),
+        user_message=user_message,
         has_input_parts=bool(list(state.get("input_parts") or [])),
         has_active_plan=bool(plan is not None and len(list(plan.steps or [])) > 0 and not plan.done),
     )
+    # “只给步骤，不执行”是当前 run 的显式用户意图，入口即写入控制态，供 planner 路由收口。
+    if requests_plan_only(user_message):
+        control["plan_only"] = True
+    else:
+        _clear_plan_only_control_state(control)
 
     log_runtime(
         logger,
@@ -1245,6 +1266,7 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
         "入口路由完成",
         state=state,
         entry_strategy=str(control.get("entry_strategy") or ""),
+        plan_only=bool(control.get("plan_only")),
     )
     return {
         **state,
@@ -1497,13 +1519,14 @@ async def recall_memory_context_node(
 async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     started_at = now_perf()
+    control = _get_control_metadata(state)
+    plan_only = bool(control.get("plan_only"))
     plan = state.get("plan")
     if plan is not None and len(plan.steps) > 0 and not plan.done:
         next_step = plan.get_next_step()
         working_memory = _ensure_working_memory(state)
         if not str(working_memory.get("goal") or "").strip():
             working_memory["goal"] = str(plan.goal or state.get("user_message") or "")
-        control = _get_control_metadata(state)
         resumed_from_cancelled_plan = bool(control.pop("continued_from_cancelled_plan", False))
 
         reuse_events: List[Any] = []
@@ -1668,8 +1691,10 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
                 "plan": plan,
                 "working_memory": working_memory,
                 **planner_context_updates,
-                "current_step_id": next_step.id if next_step is not None else None,
-                "graph_metadata": dict(state.get("graph_metadata") or {}),
+                # 仅规划模式在 planner 后直接收尾，不进入 execute。
+                "current_step_id": None if plan_only else next_step.id if next_step is not None else None,
+                "final_message": planner_message if plan_only else "",
+                "graph_metadata": _replace_control_metadata(state, control),
             },
             events=planner_events,
         )
@@ -2015,10 +2040,6 @@ async def execute_step_node(
         status=step.status,
     )
     final_step_events: List[Any] = [completed_event]
-    # 中间候选结果需要显式投递给前端，不能只停留在 step outcome 中。
-    intermediate_message_event = _build_intermediate_step_message_event(step)
-    if intermediate_message_event is not None:
-        final_step_events.append(intermediate_message_event)
 
     await emit_live_events(*final_step_events)
 
@@ -2412,18 +2433,24 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         )
     working_memory = _ensure_working_memory(state)
     final_message = str(state.get("final_message") or "")
+    last_executed_step = state.get("last_executed_step")
+    summarize_intermediate_round = _is_intermediate_delivery_step(last_executed_step)
     summary_context_packet = _build_prompt_context_packet(
         stage="summary",
         state=state,
         task_mode=state.get("task_mode") or normalize_controlled_value(
-            getattr(state.get("last_executed_step"), "task_mode_hint", None),
+            getattr(last_executed_step, "task_mode_hint", None),
             StepTaskModeHint,
         ),
     )
     summary_context_updates = _extract_prompt_context_state_updates(summary_context_packet)
     llm_runtime = describe_llm_runtime(llm)
-    summarize_prompt = SUMMARIZE_PROMPT.format(
-        context_packet=json.dumps(summary_context_packet, ensure_ascii=False)
+    summarize_prompt = (
+        _build_intermediate_round_summary_prompt(summary_context_packet)
+        if summarize_intermediate_round
+        else SUMMARIZE_PROMPT.format(
+            context_packet=json.dumps(summary_context_packet, ensure_ascii=False)
+        )
     )
     log_runtime(
         logger,
@@ -2436,6 +2463,7 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         execution_count=int(state.get("execution_count") or 0),
         step_count=len(list(plan.steps or [])),
         final_message_length=len(final_message),
+        intermediate_round=summarize_intermediate_round,
     )
     llm_started_at = now_perf()
     llm_message = await llm.invoke(
@@ -2445,7 +2473,15 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     )
     llm_cost_ms = elapsed_ms(llm_started_at)
     parsed = safe_parse_json(llm_message.get("content"))
-    summary_message = str(parsed.get("message") or final_message or "").strip()
+    summary_message = str(
+        parsed.get("message")
+        or (
+            _build_intermediate_round_summary_fallback(last_executed_step)
+            if summarize_intermediate_round
+            else final_message
+        )
+        or ""
+    ).strip()
     extracted_facts = _normalize_memory_fact_items(parsed.get("facts_in_session"))
     extracted_preferences = _normalize_memory_preferences(parsed.get("user_preferences"))
     model_memory_candidates = _build_model_memory_candidates(
@@ -2462,10 +2498,14 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     final_events: List[Any] = [
         MessageEvent(
             role="assistant",
-            # 用户最终看到重交付正文；轻量 summary 仅保留在 state.final_message 与运行摘要中。
-            message=build_delivery_text(
-                working_memory.get("final_delivery_payload"),
-                fallback=summary_message,
+            # 预览/草稿轮仍然需要轻量收尾，但不能把旧的最终正文或草稿正文重新当成本轮最终消息发给用户。
+            message=(
+                summary_message
+                if summarize_intermediate_round
+                else build_delivery_text(
+                    working_memory.get("final_delivery_payload"),
+                    fallback=summary_message,
+                )
             ),
             attachments=summary_attachment_paths,
             stage="final",

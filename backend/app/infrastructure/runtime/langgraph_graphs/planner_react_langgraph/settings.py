@@ -100,31 +100,26 @@ TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "research": (
         *SEARCH_FUNCTION_NAMES,
         *READ_ONLY_FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "web_reading": (
         *SEARCH_FUNCTION_NAMES,
         *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "browser_interaction": (
         *SEARCH_FUNCTION_NAMES,
         *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
         *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "coding": (
         *SEARCH_FUNCTION_NAMES,
         *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "file_processing": (
         *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
     "human_wait": (
@@ -133,7 +128,6 @@ TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "general": (
         *SEARCH_FUNCTION_NAMES,
         *FILE_FUNCTION_NAMES,
-        NOTIFY_USER_FUNCTION_NAME,
         ASK_USER_FUNCTION_NAME,
     ),
 }
@@ -201,6 +195,12 @@ SYNTHESIS_PATTERN = re.compile(
 )
 COMPARISON_PATTERN = re.compile(
     r"(比较|对比|推荐|优缺点|区别|怎么选|选哪个)",
+    re.IGNORECASE,
+)
+PLAN_ONLY_PATTERN = re.compile(
+    r"((只|先).{0,6}(给|出|列).{0,6}(步骤|计划|方案|大纲))"
+    r"|((先|暂时|现在).{0,8}(不要|别).{0,4}(执行|开始执行|跑起来))"
+    r"|(\b(plan only|steps only|do not execute|don't execute)\b)",
     re.IGNORECASE,
 )
 FILE_PATTERN = re.compile(

@@ -88,6 +88,7 @@ Answer directly when any of these is true:
 - Keep the total step count at 7 or fewer whenever possible
 - Any action that asks the user to confirm, choose, or provide missing input must be split into its own step and use `task_mode_hint = "human_wait"`
 - A step after `human_wait` must use its real execution mode, not `human_wait`
+- Unless the user explicitly asks for a draft, preview, or candidate result first, do not add intermediate preview steps. Default to showing only step progress and the final delivery.
 
 ## `task_mode_hint` enum
 
@@ -108,7 +109,7 @@ For research-style tasks, prefer: `research` first, then `web_reading` if needed
 | Scenario | output_mode | artifact_policy | delivery_role | delivery_context_state |
 |------|------|------|------|------|
 | Intermediate step, no need to show output yet | `none` | `forbid_file_output` | `none` | `none` |
-| Inline preview or candidate result | `inline` | `default` | `intermediate` | `none` |
+| User explicitly requested an inline preview or candidate result | `inline` | `default` | `intermediate` | `none` |
 | Final heavy-delivery text can be organized directly from existing context | `inline` | `default` | `final` | `ready` |
 | Final heavy-delivery text is still owned by this step, but context must be prepared first | `inline` | `default` | `final` | `needs_preparation` |
 | User explicitly asked for a file output | `file` | `require_file_output` | `none` | `none` |
@@ -119,6 +120,7 @@ Additional rules:
 - Only use `output_mode="file"` when the user clearly asked for saving, exporting, or generating a file such as markdown/json/csv
 - `web_reading` steps must prefer `search_web`, `fetch_page`, or high-level browser reading. Do not plan them as file-reading steps
 - If a `general` step uses `output_mode="inline"` and does not depend on clear file context, attachments, or prior artifacts, it should return inline text directly instead of reading or writing files
+- Use `delivery_role="intermediate"` only when the user explicitly asks to see a draft or preview before continuing. Ordinary execution flows must not insert extra assistant prose between steps.
 - Use `delivery_role="final"` only for the step that owns the final heavy-delivery text. A plan should usually contain at most one `final` step
 - Use `delivery_context_state="ready"` only when that final step should directly organize the answer from already-prepared context
 - Use `delivery_context_state="needs_preparation"` when the same final step still needs to search, read, or interact before producing the final heavy delivery

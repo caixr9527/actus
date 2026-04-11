@@ -101,7 +101,7 @@ def test_build_step_from_payload_should_keep_final_delivery_role_for_inline_step
     assert step.delivery_context_state == "ready"
 
 
-def test_build_step_from_payload_should_default_inline_step_to_intermediate_delivery_role() -> None:
+def test_build_step_from_payload_should_default_inline_step_to_non_delivery_role() -> None:
     step = build_step_from_payload(
         {
             "description": "展示候选城市供用户选择",
@@ -110,6 +110,23 @@ def test_build_step_from_payload_should_default_inline_step_to_intermediate_deli
             "artifact_policy": "default",
         },
         fallback_index=0,
+    )
+
+    assert step.delivery_role == "none"
+    assert step.delivery_context_state == "none"
+
+
+def test_build_step_from_payload_should_keep_intermediate_delivery_role_for_explicit_preview_request() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "展示候选城市供用户选择",
+            "task_mode_hint": "general",
+            "output_mode": "inline",
+            "artifact_policy": "default",
+            "delivery_role": "intermediate",
+        },
+        fallback_index=0,
+        user_message="先给我看一个候选方案草稿，我确认后再继续。",
     )
 
     assert step.delivery_role == "intermediate"

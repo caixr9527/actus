@@ -195,20 +195,6 @@ class _FakeToolLoopLLM:
         self.tool_name_snapshots.append(tool_names)
         call_index = len(self.tool_name_snapshots) - 1
         if call_index == 0:
-            assert "message_notify_user" in tool_names
-            return {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call-notify",
-                        "function": {
-                            "name": "message_notify_user",
-                            "arguments": json.dumps({"text": "开始生成报告"}, ensure_ascii=False),
-                        },
-                    }
-                ],
-            }
-        if call_index == 1:
             assert "message_notify_user" not in tool_names
             return {
                 "content": "",
@@ -228,17 +214,20 @@ class _FakeToolLoopLLM:
                     }
                 ],
             }
-        return {
-            "content": json.dumps(
-                {
-                    "success": True,
-                    "result": "报告已生成",
-                    "attachments": [],
-                },
-                ensure_ascii=False,
-            ),
-            "tool_calls": [],
-        }
+        if call_index == 1:
+            assert "message_notify_user" not in tool_names
+            return {
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "result": "报告已生成",
+                        "attachments": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                "tool_calls": [],
+            }
+        raise AssertionError("unexpected invoke count")
 
 
 class _BlockedThenCompleteLLM:
@@ -453,7 +442,7 @@ def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_t
     assert executed_step.outcome.produced_artifacts == ["/home/ubuntu/report.md"]
     assert next_state["selected_artifacts"] == []
     assert next_state["artifact_refs"] == ["/home/ubuntu/report.md"]
-    assert llm.tool_name_snapshots[0].count("message_notify_user") == 1
+    assert "message_notify_user" not in llm.tool_name_snapshots[0]
     assert "message_notify_user" not in llm.tool_name_snapshots[1]
     assert next_state["step_states"][0]["status"] == ExecutionStatus.COMPLETED.value
     assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is False
@@ -1018,6 +1007,62 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
     assert '"success_criteria"' not in llm.last_prompt
 
 
+def test_summarize_should_add_lightweight_constraint_for_intermediate_round() -> None:
+    llm = _CaptureSummaryPromptLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "先给我一个北京三日游草稿",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": Step(
+            id="step-3",
+            title="北京三日游草稿",
+            description="生成北京三日游草稿",
+            objective_key="objective-step-3",
+            success_criteria=["草稿生成完成"],
+            output_mode="inline",
+            delivery_role="intermediate",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成北京三日游草稿",
+                delivery_text="这里是一整段很长的草稿正文。",
+            ),
+        ),
+        "step_states": [
+            {
+                "step_id": "step-3",
+                "status": ExecutionStatus.COMPLETED.value,
+                "delivery_role": "intermediate",
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成北京三日游草稿",
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "生成北京三日游草稿",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    asyncio.run(summarize_node(state, llm))
+
+    assert "最后一步属于“预览/草稿”步骤" in llm.last_prompt
+    assert "不要重复草稿正文" in llm.last_prompt
+
+
 def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_state() -> None:
     llm = _FakeLightSummaryLLM()
     state = {
@@ -1058,6 +1103,70 @@ def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_
     assert message_event.type == "message"
     assert message_event.stage == "final"
     assert message_event.message == "这是用户最终应该看到的完整攻略正文。"
+
+
+def test_summarize_should_emit_light_summary_for_intermediate_round_even_with_stale_final_payload() -> None:
+    llm = _FakeLightSummaryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "先给我一个草稿",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": Step(
+            id="step-3",
+            title="候选草稿",
+            description="生成候选草稿",
+            objective_key="objective-step-3",
+            success_criteria=["草稿生成完成"],
+            output_mode="inline",
+            delivery_role="intermediate",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成候选草稿",
+                delivery_text="这是一段草稿正文。",
+            ),
+        ),
+        "step_states": [
+            {
+                "step_id": "step-3",
+                "status": ExecutionStatus.COMPLETED.value,
+                "delivery_role": "intermediate",
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成候选草稿",
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "生成候选草稿",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是上一轮遗留的旧最终正文，不应被发给用户。",
+                "sections": [],
+                "source_refs": [],
+            },
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "已生成候选草稿",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["final_message"] == "轻量总结"
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.stage == "final"
+    assert message_event.message == "轻量总结"
 
 
 def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep_light_summary() -> None:
