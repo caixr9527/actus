@@ -522,6 +522,8 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["historical_artifact_refs"] == ["artifact-prev"]
     assert contract["graph_state"]["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert contract["graph_state"]["metadata"]["projection"]["run_status"] == "waiting"
+    assert "graph_state_fields" not in contract["planes"]
+    assert "task_mode" in contract["planes"]["prompt_visible_fields"]
     assert contract["planes"]["projection_only_fields"] == ["sessions.title/latest_message/status"]
     assert memory_metadata["recall_count"] == 1
     assert memory_metadata["recall_ids"] == ["mem-1"]

@@ -276,7 +276,7 @@ class PlannerReActLangGraphState(TypedDict, total=False):
 class GraphStateContractMapper:
     """Graph State 与领域对象映射器。"""
 
-    GRAPH_STATE_FIELDS: tuple[str, ...] = (
+    PROMPT_VISIBLE_FIELDS: tuple[str, ...] = (
         "session_id",
         "user_id",
         "run_id",
@@ -1163,7 +1163,7 @@ class GraphStateContractMapper:
             "graph_state_contract": {
                 "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
                 "planes": {
-                    "graph_state_fields": list(cls.GRAPH_STATE_FIELDS),
+                    "prompt_visible_fields": list(cls.PROMPT_VISIBLE_FIELDS),
                     "projection_only_fields": list(cls.PROJECTION_ONLY_FIELDS),
                     "audit_only_fields": list(cls.AUDIT_ONLY_FIELDS),
                     "artifact_only_fields": list(cls.ARTIFACT_ONLY_FIELDS),

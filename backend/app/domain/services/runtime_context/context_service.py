@@ -38,7 +38,6 @@ from .policies import ContextPolicy, get_context_policy
 _ARTIFACT_LIMIT = 6
 _BRIEF_LIMIT = 3
 _COMPLETED_STEP_LIMIT = 5
-_MEMORY_LIMIT = 6
 _MESSAGE_LIMIT = 6
 _OPEN_QUESTION_LIMIT = 8
 _SUMMARY_MAX_CHARS = 400
@@ -101,7 +100,12 @@ class RuntimeContextService:
                 stage=stage,
             )
         if policy.include_retrieved_memory_digest:
-            packet["retrieved_memory_digest"] = self._build_retrieved_memory_digest(state=state)
+            packet["retrieved_memory_digest"] = self._build_retrieved_memory_digest(
+                state=state,
+                stage=stage,
+                task_mode=resolved_task_mode,
+                policy=policy,
+            )
         if policy.include_stable_background:
             packet["stable_background"] = self._build_stable_background(
                 state=state,
@@ -431,10 +435,31 @@ class RuntimeContextService:
             self,
             *,
             state: PlannerReActLangGraphState,
+            stage: PromptStage,
+            task_mode: str,
+            policy: ContextPolicy,
     ) -> List[Dict[str, Any]]:
+        # 召回记忆必须按 stage + task_mode 的策略收敛类型和数量，不能退回统一全量裁剪。
+        normalized_stage = str(stage).strip().lower()
+        normalized_task_mode = str(task_mode or "").strip().lower()
+        if not normalized_stage or not normalized_task_mode:
+            return []
+
+        allowed_types = {
+            str(item).strip().lower()
+            for item in set(policy.retrieved_memory_allowed_types or set())
+            if str(item).strip()
+        }
+        max_items = int(policy.retrieved_memory_max_items or 0)
+        if max_items <= 0:
+            return []
+
         sanitized_memories: List[Dict[str, Any]] = []
-        for item in list(state.get("retrieved_memories") or [])[:_MEMORY_LIMIT]:
+        for item in list(state.get("retrieved_memories") or []):
             if not isinstance(item, dict):
+                continue
+            memory_type = str(item.get("memory_type") or "").strip().lower()
+            if allowed_types and memory_type not in allowed_types:
                 continue
             content = item.get("content") if isinstance(item.get("content"), dict) else {}
             content_fragments: List[str] = []
@@ -466,7 +491,7 @@ class RuntimeContextService:
             sanitized_memories.append(
                 {
                     "id": str(item.get("id") or "").strip(),
-                    "memory_type": str(item.get("memory_type") or "").strip(),
+                    "memory_type": memory_type,
                     "summary": self._truncate_text(
                         item.get("summary"),
                         max_chars=_MEMORY_SUMMARY_MAX_CHARS,
@@ -482,6 +507,8 @@ class RuntimeContextService:
                     ],
                 }
             )
+            if len(sanitized_memories) >= max_items:
+                break
         return sanitized_memories
 
     def _build_stable_background(

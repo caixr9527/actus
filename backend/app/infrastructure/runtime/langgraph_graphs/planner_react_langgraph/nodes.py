@@ -2318,7 +2318,24 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
         ),
     )
     replan_context_updates = _extract_prompt_context_state_updates(replan_context_packet)
-    prompt = UPDATE_PLAN_PROMPT.format(step=last_step.model_dump_json(), plan=plan.model_dump_json())
+    # replan 仅消费摘要字段，避免把完整步骤和整份计划 JSON 再次塞入 Prompt。
+    current_step_snapshot = (
+        dict(replan_context_packet.get("current_step") or {})
+        if isinstance(replan_context_packet, dict)
+        else {}
+    )
+    stable_background = (
+        dict(replan_context_packet.get("stable_background") or {})
+        if isinstance(replan_context_packet, dict)
+        else {}
+    )
+    prompt = UPDATE_PLAN_PROMPT.format(
+        current_step=json.dumps(current_step_snapshot, ensure_ascii=False),
+        plan_snapshot=json.dumps(
+            dict(stable_background.get("plan_snapshot") or {}),
+            ensure_ascii=False,
+        ),
+    )
     prompt = _append_prompt_context_to_prompt(prompt, replan_context_packet)
     llm_runtime = describe_llm_runtime(llm)
     log_runtime(

@@ -164,6 +164,23 @@ class _FakeReplanLLM:
         }
 
 
+class _CaptureReplanPromptLLM:
+    def __init__(self, steps) -> None:
+        self.steps = list(steps)
+        self.last_prompt = ""
+
+    async def invoke(self, messages, tools, response_format):
+        self.last_prompt = str(messages[0]["content"])
+        return {
+            "content": json.dumps(
+                {
+                    "steps": self.steps,
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _FakeWriteFileTool(BaseTool):
     name = "file"
 
@@ -777,6 +794,40 @@ def test_runtime_context_service_should_not_inherit_previous_task_mode_in_planne
     assert context_packet["retrieved_memory_digest"][0]["memory_type"] == "instruction"
 
 
+def test_runtime_context_service_should_filter_retrieved_memories_by_stage_and_task_mode_policy() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "task_mode": StepTaskModeHint.BROWSER_INTERACTION.value,
+        "retrieved_memories": [
+            {"id": "mem-fact-1", "memory_type": "fact", "summary": "事实1", "content": {"text": "事实1"}},
+            {"id": "mem-profile-1", "memory_type": "profile", "summary": "偏好1", "content": {"text": "偏好1"}},
+            {
+                "id": "mem-instruction-1",
+                "memory_type": "instruction",
+                "summary": "指令1",
+                "content": {"text": "指令1"},
+            },
+            {"id": "mem-profile-2", "memory_type": "profile", "summary": "偏好2", "content": {"text": "偏好2"}},
+            {
+                "id": "mem-instruction-2",
+                "memory_type": "instruction",
+                "summary": "指令2",
+                "content": {"text": "指令2"},
+            },
+        ],
+    }
+
+    context_packet = context_service.build_packet(
+        stage="execute",
+        state=state,
+        task_mode=StepTaskModeHint.BROWSER_INTERACTION.value,
+    )
+
+    memory_types = [item["memory_type"] for item in context_packet["retrieved_memory_digest"]]
+    assert memory_types == ["profile", "instruction", "profile"]
+    assert len(context_packet["retrieved_memory_digest"]) == 3
+
+
 def test_runtime_context_service_should_hide_execute_only_fields_in_summary_stage() -> None:
     context_service = RuntimeContextService()
     state = {
@@ -910,6 +961,42 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
     assert replanned_steps[1].description == "新的分析步骤"
     assert replanned_steps[2].id == "step-c"
     assert next_state["current_step_id"] == step_ids[1]
+
+
+def test_replan_node_should_use_summarized_prompt_inputs_instead_of_full_plan_json() -> None:
+    completed_step = Step(
+        id="step-a",
+        title="完成已有步骤",
+        description="完成已有步骤",
+        objective_key="objective-step-a",
+        success_criteria=["完成已有步骤"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(done=True, summary="已完成"),
+    )
+    plan = Plan(
+        title="重规划测试",
+        goal="验证 replan 输入摘要化",
+        language="zh",
+        message="开始重规划",
+        steps=[completed_step],
+    )
+    llm = _CaptureReplanPromptLLM(
+        steps=[
+            {"id": "step-b", "description": "继续执行下一步"},
+        ]
+    )
+    state = {
+        "plan": plan,
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "emitted_events": [],
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+    }
+
+    asyncio.run(replan_node(state, llm))
+
+    assert "当前步骤摘要" in llm.last_prompt
+    assert "当前计划快照" in llm.last_prompt
+    assert "success_criteria" not in llm.last_prompt
 
 
 def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates() -> None:

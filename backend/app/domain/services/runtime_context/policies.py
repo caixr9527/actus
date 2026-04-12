@@ -3,6 +3,7 @@
 """Runtime 上下文可见性策略。"""
 
 from dataclasses import dataclass
+from typing import FrozenSet
 
 from app.domain.models import StepTaskModeHint
 
@@ -34,6 +35,9 @@ class ContextPolicy:
     include_recent_action_digest: bool = False
     include_working_memory_digest: bool = False
     include_retrieved_memory_digest: bool = False
+    # 按 stage + task_mode 控制召回记忆的类型和数量，避免统一上限导致噪音扩散。
+    retrieved_memory_allowed_types: FrozenSet[str] = frozenset()
+    retrieved_memory_max_items: int = 0
     include_stable_background: bool = False
     include_audit_refs: bool = False
     stable_background: StableBackgroundPolicy = StableBackgroundPolicy()
@@ -50,6 +54,8 @@ _EXECUTE_BASE_POLICY = ContextPolicy(
     include_recent_action_digest=True,
     include_working_memory_digest=True,
     include_retrieved_memory_digest=True,
+    retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+    retrieved_memory_max_items=4,
     include_stable_background=True,
     include_audit_refs=True,
 )
@@ -60,6 +66,8 @@ def _build_execute_policy(
         stable_background: StableBackgroundPolicy,
         include_observation_digest: bool = True,
         include_retrieved_memory_digest: bool = True,
+        retrieved_memory_allowed_types: FrozenSet[str] = _EXECUTE_BASE_POLICY.retrieved_memory_allowed_types,
+        retrieved_memory_max_items: int = _EXECUTE_BASE_POLICY.retrieved_memory_max_items,
 ) -> ContextPolicy:
     """execute 阶段默认字段高度一致，只让各模式声明差异项。"""
     return ContextPolicy(
@@ -71,6 +79,8 @@ def _build_execute_policy(
         include_recent_action_digest=_EXECUTE_BASE_POLICY.include_recent_action_digest,
         include_working_memory_digest=_EXECUTE_BASE_POLICY.include_working_memory_digest,
         include_retrieved_memory_digest=include_retrieved_memory_digest,
+        retrieved_memory_allowed_types=retrieved_memory_allowed_types,
+        retrieved_memory_max_items=retrieved_memory_max_items,
         include_stable_background=_EXECUTE_BASE_POLICY.include_stable_background,
         include_audit_refs=_EXECUTE_BASE_POLICY.include_audit_refs,
         stable_background=stable_background,
@@ -84,6 +94,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         include_open_questions=True,
         include_working_memory_digest=True,
         include_retrieved_memory_digest=True,
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=5,
         include_stable_background=True,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
@@ -96,6 +108,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         "execute",
         StepTaskModeHint.RESEARCH.value,
     ): _build_execute_policy(
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=4,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
             include_recent_run_briefs=True,
@@ -107,6 +121,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         "execute",
         StepTaskModeHint.WEB_READING.value,
     ): _build_execute_policy(
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=4,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
             include_recent_run_briefs=True,
@@ -118,6 +134,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         "execute",
         StepTaskModeHint.BROWSER_INTERACTION.value,
     ): _build_execute_policy(
+        retrieved_memory_allowed_types=frozenset({"profile", "instruction"}),
+        retrieved_memory_max_items=3,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
             include_recent_attempt_briefs=True,
@@ -128,6 +146,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         "execute",
         StepTaskModeHint.CODING.value,
     ): _build_execute_policy(
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=4,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
             include_completed_steps=True,
@@ -137,6 +157,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         "execute",
         StepTaskModeHint.FILE_PROCESSING.value,
     ): _build_execute_policy(
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=4,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
             include_completed_steps=True,
@@ -148,6 +170,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
     ): _build_execute_policy(
         include_observation_digest=False,
         include_retrieved_memory_digest=False,
+        retrieved_memory_allowed_types=frozenset(),
+        retrieved_memory_max_items=0,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
         ),
@@ -156,6 +180,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         "execute",
         StepTaskModeHint.GENERAL.value,
     ): _build_execute_policy(
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=4,
         stable_background=StableBackgroundPolicy(
             include_conversation_summary=True,
             include_completed_steps=True,
@@ -171,6 +197,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         include_recent_action_digest=True,
         include_working_memory_digest=True,
         include_retrieved_memory_digest=True,
+        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        retrieved_memory_max_items=4,
         include_stable_background=True,
         include_audit_refs=True,
         stable_background=StableBackgroundPolicy(
