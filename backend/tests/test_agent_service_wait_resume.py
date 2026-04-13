@@ -20,12 +20,18 @@ from app.domain.models import (
     StepEvent,
     WorkflowRun,
     WorkflowRunStatus,
+    Workspace,
 )
 
 
 class _TaskFactory:
     @classmethod
     def get(cls, task_id: str):
+        return None
+
+
+class _NoTaskGraphRuntime:
+    async def get_task(self, session: Session):
         return None
 
 
@@ -119,6 +125,21 @@ class _WorkflowRunRepo:
         return list(self._events)
 
 
+class _WorkspaceRepo:
+    def __init__(self, workspace: Workspace | None = None) -> None:
+        self._workspace = workspace
+
+    async def get_by_id(self, workspace_id: str):
+        if self._workspace is None or workspace_id != self._workspace.id:
+            return None
+        return self._workspace
+
+    async def get_by_session_id(self, session_id: str):
+        if self._workspace is None or session_id != self._workspace.session_id:
+            return None
+        return self._workspace
+
+
 class _StopSessionRepo(_SessionRepo):
     def __init__(self, session: Session, *, fail_on_update_status: bool = False) -> None:
         super().__init__(session, fail_on_update_status=fail_on_update_status)
@@ -129,9 +150,15 @@ class _StopSessionRepo(_SessionRepo):
 
 
 class _UoW:
-    def __init__(self, session_repo: _SessionRepo, workflow_run_repo: _WorkflowRunRepo | None = None) -> None:
+    def __init__(
+            self,
+            session_repo: _SessionRepo,
+            workflow_run_repo: _WorkflowRunRepo | None = None,
+            workspace_repo: _WorkspaceRepo | None = None,
+    ) -> None:
         self.session = session_repo
         self.workflow_run = workflow_run_repo or _WorkflowRunRepo()
+        self.workspace = workspace_repo or _WorkspaceRepo()
 
     async def __aenter__(self):
         return self
@@ -150,6 +177,7 @@ def test_agent_service_chat_should_require_resume_when_session_waiting() -> None
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
     service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
 
     async def _collect_first_event():
         async for event in service.chat(
@@ -176,6 +204,7 @@ def test_agent_service_chat_should_reject_resume_when_session_not_waiting() -> N
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
     service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
 
     async def _collect_first_event():
         async for event in service.chat(
@@ -246,6 +275,7 @@ def test_agent_service_chat_should_reject_resume_when_checkpoint_invalid() -> No
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
     service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
 
     async def _inspect_resume_checkpoint(_session: Session):
         return SimpleNamespace(
@@ -294,6 +324,7 @@ def test_agent_service_chat_should_enqueue_continue_cancelled_task_command() -> 
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
     service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
 
     async def _get_task(_session: Session):
         return None
@@ -331,6 +362,7 @@ def test_agent_service_chat_should_reject_continue_cancelled_task_when_session_n
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
     service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
 
     async def _collect_first_event():
         async for event in service.chat(
@@ -367,6 +399,7 @@ def test_agent_service_chat_should_reject_continue_cancelled_task_when_plan_unav
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(_SessionRepo(session))
     service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
 
     async def _collect_first_event():
         async for event in service.chat(
@@ -495,6 +528,11 @@ def test_agent_service_stop_session_should_persist_cancelled_run_and_step_when_t
         id="session-1",
         user_id="user-1",
         status=SessionStatus.RUNNING,
+        workspace_id="workspace-1",
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
         current_run_id="run-1",
     )
     workflow_run = WorkflowRun(
@@ -527,9 +565,10 @@ def test_agent_service_stop_session_should_persist_cancelled_run_and_step_when_t
     )
     session_repo = _StopSessionRepo(session)
     workflow_run_repo = _WorkflowRunRepo(workflow_run)
+    workspace_repo = _WorkspaceRepo(workspace)
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(session_repo, workflow_run_repo)
+    service._uow_factory = lambda: _UoW(session_repo, workflow_run_repo, workspace_repo)
     service._task_cls = _TaskFactory
 
     async def _get_task(_session: Session):
@@ -553,6 +592,11 @@ def test_agent_service_stop_session_should_build_cancelled_events_from_run_histo
         id="session-1",
         user_id="user-1",
         status=SessionStatus.RUNNING,
+        workspace_id="workspace-1",
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
         current_run_id="run-1",
     )
     workflow_run = WorkflowRun(
@@ -599,9 +643,10 @@ def test_agent_service_stop_session_should_build_cancelled_events_from_run_histo
     ]
     session_repo = _StopSessionRepo(session)
     workflow_run_repo = _WorkflowRunRepo(workflow_run, events=run_events)
+    workspace_repo = _WorkspaceRepo(workspace)
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(session_repo, workflow_run_repo)
+    service._uow_factory = lambda: _UoW(session_repo, workflow_run_repo, workspace_repo)
     service._task_cls = _TaskFactory
 
     async def _get_task(_session: Session):

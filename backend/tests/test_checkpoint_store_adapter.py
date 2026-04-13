@@ -1,6 +1,7 @@
 import asyncio
+from typing import Optional
 
-from app.domain.models import Session, WorkflowRun
+from app.domain.models import Session, WorkflowRun, Workspace
 from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
 
 
@@ -37,10 +38,31 @@ class _WorkflowRunRepo:
         self._run.checkpoint_id = checkpoint_id
 
 
+class _WorkspaceRepo:
+    def __init__(self, workspace: Optional[Workspace]) -> None:
+        self._workspace = workspace
+
+    async def get_by_id(self, workspace_id: str):
+        if self._workspace is None or workspace_id != self._workspace.id:
+            return None
+        return self._workspace
+
+    async def get_by_session_id(self, session_id: str):
+        if self._workspace is None or session_id != self._workspace.session_id:
+            return None
+        return self._workspace
+
+
 class _UoW:
-    def __init__(self, session_repo: _SessionRepo, workflow_run_repo: _WorkflowRunRepo) -> None:
+    def __init__(
+            self,
+            session_repo: _SessionRepo,
+            workflow_run_repo: _WorkflowRunRepo,
+            workspace_repo: Optional[_WorkspaceRepo] = None,
+    ) -> None:
         self.session = session_repo
         self.workflow_run = workflow_run_repo
+        self.workspace = workspace_repo or _WorkspaceRepo(None)
 
     async def __aenter__(self):
         return self
@@ -73,7 +95,8 @@ class _FakeCheckpointer:
 
 
 def test_checkpoint_store_adapter_should_resolve_invoke_config_from_workflow_run() -> None:
-    session = Session(id="session-1", current_run_id="run-1")
+    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
+    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
     run = WorkflowRun(
         id="run-1",
         session_id="session-1",
@@ -83,7 +106,7 @@ def test_checkpoint_store_adapter_should_resolve_invoke_config_from_workflow_run
     )
     adapter = CheckpointStoreAdapter(
         session_id="session-1",
-        uow_factory=lambda: _UoW(_SessionRepo(session), _WorkflowRunRepo(run)),
+        uow_factory=lambda: _UoW(_SessionRepo(session), _WorkflowRunRepo(run), _WorkspaceRepo(workspace)),
     )
 
     config, run_id = asyncio.run(adapter.resolve_invoke_config())
@@ -99,7 +122,8 @@ def test_checkpoint_store_adapter_should_resolve_invoke_config_from_workflow_run
 
 
 def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
-    session = Session(id="session-1", current_run_id="run-1")
+    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
+    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
     run = WorkflowRun(
         id="run-1",
         session_id="session-1",
@@ -110,7 +134,7 @@ def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
     workflow_run_repo = _WorkflowRunRepo(run)
     adapter = CheckpointStoreAdapter(
         session_id="session-1",
-        uow_factory=lambda: _UoW(_SessionRepo(session), workflow_run_repo),
+        uow_factory=lambda: _UoW(_SessionRepo(session), workflow_run_repo, _WorkspaceRepo(workspace)),
     )
     checkpointer = _FakeCheckpointer(checkpoint_id="cp-new")
 
@@ -127,3 +151,29 @@ def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
     ]
     assert workflow_run_repo.updated_refs == [("run-1", "", "cp-new")]
     assert run.checkpoint_id == "cp-new"
+
+
+def test_checkpoint_store_adapter_should_not_fallback_to_session_current_run_id() -> None:
+    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
+    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id=None)
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        checkpoint_namespace="",
+        checkpoint_id="cp-old",
+    )
+    adapter = CheckpointStoreAdapter(
+        session_id="session-1",
+        uow_factory=lambda: _UoW(_SessionRepo(session), _WorkflowRunRepo(run), _WorkspaceRepo(workspace)),
+    )
+
+    config, run_id = asyncio.run(adapter.resolve_invoke_config())
+
+    assert run_id is None
+    assert config == {
+        "configurable": {
+            "thread_id": "session-1",
+            "checkpoint_ns": "",
+        }
+    }

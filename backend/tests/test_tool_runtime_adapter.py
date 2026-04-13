@@ -24,6 +24,16 @@ from app.domain.services.tools import (
     ToolRuntimeAdapter,
     ToolRuntimeEventHooks,
 )
+from app.domain.services.workspace_runtime.capabilities import (
+    WorkspaceBrowserCapability,
+    WorkspaceFileCapability,
+    WorkspaceResearchCapability,
+    WorkspaceShellCapability,
+)
+
+
+class _FakeWorkspaceRuntimeService:
+    session_id = "session-1"
 
 
 def test_capability_registry_default_v1_should_build_expected_local_tools() -> None:
@@ -34,6 +44,7 @@ def test_capability_registry_default_v1_should_build_expected_local_tools() -> N
             sandbox=object(),
             browser=object(),
             search_engine=object(),
+            workspace_runtime_service=_FakeWorkspaceRuntimeService(),
         ),
     )
 
@@ -42,10 +53,14 @@ def test_capability_registry_default_v1_should_build_expected_local_tools() -> N
     assert any(tool.has_tool("browser_view") for tool in tools)
     assert any(tool.has_tool("search_web") for tool in tools)
     assert any(tool.has_tool("message_ask_user") for tool in tools)
+    assert any(isinstance(tool, WorkspaceBrowserCapability) for tool in tools)
+    assert any(isinstance(tool, WorkspaceFileCapability) for tool in tools)
+    assert any(isinstance(tool, WorkspaceShellCapability) for tool in tools)
+    assert any(isinstance(tool, WorkspaceResearchCapability) for tool in tools)
 
 
 def test_tool_runtime_adapter_should_enrich_search_event() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="search",
         function_name="search_web",
@@ -74,7 +89,7 @@ def test_tool_runtime_adapter_should_enrich_search_event() -> None:
 
 
 def test_tool_runtime_adapter_should_enrich_fetch_page_event() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="search",
         function_name="fetch_page",
@@ -112,7 +127,7 @@ def test_tool_runtime_adapter_should_enrich_fetch_page_event() -> None:
 
 
 def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="file",
         function_name="read_file",
@@ -134,7 +149,7 @@ def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> Non
 
 
 def test_tool_runtime_adapter_should_sync_storage_only_for_write_file() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="file",
         function_name="write_file",
@@ -156,7 +171,7 @@ def test_tool_runtime_adapter_should_sync_storage_only_for_write_file() -> None:
 
 
 def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="file",
         function_name="list_files",
@@ -186,7 +201,7 @@ def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() 
 
 
 def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     screenshot_calls: list[str] = []
 
     async def _get_browser_screenshot() -> str:
@@ -231,7 +246,7 @@ def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions(
 
 
 def test_tool_runtime_adapter_should_keep_browser_event_usable_without_screenshot_hook() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="browser",
         function_name="browser_view",
@@ -253,7 +268,7 @@ def test_tool_runtime_adapter_should_keep_browser_event_usable_without_screensho
 
 
 def test_tool_runtime_adapter_should_enrich_high_level_browser_event() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="browser",
         function_name="browser_read_current_page_structured",
@@ -285,7 +300,7 @@ def test_tool_runtime_adapter_should_enrich_high_level_browser_event() -> None:
 
 
 def test_tool_runtime_adapter_should_expose_browser_degrade_reason() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="browser",
         function_name="browser_extract_main_content",
@@ -318,7 +333,7 @@ def test_tool_runtime_adapter_should_expose_browser_degrade_reason() -> None:
 
 
 def test_tool_runtime_adapter_should_expose_browser_link_match_position() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="browser",
         function_name="browser_find_link_by_text",
@@ -352,11 +367,11 @@ def test_tool_runtime_adapter_should_expose_browser_link_match_position() -> Non
 
 
 def test_tool_runtime_adapter_should_keep_shell_event_usable_without_shell_hook() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     event = ToolEvent(
         tool_name="shell",
         function_name="shell_execute",
-        function_args={"session_id": "session-1"},
+        function_args={},
         function_result=ToolResult(success=True, data={}),
         status=ToolEventStatus.CALLED,
     )
@@ -371,6 +386,47 @@ def test_tool_runtime_adapter_should_keep_shell_event_usable_without_shell_hook(
     assert handled is True
     assert event.tool_content is not None
     assert event.tool_content.console == "(No console)"
+
+
+def test_tool_runtime_adapter_should_enrich_shell_event_from_workspace_observation_hook() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+    event = ToolEvent(
+        tool_name="shell",
+        function_name="read_shell_output",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    async def _get_shell_tool_result() -> ToolResult:
+        return ToolResult(
+            success=True,
+            data={
+                "output": "pytest -q\n24 passed",
+                "console_records": [
+                    {
+                        "command": "pytest -q",
+                        "output": "24 passed",
+                    }
+                ],
+            },
+        )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(get_shell_tool_result=_get_shell_tool_result),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.console == [
+        {
+            "command": "pytest -q",
+            "output": "24 passed",
+        }
+    ]
 
 
 class _FakeMCPTool(BaseTool):
@@ -404,7 +460,7 @@ class _FakeMCPTool(BaseTool):
 
 
 def test_tool_runtime_adapter_should_build_mcp_capability_tool() -> None:
-    adapter = ToolRuntimeAdapter()
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     fake_mcp_tool = _FakeMCPTool()
 
     tools = adapter.build_runtime_tools(
@@ -412,6 +468,7 @@ def test_tool_runtime_adapter_should_build_mcp_capability_tool() -> None:
             sandbox=object(),
             browser=object(),
             search_engine=object(),
+            workspace_runtime_service=_FakeWorkspaceRuntimeService(),
             mcp_tool=fake_mcp_tool,
             mcp_config=MCPConfig(
                 mcpServers={
@@ -422,7 +479,6 @@ def test_tool_runtime_adapter_should_build_mcp_capability_tool() -> None:
                     ),
                 }
             ),
-            session_id="session-1",
             user_id="user-1",
         ),
         mcp_tool=fake_mcp_tool,

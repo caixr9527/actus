@@ -28,12 +28,26 @@ from app.domain.models import (
     WorkflowRunSummary,
     SessionContextSnapshot,
 )
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
 )
 from app.infrastructure.runtime.langgraph_graphs import bind_live_event_sink, unbind_live_event_sink
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import create_or_reuse_plan_node
+from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+    create_or_reuse_plan_node as _create_or_reuse_plan_node,
+)
+
+
+_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+async def create_or_reuse_plan_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _create_or_reuse_plan_node(
+        *args,
+        **kwargs,
+    )
 
 
 def _build_plan(step_status: ExecutionStatus = ExecutionStatus.PENDING) -> Plan:
@@ -62,7 +76,7 @@ def _build_plan(step_status: ExecutionStatus = ExecutionStatus.PENDING) -> Plan:
 
 
 def test_graph_state_contract_should_build_initial_state_from_workflow_run_snapshot() -> None:
-    session = Session(id="session-1", current_run_id="run-1")
+    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-1")
     plan = _build_plan()
     run = WorkflowRun(
         id="run-1",
@@ -152,7 +166,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                 final_answer_summary="已经输出过结论",
                 final_answer_text="这是历史运行里真正交付的完整正文。",
                 open_questions=["已完成运行待确认"],
-                artifacts=["history-artifact"],
+                artifacts=["/tmp/history-artifact.md"],
             )
         ],
         recent_attempt_summaries=[
@@ -164,7 +178,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                 final_answer_summary="上一次执行失败",
                 open_questions=["失败运行待确认"],
                 blockers=["远端接口不可用"],
-                artifacts=["failed-artifact"],
+                artifacts=["/tmp/failed-artifact.md"],
             )
         ],
         session_context_snapshot=SessionContextSnapshot(
@@ -178,13 +192,15 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                 }
             ],
             open_questions=["还需确认范围"],
-            artifact_refs=["artifact-from-snapshot"],
+            artifact_paths=["/tmp/snapshot-artifact.md"],
         ),
         user_message="你好",
+        workspace_id="workspace-1",
         thread_id="thread-1",
     )
 
     assert state["run_id"] == "run-1"
+    assert state["workspace_id"] == "workspace-1"
     assert state["thread_id"] == "thread-1"
     assert state["current_step_id"] == "step-1"
     assert state["message_window"][0]["message"] == "上一次用户输入"
@@ -207,7 +223,11 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["session_open_questions"] == ["已完成运行待确认", "失败运行待确认", "还需确认范围"]
     assert state["session_blockers"] == ["远端接口不可用"]
     assert state["selected_artifacts"] == ["/tmp/final.md"]
-    assert state["historical_artifact_refs"] == ["artifact-from-snapshot", "history-artifact", "failed-artifact"]
+    assert state["historical_artifact_paths"] == [
+        "/tmp/snapshot-artifact.md",
+        "/tmp/history-artifact.md",
+        "/tmp/failed-artifact.md",
+    ]
     assert len(state["step_states"]) == 1
     assert state["step_states"][0]["step_id"] == "step-1"
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
@@ -228,7 +248,8 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert sorted(state["retrieved_memories"][0].keys()) == ["content", "id", "memory_type", "summary", "tags"]
     assert state["pending_interrupt"]["prompt"] == "请补充上下文"
     assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
-    assert state["artifact_refs"] == ["file-1", "file-2"]
+    runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
+    assert runtime_metadata["graph_state_contract"]["graph_state"]["workspace_id"] == "workspace-1"
 
 
 def test_graph_state_contract_should_reopen_cancelled_plan_for_explicit_command() -> None:
@@ -313,7 +334,7 @@ def test_create_or_reuse_plan_node_should_emit_updated_plan_when_continuing_canc
         "session_open_questions": [],
         "session_blockers": [],
         "selected_artifacts": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "input_parts": [],
         "message_window": [],
         "retrieved_memories": [],
@@ -323,7 +344,6 @@ def test_create_or_reuse_plan_node_should_emit_updated_plan_when_continuing_canc
         "max_execution_steps": 20,
         "last_executed_step": None,
         "pending_interrupt": {},
-        "artifact_refs": [],
         "emitted_events": [],
         "final_message": "",
         "thread_id": "thread-1",
@@ -393,13 +413,13 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
             WorkflowRunSummary(
                 run_id="run-prev",
                 session_id="session-1",
-                status=WorkflowRunStatus.COMPLETED,
-                title="前序运行",
-                final_answer_summary="已完成前置分析",
-                open_questions=["上一轮遗留问题"],
-                artifacts=["artifact-prev"],
-            )
-        ],
+                    status=WorkflowRunStatus.COMPLETED,
+                    title="前序运行",
+                    final_answer_summary="已完成前置分析",
+                    open_questions=["上一轮遗留问题"],
+                    artifacts=["/tmp/artifact-prev.md"],
+                )
+            ],
         recent_attempt_summaries=[
             WorkflowRunSummary(
                 run_id="run-failed",
@@ -471,7 +491,6 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(reduced_state)
 
     assert reduced_state["current_step_id"] is None
-    assert reduced_state["artifact_refs"] == ["/tmp/file-1.md"]
     assert reduced_state["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert reduced_state["pending_interrupt"]["attachments"] == ["/tmp/reference.md"]
     assert reduced_state["pending_interrupt"]["suggest_user_takeover"] == "browser"
@@ -519,7 +538,7 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     ]
     assert contract["graph_state"]["recent_attempt_briefs"][0]["run_id"] == "run-failed"
     assert contract["graph_state"]["session_blockers"] == ["缺少凭证"]
-    assert contract["graph_state"]["historical_artifact_refs"] == ["artifact-prev"]
+    assert contract["graph_state"]["historical_artifact_paths"] == ["/tmp/artifact-prev.md"]
     assert contract["graph_state"]["pending_interrupt"]["prompt"] == "请确认是否继续？"
     assert contract["graph_state"]["metadata"]["projection"]["run_status"] == "waiting"
     assert "graph_state_fields" not in contract["planes"]
@@ -572,30 +591,6 @@ def test_build_initial_state_should_rebuild_step_states_from_plan_when_metadata_
     assert state["step_states"][0]["delivery_context_state"] == StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
-def test_apply_emitted_events_should_collect_browser_screenshot_artifact_refs() -> None:
-    state = {
-        "step_states": [],
-        "graph_metadata": {},
-        "artifact_refs": [],
-        "pending_interrupt": {},
-        "emitted_events": [
-            ToolEvent(
-                tool_call_id="call-browser-1",
-                tool_name="browser",
-                tool_content=BrowserToolContent(screenshot="https://cdn.example.com/browser-shot.png"),
-                function_name="browser_view",
-                function_args={},
-                function_result=ToolResult[dict](success=True, data={"url": "https://example.com"}),
-                status=ToolEventStatus.CALLED,
-            )
-        ],
-    }
-
-    reduced_state = GraphStateContractMapper.apply_emitted_events(state=state)
-
-    assert reduced_state["artifact_refs"] == ["https://cdn.example.com/browser-shot.png"]
-
-
 def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> None:
     state = {
         "pending_interrupt": {
@@ -605,7 +600,6 @@ def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> Non
         },
         "graph_metadata": {},
         "step_states": [],
-        "artifact_refs": [],
         "emitted_events": [DoneEvent(created_at=datetime(2026, 3, 22, 12, 0, 0))],
     }
 
@@ -648,7 +642,6 @@ def test_apply_emitted_events_should_keep_plan_in_sync_after_step_completed() ->
         "plan": created_plan.model_copy(deep=True),
         "step_states": [],
         "graph_metadata": {},
-        "artifact_refs": [],
         "pending_interrupt": {},
         "emitted_events": [
             PlanEvent(plan=created_plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
@@ -725,13 +718,12 @@ def test_graph_state_contract_should_normalize_plan_and_last_step_payload_when_b
         "session_open_questions": [],
         "session_blockers": [],
         "selected_artifacts": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "current_step_id": None,
         "execution_count": 1,
         "max_execution_steps": 20,
         "pending_interrupt": {},
         "graph_metadata": {},
-        "artifact_refs": [],
         "emitted_events": [],
         "input_parts": [],
         "user_id": None,
@@ -823,3 +815,20 @@ def test_normalize_runtime_state_should_rebuild_step_states_and_current_step_fro
     assert normalized_state["environment_digest"]["payload"]["recent_search_queries"] == ["langgraph persistence"]
     assert normalized_state["observation_digest"]["payload"]["last_step_result"] == "第一步完成"
     assert normalized_state["recent_action_digest"]["payload"]["last_user_wait_reason"] == "请确认"
+
+
+def test_build_initial_state_should_not_fallback_to_session_current_run_id_when_run_missing() -> None:
+    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
+
+    state = GraphStateContractMapper.build_initial_state(
+        session=session,
+        run=None,
+        completed_run_summaries=[],
+        recent_attempt_summaries=[],
+        session_context_snapshot=None,
+        user_message="hello",
+        workspace_id="workspace-1",
+        thread_id="thread-1",
+    )
+
+    assert state["run_id"] is None

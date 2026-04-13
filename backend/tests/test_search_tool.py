@@ -1,7 +1,15 @@
 import asyncio
 
 from app.domain.models import FetchedPage, ToolResult
-from app.domain.services.tools.search import SearchTool
+from app.domain.services.workspace_runtime.capabilities import WorkspaceResearchCapability
+
+
+class _FakeWorkspaceRuntimeService:
+    async def record_search_results(self, *, query: str, candidate_links: list[dict]):
+        return None
+
+    async def record_fetched_page_summary(self, *, page_summary: dict):
+        return None
 
 
 class _FakeSandbox:
@@ -57,7 +65,10 @@ class _FakeSandbox:
 
 
 def test_search_tool_registers_search_web() -> None:
-    tool = SearchTool(sandbox=_FakeSandbox())
+    tool = WorkspaceResearchCapability(
+        sandbox=_FakeSandbox(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+    )
     assert tool.has_tool("search_web") is True
     assert tool.has_tool("fetch_page") is True
     assert tool.has_tool("search_searxng") is False
@@ -70,7 +81,10 @@ def test_search_tool_registers_search_web() -> None:
 
 
 def test_search_tool_invoke_search_web_should_delegate_to_searxng() -> None:
-    tool = SearchTool(sandbox=_FakeSandbox())
+    tool = WorkspaceResearchCapability(
+        sandbox=_FakeSandbox(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+    )
     result = asyncio.run(tool.invoke(
         "search_web",
         query="openai",
@@ -89,7 +103,10 @@ def test_search_tool_invoke_search_web_should_delegate_to_searxng() -> None:
 
 
 def test_search_tool_invoke_fetch_page_should_delegate_to_sandbox() -> None:
-    tool = SearchTool(sandbox=_FakeSandbox())
+    tool = WorkspaceResearchCapability(
+        sandbox=_FakeSandbox(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+    )
     result = asyncio.run(tool.invoke(
         "fetch_page",
         url="https://example.com/article",

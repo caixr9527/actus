@@ -1,4 +1,5 @@
 import asyncio
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,6 +7,7 @@ import pytest
 from langgraph.types import Command
 
 from app.domain.models import (
+    File,
     Message,
     WaitEvent,
     Session,
@@ -16,7 +18,9 @@ from app.domain.models import (
     Plan,
     Step,
     ExecutionStatus,
+    Workspace,
 )
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
@@ -51,11 +55,23 @@ class _FakeGraph:
 
 
 class _FakeUoW:
-    def __init__(self, *, session_repo, workflow_run_repo, workflow_run_summary_repo, session_context_snapshot_repo):
+    def __init__(
+            self,
+            *,
+            session_repo,
+            workflow_run_repo,
+            workflow_run_summary_repo,
+            session_context_snapshot_repo,
+            workspace_repo=None,
+    ):
         self.session = session_repo
         self.workflow_run = workflow_run_repo
         self.workflow_run_summary = workflow_run_summary_repo
         self.session_context_snapshot = session_context_snapshot_repo
+        self.workspace = workspace_repo or SimpleNamespace(
+            get_by_id=AsyncMock(return_value=None),
+            get_by_session_id=AsyncMock(return_value=None),
+        )
 
     async def __aenter__(self):
         return self
@@ -74,6 +90,14 @@ def _build_stage_llms(llm=object()) -> dict[str, object]:
     }
 
 
+_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+def _build_run_engine(**kwargs) -> LangGraphRunEngine:
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return LangGraphRunEngine(**kwargs)
+
+
 def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monkeypatch) -> None:
     captured = {}
     checkpointer = object()
@@ -87,7 +111,7 @@ def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monk
         _fake_build_graph,
     )
 
-    LangGraphRunEngine(
+    _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
         checkpointer=checkpointer,
@@ -101,6 +125,7 @@ def test_langgraph_run_engine_should_require_complete_stage_llms() -> None:
         LangGraphRunEngine(
             session_id="session-1",
             stage_llms={"executor": object()},
+            runtime_context_service=_TEST_RUNTIME_CONTEXT_SERVICE,
         )
 
 
@@ -131,7 +156,7 @@ def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monke
         lambda **kwargs: fake_graph,
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
     )
@@ -164,7 +189,7 @@ def test_langgraph_run_engine_invoke_should_not_crash_when_graph_finishes_withou
         lambda **kwargs: fake_graph,
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
     )
@@ -180,13 +205,90 @@ def test_langgraph_run_engine_invoke_should_not_crash_when_graph_finishes_withou
     assert events == []
 
 
+class _InputPartsSessionRepo:
+    def __init__(self, files_by_path: dict[str, File]) -> None:
+        self._files_by_path = {
+            path: file.model_copy(deep=True)
+            for path, file in files_by_path.items()
+        }
+
+    async def get_file_by_path(self, session_id: str, filepath: str):
+        file = self._files_by_path.get(filepath)
+        return file.model_copy(deep=True) if file is not None else None
+
+
+class _InputPartsFileStorage:
+    def __init__(self, payloads_by_id: dict[str, bytes]) -> None:
+        self._payloads_by_id = dict(payloads_by_id)
+
+    async def download_file(self, file_id: str, user_id=None):
+        return io.BytesIO(self._payloads_by_id[file_id]), File(id=file_id)
+
+    def get_file_url(self, file: File) -> str:
+        return f"https://cdn.example.com/{file.id}"
+
+
+def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_attachments() -> None:
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        file_storage=_InputPartsFileStorage(
+            {
+                "file-1": b"content-a",
+                "file-2": b"content-b",
+            }
+        ),
+    )
+    uow = SimpleNamespace(
+        session=_InputPartsSessionRepo(
+            {
+                "/home/ubuntu/upload/file-1/same.txt": File(
+                    id="file-1",
+                    filename="same.txt",
+                    filepath="/home/ubuntu/upload/file-1/same.txt",
+                    mime_type="text/plain",
+                ),
+                "/home/ubuntu/upload/file-2/same.txt": File(
+                    id="file-2",
+                    filename="same.txt",
+                    filepath="/home/ubuntu/upload/file-2/same.txt",
+                    mime_type="text/plain",
+                ),
+            }
+        )
+    )
+
+    parts = asyncio.run(
+        engine._build_input_parts(
+            Message(
+                message="读取两个同名附件",
+                attachments=[
+                    "/home/ubuntu/upload/file-1/same.txt",
+                    "/home/ubuntu/upload/file-2/same.txt",
+                ],
+            ),
+            uow=uow,
+        )
+    )
+
+    assert [part["sandbox_filepath"] for part in parts] == [
+        "/home/ubuntu/upload/file-1/same.txt",
+        "/home/ubuntu/upload/file-2/same.txt",
+    ]
+    assert [part["file_url"] for part in parts] == [
+        "https://cdn.example.com/file-1",
+        "https://cdn.example.com/file-2",
+    ]
+    assert parts[0]["base64_payload"] != parts[1]["base64_payload"]
+
+
 def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
-    engine = LangGraphRunEngine(session_id="session-1", stage_llms=_build_stage_llms())
+    engine = _build_run_engine(session_id="session-1", stage_llms=_build_stage_llms())
     captured = {}
 
     async def _fake_run_graph(*, graph_input, invoke_config, run_id, fallback_state):
@@ -258,7 +360,7 @@ def test_langgraph_run_engine_resume_should_write_normalized_checkpoint_before_r
         "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
-    engine = LangGraphRunEngine(session_id="session-1", stage_llms=_build_stage_llms())
+    engine = _build_run_engine(session_id="session-1", stage_llms=_build_stage_llms())
     captured = {}
 
     async def _fake_run_graph(*, graph_input, invoke_config, run_id, fallback_state):
@@ -299,7 +401,7 @@ def test_langgraph_run_engine_inspect_resume_checkpoint_should_report_missing_pe
         lambda **kwargs: fake_graph,
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
     )
@@ -369,7 +471,6 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
             ],
             "pending_interrupt": {},
             "graph_metadata": {},
-            "artifact_refs": ["artifact-id-5", "/tmp/artifact-ref.md"],
             "emitted_events": [],
         }
     )
@@ -379,7 +480,7 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
         lambda **kwargs: fake_graph,
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
     )
@@ -397,7 +498,6 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
     assert state["last_executed_step"].outcome.produced_artifacts == ["/tmp/last-step.md"]
     assert state["step_states"][0]["outcome"]["produced_artifacts"] == ["/tmp/plan.md"]
     assert state["current_step_id"] is None
-    assert state["artifact_refs"] == ["artifact-id-5", "/tmp/artifact-ref.md"]
 
 
 def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_and_completed_summaries(monkeypatch) -> None:
@@ -412,9 +512,20 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
             return_value=Session(
                 id="session-1",
                 user_id="user-1",
+                workspace_id="workspace-1",
                 current_run_id="run-1",
             )
         )
+    )
+    workspace_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                current_run_id="run-1",
+            )
+        ),
+        get_by_session_id=AsyncMock(return_value=None),
     )
     workflow_run_repo = SimpleNamespace(
         get_by_id=AsyncMock(
@@ -439,7 +550,7 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
                         final_answer_summary="做完了前置分析",
                         final_answer_text="这是上一轮真正交付给用户的完整正文。",
                         open_questions=["还需最终确认"],
-                        artifacts=["artifact-1"],
+                        artifacts=["/tmp/artifact-1.md"],
                     ),
                 ],
                 [
@@ -451,7 +562,7 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
                         final_answer_summary="卡在外部依赖",
                         open_questions=["需要补充网络权限"],
                         blockers=["外部接口失败"],
-                        artifacts=["artifact-failed"],
+                        artifacts=["/tmp/artifact-failed.md"],
                     ),
                 ],
             ]
@@ -464,12 +575,12 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
                 summary_text="跨轮会话摘要",
                 recent_run_briefs=[{"run_id": "run-snapshot", "title": "快照中的运行"}],
                 open_questions=["快照问题"],
-                artifact_refs=["snapshot-artifact"],
+                artifact_paths=["/tmp/snapshot-artifact.md"],
             )
         )
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
@@ -477,6 +588,7 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
             workflow_run_repo=workflow_run_repo,
             workflow_run_summary_repo=workflow_run_summary_repo,
             session_context_snapshot_repo=session_context_snapshot_repo,
+            workspace_repo=workspace_repo,
         ),
     )
 
@@ -489,6 +601,7 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
     )
 
     assert state["conversation_summary"] == "跨轮会话摘要"
+    assert state["workspace_id"] == "workspace-1"
     assert workflow_run_summary_repo.list_by_session_id.await_args_list[0].kwargs["statuses"] == [WorkflowRunStatus.COMPLETED]
     assert workflow_run_summary_repo.list_by_session_id.await_args_list[1].kwargs["statuses"] == [
         WorkflowRunStatus.FAILED,
@@ -500,7 +613,11 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
     assert state["session_open_questions"] == ["还需最终确认", "需要补充网络权限", "快照问题"]
     assert state["session_blockers"] == ["外部接口失败"]
     assert state["selected_artifacts"] == []
-    assert state["historical_artifact_refs"] == ["snapshot-artifact", "artifact-1", "artifact-failed"]
+    assert state["historical_artifact_paths"] == [
+        "/tmp/snapshot-artifact.md",
+        "/tmp/artifact-1.md",
+        "/tmp/artifact-failed.md",
+    ]
 
 
 def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monkeypatch) -> None:
@@ -540,7 +657,7 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
         upsert=AsyncMock(),
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
@@ -602,7 +719,6 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
             },
         },
         "selected_artifacts": ["/tmp/final-output.md"],
-        "artifact_refs": ["artifact-1", "noise-artifact"],
         "graph_metadata": {"projection": {"run_status": "completed"}},
         "final_message": "最终总结",
         "retrieved_memories": [],
@@ -620,7 +736,7 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
         "pending_interrupt": {},
         "emitted_events": [],
         "conversation_summary": "会话摘要",
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
     }
 
     asyncio.run(engine._sync_graph_state_contract(run_id="run-1", state=state))
@@ -642,7 +758,7 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
     assert synced_snapshot.recent_run_briefs[0]["run_id"] == "run-1"
     assert synced_snapshot.recent_run_briefs[0]["status"] == WorkflowRunStatus.COMPLETED.value
     assert synced_snapshot.recent_run_briefs[0]["final_answer_text_excerpt"] == "这是最终交付正文。"
-    assert synced_snapshot.artifact_refs == ["/tmp/final-output.md"]
+    assert synced_snapshot.artifact_paths == ["/tmp/final-output.md"]
     assert "artifacts" not in synced_snapshot.recent_run_briefs[0]
 
 
@@ -703,7 +819,7 @@ def test_langgraph_run_engine_invoke_should_not_sync_episodic_projection_for_wai
         upsert=AsyncMock(),
     )
 
-    engine = LangGraphRunEngine(
+    engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
@@ -726,3 +842,58 @@ def test_langgraph_run_engine_invoke_should_not_sync_episodic_projection_for_wai
     assert isinstance(events[0], WaitEvent)
     workflow_run_summary_repo.upsert.assert_not_awaited()
     session_context_snapshot_repo.upsert.assert_not_awaited()
+
+
+def test_langgraph_run_engine_should_not_fallback_to_session_current_run_id_when_workspace_run_missing(monkeypatch) -> None:
+    fake_graph = _FakeGraph()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+
+    session_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Session(
+                id="session-1",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                current_run_id="run-legacy",
+            )
+        )
+    )
+    workspace_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                current_run_id=None,
+            )
+        ),
+        get_by_session_id=AsyncMock(return_value=None),
+    )
+    workflow_run_repo = SimpleNamespace(get_by_id=AsyncMock(return_value=None))
+    workflow_run_summary_repo = SimpleNamespace(list_by_session_id=AsyncMock(side_effect=[[], []]))
+    session_context_snapshot_repo = SimpleNamespace(get_by_session_id=AsyncMock(return_value=None))
+
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        uow_factory=lambda: _FakeUoW(
+            session_repo=session_repo,
+            workflow_run_repo=workflow_run_repo,
+            workflow_run_summary_repo=workflow_run_summary_repo,
+            session_context_snapshot_repo=session_context_snapshot_repo,
+            workspace_repo=workspace_repo,
+        ),
+    )
+
+    state = asyncio.run(
+        engine._build_graph_input_state(
+            message=Message(message="hello"),
+            run_id=None,
+            invoke_config={"configurable": {"thread_id": "session-1"}},
+        )
+    )
+
+    assert state["run_id"] is None
+    workflow_run_repo.get_by_id.assert_not_awaited()

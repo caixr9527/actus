@@ -2,11 +2,12 @@ import asyncio
 import json
 
 from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus, ToolResult
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.tools.base import BaseTool, tool
 from app.domain.services.tools.message import MessageTool
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
     direct_wait_node,
-    execute_step_node,
+    execute_step_node as _execute_step_node,
     wait_for_human_node,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing import (
@@ -16,6 +17,17 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
     execute_step_with_prompt,
 )
+
+
+_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+async def execute_step_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _execute_step_node(
+        *args,
+        **kwargs,
+    )
 
 
 class _DummyTool(BaseTool):

@@ -2,6 +2,7 @@ import pytest
 
 from app.application.service.run_engine_selector import build_run_engine
 from app.domain.models import AgentConfig
+from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
 
 
@@ -41,6 +42,14 @@ def _raise_langgraph_init_error(**kwargs):
     raise RuntimeError("boom")
 
 
+class _FakeWorkspaceRuntimeService:
+    session_id = "session-1"
+
+
+def _build_tool_runtime_adapter() -> ToolRuntimeAdapter:
+    return ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+
+
 def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.application.service.run_engine_selector.get_settings",
@@ -62,6 +71,8 @@ def test_build_run_engine_uses_langgraph_when_enabled(monkeypatch) -> None:
         search_engine=object(),
         mcp_tool=_DummyTool(),
         a2a_tool=_DummyTool(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+        tool_runtime_adapter=_build_tool_runtime_adapter(),
     )
 
     assert isinstance(engine, LangGraphRunEngine)
@@ -100,6 +111,8 @@ def test_build_run_engine_should_pass_persistent_checkpointer(monkeypatch) -> No
         search_engine=object(),
         mcp_tool=_DummyTool(),
         a2a_tool=_DummyTool(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+        tool_runtime_adapter=_build_tool_runtime_adapter(),
     )
 
     assert captured["checkpointer"] is checkpointer
@@ -144,20 +157,23 @@ def test_build_run_engine_should_pass_stage_llms_and_clamped_iterations(monkeypa
         search_engine=object(),
         mcp_tool=_DummyTool(),
         a2a_tool=_DummyTool(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+        tool_runtime_adapter=_build_tool_runtime_adapter(),
     )
 
     assert captured["max_tool_iterations"] == 20
     assert set(captured["stage_llms"].keys()) == {"router", "planner", "executor", "replan", "summary"}
     assert captured["stage_llms"]["router"].model_name == "base"
-    assert captured["stage_llms"]["router"].max_tokens == 768
+    assert captured["stage_llms"]["router"].max_tokens == 4096
     assert captured["stage_llms"]["planner"].model_name == "base"
-    assert captured["stage_llms"]["planner"].max_tokens == 2048
+    assert captured["stage_llms"]["planner"].max_tokens == 4096
     assert captured["stage_llms"]["executor"].model_name == "base"
     assert captured["stage_llms"]["executor"].max_tokens == 4096
     assert captured["stage_llms"]["replan"].model_name == "base"
-    assert captured["stage_llms"]["replan"].max_tokens == 1536
+    assert captured["stage_llms"]["replan"].max_tokens == 4096
     assert captured["stage_llms"]["summary"].model_name == "base"
-    assert captured["stage_llms"]["summary"].max_tokens == 2048
+    assert captured["stage_llms"]["summary"].max_tokens == 4096
+    assert captured["runtime_context_service"] is not None
 
 
 def test_build_run_engine_should_fallback_to_base_llm_when_clone_unavailable(monkeypatch) -> None:
@@ -194,6 +210,8 @@ def test_build_run_engine_should_fallback_to_base_llm_when_clone_unavailable(mon
         search_engine=object(),
         mcp_tool=_DummyTool(),
         a2a_tool=_DummyTool(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+        tool_runtime_adapter=_build_tool_runtime_adapter(),
     )
 
     assert set(captured["stage_llms"].keys()) == {"router", "planner", "executor", "replan", "summary"}
@@ -227,6 +245,8 @@ def test_build_run_engine_should_raise_when_langgraph_init_fails(monkeypatch) ->
             search_engine=object(),
             mcp_tool=_DummyTool(),
             a2a_tool=_DummyTool(),
+            workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+            tool_runtime_adapter=_build_tool_runtime_adapter(),
         )
 
 
@@ -249,4 +269,6 @@ def test_build_run_engine_should_reject_non_langgraph_runtime(monkeypatch) -> No
             search_engine=object(),
             mcp_tool=_DummyTool(),
             a2a_tool=_DummyTool(),
+            workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+            tool_runtime_adapter=_build_tool_runtime_adapter(),
         )

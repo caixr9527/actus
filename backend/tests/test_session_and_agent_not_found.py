@@ -78,7 +78,7 @@ def test_session_service_read_shell_output_missing_session_raises_not_found() ->
     service = _build_session_service()
 
     with pytest.raises(NotFoundError) as exc:
-        asyncio.run(service.read_shell_output("user-1", "session-1", "shell-1"))
+        asyncio.run(service.read_shell_output("user-1", "session-1"))
     assert "任务会话不存在" in exc.value.msg
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 

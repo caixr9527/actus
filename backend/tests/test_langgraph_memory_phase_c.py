@@ -11,24 +11,64 @@ from app.domain.models import (
     StepOutcome,
     StepTaskModeHint,
     ToolResult,
+    ToolEvent,
+    ToolEventStatus,
+    Workspace,
+    WorkspaceArtifact,
 )
-from app.domain.services.runtime_context import RuntimeContextService
+from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.tools import BaseTool, MessageTool
 from app.domain.services.tools.base import tool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import (
-    build_planner_react_langgraph_graph,
+    build_planner_react_langgraph_graph as _build_planner_react_langgraph_graph,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
     consolidate_memory_node,
     direct_wait_node,
-    execute_step_node,
+    execute_step_node as _execute_step_node,
     guard_step_reuse_node,
     recall_memory_context_node,
-    replan_node,
-    summarize_node,
+    replan_node as _replan_node,
+    summarize_node as _summarize_node,
     wait_for_human_node,
 )
+
+
+_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+async def execute_step_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _execute_step_node(
+        *args,
+        **kwargs,
+    )
+
+
+async def replan_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _replan_node(
+        *args,
+        **kwargs,
+    )
+
+
+async def summarize_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _summarize_node(
+        *args,
+        **kwargs,
+    )
+
+
+def build_planner_react_langgraph_graph(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return _build_planner_react_langgraph_graph(
+        *args,
+        **kwargs,
+    )
 
 
 class _FakeLongTermMemoryRepository:
@@ -203,6 +243,26 @@ class _FakeWriteFileTool(BaseTool):
         )
 
 
+class _FakeSearchTool(BaseTool):
+    name = "search"
+
+    @tool(
+        name="search_web",
+        description="搜索网页",
+        parameters={
+            "query": {"type": "string"},
+        },
+        required=["query"],
+    )
+    async def search_web(self, query: str) -> ToolResult:
+        return ToolResult(
+            success=True,
+            data={
+                "query": query,
+            },
+        )
+
+
 class _FakeToolLoopLLM:
     def __init__(self) -> None:
         self.tool_name_snapshots: list[list[str]] = []
@@ -277,6 +337,43 @@ class _BlockedThenCompleteLLM:
                 {
                     "success": True,
                     "summary": "已整理完成",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            ),
+            "tool_calls": [],
+        }
+
+
+class _SearchThenCompleteLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools, tool_choice=None, response_format=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps(
+                                {
+                                    "query": "workspace runtime p3",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "检索完成",
                     "attachments": [],
                 },
                 ensure_ascii=False,
@@ -441,7 +538,6 @@ def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_t
         "working_memory": {},
         "graph_metadata": {},
         "selected_artifacts": [],
-        "artifact_refs": [],
         "emitted_events": [],
     }
 
@@ -458,7 +554,6 @@ def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_t
     assert executed_step.outcome is not None
     assert executed_step.outcome.produced_artifacts == ["/home/ubuntu/report.md"]
     assert next_state["selected_artifacts"] == []
-    assert next_state["artifact_refs"] == ["/home/ubuntu/report.md"]
     assert "message_notify_user" not in llm.tool_name_snapshots[0]
     assert "message_notify_user" not in llm.tool_name_snapshots[1]
     assert next_state["step_states"][0]["status"] == ExecutionStatus.COMPLETED.value
@@ -515,7 +610,6 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
     assert next_state["step_states"][-1]["status"] == ExecutionStatus.COMPLETED.value
     assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is True
     assert next_state["selected_artifacts"] == []
-    assert next_state["artifact_refs"] == ["/tmp/report.md"]
     assert next_state["working_memory"]["facts_in_session"] == ["报告结构已确定"]
 
 
@@ -580,7 +674,7 @@ def test_runtime_context_service_should_build_structured_packet_with_separated_c
         "session_open_questions": ["问题1", "问题2"],
         "session_blockers": ["阻塞1"],
         "selected_artifacts": [f"/tmp/current-{index}.md" for index in range(12)],
-        "historical_artifact_refs": [f"/tmp/history-{index}.md" for index in range(12)],
+        "historical_artifact_paths": [f"/tmp/history-{index}.md" for index in range(12)],
         "step_states": [
             {
                 "step_id": "step-a",
@@ -698,9 +792,7 @@ def test_runtime_context_service_should_clear_previous_mode_digest_when_switchin
     state_updates = context_service.extract_state_updates(context_packet)
 
     assert context_packet["task_mode"] == StepTaskModeHint.CODING.value
-    assert context_packet["environment_digest"] == {
-        "available_artifacts": ["/tmp/result.md"],
-    }
+    assert context_packet["environment_digest"] == {}
     assert "latest_fetch_page" not in context_packet["observation_digest"]
     assert "latest_browser_observation" not in context_packet["observation_digest"]
     assert "recent_search_queries" not in context_packet["recent_action_digest"]
@@ -708,7 +800,7 @@ def test_runtime_context_service_should_clear_previous_mode_digest_when_switchin
     assert "last_blocked_tool_call" not in context_packet["recent_action_digest"]
     assert state_updates["environment_digest"] == {
         "task_mode": StepTaskModeHint.CODING.value,
-        "payload": {"available_artifacts": ["/tmp/result.md"]},
+        "payload": {},
     }
 
 
@@ -865,8 +957,175 @@ def test_runtime_context_service_should_hide_execute_only_fields_in_summary_stag
     assert "environment_digest" not in context_packet
     assert "observation_digest" not in context_packet
     assert "recent_action_digest" not in context_packet
-    assert "open_questions" not in context_packet
-    assert context_packet["working_memory_digest"]["final_delivery_payload"]["source_refs"] == ["/tmp/final.md"]
+
+
+class _FakeWorkspaceRuntimeService:
+    def __init__(self, snapshot: WorkspaceEnvironmentSnapshot) -> None:
+        self._snapshot = snapshot
+
+    async def build_environment_snapshot(self) -> WorkspaceEnvironmentSnapshot:
+        return self._snapshot
+
+
+def _build_runtime_context_service_with_workspace_artifacts(*paths: str) -> RuntimeContextService:
+    return RuntimeContextService(
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(
+            WorkspaceEnvironmentSnapshot(
+                workspace=Workspace(
+                    id="workspace-1",
+                    session_id="session-1",
+                ),
+                artifacts=[
+                    WorkspaceArtifact(
+                        workspace_id="workspace-1",
+                        path=path,
+                        artifact_type="file",
+                    )
+                    for path in paths
+                ],
+            )
+        )
+    )
+
+
+def test_runtime_context_service_should_prefer_workspace_snapshot_for_coding_digest() -> None:
+    context_service = RuntimeContextService(
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(
+            WorkspaceEnvironmentSnapshot(
+                workspace=Workspace(
+                    id="workspace-1",
+                    session_id="session-1",
+                    shell_session_id="shell-workspace-1",
+                    cwd="/workspace/project",
+                    environment_summary={
+                        "shell_session_status": "active",
+                        "latest_shell_result": {
+                            "function_name": "shell_execute",
+                            "message": "命令执行完成",
+                            "console": "pytest -q\n24 passed",
+                        },
+                        "recent_changed_files": ["/workspace/project/app.py"],
+                        "file_tree_summary": ["src/: 3 files"],
+                    },
+                ),
+                artifacts=[
+                    WorkspaceArtifact(
+                        workspace_id="workspace-1",
+                        path="/workspace/project/report.md",
+                        artifact_type="report",
+                    )
+                ],
+            )
+        )
+    )
+    state = {
+        "session_id": "session-1",
+        "task_mode": StepTaskModeHint.CODING.value,
+        "working_memory": {"goal": "继续完成 backend 改造"},
+    }
+
+    context_packet = asyncio.run(
+        context_service.build_packet_async(
+            stage="execute",
+            state=state,
+            task_mode=StepTaskModeHint.CODING.value,
+        )
+    )
+
+    assert context_packet["environment_digest"]["cwd"] == "/workspace/project"
+    assert context_packet["environment_digest"]["shell_session_status"] == "active"
+    assert context_packet["environment_digest"]["available_artifacts"] == ["/workspace/project/report.md"]
+    assert context_packet["observation_digest"]["latest_shell_result"]["console"] == "pytest -q\n24 passed"
+
+
+def test_runtime_context_service_should_ignore_emitted_events_for_environment_truth() -> None:
+    context_service = RuntimeContextService(
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(
+            WorkspaceEnvironmentSnapshot(
+                workspace=Workspace(
+                    id="workspace-1",
+                    session_id="session-1",
+                ),
+                artifacts=[],
+            )
+        )
+    )
+    state = {
+        "session_id": "session-1",
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "working_memory": {"goal": "继续调研"},
+        "emitted_events": [
+            ToolEvent(
+                tool_name="search",
+                function_name="search_web",
+                function_args={"query": "should be ignored"},
+                function_result=ToolResult(success=True, data={}),
+                status=ToolEventStatus.CALLED,
+            )
+        ],
+    }
+
+    context_packet = asyncio.run(
+        context_service.build_packet_async(
+            stage="execute",
+            state=state,
+            task_mode=StepTaskModeHint.RESEARCH.value,
+        )
+    )
+
+    assert context_packet["environment_digest"] == {}
+    assert context_packet["observation_digest"]["stage"] == "execute"
+    assert "latest_fetch_page" not in context_packet["observation_digest"]
+    assert "latest_browser_observation" not in context_packet["observation_digest"]
+
+
+def test_runtime_context_service_should_not_fallback_to_stale_digest_when_workspace_snapshot_is_empty() -> None:
+    context_service = RuntimeContextService(
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(
+            WorkspaceEnvironmentSnapshot(
+                workspace=Workspace(
+                    id="workspace-1",
+                    session_id="session-1",
+                ),
+                artifacts=[],
+            )
+        )
+    )
+    state = {
+        "session_id": "session-1",
+        "task_mode": StepTaskModeHint.CODING.value,
+        "working_memory": {"goal": "继续完成 backend 改造"},
+        "environment_digest": {
+            "task_mode": StepTaskModeHint.CODING.value,
+            "payload": {
+                "cwd": "/stale/workspace",
+                "shell_session_status": "stale-active",
+                "recent_changed_files": ["/stale/workspace/app.py"],
+                "file_tree_summary": ["stale tree"],
+                "available_artifacts": ["/stale/workspace/report.md"],
+            },
+        },
+        "observation_digest": {
+            "task_mode": StepTaskModeHint.CODING.value,
+            "payload": {
+                "latest_shell_result": {
+                    "console": "stale result",
+                }
+            },
+        },
+    }
+
+    context_packet = asyncio.run(
+        context_service.build_packet_async(
+            stage="execute",
+            state=state,
+            task_mode=StepTaskModeHint.CODING.value,
+        )
+    )
+
+    assert context_packet["environment_digest"] == {}
+    assert "latest_shell_result" not in context_packet["observation_digest"]
+    assert context_packet["observation_digest"]["stage"] == "execute"
 
 
 def test_execute_step_node_should_persist_current_mode_recent_action_digest() -> None:
@@ -895,7 +1154,6 @@ def test_execute_step_node_should_persist_current_mode_recent_action_digest() ->
         "working_memory": {},
         "graph_metadata": {},
         "selected_artifacts": [],
-        "artifact_refs": [],
         "emitted_events": [],
         "recent_action_digest": {},
     }
@@ -914,6 +1172,49 @@ def test_execute_step_node_should_persist_current_mode_recent_action_digest() ->
     assert next_state["recent_action_digest"]["payload"]["last_failed_action"]["function_name"] == "write_file"
     assert next_state["recent_action_digest"]["payload"]["last_blocked_tool_call"]["function_name"] == "write_file"
     assert next_state["recent_action_digest"]["payload"]["last_blocked_tool_call"]["reason"] == "task_mode_tool_blocked"
+
+
+def test_execute_step_node_should_persist_recent_search_queries_into_recent_action_digest() -> None:
+    llm = _SearchThenCompleteLLM()
+    state = {
+        "session_id": "session-1",
+        "user_message": "请继续调研并整理结果",
+        "plan": Plan(
+            title="执行测试",
+            goal="验证搜索查询沉淀",
+            language="zh",
+            message="执行当前步骤",
+            steps=[
+                Step(
+                    id="step-1",
+                    title="检索资料",
+                    description="检索资料",
+                    objective_key="objective-step-1",
+                    success_criteria=["检索完成"],
+                    task_mode_hint=StepTaskModeHint.RESEARCH,
+                    status=ExecutionStatus.PENDING,
+                )
+            ],
+        ),
+        "input_parts": [],
+        "working_memory": {},
+        "graph_metadata": {},
+        "selected_artifacts": [],
+        "emitted_events": [],
+        "recent_action_digest": {},
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm=llm,
+            runtime_tools=[_FakeSearchTool()],
+            max_tool_iterations=3,
+        )
+    )
+
+    assert next_state["recent_action_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
+    assert next_state["recent_action_digest"]["payload"]["recent_search_queries"] == ["workspace runtime p3"]
 
 
 def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assumption() -> None:
@@ -1307,7 +1608,6 @@ def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
-        "artifact_refs": ["/home/ubuntu/final-output.md"],
         "emitted_events": [],
         "final_message": "最近一步结果的短摘要",
     }
@@ -1348,7 +1648,6 @@ def test_summarize_should_use_final_delivery_source_refs_as_attachment_truth_sou
             },
         },
         "selected_artifacts": [],
-        "artifact_refs": [],
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -1396,7 +1695,6 @@ def test_summarize_should_filter_non_file_refs_from_final_delivery_source_refs()
             },
         },
         "selected_artifacts": [],
-        "artifact_refs": ["artifact-id-1", "https://example.com/final.md", "/home/ubuntu/final-output.md"],
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -1437,7 +1735,6 @@ def test_summarize_should_not_emit_non_file_refs_as_attachments() -> None:
             },
         },
         "selected_artifacts": ["artifact-id-2"],
-        "artifact_refs": ["artifact-id-1", "https://example.com/final.md"],
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -1450,6 +1747,122 @@ def test_summarize_should_not_emit_non_file_refs_as_attachments() -> None:
     assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
     assert message_event.attachments == []
+
+
+def test_summarize_should_filter_final_delivery_refs_by_workspace_artifact_index() -> None:
+    llm = _FakeLightSummaryLLM()
+    runtime_context_service = _build_runtime_context_service_with_workspace_artifacts(
+        "/home/ubuntu/final-output.md",
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "step_states": [],
+        "working_memory": {
+            "goal": "验证 workspace artifact 过滤",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "最终正文",
+                "sections": [],
+                "source_refs": [
+                    "/home/ubuntu/final-output.md",
+                    "/home/ubuntu/not-indexed.md",
+                ],
+            },
+        },
+        "selected_artifacts": ["/home/ubuntu/not-indexed.md"],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最近一步结果的短摘要",
+    }
+
+    summarized_state = asyncio.run(
+        summarize_node(
+            state,
+            llm,
+            runtime_context_service=runtime_context_service,
+        )
+    )
+
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+
+
+def test_summarize_should_filter_explicit_summary_attachments_by_workspace_artifact_index() -> None:
+    llm = _FakeSummaryAttachmentLLM()
+    runtime_context_service = _build_runtime_context_service_with_workspace_artifacts(
+        "/home/ubuntu/final-output.md",
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成文档",
+            description="生成课程目录文档",
+            objective_key="objective-step-1",
+            success_criteria=["文档生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成中间文档",
+                produced_artifacts=["/home/ubuntu/intermediate.md"],
+            ),
+        ),
+        "selected_artifacts": ["/home/ubuntu/intermediate.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成中间文档与最终文档",
+                    "produced_artifacts": [
+                        "/home/ubuntu/intermediate.md",
+                        "/home/ubuntu/final-output.md",
+                    ],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证显式附件过滤",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(
+        summarize_node(
+            state,
+            llm,
+            runtime_context_service=runtime_context_service,
+        )
+    )
+
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
 
 
 def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> None:
@@ -1488,7 +1901,6 @@ def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> 
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
-        "artifact_refs": [],
         "emitted_events": [],
     }
 
@@ -1940,7 +2352,6 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
-        "artifact_refs": ["/home/ubuntu/final-output.md"],
         "emitted_events": [],
     }
 
@@ -2052,7 +2463,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
             "graph_metadata": graph_metadata,
         }
 
-    async def _plan(state, _llm):
+    async def _plan(state, _llm, runtime_context_service=None):
         plan = Plan(
             title="记忆阶段测试",
             goal="验证长期记忆边界",
@@ -2084,7 +2495,14 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
             "current_step_id": "step-1",
         }
 
-    async def _execute(state, _llm, skill_runtime=None, runtime_tools=None, max_tool_iterations=5):
+    async def _execute(
+            state,
+            _llm,
+            runtime_context_service=None,
+            skill_runtime=None,
+            runtime_tools=None,
+            max_tool_iterations=5,
+    ):
         plan = state["plan"].model_copy(deep=True)
         current_step = next(step for step in plan.steps if not step.done)
         current_step.status = ExecutionStatus.COMPLETED
@@ -2105,7 +2523,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     async def _guard(state):
         return _append_trace(state, "guard")
 
-    async def _replan(state, _llm):
+    async def _replan(state, _llm, runtime_context_service=None):
         next_state = _append_trace(state, "replan")
         return {
             **next_state,
@@ -2113,7 +2531,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
             "current_step_id": None,
         }
 
-    async def _summarize(state, _llm):
+    async def _summarize(state, _llm, runtime_context_service=None):
         next_state = _append_trace(state, "summarize")
         return {
             **next_state,
@@ -2230,7 +2648,6 @@ def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> No
         "max_execution_steps": 20,
         "step_states": [],
         "pending_interrupt": {},
-        "artifact_refs": [],
         "emitted_events": [],
     }
 

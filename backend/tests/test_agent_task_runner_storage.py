@@ -22,11 +22,35 @@ from app.domain.models import (
     StepEvent,
     ToolEvent,
     ToolEventStatus,
+    Workspace,
     WorkflowRun,
     WorkflowRunStatus,
 )
 from app.domain.models.tool_result import ToolResult
 from app.domain.services.agent_task_runner import AgentTaskRunner
+from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
+from app.domain.services.workspace_runtime.projectors import (
+    BrowserScreenshotArtifactService,
+    MessageAttachmentProjector,
+    ToolEventProjector,
+    UserInputAttachmentProjector,
+)
+
+
+class _NoopProjector:
+    async def project(self, _event) -> None:
+        return None
+
+
+def _new_runner() -> AgentTaskRunner:
+    runner = object.__new__(AgentTaskRunner)
+    runner._tool_runtime_adapter = ToolRuntimeAdapter(
+        capability_registry=CapabilityRegistry.default_v1(),
+    )
+    runner._tool_event_projector = _NoopProjector()
+    runner._message_attachment_projector = _NoopProjector()
+    runner._user_input_attachment_projector = _NoopProjector()
+    return runner
 
 
 class _DummySessionRepo:
@@ -143,19 +167,74 @@ class _InvokeTask:
         self.input_stream = _InputStreamWithEmptyEvent()
 
 
-def _build_runner_for_storage_sync() -> AgentTaskRunner:
-    runner = object.__new__(AgentTaskRunner)
-    runner._session_id = "session-1"
-    runner._user_id = "user-1"
-    runner._uow_factory = lambda: _DummyUoW()
-    runner._sandbox = _FailSandbox()
-    runner._file_storage = _DummyFileStorage()
-    return runner
+def _build_attachment_projector(
+        *,
+        session_id: str = "session-1",
+        user_id: str = "user-1",
+        uow_factory=None,
+        sandbox=None,
+        file_storage=None,
+        workspace_runtime_service=None,
+) -> MessageAttachmentProjector:
+    return MessageAttachmentProjector(
+        session_id=session_id,
+        user_id=user_id,
+        uow_factory=uow_factory or (lambda: _DummyUoW()),
+        sandbox=sandbox or _FailSandbox(),
+        file_storage=file_storage or _DummyFileStorage(),
+        workspace_runtime_service=workspace_runtime_service or _CaptureWorkspaceRuntimeService(),
+    )
+
+
+def _build_tool_event_projector(
+        *,
+        browser,
+        file_storage,
+        workspace_runtime_service,
+        user_id: str = "user-1",
+) -> ToolEventProjector:
+    return ToolEventProjector(
+        adapter=ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1()),
+        browser=browser,
+        file_storage=file_storage,
+        workspace_runtime_service=workspace_runtime_service,
+        user_id=user_id,
+    )
+
+
+def _build_user_input_attachment_projector(
+        *,
+        session_id: str = "session-1",
+        sandbox=None,
+        file_storage=None,
+        uow_factory=None,
+) -> UserInputAttachmentProjector:
+    return UserInputAttachmentProjector(
+        session_id=session_id,
+        sandbox=sandbox or _SandboxUploadFail(),
+        file_storage=file_storage or _SandboxSyncFileStorage(),
+        uow_factory=uow_factory or (lambda: _SandboxSyncUoW()),
+    )
 
 
 class _SandboxUploadFail:
     async def upload_file(self, *, file_data, file_path: str, filename: str):
         return ToolResult(success=False, message="sandbox rejected")
+
+
+class _SandboxUploadSuccess:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def upload_file(self, *, file_data, file_path: str, filename: str):
+        self.calls.append(
+            {
+                "file_path": file_path,
+                "filename": filename,
+                "content": file_data.read(),
+            }
+        )
+        return ToolResult(success=True, data={"file_path": file_path})
 
 
 class _SandboxSyncFileStorage:
@@ -164,19 +243,27 @@ class _SandboxSyncFileStorage:
 
 
 class _SandboxSyncFileRepo:
+    def __init__(self) -> None:
+        self.saved_files: list[File] = []
+
     async def save(self, file: File) -> None:
+        self.saved_files.append(file)
         return None
 
 
 class _SandboxSyncSessionRepo:
+    def __init__(self) -> None:
+        self.added_files: list[tuple[str, File]] = []
+
     async def add_file(self, session_id: str, file: File) -> None:
+        self.added_files.append((session_id, file))
         return None
 
 
 class _SandboxSyncUoW:
-    def __init__(self) -> None:
-        self.file = _SandboxSyncFileRepo()
-        self.session = _SandboxSyncSessionRepo()
+    def __init__(self, file_repo: _SandboxSyncFileRepo | None = None, session_repo: _SandboxSyncSessionRepo | None = None) -> None:
+        self.file = file_repo or _SandboxSyncFileRepo()
+        self.session = session_repo or _SandboxSyncSessionRepo()
 
     async def __aenter__(self):
         return self
@@ -186,31 +273,110 @@ class _SandboxSyncUoW:
 
 
 def test_sync_file_to_storage_re_raises_exception() -> None:
-    runner = _build_runner_for_storage_sync()
+    projector = _build_attachment_projector()
 
     with pytest.raises(RuntimeError, match="download failed"):
-        asyncio.run(runner._sync_file_to_storage("/tmp/a.txt"))
+        asyncio.run(projector.sync_file_to_storage("/tmp/a.txt"))
 
 
-def test_sync_file_to_sandbox_should_re_raise_when_upload_unsuccessful() -> None:
-    runner = object.__new__(AgentTaskRunner)
-    runner._sandbox = _SandboxUploadFail()
-    runner._file_storage = _SandboxSyncFileStorage()
-    runner._uow_factory = lambda: _SandboxSyncUoW()
+def test_user_input_attachment_projector_should_re_raise_when_upload_unsuccessful() -> None:
+    projector = _build_user_input_attachment_projector()
 
     with pytest.raises(RuntimeError, match="sandbox rejected"):
-        asyncio.run(runner._sync_file_to_sandbox("file-1"))
+        asyncio.run(projector.sync_file_to_sandbox(file_id="file-1"))
+
+
+def test_user_input_attachment_projector_should_sync_attachments_to_sandbox_and_session() -> None:
+    sandbox = _SandboxUploadSuccess()
+    file_repo = _SandboxSyncFileRepo()
+    session_repo = _SandboxSyncSessionRepo()
+    projector = _build_user_input_attachment_projector(
+        sandbox=sandbox,
+        uow_factory=lambda: _SandboxSyncUoW(file_repo=file_repo, session_repo=session_repo),
+    )
+    event = MessageEvent(
+        role="user",
+        message="hello",
+        attachments=[File(id="file-1", filename="a.txt")],
+    )
+
+    asyncio.run(projector.project(event))
+
+    assert sandbox.calls == [
+        {
+            "file_path": "/home/ubuntu/upload/file-1/a.txt",
+            "filename": "a.txt",
+            "content": b"hello",
+        }
+    ]
+    assert [file.filepath for file in file_repo.saved_files] == ["/home/ubuntu/upload/file-1/a.txt"]
+    assert [(session_id, file.filepath) for session_id, file in session_repo.added_files] == [
+        ("session-1", "/home/ubuntu/upload/file-1/a.txt")
+    ]
+    assert [attachment.filepath for attachment in event.attachments] == ["/home/ubuntu/upload/file-1/a.txt"]
+
+
+class _SameNameFileStorage:
+    def __init__(self) -> None:
+        self._files = {
+            "file-1": File(id="file-1", filename="same.txt"),
+            "file-2": File(id="file-2", filename="same.txt"),
+        }
+
+    async def download_file(self, file_id: str):
+        file = self._files[file_id].model_copy(deep=True)
+        return io.BytesIO(file_id.encode("utf-8")), file
+
+
+def test_user_input_attachment_projector_should_not_override_same_name_attachments() -> None:
+    sandbox = _SandboxUploadSuccess()
+    file_repo = _SandboxSyncFileRepo()
+    session_repo = _SandboxSyncSessionRepo()
+    projector = _build_user_input_attachment_projector(
+        sandbox=sandbox,
+        file_storage=_SameNameFileStorage(),
+        uow_factory=lambda: _SandboxSyncUoW(file_repo=file_repo, session_repo=session_repo),
+    )
+    event = MessageEvent(
+        role="user",
+        message="hello",
+        attachments=[
+            File(id="file-1", filename="same.txt"),
+            File(id="file-2", filename="same.txt"),
+        ],
+    )
+
+    asyncio.run(projector.project(event))
+
+    assert sandbox.calls == [
+        {
+            "file_path": "/home/ubuntu/upload/file-1/same.txt",
+            "filename": "same.txt",
+            "content": b"file-1",
+        },
+        {
+            "file_path": "/home/ubuntu/upload/file-2/same.txt",
+            "filename": "same.txt",
+            "content": b"file-2",
+        },
+    ]
+    assert [file.filepath for file in file_repo.saved_files] == [
+        "/home/ubuntu/upload/file-1/same.txt",
+        "/home/ubuntu/upload/file-2/same.txt",
+    ]
+    assert [attachment.filepath for attachment in event.attachments] == [
+        "/home/ubuntu/upload/file-1/same.txt",
+        "/home/ubuntu/upload/file-2/same.txt",
+    ]
 
 
 def test_sync_file_to_storage_should_skip_when_file_not_exists() -> None:
-    runner = object.__new__(AgentTaskRunner)
-    runner._session_id = "session-1"
-    runner._user_id = "user-1"
-    runner._uow_factory = lambda: _DummyUoW()
-    runner._sandbox = _MissingFileSandbox()
-    runner._file_storage = _MissingFileStorage()
+    projector = _build_attachment_projector(
+        sandbox=_MissingFileSandbox(),
+        file_storage=_MissingFileStorage(),
+    )
 
-    synced = asyncio.run(runner._sync_file_to_storage("/tmp/not_exists.txt"))
+    synced = asyncio.run(projector.sync_file_to_storage("/tmp/not_exists.txt"))
 
     assert synced is None
 
@@ -251,6 +417,35 @@ class _ForbiddenFileStorage:
         raise AssertionError("存在会话文件时不应重新上传文件")
 
 
+class _CaptureWorkspaceRuntimeService:
+    def __init__(self, *, authoritative_paths: list[str] | None = None) -> None:
+        self.delivery_calls: list[dict] = []
+        self.authoritative_paths = list(authoritative_paths or [])
+        self.artifact_calls: list[dict] = []
+
+    async def mark_artifacts_delivery_state(self, *, paths: list[str], delivery_state: str):
+        self.delivery_calls.append(
+            {
+                "paths": list(paths),
+                "delivery_state": delivery_state,
+            }
+        )
+        return []
+
+    async def resolve_authoritative_artifact_paths(self, *, paths: list[str]) -> list[str]:
+        if len(self.authoritative_paths) == 0:
+            return list(paths)
+        allowed = set(self.authoritative_paths)
+        return [path for path in paths if path in allowed]
+
+    async def upsert_artifact(self, **kwargs):
+        self.artifact_calls.append(dict(kwargs))
+        return kwargs
+
+    async def get_latest_shell_tool_result(self):
+        return ToolResult(success=False, data={"console_records": []})
+
+
 class _FreshFinalSandbox:
     async def check_file_exists(self, file_path: str):
         return ToolResult(success=True, data=True)
@@ -278,14 +473,13 @@ def test_sync_file_to_storage_should_refresh_final_attachment_from_sandbox_when_
     )
     session_repo = _ExistingFileSessionRepo(existing_file)
     file_storage = _FreshFinalFileStorage()
-    runner = object.__new__(AgentTaskRunner)
-    runner._session_id = "session-1"
-    runner._user_id = "user-1"
-    runner._uow_factory = lambda: _ExistingFileUoW(session_repo)
-    runner._sandbox = _FreshFinalSandbox()
-    runner._file_storage = file_storage
+    projector = _build_attachment_projector(
+        uow_factory=lambda: _ExistingFileUoW(session_repo),
+        sandbox=_FreshFinalSandbox(),
+        file_storage=file_storage,
+    )
 
-    synced = asyncio.run(runner._sync_file_to_storage("/tmp/final.md", stage="final"))
+    synced = asyncio.run(projector.sync_file_to_storage("/tmp/final.md", stage="final"))
 
     assert synced is not None
     assert synced.id == "file-final-2"
@@ -307,14 +501,13 @@ def test_sync_file_to_storage_should_fallback_to_existing_final_attachment_when_
         size=12,
     )
     session_repo = _ExistingFileSessionRepo(existing_file)
-    runner = object.__new__(AgentTaskRunner)
-    runner._session_id = "session-1"
-    runner._user_id = "user-1"
-    runner._uow_factory = lambda: _ExistingFileUoW(session_repo)
-    runner._sandbox = _MissingFileSandbox()
-    runner._file_storage = _ForbiddenFileStorage()
+    projector = _build_attachment_projector(
+        uow_factory=lambda: _ExistingFileUoW(session_repo),
+        sandbox=_MissingFileSandbox(),
+        file_storage=_ForbiddenFileStorage(),
+    )
 
-    synced = asyncio.run(runner._sync_file_to_storage("/tmp/final.md", stage="final"))
+    synced = asyncio.run(projector.sync_file_to_storage("/tmp/final.md", stage="final"))
 
     assert synced == existing_file
     assert session_repo.removed_file_ids == []
@@ -323,13 +516,12 @@ def test_sync_file_to_storage_should_fallback_to_existing_final_attachment_when_
 
 
 def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    projector = _build_attachment_projector()
 
     async def _raise_sync_error(filepath: str, _stage: str = "intermediate"):
         raise RuntimeError(f"sync failed: {filepath}")
 
-    runner._user_id = "user-1"
-    runner._sync_file_to_storage = _raise_sync_error
+    projector.sync_file_to_storage = _raise_sync_error
     event = MessageEvent(
         role="assistant",
         message="hello",
@@ -337,12 +529,84 @@ def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
     )
 
     with pytest.raises(RuntimeError, match="sync failed: /tmp/a.txt"):
-        asyncio.run(runner._sync_message_attachments_to_storage(event))
+        asyncio.run(projector.project(event))
 
 
-def test_sync_message_attachments_to_sandbox_should_re_raise_when_file_id_missing() -> None:
-    runner = object.__new__(AgentTaskRunner)
-    runner._uow_factory = lambda: _SandboxSyncUoW()
+def test_sync_message_attachments_to_storage_should_mark_final_artifacts_delivered() -> None:
+    workspace_runtime_service = _CaptureWorkspaceRuntimeService()
+    projector = _build_attachment_projector(
+        workspace_runtime_service=workspace_runtime_service,
+    )
+
+    async def _sync_file(filepath: str, _stage: str = "intermediate"):
+        return File(id=f"file-{filepath}", filename="final.md", filepath=filepath)
+
+    projector.sync_file_to_storage = _sync_file
+    event = MessageEvent(
+        role="assistant",
+        message="最终结果",
+        stage="final",
+        attachments=[
+            File(filename="final.md", filepath="/tmp/final.md"),
+            File(filename="report.md", filepath="/tmp/report.md"),
+        ],
+    )
+
+    asyncio.run(projector.project(event))
+
+    assert [attachment.filepath for attachment in event.attachments] == [
+        "/tmp/final.md",
+        "/tmp/report.md",
+    ]
+    assert workspace_runtime_service.delivery_calls == [
+        {
+            "paths": ["/tmp/final.md", "/tmp/report.md"],
+            "delivery_state": "final_delivered",
+        }
+    ]
+
+
+def test_sync_message_attachments_to_storage_should_filter_non_workspace_final_attachments() -> None:
+    workspace_runtime_service = _CaptureWorkspaceRuntimeService(
+        authoritative_paths=["/tmp/final.md"],
+    )
+    projector = _build_attachment_projector(
+        workspace_runtime_service=workspace_runtime_service,
+    )
+
+    synced_paths: list[str] = []
+
+    async def _sync_file(filepath: str, _stage: str = "intermediate"):
+        synced_paths.append(filepath)
+        return File(id=f"file-{filepath}", filename="final.md", filepath=filepath)
+
+    projector.sync_file_to_storage = _sync_file
+    event = MessageEvent(
+        role="assistant",
+        message="最终结果",
+        stage="final",
+        attachments=[
+            File(filename="final.md", filepath="/tmp/final.md"),
+            File(filename="rogue.md", filepath="/tmp/rogue.md"),
+        ],
+    )
+
+    asyncio.run(projector.project(event))
+
+    assert synced_paths == ["/tmp/final.md"]
+    assert [attachment.filepath for attachment in event.attachments] == ["/tmp/final.md"]
+    assert workspace_runtime_service.delivery_calls == [
+        {
+            "paths": ["/tmp/final.md"],
+            "delivery_state": "final_delivered",
+        }
+    ]
+
+
+def test_user_input_attachment_projector_should_re_raise_when_file_id_missing() -> None:
+    projector = _build_user_input_attachment_projector(
+        uow_factory=lambda: _SandboxSyncUoW(),
+    )
     event = MessageEvent(
         role="user",
         message="hello",
@@ -350,11 +614,11 @@ def test_sync_message_attachments_to_sandbox_should_re_raise_when_file_id_missin
     )
 
     with pytest.raises(RuntimeError, match="缺少 file_id"):
-        asyncio.run(runner._sync_message_attachments_to_sandbox(event))
+        asyncio.run(projector.project(event))
 
 
 def test_invoke_skips_empty_input_stream_event() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    runner = _new_runner()
     session_repo = _InvokeSessionRepo()
 
     runner._session_id = "session-1"
@@ -399,7 +663,7 @@ class _NoopOutputStream:
 
 
 def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    runner = _new_runner()
     session_repo = _InvokeSessionRepo()
     task = _SerialInvokeTask(
         [
@@ -459,7 +723,7 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
 
 
 def test_invoke_should_keep_failed_status_after_error_event() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    runner = _new_runner()
     session_repo = _InvokeSessionRepo()
     task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
 
@@ -514,7 +778,7 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
 
 
 def test_invoke_should_project_latest_message_when_exception_falls_back_to_error_event() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    runner = _new_runner()
     session_repo = _InvokeSessionRepo()
     task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
 
@@ -588,20 +852,82 @@ class _ScreenshotFileStorage:
         return f"https://cdn.example.com/{file.key}"
 
 
-def test_get_browser_screenshot_should_use_storage_url_provider() -> None:
-    runner = object.__new__(AgentTaskRunner)
-    runner._browser = _BrowserScreenshot()
-    runner._user_id = "user-1"
-    runner._file_storage = _ScreenshotFileStorage()
+def test_browser_screenshot_artifact_service_should_upload_and_index_workspace_artifact() -> None:
+    file_storage = _ScreenshotFileStorage()
+    workspace_runtime_service = _CaptureWorkspaceRuntimeService()
+    service = BrowserScreenshotArtifactService(
+        browser=_BrowserScreenshot(),
+        file_storage=file_storage,
+        workspace_runtime_service=workspace_runtime_service,
+        user_id="user-1",
+    )
 
-    screenshot_url = asyncio.run(runner._get_browser_screenshot())
+    screenshot_url = asyncio.run(service.capture(source_capability="browser_view"))
 
     assert screenshot_url == "https://cdn.example.com/2026/03/19/s.png"
-    assert runner._file_storage.upload_user_ids == ["user-1"]
-    payload = runner._file_storage.upload_payloads[0]
+    assert file_storage.upload_user_ids == ["user-1"]
+    payload = file_storage.upload_payloads[0]
     assert getattr(payload, "filename").endswith(".png")
+    assert getattr(payload, "content_type") == "image/png"
     assert getattr(payload, "size") == len(b"fake-image-bytes")
     assert getattr(payload, "file").read() == b"fake-image-bytes"
+    assert len(workspace_runtime_service.artifact_calls) == 1
+    artifact_call = workspace_runtime_service.artifact_calls[0]
+    assert artifact_call["path"] == "/.workspace/browser-screenshots/2026/03/19/s.png"
+    assert artifact_call["artifact_type"] == "browser_screenshot"
+    assert artifact_call["summary"] == "浏览器截图: /.workspace/browser-screenshots/2026/03/19/s.png"
+    assert artifact_call["source_capability"] == "browser_view"
+    assert artifact_call["record_as_changed_file"] is False
+    assert artifact_call["metadata"] == {
+        "file_id": "file-screenshot",
+        "filename": getattr(payload, "filename"),
+        "filepath": "",
+        "key": "2026/03/19/s.png",
+        "mime_type": "image/png",
+        "size": len(b"fake-image-bytes"),
+        "url": "https://cdn.example.com/2026/03/19/s.png",
+    }
+
+
+class _ShellObservationWorkspaceRuntimeService:
+    async def get_latest_shell_tool_result(self):
+        return ToolResult(
+            success=True,
+            data={
+                "output": "pytest -q\n24 passed",
+                "console_records": [
+                    {
+                        "command": "pytest -q",
+                        "output": "24 passed",
+                    }
+                ],
+            },
+        )
+
+
+def test_tool_event_projector_should_use_workspace_shell_observation_without_sandbox() -> None:
+    projector = _build_tool_event_projector(
+        browser=_BrowserScreenshot(),
+        file_storage=_ScreenshotFileStorage(),
+        workspace_runtime_service=_ShellObservationWorkspaceRuntimeService(),
+    )
+    event = ToolEvent(
+        tool_name="shell",
+        function_name="read_shell_output",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(projector.project(event))
+
+    assert event.tool_content is not None
+    assert event.tool_content.console == [
+        {
+            "command": "pytest -q",
+            "output": "24 passed",
+        }
+    ]
 
 
 class _CancellationSessionRepo:
@@ -640,10 +966,31 @@ class _CancellationWorkflowRunRepo:
         self._run.status = WorkflowRunStatus.CANCELLED
 
 
+class _CancellationWorkspaceRepo:
+    def __init__(self, workspace: Workspace | None) -> None:
+        self._workspace = workspace
+
+    async def get_by_id(self, workspace_id: str):
+        if self._workspace is None or workspace_id != self._workspace.id:
+            return None
+        return self._workspace
+
+    async def get_by_session_id(self, session_id: str):
+        if self._workspace is None or session_id != self._workspace.session_id:
+            return None
+        return self._workspace
+
+
 class _CancellationUoW:
-    def __init__(self, session_repo: _CancellationSessionRepo, workflow_run_repo: _CancellationWorkflowRunRepo) -> None:
+    def __init__(
+            self,
+            session_repo: _CancellationSessionRepo,
+            workflow_run_repo: _CancellationWorkflowRunRepo,
+            workspace_repo: _CancellationWorkspaceRepo | None = None,
+    ) -> None:
         self.session = session_repo
         self.workflow_run = workflow_run_repo
+        self.workspace = workspace_repo or _CancellationWorkspaceRepo(None)
 
     async def __aenter__(self):
         return self
@@ -657,6 +1004,11 @@ def test_persist_cancellation_state_should_build_cancelled_events_from_run_histo
         id="session-1",
         user_id="user-1",
         status=SessionStatus.RUNNING,
+        workspace_id="workspace-1",
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
         current_run_id="run-1",
     )
     run = WorkflowRun(
@@ -685,9 +1037,10 @@ def test_persist_cancellation_state_should_build_cancelled_events_from_run_histo
     ]
     session_repo = _CancellationSessionRepo(session)
     workflow_run_repo = _CancellationWorkflowRunRepo(run, events=run_events)
-    runner = object.__new__(AgentTaskRunner)
+    workspace_repo = _CancellationWorkspaceRepo(workspace)
+    runner = _new_runner()
     runner._session_id = "session-1"
-    runner._uow_factory = lambda: _CancellationUoW(session_repo, workflow_run_repo)
+    runner._uow_factory = lambda: _CancellationUoW(session_repo, workflow_run_repo, workspace_repo)
 
     asyncio.run(runner._persist_cancellation_state())
 
@@ -709,7 +1062,7 @@ def test_persist_cancellation_state_should_build_cancelled_events_from_run_histo
 
 
 def test_run_flow_should_allow_empty_message_when_command_present() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    runner = _new_runner()
 
     class _RunEngine:
         async def invoke(self, message):
@@ -719,8 +1072,6 @@ def test_run_flow_should_allow_empty_message_when_command_present() -> None:
             yield DoneEvent()
 
     runner._run_engine = _RunEngine()
-    runner._handle_tool_event = None
-    runner._sync_message_attachments_to_storage = None
 
     async def _collect():
         return [event async for event in runner._run_flow(
@@ -734,7 +1085,7 @@ def test_run_flow_should_allow_empty_message_when_command_present() -> None:
 
 
 def test_pop_event_should_parse_continue_cancelled_task_input_without_touching_event_history() -> None:
-    runner = object.__new__(AgentTaskRunner)
+    runner = _new_runner()
     runner._session_id = "session-1"
 
     class _InputStream:

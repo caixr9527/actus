@@ -2,15 +2,16 @@ import asyncio
 import json
 
 from app.domain.models import ExecutionStatus, MessageEvent, Plan, Step, StepOutcome, ToolEventStatus, ToolResult
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph_graphs import bind_live_event_sink, unbind_live_event_sink
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
-    create_or_reuse_plan_node,
+    create_or_reuse_plan_node as _create_or_reuse_plan_node,
     direct_answer_node,
     direct_execute_node,
     direct_wait_node,
     entry_router_node,
-    execute_step_node,
+    execute_step_node as _execute_step_node,
 )
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing import route_after_plan
 from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.language_checker import (
@@ -23,6 +24,25 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools i
     execute_step_with_prompt,
     has_available_file_context,
 )
+
+
+_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+async def create_or_reuse_plan_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _create_or_reuse_plan_node(
+        *args,
+        **kwargs,
+    )
+
+
+async def execute_step_node(*args, **kwargs):
+    kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    return await _execute_step_node(
+        *args,
+        **kwargs,
+    )
 
 
 class _DirectAnswerLLM:
@@ -858,7 +878,7 @@ def test_create_or_reuse_plan_node_should_default_research_step_to_forbid_file_o
                 "session_open_questions": [],
                 "session_blockers": [],
                 "selected_artifacts": [],
-                "historical_artifact_refs": [],
+                "historical_artifact_paths": [],
                 "input_parts": [],
                 "message_window": [],
                 "retrieved_memories": [],
@@ -868,7 +888,6 @@ def test_create_or_reuse_plan_node_should_default_research_step_to_forbid_file_o
                 "max_execution_steps": 20,
                 "last_executed_step": None,
                 "pending_interrupt": {},
-                "artifact_refs": [],
                 "emitted_events": [],
                 "final_message": "",
                 "thread_id": "thread-1",
@@ -912,7 +931,7 @@ def test_create_or_reuse_plan_node_should_stop_after_planning_for_plan_only_requ
                 "session_open_questions": [],
                 "session_blockers": [],
                 "selected_artifacts": [],
-                "historical_artifact_refs": [],
+                "historical_artifact_paths": [],
                 "input_parts": [],
                 "message_window": [],
                 "retrieved_memories": [],
@@ -922,7 +941,6 @@ def test_create_or_reuse_plan_node_should_stop_after_planning_for_plan_only_requ
                 "max_execution_steps": 20,
                 "last_executed_step": None,
                 "pending_interrupt": {},
-                "artifact_refs": [],
                 "emitted_events": [],
                 "final_message": "",
                 "thread_id": "thread-1",
@@ -1357,7 +1375,6 @@ def test_execute_step_node_should_treat_selected_artifacts_as_available_file_con
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": ["/home/ubuntu/course-detail.md"],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1365,7 +1382,7 @@ def test_execute_step_node_should_treat_selected_artifacts_as_available_file_con
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请直接展示课程详情",
         "current_step_id": None,
@@ -1414,7 +1431,6 @@ def test_execute_step_node_should_store_final_delivery_payload_for_inline_step()
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1422,7 +1438,7 @@ def test_execute_step_node_should_store_final_delivery_payload_for_inline_step()
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请直接给我最终答案",
         "current_step_id": None,
@@ -1468,7 +1484,6 @@ def test_execute_step_node_should_split_light_summary_and_final_delivery_text() 
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1476,7 +1491,7 @@ def test_execute_step_node_should_split_light_summary_and_final_delivery_text() 
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请给我最终答案",
         "current_step_id": None,
@@ -1522,7 +1537,6 @@ def test_execute_step_node_should_filter_non_file_attachment_refs_from_final_del
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1530,7 +1544,7 @@ def test_execute_step_node_should_filter_non_file_attachment_refs_from_final_del
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请给我最终答案",
         "current_step_id": None,
@@ -1575,7 +1589,6 @@ def test_execute_step_node_should_support_no_tool_execution_path() -> None:
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1583,7 +1596,7 @@ def test_execute_step_node_should_support_no_tool_execution_path() -> None:
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请直接给我最终答案",
         "current_step_id": None,
@@ -1635,7 +1648,6 @@ def test_execute_step_node_should_not_overwrite_final_delivery_payload_for_inter
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1643,7 +1655,7 @@ def test_execute_step_node_should_not_overwrite_final_delivery_payload_for_inter
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请展示候选项",
         "current_step_id": None,
@@ -1686,7 +1698,6 @@ def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candi
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1694,7 +1705,7 @@ def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candi
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请展示候选课程",
         "current_step_id": None,
@@ -1746,7 +1757,6 @@ def test_execute_step_node_should_drop_delivery_text_for_non_inline_step() -> No
         "execution_count": 0,
         "input_parts": [],
         "selected_artifacts": [],
-        "artifact_refs": [],
         "step_states": [],
         "pending_interrupt": {},
         "retrieved_memories": [],
@@ -1754,7 +1764,7 @@ def test_execute_step_node_should_drop_delivery_text_for_non_inline_step() -> No
         "recent_attempt_briefs": [],
         "session_open_questions": [],
         "session_blockers": [],
-        "historical_artifact_refs": [],
+        "historical_artifact_paths": [],
         "emitted_events": [],
         "user_message": "请先搜索课程",
         "current_step_id": None,

@@ -1,6 +1,6 @@
 from app.domain.models import AgentConfig, MCPConfig, A2AConfig
 from app.domain.services.agent_task_runner import AgentTaskRunner
-from app.domain.services.tools import ToolRuntimeAdapter
+from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 import pytest
 
 
@@ -32,6 +32,9 @@ def test_agent_task_runner_should_build_run_engine_with_task_scoped_tools() -> N
         search_engine=object(),
         sandbox=object(),
         run_engine_factory=_factory,
+        tool_runtime_adapter=ToolRuntimeAdapter(
+            capability_registry=CapabilityRegistry.default_v1(),
+        ),
     )
 
     assert runner._run_engine is engine
@@ -56,4 +59,7 @@ def test_agent_task_runner_should_fail_fast_when_run_engine_factory_missing() ->
             browser=object(),
             search_engine=object(),
             sandbox=object(),
+            tool_runtime_adapter=ToolRuntimeAdapter(
+                capability_registry=CapabilityRegistry.default_v1(),
+            ),
         )

@@ -1,7 +1,7 @@
 import asyncio
 
 from app.application.service.agent_service import AgentService
-from app.domain.models import AgentConfig, MCPConfig, A2AConfig, Session
+from app.domain.models import AgentConfig, MCPConfig, A2AConfig, Session, Workspace
 
 
 class _DummyBrowser:
@@ -67,10 +67,36 @@ class _WorkflowRunRepo:
         return WorkflowRun(id="run-1", session_id=session.id, user_id=session.user_id, status=status, thread_id=thread_id)
 
 
+class _WorkspaceRepo:
+    def __init__(self) -> None:
+        self.saved_workspaces: list[Workspace] = []
+        self.workspace_by_session_id: dict[str, Workspace] = {}
+
+    async def save(self, workspace: Workspace) -> None:
+        cloned = workspace.model_copy(deep=True)
+        self.saved_workspaces.append(cloned)
+        self.workspace_by_session_id[cloned.session_id] = cloned
+
+    async def get_by_id(self, workspace_id: str):
+        for workspace in self.saved_workspaces:
+            if workspace.id == workspace_id:
+                return workspace
+        return None
+
+    async def get_by_session_id(self, session_id: str):
+        return self.workspace_by_session_id.get(session_id)
+
+
 class _UoW:
-    def __init__(self, session_repo: _SessionRepo, workflow_run_repo: _WorkflowRunRepo) -> None:
+    def __init__(
+            self,
+            session_repo: _SessionRepo,
+            workflow_run_repo: _WorkflowRunRepo,
+            workspace_repo: _WorkspaceRepo,
+    ) -> None:
         self.session = session_repo
         self.workflow_run = workflow_run_repo
+        self.workspace = workspace_repo
 
     async def __aenter__(self):
         return self
@@ -130,6 +156,7 @@ def _dummy_run_engine_factory(**kwargs):
 def test_agent_service_create_task_should_build_llm_from_session_model() -> None:
     session_repo = _SessionRepo()
     workflow_run_repo = _WorkflowRunRepo()
+    workspace_repo = _WorkspaceRepo()
     resolver = _DummyResolver()
     llm_factory = _DummyLLMFactory()
     _TaskFactory.created_tasks = []
@@ -143,7 +170,7 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
         json_parser=_DummyJsonParser(),
         search_engine=_DummySearchEngine(),
         file_storage=_DummyFileStorage(),
-        uow_factory=lambda: _UoW(session_repo, workflow_run_repo),
+        uow_factory=lambda: _UoW(session_repo, workflow_run_repo, workspace_repo),
         model_runtime_resolver=resolver,
         llm_factory=llm_factory,
         run_engine_factory=_dummy_run_engine_factory,
@@ -156,5 +183,6 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
     assert resolver.calls == ["deepseek"]
     assert llm_factory.configs[0].model_name == "gpt-5.4"
     assert llm_factory.configs[0].temperature == 0.3
-    assert session_repo.saved_sessions[0].task_id == "task-1"
+    assert session_repo.saved_sessions[0].workspace_id is not None
     assert session_repo.saved_sessions[0].current_run_id == "run-1"
+    assert workspace_repo.saved_workspaces[0].task_id == "task-1"
