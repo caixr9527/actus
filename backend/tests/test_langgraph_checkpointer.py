@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from app.infrastructure.runtime import langgraph_checkpointer as checkpointer_module
+from app.infrastructure.runtime.langgraph.checkpoint import checkpointer as checkpointer_module
 from scripts import bootstrap_langgraph_checkpointer
 
 

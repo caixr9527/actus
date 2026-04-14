@@ -5,16 +5,16 @@ from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus, Tool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.tools.base import BaseTool, tool
 from app.domain.services.tools.message import MessageTool
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     direct_wait_node,
     execute_step_node as _execute_step_node,
     wait_for_human_node,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.routing import (
     route_after_execute,
     route_after_wait,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tools import (
     execute_step_with_prompt,
 )
 
@@ -457,7 +457,7 @@ def test_execute_step_with_prompt_should_preserve_assistant_reasoning_fields_dur
 
 def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: "AI 人工智能算法工程师体系课",
     )
 
@@ -514,7 +514,7 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
 
 def test_wait_for_human_node_should_cancel_waiting_step_and_replan_after_confirm_cancel(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: False,
     )
 
@@ -571,7 +571,7 @@ def test_wait_for_human_node_should_cancel_waiting_step_and_replan_after_confirm
 
 def test_direct_wait_cancel_should_clear_direct_wait_control_state(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: False,
     )
 
@@ -603,7 +603,7 @@ def test_direct_wait_cancel_should_clear_direct_wait_control_state(monkeypatch) 
 
 def test_direct_wait_cancel_replan_execute_should_route_to_replan_instead_of_summarize(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: False,
     )
 
@@ -649,7 +649,7 @@ def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> 
     user_message = "先让我确认后再继续搜索课程"
     llm = _IllegalAskUserLLM()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: True,
     )
 

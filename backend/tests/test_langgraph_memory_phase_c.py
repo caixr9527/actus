@@ -21,10 +21,10 @@ from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.tools import BaseTool, MessageTool
 from app.domain.services.tools.base import tool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.graph import (
     build_planner_react_langgraph_graph as _build_planner_react_langgraph_graph,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     consolidate_memory_node,
     direct_wait_node,
     execute_step_node as _execute_step_node,
@@ -1925,7 +1925,7 @@ def test_summarize_should_block_direct_wait_without_original_execution(monkeypat
         captured_events.extend(events)
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.emit_live_events",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.emit_live_events",
         _capture_events,
     )
 
@@ -1981,7 +1981,7 @@ def test_summarize_should_block_direct_wait_without_original_execution(monkeypat
 def test_summarize_should_not_block_after_direct_wait_cancel_and_replan(monkeypatch) -> None:
     llm = _FakeLLM()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes.interrupt",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: False,
     )
 
@@ -2599,51 +2599,51 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
         return _append_trace(state, "finalize")
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.entry_router_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.entry_router_node",
         _entry_router,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.recall_memory_context_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.recall_memory_context_node",
         _recall,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.direct_answer_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.direct_answer_node",
         lambda state, llm: state,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.direct_wait_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.direct_wait_node",
         lambda state: state,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.direct_execute_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.direct_execute_node",
         lambda state: state,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.create_or_reuse_plan_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.create_or_reuse_plan_node",
         _plan,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.execute_step_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.execute_step_node",
         _execute,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.guard_step_reuse_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.guard_step_reuse_node",
         _guard,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.replan_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.replan_node",
         _replan,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.summarize_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.summarize_node",
         _summarize,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.consolidate_memory_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.consolidate_memory_node",
         _consolidate,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.graph.finalize_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.finalize_node",
         _finalize,
     )
 

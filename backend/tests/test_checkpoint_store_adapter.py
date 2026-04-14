@@ -2,7 +2,7 @@ import asyncio
 from typing import Optional
 
 from app.domain.models import Session, WorkflowRun, Workspace
-from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
+from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 
 
 class _SessionRepo:

@@ -21,7 +21,7 @@ from app.domain.models import (
     Workspace,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
+from app.infrastructure.runtime.langgraph.engine.run_engine import LangGraphRunEngine
 
 
 class _FakeGraph:
@@ -107,7 +107,7 @@ def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monk
         return _FakeGraph()
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         _fake_build_graph,
     )
 
@@ -152,7 +152,7 @@ def test_langgraph_run_engine_invoke_should_emit_wait_event_from_interrupt(monke
     )
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -185,7 +185,7 @@ def test_langgraph_run_engine_invoke_should_not_crash_when_graph_finishes_withou
     )
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -285,7 +285,7 @@ def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_att
 def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
     engine = _build_run_engine(session_id="session-1", stage_llms=_build_stage_llms())
@@ -357,7 +357,7 @@ def test_langgraph_run_engine_resume_should_write_normalized_checkpoint_before_r
         }
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
     engine = _build_run_engine(session_id="session-1", stage_llms=_build_stage_llms())
@@ -397,7 +397,7 @@ def test_langgraph_run_engine_inspect_resume_checkpoint_should_report_missing_pe
     )
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -476,7 +476,7 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
     )
 
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -503,7 +503,7 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
 def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_and_completed_summaries(monkeypatch) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -623,7 +623,7 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
 def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monkeypatch) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -786,7 +786,7 @@ def test_langgraph_run_engine_invoke_should_not_sync_episodic_projection_for_wai
         },
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 
@@ -847,7 +847,7 @@ def test_langgraph_run_engine_invoke_should_not_sync_episodic_projection_for_wai
 def test_langgraph_run_engine_should_not_fallback_to_session_current_run_id_when_workspace_run_missing(monkeypatch) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph_run_engine.build_planner_react_langgraph_graph",
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
         lambda **kwargs: fake_graph,
     )
 

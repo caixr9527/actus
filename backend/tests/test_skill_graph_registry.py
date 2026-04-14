@@ -9,7 +9,7 @@ from app.domain.services.runtime.skill_graph_registry import (
     SkillGraphRegistry,
     SkillRuntimePolicy,
 )
-from app.infrastructure.runtime.langgraph_graphs.skill_subgraphs import (
+from app.infrastructure.runtime.langgraph.graphs.skills.registry import (
     build_default_skill_graph_registry,
 )
 
@@ -98,7 +98,10 @@ def test_skill_graph_runtime_should_validate_schema_and_execute_graph() -> None:
 def test_default_skill_registry_should_run_planner_execute_step_subgraph() -> None:
     class _StepLLM:
         async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
-            assert "你正在执行任务" in messages[0]["content"]
+            # 断言 skill 输入契约，不绑定具体 prompt 文案，避免模板迭代导致无意义回归。
+            content = str(messages[0]["content"])
+            assert "请继续执行" in content
+            assert "执行第一步" in content
             return {
                 "role": "assistant",
                 "content": "{\"success\": true, \"result\": \"步骤执行完成\", \"attachments\": []}",

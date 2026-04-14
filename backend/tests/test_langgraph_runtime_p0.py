@@ -4,8 +4,8 @@ import json
 from app.domain.models import ExecutionStatus, MessageEvent, Plan, Step, StepOutcome, ToolEventStatus, ToolResult
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.tools.base import BaseTool, tool
-from app.infrastructure.runtime.langgraph_graphs import bind_live_event_sink, unbind_live_event_sink
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     create_or_reuse_plan_node as _create_or_reuse_plan_node,
     direct_answer_node,
     direct_execute_node,
@@ -13,12 +13,12 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes i
     entry_router_node,
     execute_step_node as _execute_step_node,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.routing import route_after_plan
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.language_checker import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.routing import route_after_plan
+from app.infrastructure.runtime.langgraph.graphs.planner_react.language_checker import (
     build_direct_path_copy,
     infer_working_language_from_message,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tools import (
     classify_confirmed_user_task_mode,
     classify_step_task_mode,
     execute_step_with_prompt,

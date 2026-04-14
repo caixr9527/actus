@@ -3,7 +3,7 @@ import json
 
 from app.domain.models import Step, ToolEventStatus, ToolResult
 from app.domain.services.tools.base import BaseTool, tool
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.tools import execute_step_with_prompt
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tools import execute_step_with_prompt
 
 
 class _BrowserPriorityTool(BaseTool):

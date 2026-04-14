@@ -33,8 +33,8 @@ from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
 )
-from app.infrastructure.runtime.langgraph_graphs import bind_live_event_sink, unbind_live_event_sink
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.nodes import (
+from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     create_or_reuse_plan_node as _create_or_reuse_plan_node,
 )
 

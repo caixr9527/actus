@@ -1,4 +1,4 @@
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import (
+from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
     build_trace_id,
     format_runtime_log,

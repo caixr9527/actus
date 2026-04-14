@@ -3,7 +3,7 @@ import pytest
 from app.application.service.run_engine_selector import build_run_engine
 from app.domain.models import AgentConfig
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
-from app.infrastructure.runtime.langgraph_run_engine import LangGraphRunEngine
+from app.infrastructure.runtime.langgraph.engine.run_engine import LangGraphRunEngine
 
 
 class _DummyLLM:

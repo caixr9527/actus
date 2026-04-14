@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.domain.models import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
 from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
 from app.infrastructure.repositories.db_long_term_memory_repository import DBLongTermMemoryRepository
-from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
+from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
 from core.config import Settings
 
 
