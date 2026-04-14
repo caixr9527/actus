@@ -303,6 +303,50 @@ def test_agent_service_chat_should_reject_resume_when_checkpoint_invalid() -> No
     assert session.status == SessionStatus.WAITING
 
 
+def test_agent_service_inspect_resume_checkpoint_should_inject_runtime_context_service(monkeypatch) -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.WAITING,
+    )
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(_SessionRepo(session))
+    service._task_cls = _TaskFactory
+
+    async def _resolve_runtime_llm(_session: Session):
+        return object()
+
+    service._resolve_runtime_llm = _resolve_runtime_llm
+    captured: dict[str, object] = {}
+
+    class _FakeLangGraphRunEngine:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def inspect_resume_checkpoint(self):
+            return SimpleNamespace(
+                is_resumable=True,
+                run_id="run-1",
+                has_checkpoint=True,
+                pending_interrupt={},
+            )
+
+    monkeypatch.setattr(
+        "app.application.service.agent_service.LangGraphRunEngine",
+        _FakeLangGraphRunEngine,
+    )
+    monkeypatch.setattr(
+        "app.application.service.agent_service.get_langgraph_checkpointer",
+        lambda: SimpleNamespace(get_checkpointer=lambda: None),
+    )
+
+    inspection = asyncio.run(service._inspect_resume_checkpoint(session))
+
+    assert inspection.is_resumable is True
+    assert captured.get("runtime_context_service") is not None
+
+
 def test_agent_service_chat_should_enqueue_continue_cancelled_task_command() -> None:
     cancelled_plan = Plan(
         title="被取消任务",

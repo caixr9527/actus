@@ -2287,6 +2287,59 @@ def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_emp
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/course_directory.md"]
 
 
+def test_summarize_should_not_fallback_attachments_when_last_step_disables_attachment_delivery() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "创建文档但不要作为最终附件交付",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成文档",
+            description="生成课程目录文档",
+            objective_key="objective-step-1",
+            success_criteria=["文档生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成课程目录文档",
+                produced_artifacts=["/home/ubuntu/course_directory.md"],
+                deliver_result_as_attachment=False,
+            ),
+        ),
+        "selected_artifacts": ["/home/ubuntu/course_directory.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证总结附件硬门禁",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "delivery_controls": {
+                "source_step_id": "step-1",
+                "deliver_result_as_attachment": False,
+            },
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["selected_artifacts"] == []
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.attachments == []
+
+
 class _FakeSummaryAttachmentLLM:
     async def invoke(self, messages, tools, response_format):
         return {

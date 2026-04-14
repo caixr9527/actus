@@ -275,6 +275,24 @@ class _SearchFetchTool(BaseTool):
         )
 
 
+class _ShellTool(BaseTool):
+    name = "shell"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invoked = 0
+
+    @tool(
+        name="shell_execute",
+        description="执行 shell 命令",
+        parameters={"command": {"type": "string"}},
+        required=["command"],
+    )
+    async def shell_execute(self, command: str):
+        self.invoked += 1
+        return ToolResult(success=True, data={"command": command, "stdout": "ok"})
+
+
 class _FinalDeliverySearchDriftLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -307,6 +325,69 @@ class _FinalDeliverySearchDriftLLM:
         }
 
 
+class _FinalDeliveryShellDriftLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-shell",
+                        "function": {
+                            "name": "shell_execute",
+                            "arguments": json.dumps({"command": "echo summarize"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已直接完成最终交付",
+                    "delivery_text": "这是基于已知上下文整理出的完整最终正文。",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _FileProcessingShellDriftLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-file-shell",
+                        "function": {
+                            "name": "shell_execute",
+                            "arguments": json.dumps({"command": "git status"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "文件处理步骤已完成",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _RepeatedSearchLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         return {
@@ -320,6 +401,58 @@ class _RepeatedSearchLLM:
                     },
                 }
             ],
+        }
+
+
+class _RepeatedFetchPageLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-fetch",
+                    "function": {
+                        "name": "fetch_page",
+                        "arguments": json.dumps({"url": "https://example.com/article"}, ensure_ascii=False),
+                    },
+                }
+            ],
+        }
+
+
+class _SearchTransportErrorTool(BaseTool):
+    name = "search"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invoked = 0
+
+    @tool(
+        name="search_web",
+        description="搜索网页",
+        parameters={"query": {"type": "string"}},
+        required=["query"],
+    )
+    async def search_web(self, query: str):
+        self.invoked += 1
+        return ToolResult(
+            success=False,
+            message="RemoteProtocolError: Server disconnected without sending a response",
+            data=None,
+        )
+
+
+class _NoAttachmentPreferenceLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/workspace/p3-artifact/result.md"],
+                },
+                ensure_ascii=False,
+            )
         }
 
 
@@ -631,6 +764,19 @@ def test_entry_router_node_should_not_route_long_mixed_request_to_direct_wait() 
     assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
 
 
+def test_entry_router_node_should_not_route_waiting_plan_request_to_direct_wait() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "帮我制定周末出行方案；如果你需要我先确认预算和偏好，请先停下来问我。",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+
+
 def test_entry_router_node_should_route_direct_execute_for_simple_tool_task() -> None:
     state = asyncio.run(
         entry_router_node(
@@ -732,6 +878,12 @@ def test_classify_confirmed_user_task_mode_should_ignore_wait_signal() -> None:
     user_message = "先让我确认后再继续搜索课程"
 
     assert classify_step_task_mode(Step(description=user_message)) == "human_wait"
+    assert classify_confirmed_user_task_mode(user_message) == "research"
+
+
+def test_classify_confirmed_user_task_mode_should_fallback_to_research_for_planning_query() -> None:
+    user_message = "帮我制定周末出行方案"
+
     assert classify_confirmed_user_task_mode(user_message) == "research"
 
 
@@ -1078,6 +1230,56 @@ def test_execute_step_with_prompt_should_break_on_repeated_search_query() -> Non
     assert len(called_events) == 3
 
 
+def test_execute_step_with_prompt_should_break_on_repeated_fetch_page_url() -> None:
+    llm = _RepeatedFetchPageLLM()
+    search_fetch_tool = _SearchFetchTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="读取同一页面并整理内容"),
+            runtime_tools=[search_fetch_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请读取 https://example.com/article 这个页面并整理内容"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is False
+    assert payload["blockers"] == ["同一页面抓取请求已重复触发多次，当前检索路径没有新增信息。"]
+    assert payload["next_hint"] == "请切换其他候选 URL、改用其他工具，或结束当前步骤。"
+    assert search_fetch_tool.invocations == ["fetch_page", "fetch_page"]
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 3
+    assert called_events[-1].function_result is not None
+    assert called_events[-1].function_result.success is False
+
+
+def test_execute_step_with_prompt_should_fast_fail_on_search_transport_error() -> None:
+    llm = _RepeatedSearchLLM()
+    search_tool = _SearchTransportErrorTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="检索 OpenAI 最新消息"),
+            runtime_tools=[search_tool],
+            task_mode="research",
+            user_content=[{"type": "text", "text": "请检索 OpenAI 最新消息"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["success"] is False
+    assert payload["blockers"] == ["检索/抓取链路出现瞬时网络错误，当前步骤已停止重试。"]
+    assert payload["next_hint"] == "请稍后重试，或先基于已有信息继续后续步骤。"
+    assert search_tool.invoked == 1
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+
+
 def test_execute_step_with_prompt_should_block_read_file_without_explicit_file_context_in_research() -> None:
     llm = _ReadFileThenFinishLLM("/home/ubuntu/report.md")
     file_tool = _ReadFileTool()
@@ -1293,6 +1495,82 @@ def test_execute_step_with_prompt_should_block_search_for_final_delivery_step_ev
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
     assert "负责最终交付正文" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_shell_for_final_delivery_step() -> None:
+    llm = _FinalDeliveryShellDriftLLM()
+    shell_tool = _ShellTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="基于已有上下文输出最终结论",
+                output_mode="inline",
+                artifact_policy="default",
+                delivery_role="final",
+                delivery_context_state="ready",
+            ),
+            runtime_tools=[shell_tool],
+            task_mode="general",
+            user_content=[{"type": "text", "text": "请输出最终结论"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["summary"] == "已直接完成最终交付"
+    assert payload["delivery_text"] == "这是基于已知上下文整理出的完整最终正文。"
+    assert shell_tool.invoked == 0
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "shell_execute"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "不要调用 shell_execute" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_shell_for_file_processing_without_explicit_command() -> None:
+    llm = _FileProcessingShellDriftLLM()
+    shell_tool = _ShellTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="创建结果文件并返回摘要"),
+            runtime_tools=[shell_tool],
+            task_mode="file_processing",
+            user_content=[{"type": "text", "text": "创建 /home/ubuntu/output.md 并写入总结内容"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["summary"] == "文件处理步骤已完成"
+    assert shell_tool.invoked == 0
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "shell_execute"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "默认禁止调用 shell_execute" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_allow_shell_for_file_processing_with_explicit_command() -> None:
+    llm = _FileProcessingShellDriftLLM()
+    shell_tool = _ShellTool()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(description="执行命令并返回输出"),
+            runtime_tools=[shell_tool],
+            task_mode="file_processing",
+            user_content=[{"type": "text", "text": "请执行命令 git status 并返回输出"}],
+        )
+
+    payload, _events = asyncio.run(_run())
+
+    assert payload["summary"] == "文件处理步骤已完成"
+    assert shell_tool.invoked == 1
 
 
 def test_direct_execute_step_should_allow_search_before_final_delivery_when_context_not_ready() -> None:
@@ -1613,6 +1891,29 @@ def test_execute_step_node_should_support_no_tool_execution_path() -> None:
         "text": "这是面向用户的完整最终交付正文。",
         "sections": [],
         "source_refs": [],
+    }
+
+
+def test_execute_step_node_should_store_attachment_delivery_preference_in_outcome_and_working_memory() -> None:
+    llm = _NoAttachmentPreferenceLLM()
+    state = asyncio.run(
+        direct_execute_node(
+            {
+                "user_message": "创建文件 /home/ubuntu/workspace/p3-artifact/result.md，内容为 VERSION_1。这一步不要作为最终附件返回。",
+                "graph_metadata": {},
+            }
+        )
+    )
+
+    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[]))
+
+    last_step = next_state["last_executed_step"]
+    assert last_step is not None
+    assert last_step.outcome is not None
+    assert last_step.outcome.deliver_result_as_attachment is False
+    assert next_state["working_memory"]["delivery_controls"] == {
+        "source_step_id": str(last_step.id),
+        "deliver_result_as_attachment": False,
     }
 
 
