@@ -1,25 +1,36 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-@Time   : 2025/12/14 14:23
-@Author : caixiaorong01@outlook.com
-@File   : file.py
-"""
+"""Workspace file capability。"""
+
 from typing import Optional
 
 from app.domain.external import Sandbox
 from app.domain.models import ToolResult
-from .base import tool, BaseTool
+from app.domain.services.tools.base import BaseTool, tool
+from ..service import WorkspaceRuntimeService
 
 
-class FileTool(BaseTool):
-    """文件工具箱"""
+class WorkspaceFileCapability(BaseTool):
+    """工作区文件能力。"""
+
     name: str = "file"
 
-    def __init__(self, sandbox: Sandbox) -> None:
-        """构造函数，完成文件工具箱初始化"""
+    def __init__(
+            self,
+            sandbox: Sandbox,
+            workspace_runtime_service: WorkspaceRuntimeService,
+    ) -> None:
         super().__init__()
-        self.sandbox = sandbox
+        self._sandbox = sandbox
+        self._workspace_runtime_service = workspace_runtime_service
+
+    @staticmethod
+    def _build_file_tree_summary(*, dir_path: str, files: list[object]) -> str:
+        normalized_dir = str(dir_path or "").strip()
+        file_count = len([item for item in files if str(item).strip()])
+        if normalized_dir:
+            return f"目录 {normalized_dir} 共 {file_count} 项"
+        return f"共 {file_count} 项"
 
     @tool(
         name="read_file",
@@ -56,8 +67,7 @@ class FileTool(BaseTool):
             sudo: Optional[bool] = False,
             max_length: int = 10000,
     ) -> ToolResult:
-        """传递文件路径读取沙箱中的文件内容"""
-        return await self.sandbox.read_file(
+        return await self._sandbox.read_file(
             file_path=filepath,
             start_line=start_line,
             end_line=end_line,
@@ -105,7 +115,7 @@ class FileTool(BaseTool):
             trailing_newline: Optional[bool] = False,
             sudo: Optional[bool] = False
     ) -> ToolResult:
-        return await self.sandbox.write_file(
+        result = await self._sandbox.write_file(
             file_path=filepath,
             content=content,
             append=append,
@@ -113,6 +123,20 @@ class FileTool(BaseTool):
             trailing_newline=trailing_newline,
             sudo=sudo,
         )
+        if result.success:
+            await self._workspace_runtime_service.upsert_artifact(
+                path=filepath,
+                artifact_type="file",
+                summary=f"通过 write_file 更新文件: {filepath}",
+                source_capability="write_file",
+                metadata={
+                    "append": bool(append),
+                    "leading_newline": bool(leading_newline),
+                    "trailing_newline": bool(trailing_newline),
+                    "sudo": bool(sudo),
+                },
+            )
+        return result
 
     @tool(
         name="replace_in_file",
@@ -144,12 +168,23 @@ class FileTool(BaseTool):
             new_str: str,
             sudo: Optional[bool] = False
     ) -> ToolResult:
-        return await self.sandbox.replace_in_file(
+        result = await self._sandbox.replace_in_file(
             file_path=filepath,
             old_text=old_str,
             new_text=new_str,
             sudo=sudo,
         )
+        if result.success:
+            await self._workspace_runtime_service.upsert_artifact(
+                path=filepath,
+                artifact_type="file",
+                summary=f"通过 replace_in_file 更新文件: {filepath}",
+                source_capability="replace_in_file",
+                metadata={
+                    "sudo": bool(sudo),
+                },
+            )
+        return result
 
     @tool(
         name="search_in_file",
@@ -176,7 +211,7 @@ class FileTool(BaseTool):
             regex: str,
             sudo: Optional[bool] = False
     ) -> ToolResult:
-        return await self.sandbox.search_in_file(
+        return await self._sandbox.search_in_file(
             file_path=filepath,
             regex=regex,
             sudo=sudo,
@@ -202,10 +237,19 @@ class FileTool(BaseTool):
             dir_path: str,
             glob_pattern: str
     ) -> ToolResult:
-        return await self.sandbox.find_files(
+        result = await self._sandbox.find_files(
             dir_path=dir_path,
             glob_pattern=glob_pattern,
         )
+        if result.success:
+            data = result.data if isinstance(result.data, dict) else {}
+            await self._workspace_runtime_service.record_file_tree_summary(
+                summary_text=self._build_file_tree_summary(
+                    dir_path=str(data.get("dir_path") or dir_path or "").strip(),
+                    files=list(data.get("files") or []),
+                )
+            )
+        return result
 
     @tool(
         name="list_files",
@@ -219,4 +263,13 @@ class FileTool(BaseTool):
         required=["dir_path"]
     )
     async def list_files(self, dir_path: str) -> ToolResult:
-        return await self.sandbox.list_files(dir_path)
+        result = await self._sandbox.list_files(dir_path)
+        if result.success:
+            data = result.data if isinstance(result.data, dict) else {}
+            await self._workspace_runtime_service.record_file_tree_summary(
+                summary_text=self._build_file_tree_summary(
+                    dir_path=str(data.get("dir_path") or dir_path or "").strip(),
+                    files=list(data.get("files") or []),
+                )
+            )
+        return result

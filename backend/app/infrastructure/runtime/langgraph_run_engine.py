@@ -21,6 +21,7 @@ from app.domain.models import (
     BaseEvent,
     Message,
     File,
+    Workspace,
     WaitEvent,
     WorkflowRunSummary,
     SessionContextSnapshot,
@@ -28,6 +29,8 @@ from app.domain.models import (
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
+from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime import WorkspaceManager
 from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
     PlannerReActLangGraphState,
@@ -128,9 +131,13 @@ class LangGraphRunEngine(RunEngine):
             user_id: Optional[str] = None,
             uow_factory: Optional[Callable[[], IUnitOfWork]] = None,
             runtime_tools: Optional[List[BaseTool]] = None,
+            *,
+            runtime_context_service: RuntimeContextService,
             max_tool_iterations: Optional[int] = None,
             checkpointer: Any | None = None,
     ) -> None:
+        if runtime_context_service is None:
+            raise ValueError("runtime_context_service 不能为空")
         self._session_id = session_id
         self._file_storage = file_storage
         self._user_id = user_id
@@ -142,9 +149,15 @@ class LangGraphRunEngine(RunEngine):
             if uow_factory is not None
             else None
         )
+        self._workspace_manager = (
+            WorkspaceManager(uow_factory=uow_factory)
+            if uow_factory is not None
+            else None
+        )
         self._graph = self._build_graph(
             stage_llms=normalized_stage_llms,
             runtime_tools=runtime_tools,
+            runtime_context_service=runtime_context_service,
             max_tool_iterations=max_tool_iterations,
             checkpointer=self._checkpointer,
             long_term_memory_repository=self._long_term_memory_repository,
@@ -160,6 +173,7 @@ class LangGraphRunEngine(RunEngine):
             *,
             stage_llms: Dict[str, LLM],
             runtime_tools: Optional[List[BaseTool]],
+            runtime_context_service: RuntimeContextService,
             max_tool_iterations: Optional[int],
             checkpointer: Any,
             long_term_memory_repository: Any,
@@ -172,6 +186,7 @@ class LangGraphRunEngine(RunEngine):
         if runtime_tools is not None or max_tool_iterations is not None:
             graph_kwargs["runtime_tools"] = runtime_tools
             graph_kwargs["max_tool_iterations"] = max_tool_iterations or 5
+        graph_kwargs["runtime_context_service"] = runtime_context_service
 
         log_runtime(
             logger,
@@ -242,7 +257,15 @@ class LangGraphRunEngine(RunEngine):
                 if session is None:
                     raise ValueError(f"会话[{self._session_id}]不存在，无法构建Graph初始状态")
 
-                resolved_run_id = run_id or session.current_run_id
+                workspace: Optional[Workspace] = None
+                if self._workspace_manager is not None:
+                    workspace = await self._workspace_manager.get_workspace(session=session, uow=uow)
+
+                resolved_run_id = (
+                    run_id
+                    or (await self._workspace_manager.resolve_current_run_id(session=session, uow=uow)
+                        if self._workspace_manager is not None else None)
+                )
                 run = (
                     await uow.workflow_run.get_by_id(resolved_run_id)
                     if resolved_run_id
@@ -275,6 +298,7 @@ class LangGraphRunEngine(RunEngine):
                             message.command is not None
                             and message.command.type == "continue_cancelled_task"
                     ),
+                    workspace_id=workspace.id if workspace is not None else session.workspace_id,
                     thread_id=thread_id,
                 )
         except Exception as e:
@@ -292,6 +316,7 @@ class LangGraphRunEngine(RunEngine):
                 "session_id": self._session_id,
                 "user_id": self._user_id,
                 "run_id": run_id,
+                "workspace_id": "",
                 "thread_id": thread_id,
                 "user_message": message.message,
                 "input_parts": input_parts,
@@ -309,7 +334,7 @@ class LangGraphRunEngine(RunEngine):
                 "session_open_questions": [],
                 "session_blockers": [],
                 "selected_artifacts": [],
-                "historical_artifact_refs": [],
+                "historical_artifact_paths": [],
                 "plan": None,
                 "current_step_id": None,
                 "execution_count": 0,
@@ -318,7 +343,6 @@ class LangGraphRunEngine(RunEngine):
                 "step_states": [],
                 "pending_interrupt": {},
                 "graph_metadata": {},
-                "artifact_refs": [],
                 "final_message": "",
                 "emitted_events": [],
             }
@@ -468,8 +492,8 @@ class LangGraphRunEngine(RunEngine):
             open_questions=normalize_text_list(
                 [question for item in recent_summaries for question in list(item.open_questions or [])]
             ),
-            # 收集并去重所有运行中产生的工件引用
-            artifact_refs=normalize_ref_list(
+            # 会话级快照只保留历史最终交付文件路径，不保留普通引用池。
+            artifact_paths=normalize_file_path_list(
                 [artifact for item in recent_summaries for artifact in list(item.artifacts or [])]
             ),
         )

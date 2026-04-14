@@ -12,8 +12,10 @@ from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine,
 from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.stage_llm import REQUIRED_STAGE_LLM_NAMES
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, CapabilityBuildContext
+from app.domain.services.workspace_runtime import WorkspaceRuntimeService
 from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
 from core.config import get_settings
 
@@ -83,6 +85,7 @@ def build_run_engine(
         search_engine: SearchEngine,
         mcp_tool: MCPTool,
         a2a_tool: A2ATool,
+        workspace_runtime_service: WorkspaceRuntimeService,
         mcp_config: MCPConfig | None = None,
         user_id: str | None = None,
         tool_runtime_adapter: ToolRuntimeAdapter | None = None,
@@ -93,18 +96,19 @@ def build_run_engine(
 
     if engine_kind != "langgraph":
         raise ValueError(f"不支持的运行时引擎配置: {engine_kind}，当前仅支持 langgraph")
+    if tool_runtime_adapter is None:
+        raise ValueError("tool_runtime_adapter 不能为空")
 
     logger.info("启用 LangGraph 运行时引擎")
-    runtime_adapter = tool_runtime_adapter or ToolRuntimeAdapter()
-    runtime_tools = runtime_adapter.build_runtime_tools(
+    runtime_tools = tool_runtime_adapter.build_runtime_tools(
         capability_context=CapabilityBuildContext(
             sandbox=sandbox,
             browser=browser,
             search_engine=search_engine,
+            workspace_runtime_service=workspace_runtime_service,
             mcp_tool=mcp_tool,
             a2a_tool=a2a_tool,
             mcp_config=mcp_config,
-            session_id=session_id,
             user_id=user_id,
         ),
         mcp_tool=mcp_tool,
@@ -120,6 +124,9 @@ def build_run_engine(
         user_id=user_id,
         uow_factory=uow_factory,
         runtime_tools=runtime_tools,
+        runtime_context_service=RuntimeContextService(
+            workspace_runtime_service=workspace_runtime_service,
+        ),
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
     )

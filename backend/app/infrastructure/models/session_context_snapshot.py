@@ -28,7 +28,7 @@ class SessionContextSnapshotModel(Base):
     summary_text: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''::text"))
     recent_run_briefs: Mapped[List[Dict[str, Any]]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     open_questions: Mapped[List[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
-    artifact_refs: Mapped[List[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    artifact_paths: Mapped[List[str]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP(0)"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -42,11 +42,11 @@ class SessionContextSnapshotModel(Base):
         return cls(
             **snapshot.model_dump(
                 mode="python",
-                exclude={"recent_run_briefs", "open_questions", "artifact_refs"},
+                exclude={"recent_run_briefs", "open_questions", "artifact_paths"},
             ),
             **snapshot.model_dump(
                 mode="json",
-                include={"recent_run_briefs", "open_questions", "artifact_refs"},
+                include={"recent_run_briefs", "open_questions", "artifact_paths"},
             ),
         )
 
@@ -58,7 +58,7 @@ class SessionContextSnapshotModel(Base):
             summary_text=self.summary_text,
             recent_run_briefs=list(self.recent_run_briefs or []),
             open_questions=list(self.open_questions or []),
-            artifact_refs=list(self.artifact_refs or []),
+            artifact_paths=list(self.artifact_paths or []),
             created_at=self.created_at,
             updated_at=self.updated_at,
         )
@@ -69,4 +69,4 @@ class SessionContextSnapshotModel(Base):
         self.summary_text = snapshot.summary_text
         self.recent_run_briefs = snapshot.model_dump(mode="json", include={"recent_run_briefs"})["recent_run_briefs"]
         self.open_questions = list(snapshot.open_questions or [])
-        self.artifact_refs = list(snapshot.artifact_refs or [])
+        self.artifact_paths = list(snapshot.artifact_paths or [])

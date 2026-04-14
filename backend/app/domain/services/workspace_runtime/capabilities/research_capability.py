@@ -1,23 +1,54 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-@Time   : 2025/11/27 18:47
-@Author : caixiaorong01@outlook.com
-@File   : search.py
-"""
+"""Workspace research capability。"""
+
 from typing import Optional
 
 from app.domain.external import Sandbox
 from app.domain.models import FetchedPage, SearchResultItem, SearchResults, ToolResult
-from .base import BaseTool, tool
+from app.domain.services.tools.base import BaseTool, tool
+from ..service import WorkspaceRuntimeService
 
 
-class SearchTool(BaseTool):
+class WorkspaceResearchCapability(BaseTool):
     name: str = "search"
 
-    def __init__(self, sandbox: Sandbox) -> None:
+    def __init__(
+            self,
+            sandbox: Sandbox,
+            workspace_runtime_service: WorkspaceRuntimeService,
+    ) -> None:
         super().__init__()
-        self.sandbox = sandbox
+        self._sandbox = sandbox
+        self._workspace_runtime_service = workspace_runtime_service
+
+    async def _record_search_results(
+            self,
+            *,
+            query: str,
+            search_results: SearchResults,
+    ) -> None:
+        await self._workspace_runtime_service.record_search_results(
+            query=query,
+            candidate_links=[
+                {
+                    "title": str(item.title or "").strip(),
+                    "url": str(item.url or "").strip(),
+                    "snippet": str(item.snippet or "").strip(),
+                }
+                for item in list(search_results.results or [])
+                if str(item.url or "").strip()
+            ],
+        )
+
+    async def _record_fetched_page(self, page: FetchedPage) -> None:
+        await self._workspace_runtime_service.record_fetched_page_summary(
+            page_summary={
+                "title": str(page.title or "").strip(),
+                "url": str(page.final_url or page.url or "").strip(),
+                "excerpt": str(page.excerpt or page.content or "").strip()[:240],
+            }
+        )
 
     @classmethod
     def _to_search_results(cls, payload: object, time_range: Optional[str]) -> SearchResults:
@@ -65,7 +96,7 @@ class SearchTool(BaseTool):
             time_range: Optional[str] = None,
             safesearch: Optional[int] = None,
     ) -> ToolResult[SearchResults]:
-        sandbox_result = await self.sandbox.search_searxng(
+        sandbox_result = await self._sandbox.search_searxng(
             query=query,
             categories=categories,
             engines=engines,
@@ -80,10 +111,12 @@ class SearchTool(BaseTool):
                 message=sandbox_result.message,
                 data=None,
             )
+        search_results = self._to_search_results(payload=sandbox_result.data, time_range=time_range)
+        await self._record_search_results(query=query, search_results=search_results)
         return ToolResult(
             success=True,
             message=sandbox_result.message,
-            data=self._to_search_results(payload=sandbox_result.data, time_range=time_range),
+            data=search_results,
         )
 
     async def _fetch_page_via_searxng(
@@ -91,7 +124,7 @@ class SearchTool(BaseTool):
             url: str,
             max_chars: Optional[int] = None,
     ) -> ToolResult[FetchedPage]:
-        sandbox_result = await self.sandbox.fetch_searxng_page(
+        sandbox_result = await self._sandbox.fetch_searxng_page(
             url=url,
             max_chars=max_chars,
         )
@@ -101,10 +134,12 @@ class SearchTool(BaseTool):
                 message=sandbox_result.message,
                 data=None,
             )
+        fetched_page = self._to_fetched_page(payload=sandbox_result.data, max_chars=max_chars)
+        await self._record_fetched_page(fetched_page)
         return ToolResult(
             success=True,
             message=sandbox_result.message,
-            data=self._to_fetched_page(payload=sandbox_result.data, max_chars=max_chars),
+            data=fetched_page,
         )
 
     @tool(

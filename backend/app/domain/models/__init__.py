@@ -69,6 +69,8 @@ from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
 from .user import User, UserProfile, UserStatus
+from .workspace import Workspace, WorkspaceStatus
+from .workspace_artifact import WorkspaceArtifact
 from .workflow_run import (
     WorkflowRun,
     WorkflowRunStatus,
@@ -163,6 +165,9 @@ __all__ = [
     "User",
     "UserProfile",
     "UserStatus",
+    "Workspace",
+    "WorkspaceStatus",
+    "WorkspaceArtifact",
     "WorkflowRun",
     "WorkflowRunStatus",
     "WorkflowRunEventRecord",

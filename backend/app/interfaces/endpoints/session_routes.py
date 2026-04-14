@@ -33,8 +33,7 @@ from app.interfaces.schemas import (
     FileReadResponse,
     FileReadRequest,
     ConsoleRecord,
-    ShellReadResponse,
-    ShellReadRequest
+    ShellReadResponse
 )
 from app.interfaces.schemas import Response
 from app.interfaces.dependencies.auth import get_current_user
@@ -302,7 +301,6 @@ async def read_file(
 )
 async def read_shell_output(
         session_id: str,
-        request: ShellReadRequest,
         current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
 ) -> Response[ShellReadResponse]:
@@ -310,12 +308,10 @@ async def read_shell_output(
     result = await session_service.read_shell_output(
         user_id=current_user.id,
         session_id=session_id,
-        shell_session_id=request.session_id,
     )
     return Response.success(
         msg="获取Shell内容输出结果成功",
         data=ShellReadResponse(
-            session_id=result.session_id,
             output=result.output,
             console_records=[
                 ConsoleRecord(

@@ -6,11 +6,9 @@
 @File   : agent_task_runner.py
 """
 import asyncio
-import io
 import logging
-import uuid
 from datetime import datetime
-from typing import List, AsyncGenerator, Callable, BinaryIO, Optional, Any, Literal
+from typing import List, AsyncGenerator, Callable, Optional, Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -24,7 +22,6 @@ from app.domain.external import (
     Browser,
     SearchEngine,
     Sandbox,
-    FileUploadPayload,
 )
 from app.domain.models import (
     AgentConfig,
@@ -34,12 +31,10 @@ from app.domain.models import (
     SessionStatus,
     Event,
     MessageEvent,
-    File,
     Message,
     MessageCommand,
     BaseEvent,
     ToolEvent,
-    ToolResult,
     DoneEvent,
     TitleEvent,
     WaitEvent,
@@ -57,7 +52,13 @@ from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.cancellation import (
     build_cancelled_runtime_events,
 )
-from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, ToolRuntimeEventHooks
+from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
+from app.domain.services.workspace_runtime.projectors import (
+    MessageAttachmentProjector,
+    ToolEventProjector,
+    UserInputAttachmentProjector,
+)
+from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ class AgentTaskRunner(TaskRunner):
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
             tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
     ) -> None:
+        if tool_runtime_adapter is None:
+            raise ValueError("tool_runtime_adapter 不能为空")
         self._session_id = session_id
         self._user_id = user_id
         self._sandbox = sandbox
@@ -92,11 +95,34 @@ class AgentTaskRunner(TaskRunner):
         self._a2a_config = a2a_config
         self._a2a_tool = A2ATool()
         self._file_storage = file_storage
-        self._browser = browser
         self._uow_factory = uow_factory
-        # BE-LG-05：统一工具运行时适配入口。
-        # 若外部未显式注入，则使用默认实现（包含 CapabilityRegistry.default_v1）。
-        self._tool_runtime_adapter = tool_runtime_adapter or ToolRuntimeAdapter()
+        self._workspace_runtime_service = WorkspaceRuntimeService(
+            session_id=session_id,
+            uow_factory=uow_factory,
+        )
+        self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
+        self._tool_runtime_adapter = tool_runtime_adapter
+        self._tool_event_projector = ToolEventProjector(
+            adapter=tool_runtime_adapter,
+            browser=browser,
+            file_storage=file_storage,
+            workspace_runtime_service=self._workspace_runtime_service,
+            user_id=user_id,
+        )
+        self._message_attachment_projector = MessageAttachmentProjector(
+            session_id=session_id,
+            user_id=user_id,
+            sandbox=sandbox,
+            file_storage=file_storage,
+            uow_factory=uow_factory,
+            workspace_runtime_service=self._workspace_runtime_service,
+        )
+        self._user_input_attachment_projector = UserInputAttachmentProjector(
+            session_id=session_id,
+            sandbox=sandbox,
+            file_storage=file_storage,
+            uow_factory=uow_factory,
+        )
         self._run_engine = self._build_run_engine(
             llm=llm,
             agent_config=agent_config,
@@ -108,14 +134,6 @@ class AgentTaskRunner(TaskRunner):
             search_engine=search_engine,
             run_engine_factory=run_engine_factory,
         )
-
-    def _get_tool_runtime_adapter(self) -> ToolRuntimeAdapter:
-        """懒加载 tool runtime adapter，兼容测试中 object.__new__ 的构造方式。"""
-        adapter = getattr(self, "_tool_runtime_adapter", None)
-        if adapter is None:
-            adapter = ToolRuntimeAdapter()
-            self._tool_runtime_adapter = adapter
-        return adapter
 
     def _build_run_engine(
             self,
@@ -146,10 +164,18 @@ class AgentTaskRunner(TaskRunner):
             search_engine=search_engine,
             mcp_tool=self._mcp_tool,
             a2a_tool=self._a2a_tool,
+            workspace_runtime_service=self._workspace_runtime_service,
             mcp_config=self._mcp_config,
             user_id=self._user_id,
-            tool_runtime_adapter=self._get_tool_runtime_adapter(),
+            tool_runtime_adapter=self._tool_runtime_adapter,
         )
+
+    def _get_workspace_manager(self) -> WorkspaceManager:
+        manager = getattr(self, "_workspace_manager", None)
+        if manager is None:
+            manager = WorkspaceManager(uow_factory=self._uow_factory)
+            self._workspace_manager = manager
+        return manager
 
     async def _put_stream_record(
             self,
@@ -289,210 +315,6 @@ class AgentTaskRunner(TaskRunner):
 
         return runtime_input
 
-    async def _sync_file_to_sandbox(self, file_id: str) -> File:
-
-        try:
-            # 从文件存储中下载文件数据和文件元信息
-            file_data, file = await self._file_storage.download_file(file_id=file_id)
-            # 构建沙箱中的文件路径
-            filepath = f"/home/ubuntu/upload/{file.filename}"
-
-            # 将文件上传到沙箱环境中
-            tool_result = await self._sandbox.upload_file(
-                file_data=file_data,
-                file_path=filepath,
-                filename=file.filename,
-            )
-
-            # 如果上传成功，则更新文件的存储路径并保存到文件仓库
-            if tool_result.success:
-                file.filepath = filepath
-                async with self._uow_factory() as uow:
-                    await uow.file.save(file=file)
-                return file
-            raise RuntimeError(
-                f"同步文件[{file_id}]到沙箱失败: {tool_result.message or 'upload_file returned unsuccessful result'}"
-            )
-        except Exception as e:
-            # 记录同步文件到沙箱时出现的异常
-            logger.exception(f"同步文件 [{file_id}] 到沙箱失败: {e}")
-            raise
-
-    async def _sync_message_attachments_to_sandbox(self, event: MessageEvent) -> None:
-        # 初始化附件列表
-        attachments: List[File] = []
-        # 检查事件是否包含附件
-        if not event.attachments:
-            return
-        try:
-            # 遍历所有附件，同步到沙箱环境
-            for attachment in event.attachments:
-                file_id = str(attachment.id or "").strip()
-                if not file_id:
-                    raise RuntimeError("消息附件缺少 file_id，无法同步到沙箱")
-                # 将附件同步到沙箱
-                file = await self._sync_file_to_sandbox(file_id=file_id)
-                # 添加到附件列表
-                attachments.append(file)
-                # 将文件添加到会话存储中
-                async with self._uow_factory() as uow:
-                    await uow.session.add_file(session_id=self._session_id, file=file)
-
-            # 更新事件中的附件列表为已同步的文件
-            event.attachments = attachments
-        except Exception as e:
-            # 记录同步附件到沙箱时发生的异常
-            logger.exception(f"同步消息附件到沙箱失败: {e}")
-            raise
-
-    @classmethod
-    def _get_stream_size(cls, f: BinaryIO) -> int:
-        # 获取当前文件指针位置
-        current_pos = f.tell()
-        # 将文件指针移动到文件末尾
-        f.seek(0, 2)
-        # 获取文件大小（当前位置即为文件大小）
-        size = f.tell()
-        # 将文件指针恢复到原来的位置
-        f.seek(current_pos)
-        # 返回文件大小
-        return size
-
-    @staticmethod
-    def _parse_sandbox_file_exists_payload(payload: Any) -> Optional[bool]:
-        """解析沙箱 check_file_exists 的 data 字段，兼容不同返回结构。"""
-        if isinstance(payload, bool):
-            return payload
-        if isinstance(payload, dict):
-            for key in ("exists", "is_exists", "file_exists", "found"):
-                if key in payload:
-                    return bool(payload[key])
-        if payload is None:
-            return None
-        return bool(payload)
-
-    async def _check_sandbox_file_exists(self, filepath: str) -> bool:
-        """判断沙箱文件是否存在；检查失败时按“不存在”处理，避免误下载。"""
-        try:
-            result = await self._sandbox.check_file_exists(file_path=filepath)
-        except Exception as e:
-            logger.warning(f"检查沙箱文件[{filepath}]是否存在失败，跳过附件同步: {e}")
-            return False
-
-        if not result.success:
-            logger.info(f"沙箱文件[{filepath}]不存在或不可访问，跳过附件同步: {result.message}")
-            return False
-
-        parsed = self._parse_sandbox_file_exists_payload(result.data)
-        if parsed is None:
-            # 兼容历史返回：仅返回 success，不带 data。
-            return True
-        return parsed
-
-    async def _sync_file_to_storage(self,
-                                    filepath: str,
-                                    stage: Optional[Literal["intermediate", "final"]] = "intermediate") -> Optional[
-        File]:
-        try:
-            if not filepath.strip():
-                logger.info("接收到空附件路径，跳过附件同步")
-                return None
-
-            # 根据文件路径从会话存储中获取旧文件信息（如存在）
-            async with self._uow_factory() as uow:
-                old_file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
-                # 中途事件附件允许复用既有文件对象，避免重复上传同一路径的中间产物。
-                if old_file is not None and stage != "final":
-                    return old_file
-
-            sandbox_file_exists = await self._check_sandbox_file_exists(filepath=filepath)
-            if not sandbox_file_exists:
-                # final 附件必须优先代表“当前沙箱里的最终版本”。
-                # 只有最终文件已经从沙箱消失时，才允许回退复用同路径旧文件对象，避免把旧内容误当成最终产物。
-                if old_file is not None and stage == "final":
-                    async with self._uow_factory() as uow:
-                        await uow.session.add_final_files(session_id=self._session_id, file=old_file)
-                    return old_file
-                return None
-
-            # 从沙箱环境中下载文件数据
-            file_data = await self._sandbox.download_file(file_path=filepath)
-
-            # 从路径中提取文件名
-            filename = filepath.split("/")[-1]
-
-            # 创建 UploadFile 对象用于上传
-            upload_file = FileUploadPayload(
-                file=file_data,
-                filename=filename,
-                size=self._get_stream_size(file_data),
-            )
-
-            # 上传并接收新文件对象，后续会话映射以该对象为准
-            new_file = await self._file_storage.upload_file(upload_file=upload_file, user_id=self._user_id)
-            new_file.filepath = filepath
-
-            # 原子更新会话文件索引：final 阶段即使命中旧路径，也要替换成刚同步的最新文件对象。
-            async with self._uow_factory() as uow:
-                if old_file:
-                    await uow.session.remove_file(session_id=self._session_id, file_id=old_file.id)
-                await uow.session.add_file(session_id=self._session_id, file=new_file)
-                if stage == "final":
-                    await uow.session.add_final_files(session_id=self._session_id, file=new_file)
-
-            return new_file
-        except Exception as e:
-            # 记录同步文件到存储时发生的异常
-            logger.exception(f"同步文件到存储失败: {e}")
-            raise
-
-    async def _sync_message_attachments_to_storage(self, event: MessageEvent) -> None:
-        attachments: List[File] = []
-
-        try:
-            if event.attachments:
-                for attachment in event.attachments:
-                    # 将附件上传到存储
-                    file = await self._sync_file_to_storage(attachment.filepath, event.stage)
-                    if file:
-                        attachments.append(file)
-
-                # 更新事件中的附件列表为已上传的文件
-                event.attachments = attachments
-        except Exception as e:
-            # 记录同步附件到存储时发生的异常
-            logger.exception(f"同步消息附件到存储失败: {e}")
-            raise
-
-    async def _get_browser_screenshot(self) -> str:
-        # 获取浏览器截图
-        screenshot = await self._browser.screenshot()
-        screenshot_stream = io.BytesIO(screenshot)
-        file = await self._file_storage.upload_file(
-            upload_file=FileUploadPayload(
-                file=screenshot_stream,
-                filename=f"{str(uuid.uuid4())}.png",
-                size=self._get_stream_size(screenshot_stream),
-            ),
-            user_id=self._user_id,
-        )
-        return self._file_storage.get_file_url(file)
-
-    async def _read_shell_output_for_tool(self, session_id: str) -> ToolResult:
-        """读取 shell 控制台输出，供 ToolRuntimeAdapter 富化 shell 工具结果。"""
-        return await self._sandbox.read_shell_output(session_id=session_id, console=True)
-
-    async def _handle_tool_event(self, event: ToolEvent) -> None:
-        try:
-            hooks = ToolRuntimeEventHooks(
-                get_browser_screenshot=self._get_browser_screenshot,
-                read_shell_output=self._read_shell_output_for_tool,
-            )
-            await self._get_tool_runtime_adapter().enrich_tool_event(event=event, hooks=hooks)
-        except Exception as e:
-            # 记录处理工具事件时发生的异常
-            logger.exception(f"处理工具事件失败: {e}")
-
     async def _run_flow(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         # 检查消息是否为空，如果为空则记录警告并返回错误事件
         if not message.message and message.command is None:
@@ -504,10 +326,10 @@ class AgentTaskRunner(TaskRunner):
         async for event in self._run_engine.invoke(message):
             # 处理工具事件，根据工具类型进行相应的内容填充
             if isinstance(event, ToolEvent):
-                await self._handle_tool_event(event)
+                await self._tool_event_projector.project(event)
             # 处理消息事件，同步附件到存储
             elif isinstance(event, MessageEvent):
-                await self._sync_message_attachments_to_storage(event)
+                await self._message_attachment_projector.project(event)
 
             # 产出事件
             yield event
@@ -526,9 +348,9 @@ class AgentTaskRunner(TaskRunner):
     async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
         async for event in self._run_engine.resume(value):
             if isinstance(event, ToolEvent):
-                await self._handle_tool_event(event)
+                await self._tool_event_projector.project(event)
             elif isinstance(event, MessageEvent):
-                await self._sync_message_attachments_to_storage(event)
+                await self._message_attachment_projector.project(event)
             yield event
 
     async def _cleanup_tools(self) -> None:
@@ -537,7 +359,7 @@ class AgentTaskRunner(TaskRunner):
         注意：该方法必须在初始化MCP/A2A的同一个asyncio Task中调用，
         否则anyio的cancel scope会检测到任务上下文切换并抛出RuntimeError。
         """
-        await self._get_tool_runtime_adapter().cleanup_remote_tools(
+        await self._tool_runtime_adapter.cleanup_remote_tools(
             mcp_tool=self._mcp_tool,
             a2a_tool=self._a2a_tool,
         )
@@ -570,7 +392,10 @@ class AgentTaskRunner(TaskRunner):
                     session_id=self._session_id,
                     status=SessionStatus.CANCELLED,
                 )
-                current_run_id = str(session.current_run_id or "").strip()
+                current_run_id = await self._get_workspace_manager().resolve_current_run_id(
+                    session=session,
+                    uow=uow,
+                )
                 if current_run_id:
                     await uow.workflow_run.cancel_run(current_run_id)
         except Exception as fallback_err:
@@ -588,7 +413,10 @@ class AgentTaskRunner(TaskRunner):
                 status=SessionStatus.CANCELLED,
             )
 
-            run_id = str(session.current_run_id or "").strip()
+            run_id = await self._get_workspace_manager().resolve_current_run_id(
+                session=session,
+                uow=uow,
+            )
             if not run_id:
                 return
 
@@ -631,7 +459,7 @@ class AgentTaskRunner(TaskRunner):
 
             # 确保沙箱环境就绪并初始化各种工具
             await self._sandbox.ensure_sandbox()
-            await self._get_tool_runtime_adapter().initialize_remote_tools(
+            await self._tool_runtime_adapter.initialize_remote_tools(
                 mcp_tool=self._mcp_tool,
                 mcp_config=self._mcp_config,
                 a2a_tool=self._a2a_tool,
@@ -657,7 +485,7 @@ class AgentTaskRunner(TaskRunner):
                     message = event.message or ""
 
                     # 同步消息附件到沙箱环境
-                    await self._sync_message_attachments_to_sandbox(event)
+                    await self._user_input_attachment_projector.project(event)
 
                     # 记录接收到的消息日志
                     logger.info(f"收到消息: {message[:50]}...")

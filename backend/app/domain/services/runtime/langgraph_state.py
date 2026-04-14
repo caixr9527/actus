@@ -17,7 +17,6 @@ from app.domain.models import (
     DoneEvent,
     ErrorEvent,
     ExecutionStatus,
-    MessageEvent,
     Plan,
     PlanEvent,
     Session,
@@ -29,7 +28,6 @@ from app.domain.models import (
     StepOutputMode,
     StepEvent,
     StepTaskModeHint,
-    ToolEvent,
     WaitEvent,
     WorkflowRun,
     WorkflowRunSummary,
@@ -50,8 +48,8 @@ from app.domain.services.runtime.normalizers import (
 logger = logging.getLogger(__name__)
 
 # BE-LG-04 契约版本。
-# v7 为 P2 增加 task_mode 与 digest 状态面，确保恢复链路与 Prompt 上下文使用同一份摘要真相源。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v7"
+# v9 为 P3 增加 workspace_id 契约字段，graph state 只保留环境引用。
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v9"
 
 
 class StepState(TypedDict, total=False):
@@ -213,6 +211,8 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     user_id: Optional[str]
     """当前运行 ID；用于状态回写、事件归并和运行内复用标识。"""
     run_id: Optional[str]
+    """当前 workspace ID；仅作为环境引用，不承载环境细节。"""
+    workspace_id: Optional[str]
     """LangGraph 线程 ID；用于 checkpoint 隔离与恢复。"""
     thread_id: str
     """当前轮用户输入文本；用于入口路由、规划、执行和总结提示词。"""
@@ -247,8 +247,8 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     session_blockers: List[str]
     """当前运行明确选中/确认的产物引用；用于总结输出和历史上下文投影。"""
     selected_artifacts: List[str]
-    """历史运行产物引用；用于当前运行 prompt 中补充跨轮产物上下文。"""
-    historical_artifact_refs: List[str]
+    """历史运行最终交付文件路径；用于当前运行 prompt 中补充跨轮文件上下文。"""
+    historical_artifact_paths: List[str]
     """当前运行的计划快照；承载步骤编排，是执行主路径的核心状态。"""
     plan: Optional[Plan]
     """当前待执行或等待恢复的步骤 ID；是 wait/cancel/projection 的快捷指针，不是步骤真相源。"""
@@ -265,8 +265,6 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     pending_interrupt: Dict[str, Any]
     """图内控制/投影元状态；用于路由控制和 run_status 投影。"""
     graph_metadata: GraphMetadataState
-    """当前运行从事件层收敛出的原始产物引用集合；仅作附件兜底池，不等于最终交付附件。"""
-    artifact_refs: List[str]
     """当前运行最新的面向用户结果文本；用于投影、总结和消息窗口收敛。"""
     final_message: str
     """当前 graph 已发射但尚未完成外部归并的事件序列；用于状态归并和流式事件去重。"""
@@ -280,6 +278,7 @@ class GraphStateContractMapper:
         "session_id",
         "user_id",
         "run_id",
+        "workspace_id",
         "thread_id",
         "user_message",
         "input_parts",
@@ -297,7 +296,7 @@ class GraphStateContractMapper:
         "session_open_questions",
         "session_blockers",
         "selected_artifacts",
-        "historical_artifact_refs",
+        "historical_artifact_paths",
         "plan",
         "current_step_id",
         "execution_count",
@@ -688,16 +687,19 @@ class GraphStateContractMapper:
         return blockers
 
     @classmethod
-    def _build_artifact_refs_from_summaries(
+    def _build_artifact_paths_from_summaries(
             cls,
             summaries: Optional[List[WorkflowRunSummary]],
     ) -> List[str]:
-        artifact_refs: List[str] = []
+        artifact_paths: List[str] = []
         for summary in list(summaries or []):
             if summary is None:
                 continue
-            artifact_refs = merge_unique_strings(artifact_refs, normalize_ref_list(getattr(summary, "artifacts", [])))
-        return artifact_refs
+            artifact_paths = merge_unique_strings(
+                artifact_paths,
+                normalize_file_path_list(getattr(summary, "artifacts", [])),
+            )
+        return artifact_paths
 
     @classmethod
     def _normalize_pending_interrupt(cls, raw: Any) -> Dict[str, Any]:
@@ -790,6 +792,7 @@ class GraphStateContractMapper:
             session_context_snapshot: Optional[SessionContextSnapshot],
             user_message: str,
             input_parts: Optional[List[Dict[str, Any]]] = None,
+            workspace_id: Optional[str] = None,
             continue_cancelled_task: bool = False,
             thread_id: str = "",
     ) -> PlannerReActLangGraphState:
@@ -852,12 +855,12 @@ class GraphStateContractMapper:
         # selected_artifacts 只承载最终可交付文件路径，避免历史普通引用污染附件链路。
         selected_artifacts = normalize_file_path_list(graph_state_from_metadata.get("selected_artifacts"))
 
-        historical_artifact_refs = normalize_ref_list(graph_state_from_metadata.get("historical_artifact_refs"))
-        if not historical_artifact_refs:
-            historical_artifact_refs = merge_unique_strings(
-                normalize_ref_list(getattr(session_context_snapshot, "artifact_refs", None)),
-                cls._build_artifact_refs_from_summaries(completed_run_summaries),
-                cls._build_artifact_refs_from_summaries(recent_attempt_summaries),
+        historical_artifact_paths = normalize_file_path_list(graph_state_from_metadata.get("historical_artifact_paths"))
+        if not historical_artifact_paths:
+            historical_artifact_paths = merge_unique_strings(
+                normalize_file_path_list(getattr(session_context_snapshot, "artifact_paths", None)),
+                cls._build_artifact_paths_from_summaries(completed_run_summaries),
+                cls._build_artifact_paths_from_summaries(recent_attempt_summaries),
             )
 
         conversation_summary = cls._normalize_text(graph_state_from_metadata.get("conversation_summary"))
@@ -877,7 +880,8 @@ class GraphStateContractMapper:
                 if run is not None and run.user_id is not None
                 else session.user_id
             ),
-            "run_id": run.id if run is not None else session.current_run_id,
+            "run_id": run.id if run is not None else None,
+            "workspace_id": cls._normalize_text(workspace_id or session.workspace_id),
             "thread_id": thread_id,
             "user_message": user_message,
             "input_parts": cls._normalize_input_parts(input_parts),
@@ -900,7 +904,7 @@ class GraphStateContractMapper:
             "session_open_questions": session_open_questions,
             "session_blockers": session_blockers,
             "selected_artifacts": selected_artifacts,
-            "historical_artifact_refs": historical_artifact_refs,
+            "historical_artifact_paths": historical_artifact_paths,
             "plan": plan,
             "current_step_id": current_step_id,
             "execution_count": int(graph_state_from_metadata.get("execution_count") or 0),
@@ -911,9 +915,6 @@ class GraphStateContractMapper:
             "step_states": step_states,
             "pending_interrupt": cls._extract_pending_interrupt_from_metadata(graph_state_from_metadata),
             "graph_metadata": graph_metadata,
-            "artifact_refs": normalize_ref_list(
-                (run.runtime_metadata or {}).get("artifacts") if run is not None else []
-            ),
             "emitted_events": [],
             "final_message": "",
         }
@@ -975,33 +976,6 @@ class GraphStateContractMapper:
         return str(next_step.id or "") or None
 
     @classmethod
-    def _extract_artifact_refs_from_event(cls, event: BaseEvent) -> List[str]:
-        refs: List[str] = []
-
-        if isinstance(event, MessageEvent):
-            for attachment in event.attachments:
-                if attachment.id:
-                    refs.append(str(attachment.id))
-
-        if isinstance(event, StepEvent):
-            step_outcome = event.step.outcome
-            if step_outcome is not None:
-                refs.extend(
-                    [
-                        str(item)
-                        for item in list(step_outcome.produced_artifacts or [])
-                        if str(item).strip()
-                    ]
-                )
-
-        if isinstance(event, ToolEvent) and event.tool_content is not None:
-            screenshot = getattr(event.tool_content, "screenshot", None)
-            if isinstance(screenshot, str) and screenshot.strip():
-                refs.append(screenshot.strip())
-
-        return refs
-
-    @classmethod
     def apply_emitted_events(cls, state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         """根据 emitted events 收敛 step/tool/audit 状态。"""
         events = list(state.get("emitted_events") or [])
@@ -1011,14 +985,11 @@ class GraphStateContractMapper:
         graph_metadata = cls._normalize_graph_metadata(next_state.get("graph_metadata"))
         control = dict(graph_metadata.get("control") or {})
         projection = dict(graph_metadata.get("projection") or {})
-        artifact_refs = list(next_state.get("artifact_refs") or [])
         pending_interrupt = cls._normalize_pending_interrupt(next_state.get("pending_interrupt"))
         waiting_for_replan = control.get("wait_resume_action") == "replan"
         plan_only = bool(control.get("plan_only"))
 
         for event in events:
-            artifact_refs.extend(cls._extract_artifact_refs_from_event(event))
-
             if isinstance(event, PlanEvent):
                 plan = event.plan.model_copy(deep=True)
                 step_states = cls._build_step_states_from_plan(plan)
@@ -1068,7 +1039,6 @@ class GraphStateContractMapper:
         if projection:
             next_graph_metadata["projection"] = projection
         next_state["graph_metadata"] = next_graph_metadata
-        next_state["artifact_refs"] = normalize_ref_list(artifact_refs)
         return next_state
 
     @classmethod
@@ -1077,7 +1047,7 @@ class GraphStateContractMapper:
         if not isinstance(raw, dict):
             return {}
 
-        normalized_state: PlannerReActLangGraphState = dict(raw)
+        normalized_state: PlannerReActLangGraphState = {}
         normalized_state["session_id"] = cls._normalize_text(raw.get("session_id"))
         normalized_state["user_id"] = (
             cls._normalize_text(raw.get("user_id"))
@@ -1087,6 +1057,11 @@ class GraphStateContractMapper:
         normalized_state["run_id"] = (
             cls._normalize_text(raw.get("run_id"))
             if raw.get("run_id") is not None
+            else None
+        )
+        normalized_state["workspace_id"] = (
+            cls._normalize_text(raw.get("workspace_id"))
+            if raw.get("workspace_id") is not None
             else None
         )
         normalized_state["thread_id"] = cls._normalize_text(raw.get("thread_id"))
@@ -1108,7 +1083,7 @@ class GraphStateContractMapper:
         normalized_state["session_open_questions"] = normalize_text_list(raw.get("session_open_questions"))
         normalized_state["session_blockers"] = normalize_text_list(raw.get("session_blockers"))
         normalized_state["selected_artifacts"] = normalize_file_path_list(raw.get("selected_artifacts"))
-        normalized_state["historical_artifact_refs"] = normalize_ref_list(raw.get("historical_artifact_refs"))
+        normalized_state["historical_artifact_paths"] = normalize_file_path_list(raw.get("historical_artifact_paths"))
 
         normalized_plan = normalize_plan_payload(raw.get("plan"))
         plan = Plan.model_validate(normalized_plan) if normalized_plan is not None else None
@@ -1138,7 +1113,6 @@ class GraphStateContractMapper:
         normalized_state["graph_metadata"] = cls._normalize_graph_metadata(
             raw.get("graph_metadata") if raw.get("graph_metadata") is not None else raw.get("metadata")
         )
-        normalized_state["artifact_refs"] = normalize_ref_list(raw.get("artifact_refs"))
         normalized_state["final_message"] = cls._normalize_text(raw.get("final_message"))
         normalized_state["emitted_events"] = list(raw.get("emitted_events") or [])
         return normalized_state
@@ -1172,6 +1146,7 @@ class GraphStateContractMapper:
                     "session_id": state.get("session_id"),
                     "user_id": state.get("user_id"),
                     "run_id": state.get("run_id"),
+                    "workspace_id": state.get("workspace_id"),
                     "thread_id": state.get("thread_id"),
                     "input_parts": cls._to_json_safe(state.get("input_parts") or []),
                     "message_window": cls._to_json_safe(cls._normalize_message_window(state.get("message_window"))),
@@ -1196,7 +1171,9 @@ class GraphStateContractMapper:
                     "selected_artifacts": cls._to_json_safe(
                         normalize_file_path_list(state.get("selected_artifacts"))
                     ),
-                    "historical_artifact_refs": cls._to_json_safe(state.get("historical_artifact_refs") or []),
+                    "historical_artifact_paths": cls._to_json_safe(
+                        normalize_file_path_list(state.get("historical_artifact_paths"))
+                    ),
                     "plan": cls._to_json_safe(normalize_plan_payload(state.get("plan"))),
                     "current_step_id": state.get("current_step_id"),
                     "execution_count": int(state.get("execution_count") or 0),
@@ -1215,7 +1192,6 @@ class GraphStateContractMapper:
                     "last_event_at": cls._to_iso(last_event.created_at) if last_event is not None else None,
                 },
             },
-            "artifacts": cls._to_json_safe(state.get("artifact_refs") or []),
         }
 
 

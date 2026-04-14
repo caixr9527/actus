@@ -1,23 +1,96 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-@Time   : 2025/12/8 14:50
-@Author : caixiaorong01@outlook.com
-@File   : browser.py
-"""
+"""Workspace browser capability。"""
+
 from typing import Optional
 
 from app.domain.external import Browser
-from app.domain.models import ToolResult
-from .base import BaseTool, tool
+from app.domain.models import (
+    BrowserActionableElementsResult,
+    BrowserCardExtractionResult,
+    BrowserMainContentResult,
+    BrowserPageStructuredResult,
+    ToolResult,
+)
+from app.domain.services.tools.base import BaseTool, tool
+from ..service import WorkspaceRuntimeService
 
 
-class BrowserTool(BaseTool):
+class WorkspaceBrowserCapability(BaseTool):
     name: str = "browser"
 
-    def __init__(self, browser: Browser) -> None:
+    def __init__(
+            self,
+            browser: Browser,
+            workspace_runtime_service: WorkspaceRuntimeService,
+    ) -> None:
         super().__init__()
-        self.browser = browser
+        self._browser = browser
+        self._workspace_runtime_service = workspace_runtime_service
+
+    @staticmethod
+    def _serialize_actionable_elements(elements: list[object]) -> list[dict]:
+        serialized: list[dict] = []
+        for item in elements:
+            serialized.append(
+                {
+                    "text": str(getattr(item, "text", "") or "").strip(),
+                    "selector": str(getattr(item, "selector", "") or "").strip(),
+                    "type": str(getattr(item, "tag", "") or getattr(item, "role", "") or "").strip(),
+                }
+            )
+        return [item for item in serialized if item["text"] or item["selector"]]
+
+    def _build_browser_snapshot(self, result: ToolResult) -> dict:
+        result_data = result.data
+        if isinstance(result_data, BrowserPageStructuredResult):
+            return {
+                "url": str(result_data.url or "").strip(),
+                "title": str(result_data.title or "").strip(),
+                "page_type": result_data.page_type.value,
+                "main_content_summary": str(result_data.content_summary or result_data.main_content_preview or "").strip(),
+                "actionable_elements": self._serialize_actionable_elements(list(result_data.actionable_elements or [])),
+            }
+        if isinstance(result_data, BrowserMainContentResult):
+            return {
+                "url": str(result_data.url or "").strip(),
+                "title": str(result_data.title or "").strip(),
+                "page_type": result_data.page_type.value,
+                "main_content_summary": str(result_data.excerpt or result_data.content or "").strip()[:240],
+            }
+        if isinstance(result_data, BrowserCardExtractionResult):
+            return {
+                "url": str(result_data.url or "").strip(),
+                "title": str(result_data.title or "").strip(),
+                "page_type": result_data.page_type.value,
+            }
+        if isinstance(result_data, BrowserActionableElementsResult):
+            return {
+                "url": str(result_data.url or "").strip(),
+                "title": str(result_data.title or "").strip(),
+                "page_type": result_data.page_type.value,
+                "actionable_elements": self._serialize_actionable_elements(list(result_data.elements or [])),
+            }
+        if isinstance(result_data, dict):
+            return {
+                "url": str(result_data.get("url") or "").strip(),
+                "title": str(result_data.get("title") or "").strip(),
+                "page_type": str(result_data.get("page_type") or "").strip(),
+                "main_content_summary": str(
+                    result_data.get("content_summary")
+                    or result_data.get("main_content_summary")
+                    or result_data.get("excerpt")
+                    or ""
+                ).strip()[:240],
+                "actionable_elements": list(result_data.get("actionable_elements") or []),
+                "degrade_reason": str(result_data.get("degrade_reason") or "").strip(),
+            }
+        return {}
+
+    async def _record_browser_snapshot(self, result: ToolResult) -> None:
+        snapshot = self._build_browser_snapshot(result)
+        if snapshot:
+            await self._workspace_runtime_service.record_browser_snapshot(snapshot=snapshot)
 
     @tool(
         name="browser_read_current_page_structured",
@@ -26,8 +99,9 @@ class BrowserTool(BaseTool):
         required=[],
     )
     async def browser_read_current_page_structured(self) -> ToolResult:
-        """读取当前页面的结构化摘要。"""
-        return await self.browser.read_current_page_structured()
+        result = await self._browser.read_current_page_structured()
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_extract_main_content",
@@ -36,8 +110,9 @@ class BrowserTool(BaseTool):
         required=[],
     )
     async def browser_extract_main_content(self) -> ToolResult:
-        """提取当前页面的正文内容。"""
-        return await self.browser.extract_main_content()
+        result = await self._browser.extract_main_content()
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_extract_cards",
@@ -46,8 +121,9 @@ class BrowserTool(BaseTool):
         required=[],
     )
     async def browser_extract_cards(self) -> ToolResult:
-        """提取当前页面的候选卡片。"""
-        return await self.browser.extract_cards()
+        result = await self._browser.extract_cards()
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_find_link_by_text",
@@ -61,8 +137,7 @@ class BrowserTool(BaseTool):
         required=["text"],
     )
     async def browser_find_link_by_text(self, text: str) -> ToolResult:
-        """按文本在当前页面查找最匹配的链接。"""
-        return await self.browser.find_link_by_text(text)
+        return await self._browser.find_link_by_text(text)
 
     @tool(
         name="browser_find_actionable_elements",
@@ -71,8 +146,9 @@ class BrowserTool(BaseTool):
         required=[],
     )
     async def browser_find_actionable_elements(self) -> ToolResult:
-        """提取当前页面的主要可交互元素。"""
-        return await self.browser.find_actionable_elements()
+        result = await self._browser.find_actionable_elements()
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_view",
@@ -80,9 +156,10 @@ class BrowserTool(BaseTool):
         parameters={},
         required=[],
     )
-    async def brow_ser_view(self) -> ToolResult:
-        """查看当前浏览器页面内容，用于确认已打开页面的最新状态。"""
-        return await self.browser.view_page()
+    async def browser_view(self) -> ToolResult:
+        result = await self._browser.view_page()
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_navigate",
@@ -96,8 +173,9 @@ class BrowserTool(BaseTool):
         required=["url"],
     )
     async def browser_navigate(self, url: str) -> ToolResult:
-        """将浏览器导航到指定 URL，当需要访问新页面时使用"""
-        return await self.browser.navigate(url)
+        result = await self._browser.navigate(url)
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_restart",
@@ -111,8 +189,9 @@ class BrowserTool(BaseTool):
         required=["url"],
     )
     async def browser_restart(self, url: str) -> ToolResult:
-        """重启浏览器并导航到指定URL，当需要重置浏览器时使用"""
-        return await self.browser.restart(url)
+        result = await self._browser.restart(url)
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_click",
@@ -139,12 +218,13 @@ class BrowserTool(BaseTool):
             coordinate_x: Optional[float] = None,
             coordinate_y: Optional[float] = None,
     ) -> ToolResult:
-        """点击当前页面上的元素，当需要点击当前页面上的元素时使用"""
-        return await self.browser.click(
+        result = await self._browser.click(
             index=index,
             coordinate_x=coordinate_x,
             coordinate_y=coordinate_y,
         )
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_input",
@@ -181,14 +261,15 @@ class BrowserTool(BaseTool):
             coordinate_x: Optional[float] = None,
             coordinate_y: Optional[float] = None,
     ) -> ToolResult:
-        """覆盖浏览器当前页面可编辑区域的文本(input/textarea输入框)，当需要填充输入文本时使用"""
-        return await self.browser.input(
+        result = await self._browser.input(
             text=text,
             press_enter=press_enter,
             index=index,
             coordinate_x=coordinate_x,
             coordinate_y=coordinate_y,
         )
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_move_mouse",
@@ -210,8 +291,7 @@ class BrowserTool(BaseTool):
             coordinate_x: float,
             coordinate_y: float,
     ) -> ToolResult:
-        """将鼠标光标移动到当前浏览器指定位置，用于模拟用户的鼠标移动，当需要移动鼠标时使用"""
-        return await self.browser.move_mouse(
+        return await self._browser.move_mouse(
             coordinate_x=coordinate_x,
             coordinate_y=coordinate_y,
         )
@@ -231,10 +311,9 @@ class BrowserTool(BaseTool):
             self,
             key: str,
     ) -> ToolResult:
-        """在当前浏览器用于模拟用户的按键操作，当需要指定特定的键盘操作时使用"""
-        return await self.browser.press_key(
-            key=key,
-        )
+        result = await self._browser.press_key(key=key)
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_select_option",
@@ -256,11 +335,12 @@ class BrowserTool(BaseTool):
             index: int,
             option: int,
     ) -> ToolResult:
-        """从当前浏览器页面的下拉列表元素中选择指定选项，用于选择下拉菜单中的选项。"""
-        return await self.browser.select_option(
+        result = await self._browser.select_option(
             index=index,
             option=option,
         )
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_scroll_up",
@@ -277,10 +357,9 @@ class BrowserTool(BaseTool):
             self,
             to_top: Optional[bool] = None,
     ) -> ToolResult:
-        """向上滚动当前浏览器页面，用于模拟用户向上滚动页面或返回页面顶部。"""
-        return await self.browser.scroll_up(
-            to_top=to_top,
-        )
+        result = await self._browser.scroll_up(to_top=to_top)
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_scroll_down",
@@ -297,10 +376,9 @@ class BrowserTool(BaseTool):
             self,
             to_bottom: Optional[bool] = None,
     ) -> ToolResult:
-        """向下滚动当前浏览器页面，用于模拟用户向下滚动页面或返回页面底部。"""
-        return await self.browser.scroll_down(
-            to_bottom=to_bottom,
-        )
+        result = await self._browser.scroll_down(to_bottom=to_bottom)
+        await self._record_browser_snapshot(result)
+        return result
 
     @tool(
         name="browser_console_exec",
@@ -317,10 +395,7 @@ class BrowserTool(BaseTool):
             self,
             javascript: str,
     ) -> ToolResult:
-        """在浏览器控制台执行 JavaScript 脚本，当需要指定自定义脚本时使用"""
-        return await self.browser.console_exec(
-            javascript=javascript,
-        )
+        return await self._browser.console_exec(javascript=javascript)
 
     @tool(
         name="browser_console_view",
@@ -337,7 +412,4 @@ class BrowserTool(BaseTool):
             self,
             max_lines: Optional[int] = None,
     ) -> ToolResult:
-        """查看当前浏览器控制台的输出内容，当需要查看控制台输出时使用"""
-        return await self.browser.console_view(
-            max_lines=max_lines
-        )
+        return await self._browser.console_view(max_lines=max_lines)

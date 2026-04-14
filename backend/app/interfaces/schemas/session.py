@@ -104,11 +104,6 @@ class FileReadResponse(BaseModel):
     content: str
 
 
-class ShellReadRequest(BaseModel):
-    """需要读取的沙箱shell请求结构体"""
-    session_id: str  # Shell会话id
-
-
 class ConsoleRecord(BaseModel):
     """控制台记录模型，包含ps1、command、output"""
     ps1: str
@@ -118,6 +113,5 @@ class ConsoleRecord(BaseModel):
 
 class ShellReadResponse(BaseModel):
     """需要读取的沙箱shell响应结构体"""
-    session_id: str
     output: str
     console_records: List[ConsoleRecord] = Field(default_factory=list)

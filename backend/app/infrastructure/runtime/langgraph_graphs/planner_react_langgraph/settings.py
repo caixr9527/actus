@@ -71,8 +71,20 @@ BROWSER_PROGRESS_FUNCTIONS: tuple[str, ...] = (
 )
 REPEAT_TOOL_LIMIT = 2
 SEARCH_REPEAT_LIMIT = 2
+# P3-2A 收敛修复：对同一页面正文抓取指纹也做重复早停，避免 fetch_page 长循环空转。
+FETCH_REPEAT_LIMIT = 2
 BROWSER_NO_PROGRESS_LIMIT = 2
 TOOL_FAILURE_LIMIT = 3
+# P3-2A 收敛修复：按任务模式限制单步骤工具轮次上限，防止默认上限过大导致耗时失控。
+TASK_MODE_MAX_TOOL_ITERATIONS: dict[str, int] = {
+    "human_wait": 2,
+    "general": 6,
+    "research": 8,
+    "web_reading": 10,
+    "browser_interaction": 10,
+    "coding": 8,
+    "file_processing": 6,
+}
 
 # 工具能力与任务模式白名单
 SEARCH_FUNCTION_NAMES: tuple[str, ...] = ("search_web", "fetch_page")
@@ -120,6 +132,7 @@ TASK_MODE_ALLOWED_FUNCTIONS: dict[str, tuple[str, ...]] = {
     ),
     "file_processing": (
         *FILE_FUNCTION_NAMES,
+        "shell_execute",
         ASK_USER_FUNCTION_NAME,
     ),
     "human_wait": (
@@ -220,5 +233,19 @@ ACTION_PATTERN = re.compile(
 )
 TOOL_REFERENCE_PATTERN = re.compile(
     r"\b(search_web|fetch_page|browser_[a-z_]+|read_file|write_file|list_files|find_files|replace_in_file|search_in_file|shell_[a-z_]+)\b",
+    re.IGNORECASE,
+)
+
+# 附件交付偏好判定规则
+ATTACHMENT_DELIVERY_DENY_PATTERN = re.compile(
+    r"((不要|不需要|无需|不用|别).{0,8}(作为)?(.{0,4})?(最终)?附件)"
+    r"|((不要|不需要|无需|不用|别).{0,8}(返回|交付).{0,4}附件)"
+    r"|(\b(do not|don't|without|no)\s+(return\s+)?attachments?\b)",
+    re.IGNORECASE,
+)
+ATTACHMENT_DELIVERY_ALLOW_PATTERN = re.compile(
+    r"((作为|以).{0,4}(最终)?附件(.{0,4})?(返回|交付|提供)?)"
+    r"|((附上|带上|返回).{0,4}附件)"
+    r"|(\b(with|attach)\s+(it\s+as\s+)?attachments?\b)",
     re.IGNORECASE,
 )

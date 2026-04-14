@@ -16,6 +16,8 @@ from .session_context_snapshot_repository import SessionContextSnapshotRepositor
 from .user_repository import UserRepository
 from .workflow_run_repository import WorkflowRunRepository
 from .workflow_run_summary_repository import WorkflowRunSummaryRepository
+from .workspace_artifact_repository import WorkspaceArtifactRepository
+from .workspace_repository import WorkspaceRepository
 
 T = TypeVar("T", bound="IUnitOfWork")
 
@@ -30,6 +32,8 @@ class IUnitOfWork(ABC):
     workflow_run: WorkflowRunRepository
     workflow_run_summary: WorkflowRunSummaryRepository
     session_context_snapshot: SessionContextSnapshotRepository
+    workspace: WorkspaceRepository
+    workspace_artifact: WorkspaceArtifactRepository
 
     @abstractmethod
     async def commit(self):

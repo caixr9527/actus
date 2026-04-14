@@ -2,24 +2,15 @@
 # -*- coding: utf-8 -*-
 """Planner-ReAct LangGraph 工具调用循环与仲裁逻辑。"""
 
-import hashlib
 import inspect
 import json
 import logging
-import re
 import uuid
 from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel
-
 from app.domain.external import LLM
 from app.domain.models import (
-    BrowserActionableElementsResult,
-    BrowserCardExtractionResult,
-    BrowserLinkMatchResult,
-    BrowserMainContentResult,
-    BrowserPageStructuredResult,
     BrowserPageType,
     SearchResults,
     Step,
@@ -37,7 +28,37 @@ from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
     normalize_execution_response,
     normalize_file_path_list,
-    truncate_text,
+)
+from app.domain.services.workspace_runtime.policies import (
+    build_human_wait_missing_interrupt_payload as _build_human_wait_missing_interrupt_payload,
+    build_loop_break_payload as _build_loop_break_payload,
+    build_recent_blocked_tool_call as _build_recent_blocked_tool_call,
+    build_recent_failed_action as _build_recent_failed_action,
+    build_search_fingerprint as _build_search_fingerprint,
+    build_tool_feedback_content as _build_tool_feedback_content,
+    build_tool_fingerprint as _build_tool_fingerprint,
+    analyze_text_intent as _analyze_text_intent,
+    attach_browser_degrade_payload as _attach_browser_degrade_payload,
+    build_browser_atomic_allowlist as _build_browser_atomic_allowlist,
+    build_browser_capability_gap_allowlist as _build_browser_capability_gap_allowlist,
+    build_browser_high_level_failure_key as _build_browser_high_level_failure_key,
+    build_browser_high_level_retry_block_message as _build_browser_high_level_retry_block_message,
+    build_browser_observation_fingerprint as _build_browser_observation_fingerprint,
+    build_browser_preferred_function_names as _build_browser_preferred_function_names,
+    build_browser_route_block_message as _build_browser_route_block_message,
+    build_browser_route_state_key as _build_browser_route_state_key,
+    build_listing_click_target_block_message as _build_listing_click_target_block_message,
+    build_step_candidate_text as _build_step_candidate_text,
+    build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
+    classify_confirmed_user_task_mode,
+    classify_step_task_mode,
+    coerce_optional_int as _coerce_optional_int,
+    collect_temporarily_blocked_browser_high_level_function_names as _collect_temporarily_blocked_browser_high_level_function_names,
+    extract_browser_tool_state as _extract_browser_tool_state,
+    infer_entry_strategy,
+    is_browser_high_level_temporarily_blocked as _is_browser_high_level_temporarily_blocked,
+    normalize_execution_payload as _normalize_execution_payload,
+    requests_plan_only,
 )
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
@@ -46,226 +67,23 @@ from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
 )
 from .runtime_logging import elapsed_ms, log_runtime, now_perf
 from .settings import (
-    ABSOLUTE_PATH_PATTERN,
-    ACTION_PATTERN,
     ASK_USER_FUNCTION_NAME,
     BROWSER_ATOMIC_FUNCTION_NAMES,
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
-    BROWSER_INTERACTION_PATTERN,
     BROWSER_NO_PROGRESS_LIMIT,
+    FETCH_REPEAT_LIMIT,
     BROWSER_PROGRESS_FUNCTIONS,
-    COMPARISON_PATTERN,
-    CODING_PATTERN,
-    CODE_BLOCK_PATTERN,
     FILE_FUNCTION_NAMES,
-    FILE_PATTERN,
     NOTIFY_USER_FUNCTION_NAME,
-    NUMBERED_LIST_PATTERN,
-    PHATIC_PATTERN,
-    PLANNING_PATTERN,
-    PLAN_ONLY_PATTERN,
-    READ_ACTION_PATTERN,
     READ_ONLY_FILE_FUNCTION_NAMES,
     REPEAT_TOOL_LIMIT,
     SEARCH_FUNCTION_NAMES,
-    SEARCH_PATTERN,
     SEARCH_REPEAT_LIMIT,
-    SEQUENCE_PATTERN,
-    SHELL_COMMAND_PATTERN,
-    SYNTHESIS_PATTERN,
-    TASK_MODE_ALLOWED_FUNCTIONS,
-    TASK_MODE_ALLOWED_PREFIXES,
+    TASK_MODE_MAX_TOOL_ITERATIONS,
     TOOL_FAILURE_LIMIT,
-    TOOL_REFERENCE_PATTERN,
-    TOOL_RESULT_MAX_DICT_ITEMS,
-    TOOL_RESULT_MAX_LIST_ITEMS,
-    TOOL_RESULT_MAX_TEXT_CHARS,
-    URL_PATTERN,
-    WAIT_PATTERN,
-    WAIT_REQUEST_PATTERN,
-    WEB_READING_PATTERN,
 )
 
 logger = logging.getLogger(__name__)
-
-_BLOCKED_TOOL_LOOP_BREAK_REASONS = {
-    "human_wait_non_interrupt_tool_blocked",
-    "research_file_context_required",
-    "web_reading_file_tool_blocked",
-    "general_inline_file_context_required",
-    "artifact_policy_file_output_blocked",
-    "final_delivery_search_drift_blocked",
-    "browser_route_blocked",
-    "task_mode_tool_blocked",
-    "research_route_search_required",
-    "research_route_fetch_required",
-    "browser_click_target_blocked",
-    "browser_high_level_retry_blocked",
-}
-
-
-def _normalize_intent_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
-
-
-def _has_explicit_wait_semantics(value: str) -> bool:
-    """统一判断文本是否明确表达“当前步骤要向用户等待确认/选择/输入”语义。"""
-    normalized_text = _normalize_intent_text(value)
-    if not normalized_text:
-        return False
-    # 两个 pattern 故意分开维护，但这里统一收口：
-    # WAIT_PATTERN 负责“直接等待语气”，WAIT_REQUEST_PATTERN 负责“请求式等待文案”。
-    return bool(
-        WAIT_PATTERN.search(normalized_text)
-        or WAIT_REQUEST_PATTERN.search(normalized_text)
-    )
-
-
-def _analyze_text_intent(value: str) -> Dict[str, Any]:
-    normalized_text = _normalize_intent_text(value)
-    if not normalized_text:
-        return {
-            "text": "",
-            "char_count": 0,
-            "has_url": False,
-            "has_absolute_path": False,
-            "has_shell_command": False,
-            "has_code_block": False,
-            "has_numbered_list": False,
-            "has_sequence_marker": False,
-            "is_phatic": False,
-            "needs_human_wait": False,
-            "has_browser_interaction_signal": False,
-            "has_web_reading_signal": False,
-            "has_read_action_signal": False,
-            "has_search_signal": False,
-            "has_planning_signal": False,
-            "has_plan_only_signal": False,
-            "has_synthesis_signal": False,
-            "has_comparison_signal": False,
-            "has_file_signal": False,
-            "has_coding_signal": False,
-            "has_action_signal": False,
-            "has_tool_reference": False,
-            "clause_count": 0,
-        }
-
-    clause_count = len(
-        [
-            segment
-            for segment in re.split(r"[。！？!?；;\n]+", normalized_text)
-            if str(segment).strip()
-        ]
-    )
-    return {
-        "text": normalized_text,
-        "char_count": len(normalized_text),
-        "has_url": bool(URL_PATTERN.search(normalized_text)),
-        "has_absolute_path": bool(ABSOLUTE_PATH_PATTERN.search(normalized_text)),
-        "has_shell_command": bool(SHELL_COMMAND_PATTERN.search(normalized_text)),
-        "has_code_block": bool(CODE_BLOCK_PATTERN.search(normalized_text)),
-        "has_numbered_list": bool(NUMBERED_LIST_PATTERN.search(normalized_text)),
-        "has_sequence_marker": bool(SEQUENCE_PATTERN.search(normalized_text)),
-        "is_phatic": bool(PHATIC_PATTERN.match(normalized_text)),
-        "needs_human_wait": _has_explicit_wait_semantics(normalized_text),
-        "has_browser_interaction_signal": bool(BROWSER_INTERACTION_PATTERN.search(normalized_text)),
-        "has_web_reading_signal": bool(WEB_READING_PATTERN.search(normalized_text)),
-        "has_read_action_signal": bool(READ_ACTION_PATTERN.search(normalized_text)),
-        "has_search_signal": bool(SEARCH_PATTERN.search(normalized_text)),
-        "has_planning_signal": bool(PLANNING_PATTERN.search(normalized_text)),
-        "has_plan_only_signal": bool(PLAN_ONLY_PATTERN.search(normalized_text)),
-        "has_synthesis_signal": bool(SYNTHESIS_PATTERN.search(normalized_text)),
-        "has_comparison_signal": bool(COMPARISON_PATTERN.search(normalized_text)),
-        "has_file_signal": bool(FILE_PATTERN.search(normalized_text)),
-        "has_coding_signal": bool(CODING_PATTERN.search(normalized_text)),
-        "has_action_signal": bool(ACTION_PATTERN.search(normalized_text)),
-        "has_tool_reference": bool(TOOL_REFERENCE_PATTERN.search(normalized_text)),
-        "clause_count": clause_count,
-    }
-
-
-def _has_direct_execution_need(signals: Dict[str, Any]) -> bool:
-    """只识别真正需要工具/环境的请求，避免把泛动作词直接当成可直达执行。"""
-    return any(
-        (
-            signals["has_tool_reference"],
-            signals["has_url"],
-            signals["has_absolute_path"],
-            signals["has_shell_command"],
-            signals["has_code_block"],
-            signals["has_browser_interaction_signal"],
-            signals["has_web_reading_signal"],
-            signals["has_search_signal"],
-            signals["has_file_signal"],
-            signals["has_coding_signal"],
-        )
-    )
-
-
-def _should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
-    """显式识别需要拆解/归纳的任务，避免误落到 direct_execute。"""
-    if signals["has_plan_only_signal"]:
-        return True
-    if signals["has_planning_signal"] or signals["has_comparison_signal"]:
-        return True
-    if signals["has_search_signal"] and signals["has_synthesis_signal"]:
-        return True
-    if signals["has_search_signal"] and signals["has_read_action_signal"]:
-        return True
-    if signals["has_web_reading_signal"] and signals["has_synthesis_signal"] and not (
-            signals["has_url"] or signals["has_tool_reference"]
-    ):
-        # “打开这个 URL 看一下当前页面”仍应允许直达；但“阅读网页并整理关键点”属于检索归纳任务。
-        return True
-    if signals["clause_count"] >= 3 and (
-            signals["has_search_signal"]
-            or signals["has_web_reading_signal"]
-            or signals["has_planning_signal"]
-            or signals["has_comparison_signal"]
-    ):
-        return True
-    return False
-
-
-def requests_plan_only(user_message: str) -> bool:
-    """识别“先只给计划/步骤，不要执行”的请求。"""
-    return bool(_analyze_text_intent(user_message)["has_plan_only_signal"])
-
-
-def infer_entry_strategy(
-        *,
-        user_message: str,
-        has_input_parts: bool,
-        has_active_plan: bool,
-) -> str:
-    if has_active_plan:
-        return "create_plan_or_reuse"
-    if has_input_parts:
-        return "recall_memory_context"
-
-    signals = _analyze_text_intent(user_message)
-    if signals["char_count"] == 0:
-        return "recall_memory_context"
-    needs_planner = _should_force_planner_for_tool_task(signals)
-    is_structurally_multi_step = (
-            signals["has_numbered_list"]
-            or signals["has_sequence_marker"]
-            or signals["clause_count"] >= 3
-            or signals["char_count"] >= 120
-    )
-    has_direct_execution_need = _has_direct_execution_need(signals)
-    if signals["needs_human_wait"]:
-        # 只有“短且单一的前置确认请求”才走 direct_wait。
-        # 对包含明确执行目标、篇幅较长的新任务请求，保留给完整规划链路处理，避免一进来就弹出通用确认。
-        if has_direct_execution_need and ((needs_planner or is_structurally_multi_step) or signals["char_count"] >= 48):
-            return "recall_memory_context"
-        return "direct_wait"
-    if signals["is_phatic"] and not signals["has_action_signal"] and not signals["has_tool_reference"]:
-        return "direct_answer"
-    if has_direct_execution_need and not needs_planner and not is_structurally_multi_step:
-        return "direct_execute"
-    return "recall_memory_context"
-
 
 def has_available_file_context(
         *,
@@ -313,92 +131,6 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
 
     available_tools.sort(key=_tool_priority)
     return available_tools
-
-
-def _classify_task_mode_from_signals(signals: Dict[str, Any]) -> str:
-    """基于已解析的意图信号归类真实执行模式。"""
-    scores = {
-        "web_reading": 0,
-        "browser_interaction": 0,
-        "coding": 0,
-        "file_processing": 0,
-        "research": 0,
-    }
-    if signals["has_browser_interaction_signal"]:
-        scores["browser_interaction"] += 5
-    if signals["has_web_reading_signal"]:
-        scores["web_reading"] += 3
-    if signals["has_url"]:
-        scores["web_reading"] += 2
-        scores["research"] += 2
-    if signals["has_shell_command"] or signals["has_code_block"] or signals["has_coding_signal"]:
-        scores["coding"] += 3
-    if signals["has_absolute_path"] or signals["has_file_signal"]:
-        scores["file_processing"] += 3
-    if signals["has_search_signal"]:
-        scores["research"] += 3
-    if signals["has_tool_reference"]:
-        if any(name in signals["text"] for name in
-               ("browser_click", "browser_input", "browser_scroll", "browser_press_key", "browser_select_option")):
-            scores["browser_interaction"] += 3
-        if any(
-                name in signals["text"]
-                for name in (
-                        "browser_view",
-                        "browser_navigate",
-                        "browser_restart",
-                        "browser_read_current_page_structured",
-                        "browser_extract_main_content",
-                        "browser_extract_cards",
-                        "browser_find_link_by_text",
-                        "browser_find_actionable_elements",
-                )
-        ):
-            scores["web_reading"] += 2
-        if "shell_" in signals["text"]:
-            scores["coding"] += 2
-        if any(name in signals["text"] for name in FILE_FUNCTION_NAMES):
-            scores["file_processing"] += 2
-        if any(name in signals["text"] for name in SEARCH_FUNCTION_NAMES):
-            scores["research"] += 2
-    if scores["browser_interaction"] == 0 and scores["web_reading"] > 0:
-        scores["research"] += 1
-
-    ranked_modes = sorted(
-        scores.items(),
-        key=lambda item: (
-            item[1],
-            {
-                "web_reading": 5,
-                "browser_interaction": 4,
-                "coding": 3,
-                "file_processing": 2,
-                "research": 1,
-            }.get(item[0], 0),
-        ),
-        reverse=True,
-    )
-    if ranked_modes and ranked_modes[0][1] > 0:
-        return ranked_modes[0][0]
-    return "general"
-
-
-def classify_step_task_mode(step: Step) -> str:
-    """基于步骤语义识别任务模式；结构化标记优先，文本规则仅兜底。"""
-    structured_hint = normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint)
-    if structured_hint:
-        return structured_hint
-    signals = _analyze_text_intent(_build_step_candidate_text(step))
-    if signals["needs_human_wait"]:
-        return "human_wait"
-    return _classify_task_mode_from_signals(signals)
-
-
-def classify_confirmed_user_task_mode(user_message: str) -> str:
-    """对已确认执行的原始请求做真实任务归类，不再被等待语义短路。"""
-    signals = _analyze_text_intent(user_message)
-    return _classify_task_mode_from_signals(signals)
-
 
 def _extract_function_name(tool_schema: Dict[str, Any]) -> str:
     if not isinstance(tool_schema, dict):
@@ -585,13 +317,45 @@ def _step_final_delivery_context_ready(step: Step, *, task_mode: str) -> bool:
     return _resolve_step_delivery_context_state(step, task_mode=task_mode) == StepDeliveryContextState.READY.value
 
 
-def _build_step_candidate_text(step: Step) -> str:
-    candidate_parts = [
-        str(step.title or "").strip(),
-        str(step.description or "").strip(),
-        *[str(item or "").strip() for item in list(step.success_criteria or [])],
-    ]
-    return " ".join([part for part in candidate_parts if part])
+def _step_is_final_inline_delivery_ready(step: Step, *, task_mode: str) -> bool:
+    # P3-1A 收敛修复：统一识别“最终交付正文步骤”，用于集中禁用漂移型工具。
+    return (
+        _step_outputs_inline_result(step)
+        and _step_owns_final_delivery(step)
+        and _step_final_delivery_context_ready(step, task_mode=task_mode)
+    )
+
+
+def _resolve_effective_max_tool_iterations(*, task_mode: str, requested_max_tool_iterations: int) -> int:
+    # P3-2A 收敛修复：按任务模式收敛工具轮次，防止单步在默认 20 轮上限下长时间空转。
+    mode_cap = TASK_MODE_MAX_TOOL_ITERATIONS.get(str(task_mode or "").strip().lower())
+    if mode_cap is None:
+        return requested_max_tool_iterations
+    return min(requested_max_tool_iterations, max(1, int(mode_cap)))
+
+
+def _build_fetch_fingerprint(function_args: Dict[str, Any]) -> str:
+    # P3-2A 收敛修复：fetch_page 使用 URL 指纹去重，避免反复读取同一链接。
+    return str(function_args.get("url") or "").strip().lower()
+
+
+def _is_transient_research_transport_error(raw_error: Any) -> bool:
+    # P3-3A 收敛修复：识别检索链路瞬时传输错误，避免在当前步骤内盲目重试。
+    message = str(raw_error or "").strip().lower()
+    if not message:
+        return False
+    transient_markers = (
+        "remoteprotocolerror",
+        "server disconnected",
+        "connection reset",
+        "connection aborted",
+        "readtimeout",
+        "connecttimeout",
+        "connection error",
+        "temporarily unavailable",
+        "unexpected eof",
+    )
+    return any(marker in message for marker in transient_markers)
 
 
 def _filter_available_tools(
@@ -612,443 +376,6 @@ def _filter_available_tools(
     return filtered_tools
 
 
-def _truncate_tool_text(value: Any, *, max_chars: int = TOOL_RESULT_MAX_TEXT_CHARS) -> str:
-    return truncate_text(value, max_chars=max_chars)
-
-
-def _compact_tool_value(value: Any, *, depth: int = 0) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, BaseModel):
-        return _compact_tool_value(value.model_dump(mode="json"), depth=depth)
-    if isinstance(value, str):
-        return _truncate_tool_text(value)
-    if depth >= 2:
-        return _truncate_tool_text(value, max_chars=400)
-    if isinstance(value, list):
-        return [
-            _compact_tool_value(item, depth=depth + 1)
-            for item in value[:TOOL_RESULT_MAX_LIST_ITEMS]
-        ]
-    if isinstance(value, dict):
-        compacted: Dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= TOOL_RESULT_MAX_DICT_ITEMS:
-                break
-            compacted[str(key)] = _compact_tool_value(item, depth=depth + 1)
-        return compacted
-    return _truncate_tool_text(value, max_chars=400)
-
-
-def _hash_payload(payload: Dict[str, Any]) -> str:
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
-
-
-def _build_tool_fingerprint(function_name: str, function_args: Dict[str, Any]) -> str:
-    return _hash_payload(
-        {
-            "function_name": function_name.strip().lower(),
-            "args": _compact_tool_value(function_args),
-        }
-    )
-
-
-def _build_search_fingerprint(function_args: Dict[str, Any]) -> str:
-    return _hash_payload(
-        {
-            "query": str(function_args.get("query") or "").strip().lower(),
-            "engines": str(function_args.get("engines") or "").strip().lower(),
-            "language": str(function_args.get("language") or "").strip().lower(),
-            "time_range": str(function_args.get("time_range") or "").strip().lower(),
-        }
-    )
-
-
-def _build_browser_observation_fingerprint(tool_result: ToolResult) -> str:
-    result_data = tool_result.data if hasattr(tool_result, "data") else None
-    return _hash_payload(
-        {
-            "message": _truncate_tool_text(getattr(tool_result, "message", ""), max_chars=200),
-            "data": _compact_tool_value(result_data),
-        }
-    )
-
-
-def _build_browser_route_state_key(
-        *,
-        browser_page_type: str,
-        browser_url: str,
-        browser_observation_fingerprint: str,
-) -> str:
-    # 这里把“页面类型 + 当前 URL + 最近一次浏览器观察结果”压成一个稳定 key。
-    # 这个 key 的职责不是表达“信息已经完整”，而是表达“当前失败应该绑定在哪个页面状态上”。
-    # 即使三项里有空字符串，它仍然有意义，因为“尚未读到页面结构/URL/观察结果”本身也是一个明确状态。
-    # 这样首轮高阶工具失败时，会先被收敛到“初始空状态”；一旦后续读到了 URL 或页面观察变化，key 就会变化，失败封禁也会自然失效。
-    return _hash_payload(
-        {
-            # page_type 用来区分正文页、列表页等不同路由状态，避免跨页面类型误复用失败记录。
-            "page_type": browser_page_type.strip().lower(),
-            # url 用来区分至少最常见的页面变化场景；只要跳到新页面，这里的 key 就会变化。
-            "url": browser_url.strip(),
-            # observation 记录最近一次浏览器高阶观察结果的摘要；URL 不变但页面内容变化时，也能触发 key 变化。
-            "observation": browser_observation_fingerprint.strip(),
-        }
-    )
-
-
-def _build_browser_high_level_failure_key(
-        *,
-        function_name: str,
-        function_args: Dict[str, Any],
-        browser_route_state_key: str,
-) -> str:
-    return _hash_payload(
-        {
-            "function_name": function_name.strip().lower(),
-            "page": browser_route_state_key,
-            "args": _compact_tool_value(function_args),
-        }
-    )
-
-
-def _is_browser_high_level_temporarily_blocked(
-        *,
-        function_name: str,
-        function_args: Dict[str, Any],
-        browser_route_state_key: str,
-        failed_high_level_keys: set[str],
-) -> bool:
-    normalized_function_name = function_name.strip().lower()
-    if normalized_function_name not in BROWSER_HIGH_LEVEL_FUNCTION_NAMES:
-        return False
-    return _build_browser_high_level_failure_key(
-        function_name=normalized_function_name,
-        function_args=function_args,
-        browser_route_state_key=browser_route_state_key,
-    ) in failed_high_level_keys
-
-
-def _collect_temporarily_blocked_browser_high_level_function_names(
-        *,
-        browser_route_state_key: str,
-        failed_high_level_keys: set[str],
-) -> set[str]:
-    return {
-        function_name
-        for function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES
-        if _is_browser_high_level_temporarily_blocked(
-            function_name=function_name,
-            function_args={},
-            browser_route_state_key=browser_route_state_key,
-            failed_high_level_keys=failed_high_level_keys,
-        )
-    }
-
-
-def _build_browser_preferred_function_names(
-        *,
-        task_mode: str,
-        available_function_names: set[str],
-        browser_page_type: str,
-        browser_structured_ready: bool,
-        browser_main_content_ready: bool,
-        browser_cards_ready: bool,
-        browser_link_match_ready: bool,
-        browser_actionables_ready: bool,
-        failed_high_level_functions: set[str],
-) -> Tuple[str, ...]:
-    is_listing_page = browser_page_type in {
-        BrowserPageType.LISTING.value,
-        BrowserPageType.SEARCH_RESULTS.value,
-    }
-
-    ordered_candidates: Tuple[str, ...] = ()
-    if task_mode == "web_reading":
-        if not browser_structured_ready:
-            ordered_candidates = ("browser_read_current_page_structured",)
-        elif is_listing_page:
-            if not browser_cards_ready:
-                ordered_candidates = ("browser_extract_cards",)
-            elif not browser_link_match_ready:
-                ordered_candidates = ("browser_find_link_by_text",)
-            else:
-                ordered_candidates = ("browser_click", "browser_navigate")
-        elif not browser_main_content_ready:
-            ordered_candidates = ("browser_extract_main_content",)
-    elif task_mode == "browser_interaction":
-        if not browser_structured_ready:
-            ordered_candidates = ("browser_read_current_page_structured",)
-        elif is_listing_page:
-            if not browser_cards_ready:
-                ordered_candidates = ("browser_extract_cards",)
-            elif not browser_link_match_ready:
-                ordered_candidates = ("browser_find_link_by_text",)
-            else:
-                ordered_candidates = ("browser_click", "browser_navigate")
-        elif not browser_actionables_ready:
-            ordered_candidates = ("browser_find_actionable_elements",)
-    else:
-        return ()
-
-    return tuple(
-        function_name
-        for function_name in ordered_candidates
-        if function_name in available_function_names and function_name not in failed_high_level_functions
-    )
-
-
-def _normalize_browser_page_type(value: Any) -> str:
-    if isinstance(value, BrowserPageType):
-        return value.value
-    normalized_value = getattr(value, "value", value)
-    return str(normalized_value or "").strip().lower()
-
-
-def _extract_browser_tool_state(tool_result: ToolResult) -> Dict[str, Any]:
-    data = tool_result.data
-    if isinstance(
-            data,
-            (
-                    BrowserPageStructuredResult,
-                    BrowserMainContentResult,
-                    BrowserCardExtractionResult,
-                    BrowserActionableElementsResult,
-            ),
-    ):
-        return {
-            "url": str(data.url or "").strip(),
-            "title": str(data.title or "").strip(),
-            "page_type": _normalize_browser_page_type(data.page_type),
-            "selector": "",
-            "index": None,
-        }
-    if isinstance(data, BrowserLinkMatchResult):
-        return {
-            "url": str(data.url or "").strip(),
-            "title": str(data.matched_text or "").strip(),
-            "page_type": "",
-            "selector": str(data.selector or "").strip(),
-            "index": data.index,
-        }
-    if isinstance(data, dict):
-        return {
-            "url": str(data.get("url") or "").strip(),
-            "title": str(data.get("title") or data.get("matched_text") or "").strip(),
-            "page_type": _normalize_browser_page_type(data.get("page_type")),
-            "selector": str(data.get("selector") or "").strip(),
-            "index": data.get("index"),
-        }
-    return {"url": "", "title": "", "page_type": "", "selector": "", "index": None}
-
-
-def _build_browser_atomic_allowlist(
-        *,
-        task_mode: str,
-        browser_page_type: str,
-        browser_structured_ready: bool,
-        browser_link_match_ready: bool,
-        browser_actionables_ready: bool,
-        failed_high_level_functions: set[str],
-) -> Tuple[str, ...]:
-    # 这里不再保留 browser_cards_ready 这种未使用参数。
-    # 原子工具是否放行，当前只依赖：
-    # 1. 页面类型是否已经判明
-    # 2. 链接是否已经匹配完成
-    # 3. 可交互元素是否已经提取完成
-    # 4. 哪些高阶能力在当前页面状态下失败过
-    # 没有参与判断的状态就直接删除，避免函数签名和真实逻辑不一致。
-    is_listing_page = browser_page_type in {
-        BrowserPageType.LISTING.value,
-        BrowserPageType.SEARCH_RESULTS.value,
-    }
-
-    if task_mode == "web_reading":
-        if not browser_structured_ready and "browser_read_current_page_structured" in failed_high_level_functions:
-            return ("browser_view", "browser_scroll_down", "browser_scroll_up")
-        if is_listing_page:
-            if browser_link_match_ready:
-                return ("browser_click", "browser_navigate")
-            if any(
-                    function_name in failed_high_level_functions
-                    for function_name in (
-                            "browser_extract_cards",
-                            "browser_read_current_page_structured",
-                    )
-            ):
-                return ("browser_view", "browser_scroll_down", "browser_scroll_up", "browser_navigate")
-            return ()
-        if any(
-                function_name in failed_high_level_functions
-                for function_name in (
-                        "browser_extract_main_content",
-                        "browser_read_current_page_structured",
-                )
-        ):
-            return ("browser_view", "browser_scroll_down", "browser_scroll_up")
-        return ()
-
-    if task_mode == "browser_interaction":
-        if not browser_structured_ready and "browser_read_current_page_structured" in failed_high_level_functions:
-            return BROWSER_ATOMIC_FUNCTION_NAMES
-        if is_listing_page:
-            if browser_link_match_ready:
-                return ("browser_click", "browser_navigate")
-            if any(
-                    function_name in failed_high_level_functions
-                    for function_name in (
-                            "browser_extract_cards",
-                            "browser_read_current_page_structured",
-                    )
-            ):
-                return BROWSER_ATOMIC_FUNCTION_NAMES
-            return ()
-        if browser_actionables_ready or any(
-                function_name in failed_high_level_functions
-                for function_name in (
-                        "browser_find_actionable_elements",
-                        "browser_read_current_page_structured",
-                )
-        ):
-            return BROWSER_ATOMIC_FUNCTION_NAMES
-        return ()
-
-    return ()
-
-
-def _build_browser_capability_gap_allowlist(
-        *,
-        task_mode: str,
-) -> Tuple[str, ...]:
-    if task_mode == "web_reading":
-        return ("browser_view", "browser_navigate", "browser_restart", "browser_scroll_down", "browser_scroll_up")
-    if task_mode == "browser_interaction":
-        return BROWSER_ATOMIC_FUNCTION_NAMES
-    return ()
-
-
-def _build_browser_route_block_message(
-        *,
-        task_mode: str,
-        function_name: str,
-        browser_page_type: str,
-        browser_structured_ready: bool,
-        browser_cards_ready: bool,
-        browser_link_match_ready: bool,
-        browser_actionables_ready: bool,
-        last_browser_route_url: str,
-        last_browser_route_selector: str,
-        last_browser_route_index: Optional[int],
-) -> str:
-    is_listing_page = browser_page_type in {
-        BrowserPageType.LISTING.value,
-        BrowserPageType.SEARCH_RESULTS.value,
-    }
-    normalized_function_name = function_name.strip().lower()
-
-    if not browser_structured_ready:
-        return "当前步骤属于浏览器任务，请先调用 browser_read_current_page_structured 判断页面类型，再决定后续动作。"
-
-    if is_listing_page:
-        if not browser_cards_ready:
-            return "当前页面是列表页，请先调用 browser_extract_cards 提取候选卡片，不要直接执行原子浏览器动作。"
-        if not browser_link_match_ready:
-            return "当前页面是列表页，已提取候选卡片，请先调用 browser_find_link_by_text 选定目标，不要直接执行原子浏览器动作。"
-        if normalized_function_name not in {"browser_click", "browser_navigate"}:
-            if last_browser_route_index is not None:
-                url_hint = f"；如需直接跳转可使用 browser_navigate 或 fetch_page 读取 {last_browser_route_url}" if last_browser_route_url else ""
-                selector_hint = f"；匹配定位: {last_browser_route_selector}" if last_browser_route_selector else ""
-                return (
-                    "当前页面已完成目标链接定位，请优先使用 "
-                    f"browser_click(index={last_browser_route_index}){url_hint}{selector_hint}。"
-                )
-            if last_browser_route_url:
-                return (
-                    "当前页面已完成目标链接定位，请优先使用返回结果中的 URL 调用 browser_navigate"
-                    f" 或 fetch_page，当前可用 URL: {last_browser_route_url}"
-                )
-            return "当前页面已完成目标链接定位，请优先使用 browser_click 或 browser_navigate。"
-
-    if task_mode == "web_reading":
-        return "当前步骤属于网页阅读任务，请优先使用高阶浏览器阅读能力，只有高阶提取失败后才能退回原子浏览器动作。"
-    if task_mode == "browser_interaction" and not browser_actionables_ready:
-        return "当前步骤属于浏览器交互任务，请先调用 browser_find_actionable_elements 确认可交互元素，再执行原子浏览器动作。"
-    return "当前浏览器原子动作尚未开放，请先完成当前阶段要求的高阶浏览器能力。"
-
-
-def _attach_browser_degrade_payload(
-        tool_result: ToolResult,
-        *,
-        function_name: str,
-        degrade_reason: str,
-        browser_page_type: str,
-        browser_url: str,
-        browser_title: str,
-) -> ToolResult:
-    payload = tool_result.data if isinstance(tool_result.data, dict) else {}
-    payload = {
-        **payload,
-        "degrade_reason": degrade_reason,
-        "function_name": function_name,
-        "page_type": browser_page_type,
-        "url": browser_url,
-        "title": browser_title,
-    }
-    tool_result.data = payload
-    return tool_result
-
-
-def _build_browser_high_level_retry_block_message(
-        *,
-        function_name: str,
-        function_args: Dict[str, Any],
-) -> str:
-    normalized_function_name = function_name.strip().lower()
-    if normalized_function_name == "browser_find_link_by_text":
-        query = str(function_args.get("text") or "").strip()
-        if query:
-            return f"当前页面中“{query}”的链接匹配刚刚失败，请先更换关键词或改变页面状态后再试。"
-        return "当前页面的链接匹配刚刚失败，请先更换关键词或改变页面状态后再试。"
-    return f"{function_name} 在当前页面状态下刚刚失败，请先改变页面状态或尝试其他高阶路径后再试。"
-
-
-def _coerce_optional_int(value: Any) -> Optional[int]:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str):
-        stripped_value = value.strip()
-        if stripped_value.isdigit() or (
-                stripped_value.startswith("-") and stripped_value[1:].isdigit()
-        ):
-            return int(stripped_value)
-    return None
-
-
-def _build_listing_click_target_block_message(
-        *,
-        last_browser_route_index: Optional[int],
-        last_browser_route_url: str,
-        last_browser_route_selector: str,
-) -> str:
-    if last_browser_route_index is None:
-        if last_browser_route_url:
-            return (
-                "当前列表页已完成目标链接定位，但匹配结果没有可点击 index，"
-                f"请改用 browser_navigate 或 fetch_page 读取 {last_browser_route_url}。"
-            )
-        return "当前列表页已完成目标链接定位，但匹配结果没有可点击 index，请改用 browser_navigate。"
-    selector_hint = f"；匹配定位: {last_browser_route_selector}" if last_browser_route_selector else ""
-    url_hint = f"；目标 URL: {last_browser_route_url}" if last_browser_route_url else ""
-    return (
-        "当前列表页已完成目标链接定位，只允许点击刚刚匹配到的目标，"
-        f"请调用 browser_click(index={last_browser_route_index}){selector_hint}{url_hint}。"
-    )
-
-
 def _extract_text_from_user_content(user_content: Optional[List[Dict[str, Any]]]) -> str:
     fragments: List[str] = []
     for item in list(user_content or []):
@@ -1062,6 +389,31 @@ def _extract_text_from_user_content(user_content: Optional[List[Dict[str, Any]]]
     return "\n".join(fragments)
 
 
+def _step_explicitly_requests_shell_execution(step: Step, user_content: Optional[List[Dict[str, Any]]]) -> bool:
+    # P3-CASE3 修复：file_processing 默认禁用 shell_execute，只有显式命令意图才放开。
+    candidate_text = "\n".join(
+        [
+            _build_step_candidate_text(step),
+            _extract_text_from_user_content(user_content),
+        ]
+    )
+    signals = _analyze_text_intent(candidate_text)
+    if bool(signals.get("has_shell_command")):
+        return True
+    normalized_text = str(signals.get("text") or "").strip().lower()
+    explicit_markers = (
+        "shell_execute",
+        "执行命令",
+        "运行命令",
+        "终端命令",
+        "命令行执行",
+        "run command",
+        "execute command",
+        "terminal command",
+    )
+    return any(marker in normalized_text for marker in explicit_markers)
+
+
 def _step_or_user_content_has_url(step: Step, user_content: Optional[List[Dict[str, Any]]]) -> bool:
     candidate_text = "\n".join(
         [
@@ -1069,7 +421,7 @@ def _step_or_user_content_has_url(step: Step, user_content: Optional[List[Dict[s
             _extract_text_from_user_content(user_content),
         ]
     )
-    return bool(URL_PATTERN.search(candidate_text))
+    return bool(_analyze_text_intent(candidate_text)["has_url"])
 
 
 def _extract_search_result_urls(tool_result: ToolResult) -> List[str]:
@@ -1099,187 +451,6 @@ def _extract_search_result_urls(tool_result: ToolResult) -> List[str]:
         seen_urls.add(url)
         deduped_urls.append(url)
     return deduped_urls[:5]
-
-
-def _is_allowed_in_task_mode(function_name: str, task_mode: str) -> bool:
-    normalized_name = function_name.strip().lower()
-    allowed_functions = set(TASK_MODE_ALLOWED_FUNCTIONS.get(task_mode, TASK_MODE_ALLOWED_FUNCTIONS["general"]))
-    allowed_prefixes = TASK_MODE_ALLOWED_PREFIXES.get(task_mode, TASK_MODE_ALLOWED_PREFIXES["general"])
-    if normalized_name in allowed_functions:
-        return True
-    return any(normalized_name.startswith(prefix) for prefix in allowed_prefixes)
-
-
-def _build_task_mode_disallowed_names(
-        available_tools: List[Dict[str, Any]],
-        *,
-        task_mode: str,
-) -> set[str]:
-    blocked_names: set[str] = set()
-    for tool_schema in available_tools:
-        function_name = _extract_function_name(tool_schema)
-        if not function_name:
-            continue
-        if _is_allowed_in_task_mode(function_name, task_mode):
-            continue
-        blocked_names.add(function_name)
-    return blocked_names
-
-
-def _build_loop_break_payload(
-        *,
-        step: Step,
-        loop_break_reason: str,
-        blocker: str,
-        next_hint: str,
-        runtime_recent_action: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    log_runtime(
-        logger,
-        logging.INFO,
-        "工具循环已收敛",
-        step_id=str(step.id or ""),
-        reason=loop_break_reason,
-        blocker_count=1,
-        error=blocker,
-        next_hint=next_hint,
-    )
-    payload = {
-        "success": False,
-        "summary": f"当前步骤暂时未能完成：{step.description}",
-        "result": f"当前步骤暂时未能完成：{step.description}",
-        "delivery_text": "",
-        "attachments": [],
-        "blockers": [blocker],
-        "next_hint": next_hint,
-    }
-    merged_recent_action = dict(runtime_recent_action or {})
-    merged_recent_action["last_no_progress_reason"] = blocker
-    if merged_recent_action:
-        payload["runtime_recent_action"] = merged_recent_action
-    return payload
-
-
-def _normalize_execution_payload(parsed: Dict[str, Any], *, default_summary: str) -> Dict[str, Any]:
-    """统一构造执行器返回值，避免工具循环各出口重复拼字段。"""
-    payload = normalize_execution_response(parsed)
-    if not str(payload.get("summary") or "").strip():
-        payload["summary"] = default_summary
-        payload["result"] = default_summary
-    runtime_recent_action = parsed.get("runtime_recent_action")
-    if isinstance(runtime_recent_action, dict) and runtime_recent_action:
-        payload["runtime_recent_action"] = runtime_recent_action
-    return payload
-
-
-def _build_human_wait_missing_interrupt_payload(
-        step: Step,
-        *,
-        reason: str,
-        runtime_recent_action: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """等待步骤必须显式进入 interrupt，不能用普通成功结果冒充完成。"""
-    return _build_loop_break_payload(
-        step=step,
-        loop_break_reason=reason,
-        blocker="当前步骤需要等待用户确认/选择，但尚未成功发起等待请求。",
-        next_hint="请调用 message_ask_user 发起确认/选择，不要继续搜索、读取或直接结束当前步骤。",
-        runtime_recent_action=runtime_recent_action,
-    )
-
-
-def _build_recent_failed_action(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
-    return {
-        "function_name": str(function_name or "").strip(),
-        "message": _truncate_tool_text(tool_result.message, max_chars=120),
-    }
-
-
-def _build_recent_blocked_tool_call(
-        *,
-        function_name: str,
-        tool_result: ToolResult,
-        loop_break_reason: str,
-) -> Dict[str, Any]:
-    if loop_break_reason not in _BLOCKED_TOOL_LOOP_BREAK_REASONS:
-        return {}
-    return {
-        "function_name": str(function_name or "").strip(),
-        "reason": loop_break_reason,
-        "message": _truncate_tool_text(tool_result.message, max_chars=160),
-    }
-
-
-def _summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> Dict[str, Any]:
-    normalized_name = function_name.strip().lower()
-    result_data = tool_result.data
-    if normalized_name == NOTIFY_USER_FUNCTION_NAME:
-        return {
-            "notified": True,
-            "message": "当前步骤进度通知已发送，请继续执行实际工具步骤，不要再次调用进度通知。",
-        }
-    if normalized_name == ASK_USER_FUNCTION_NAME:
-        interrupt_payload = result_data.get("interrupt") if isinstance(result_data, dict) else None
-        if isinstance(interrupt_payload, dict):
-            return {
-                "interrupt": {
-                    "kind": str(interrupt_payload.get("kind") or "").strip(),
-                    "prompt": _truncate_tool_text(interrupt_payload.get("prompt"), max_chars=200),
-                    "title": _truncate_tool_text(interrupt_payload.get("title"), max_chars=120),
-                }
-            }
-        return {"interrupt": True}
-    if normalized_name == "write_file" and isinstance(result_data, dict):
-        return {
-            "filepath": str(
-                result_data.get("filepath")
-                or result_data.get("file_path")
-                or result_data.get("path")
-                or ""
-            ).strip(),
-            "message": _truncate_tool_text(tool_result.message, max_chars=200),
-        }
-    if normalized_name == "read_file" and isinstance(result_data, dict):
-        return {
-            "filepath": str(
-                result_data.get("filepath")
-                or result_data.get("file_path")
-                or result_data.get("path")
-                or ""
-            ).strip(),
-            "content": _truncate_tool_text(result_data.get("content"), max_chars=1800),
-        }
-    if normalized_name in {"list_files", "find_files"} and isinstance(result_data, dict):
-        files = result_data.get("files") or result_data.get("results") or []
-        if not isinstance(files, list):
-            files = []
-        return {
-            "dir_path": str(result_data.get("dir_path") or "").strip(),
-            "files": [_truncate_tool_text(item, max_chars=200) for item in files[:TOOL_RESULT_MAX_LIST_ITEMS]],
-        }
-    if normalized_name == "search_web" and isinstance(result_data, SearchResults):
-        return {
-            "query": str(result_data.query or "").strip(),
-            "results": [
-                {
-                    "title": _truncate_tool_text(item.title, max_chars=120),
-                    "url": _truncate_tool_text(item.url, max_chars=240),
-                    "snippet": _truncate_tool_text(item.snippet, max_chars=200),
-                }
-                for item in list(result_data.results or [])[:5]
-            ],
-        }
-    return {"data": _compact_tool_value(result_data)}
-
-
-def _build_tool_feedback_content(function_name: str, tool_result: ToolResult) -> str:
-    payload = {
-        "success": bool(tool_result.success),
-        "message": _truncate_tool_text(tool_result.message, max_chars=240),
-        "data": _summarize_tool_result_data(function_name, tool_result),
-    }
-    return json.dumps(payload, ensure_ascii=False)
-
 
 async def execute_step_with_prompt(
         *,
@@ -1332,13 +503,15 @@ async def execute_step_with_prompt(
             and any(function_name in available_function_names for function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES)
     )
     blocked_function_names = _build_task_mode_disallowed_names(
-        available_tools,
+        list(available_function_names),
         task_mode=task_mode,
     )
     research_file_context_blocked_function_names: set[str] = set()
     general_inline_blocked_function_names: set[str] = set()
+    file_processing_shell_blocked_function_names: set[str] = set()
     artifact_policy_blocked_function_names: set[str] = set()
     final_delivery_search_blocked_function_names: set[str] = set()
+    final_delivery_shell_blocked_function_names: set[str] = set()
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
@@ -1346,13 +519,17 @@ async def execute_step_with_prompt(
         # 展示型步骤应当直接把已有观察整理成文本，不要在无文件上下文时再试探读写文件。
         general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
         blocked_function_names.update(general_inline_blocked_function_names)
-    if _step_outputs_inline_result(step) and _step_owns_final_delivery(step) and _step_final_delivery_context_ready(
-            step,
-            task_mode=task_mode,
-    ):
+    if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
+        # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
+        file_processing_shell_blocked_function_names.add("shell_execute")
+        blocked_function_names.update(file_processing_shell_blocked_function_names)
+    if _step_is_final_inline_delivery_ready(step, task_mode=task_mode):
         # 最终交付步骤只负责组织已准备好的上下文，不再重新发起搜索/页面读取。
         final_delivery_search_blocked_function_names.update(SEARCH_FUNCTION_NAMES)
         blocked_function_names.update(final_delivery_search_blocked_function_names)
+        # P3-1A 收敛修复：最终交付正文阶段禁止 shell_execute，避免进入无意义命令循环。
+        final_delivery_shell_blocked_function_names.add("shell_execute")
+        blocked_function_names.update(final_delivery_shell_blocked_function_names)
     if _step_forbids_file_output(step):
         artifact_policy_blocked_function_names.add("write_file")
         blocked_function_names.update(artifact_policy_blocked_function_names)
@@ -1376,6 +553,13 @@ async def execute_step_with_prompt(
     blocked_function_names.difference_update(
         {
             function_name
+            for function_name in file_processing_shell_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    blocked_function_names.difference_update(
+        {
+            function_name
             for function_name in artifact_policy_blocked_function_names
             if function_name not in available_function_names
         }
@@ -1387,6 +571,19 @@ async def execute_step_with_prompt(
             if function_name not in available_function_names
         }
     )
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in final_delivery_shell_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    # P3-2A 收敛修复：先记录外部请求上限，再计算 task_mode 分级后的真实轮次上限。
+    requested_max_tool_iterations = max(1, int(max_tool_iterations))
+    effective_max_tool_iterations = _resolve_effective_max_tool_iterations(
+        task_mode=task_mode,
+        requested_max_tool_iterations=requested_max_tool_iterations,
+    )
     if task_mode == "human_wait" and ASK_USER_FUNCTION_NAME not in available_function_names:
         log_runtime(
             logger,
@@ -1396,7 +593,6 @@ async def execute_step_with_prompt(
         )
         return _build_loop_break_payload(
             step=step,
-            loop_break_reason="human_wait_tool_missing",
             blocker="当前等待步骤缺少可用的 message_ask_user 工具，无法向用户发起确认或选择。",
             next_hint="请先为当前运行时注入 message_ask_user 工具，再重新执行该等待步骤。",
         ), emitted_tool_events
@@ -1409,7 +605,8 @@ async def execute_step_with_prompt(
         task_mode=task_mode,
         available_tool_count=len(available_tools),
         blocked_tool_count=len(blocked_function_names),
-        max_tool_iterations=max(1, int(max_tool_iterations)),
+        requested_max_tool_iterations=requested_max_tool_iterations,
+        max_tool_iterations=effective_max_tool_iterations,
     )
 
     if len(available_tools) == 0:
@@ -1475,13 +672,14 @@ async def execute_step_with_prompt(
     last_tool_fingerprint = ""
     same_tool_repeat_count = 0
     search_repeat_counter: Dict[str, int] = {}
+    fetch_repeat_counter: Dict[str, int] = {}
     last_browser_observation_fingerprint = ""
     browser_no_progress_count = 0
     failed_browser_high_level_keys: set[str] = set()
     consecutive_failure_count = 0
     runtime_recent_action: Dict[str, Any] = {}
 
-    for index in range(max(1, int(max_tool_iterations))):
+    for index in range(effective_max_tool_iterations):
         # 每轮都先根据“当前页面状态”生成一个 route key。
         # 这里即使 browser_page_type / last_browser_route_url / last_browser_observation_fingerprint 里有空值，key 仍然有意义：
         # 1. 空值组合本身就代表“还没读到页面结构/URL/观察结果”的初始状态。
@@ -1565,7 +763,6 @@ async def execute_step_with_prompt(
                 )
                 return _build_human_wait_missing_interrupt_payload(
                     step,
-                    reason="human_wait_missing_interrupt",
                     runtime_recent_action=runtime_recent_action,
                 ), emitted_tool_events
             has_summary = bool(str(parsed_execution.get("summary") or "").strip())
@@ -1739,6 +936,20 @@ async def execute_step_with_prompt(
                     success=False,
                     message="当前步骤是直接内联展示结果的步骤，且没有可用文件上下文，请直接返回文本结果，不要继续读写文件。",
                 )
+            elif normalized_function_name in file_processing_shell_blocked_function_names:
+                loop_break_reason = "file_processing_shell_explicit_required"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "文件处理步骤缺少显式命令意图，已拦截 shell 工具调用",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤属于文件处理，默认禁止调用 shell_execute。仅在用户明确要求执行命令时才允许。",
+                )
             elif normalized_function_name in artifact_policy_blocked_function_names:
                 loop_break_reason = "artifact_policy_file_output_blocked"
                 log_runtime(
@@ -1769,6 +980,22 @@ async def execute_step_with_prompt(
                 tool_result = ToolResult(
                     success=False,
                     message="当前步骤负责最终交付正文，请直接基于已知上下文组织答案，不要重新调用 search_web 或 fetch_page。",
+                )
+            elif normalized_function_name in final_delivery_shell_blocked_function_names:
+                # P3-1A 收敛修复：最终交付步骤禁止 shell_execute，防止总结阶段漂移成命令执行。
+                loop_break_reason = "final_delivery_shell_drift_blocked"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "最终交付步骤已拦截 shell 漂移",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    task_mode=task_mode,
+                    delivery_role=str(getattr(step, "delivery_role", "") or ""),
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="当前步骤负责最终交付正文，请直接输出最终答案，不要调用 shell_execute。",
                 )
             elif browser_route_enabled and normalized_function_name.startswith("browser_"):
                 loop_break_reason = "browser_route_blocked"
@@ -1956,21 +1183,115 @@ async def execute_step_with_prompt(
                     tool_cost_ms = elapsed_ms(tool_started_at)
                     if not isinstance(tool_result, ToolResult):
                         tool_result = ToolResult(success=True, data=tool_result)
+                    # P3-3A 收敛修复：search_web 返回瞬时链路错误时立即降级，阻止同一步骤内继续空转重试。
+                    if not bool(tool_result.success) and _is_transient_research_transport_error(tool_result.message):
+                        loop_break_reason = "research_route_transport_error"
+                        tool_result = ToolResult(
+                            success=False,
+                            message="检索链路出现瞬时网络抖动（如连接中断），当前步骤已停止重试。请稍后重试或切换其他路径。",
+                        )
                 except Exception as e:
                     tool_cost_ms = elapsed_ms(tool_started_at)
-                    log_runtime(
-                        logger,
-                        logging.ERROR,
-                        "工具调用失败",
-                        step_id=str(step.id or ""),
-                        function_name=function_name,
-                        tool_name=tool_name,
-                        error=str(e),
-                        tool_elapsed_ms=tool_cost_ms,
-                        elapsed_ms=elapsed_ms(started_at),
-                        exc_info=True,
-                    )
-                    tool_result = ToolResult(success=False, message=f"调用工具失败: {function_name}")
+                    # P3-3A 收敛修复：RemoteProtocolError 等瞬时异常直接收敛，不再继续长循环重试。
+                    if _is_transient_research_transport_error(f"{e.__class__.__name__}: {e}"):
+                        loop_break_reason = "research_route_transport_error"
+                        log_runtime(
+                            logger,
+                            logging.WARNING,
+                            "检索链路瞬时错误，已触发快速收敛",
+                            step_id=str(step.id or ""),
+                            function_name=function_name,
+                            tool_name=tool_name,
+                            error=f"{e.__class__.__name__}: {e}",
+                            tool_elapsed_ms=tool_cost_ms,
+                            elapsed_ms=elapsed_ms(started_at),
+                        )
+                        tool_result = ToolResult(
+                            success=False,
+                            message="检索链路出现瞬时网络抖动（如连接中断），当前步骤已停止重试。请稍后重试或切换其他路径。",
+                        )
+                    else:
+                        log_runtime(
+                            logger,
+                            logging.ERROR,
+                            "工具调用失败",
+                            step_id=str(step.id or ""),
+                            function_name=function_name,
+                            tool_name=tool_name,
+                            error=str(e),
+                            tool_elapsed_ms=tool_cost_ms,
+                            elapsed_ms=elapsed_ms(started_at),
+                            exc_info=True,
+                        )
+                        tool_result = ToolResult(success=False, message=f"调用工具失败: {function_name}")
+        elif normalized_function_name == "fetch_page":
+            # P3-2A 收敛修复：fetch_page 也按 URL 指纹收敛，防止同一页面被反复读取。
+            fetch_fingerprint = _build_fetch_fingerprint(function_args)
+            if fetch_fingerprint:
+                fetch_repeat_counter[fetch_fingerprint] = fetch_repeat_counter.get(fetch_fingerprint, 0) + 1
+            if fetch_fingerprint and fetch_repeat_counter[fetch_fingerprint] > FETCH_REPEAT_LIMIT:
+                loop_break_reason = "research_route_fingerprint_repeat"
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "重复抓取同一页面已收敛",
+                    step_id=str(step.id or ""),
+                    function_name=function_name,
+                    fetch_repeat_count=fetch_repeat_counter[fetch_fingerprint],
+                    fetch_url=fetch_fingerprint,
+                )
+                tool_result = ToolResult(
+                    success=False,
+                    message="同一页面 URL 已重复抓取多次，请切换其他候选链接或结束当前步骤。",
+                )
+            else:
+                tool_started_at = now_perf()
+                try:
+                    tool_result = await matched_tool.invoke(function_name, **function_args)
+                    tool_cost_ms = elapsed_ms(tool_started_at)
+                    if not isinstance(tool_result, ToolResult):
+                        tool_result = ToolResult(success=True, data=tool_result)
+                    # P3-3A 收敛修复：fetch_page 返回瞬时链路错误时立即降级，避免同一步骤内长循环。
+                    if not bool(tool_result.success) and _is_transient_research_transport_error(tool_result.message):
+                        loop_break_reason = "research_route_transport_error"
+                        tool_result = ToolResult(
+                            success=False,
+                            message="页面抓取链路出现瞬时网络抖动（如连接中断），当前步骤已停止重试。请稍后重试或改用其他来源。",
+                        )
+                except Exception as e:
+                    tool_cost_ms = elapsed_ms(tool_started_at)
+                    # P3-3A 收敛修复：RemoteProtocolError 等瞬时异常快速收敛，不再进入长重试。
+                    if _is_transient_research_transport_error(f"{e.__class__.__name__}: {e}"):
+                        loop_break_reason = "research_route_transport_error"
+                        log_runtime(
+                            logger,
+                            logging.WARNING,
+                            "页面抓取链路瞬时错误，已触发快速收敛",
+                            step_id=str(step.id or ""),
+                            function_name=function_name,
+                            tool_name=tool_name,
+                            error=f"{e.__class__.__name__}: {e}",
+                            tool_elapsed_ms=tool_cost_ms,
+                            elapsed_ms=elapsed_ms(started_at),
+                        )
+                        tool_result = ToolResult(
+                            success=False,
+                            message="页面抓取链路出现瞬时网络抖动（如连接中断），当前步骤已停止重试。请稍后重试或改用其他来源。",
+                        )
+                    else:
+                        log_runtime(
+                            logger,
+                            logging.ERROR,
+                            "工具调用失败",
+                            step_id=str(step.id or ""),
+                            function_name=function_name,
+                            tool_name=tool_name,
+                            error=str(e),
+                            tool_elapsed_ms=tool_cost_ms,
+                            elapsed_ms=elapsed_ms(started_at),
+                            exc_info=True,
+                        )
+                        tool_result = ToolResult(success=False, message=f"调用工具失败: {function_name}")
         elif same_tool_repeat_count > REPEAT_TOOL_LIMIT:
             loop_break_reason = "repeat_tool_call"
             log_runtime(
@@ -2156,7 +1477,6 @@ async def execute_step_with_prompt(
         if loop_break_reason == "repeat_tool_call":
             return _build_loop_break_payload(
                 step=step,
-                loop_break_reason=loop_break_reason,
                 blocker="同一工具及参数被重复调用过多次，当前步骤已被强制收敛。",
                 next_hint="请改用其他工具、调整参数，或将当前步骤拆小后再执行。",
                 runtime_recent_action=runtime_recent_action,
@@ -2164,15 +1484,29 @@ async def execute_step_with_prompt(
         if loop_break_reason == "search_repeat":
             return _build_loop_break_payload(
                 step=step,
-                loop_break_reason=loop_break_reason,
                 blocker="同一搜索查询已重复触发多次，当前检索路径没有继续收获。",
                 next_hint="请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。",
+                runtime_recent_action=runtime_recent_action,
+            ), emitted_tool_events
+        if loop_break_reason == "research_route_fingerprint_repeat":
+            # P3-2A 收敛修复：研究链路（fetch_page）命中重复指纹后直接结束，避免继续空转。
+            return _build_loop_break_payload(
+                step=step,
+                blocker="同一页面抓取请求已重复触发多次，当前检索路径没有新增信息。",
+                next_hint="请切换其他候选 URL、改用其他工具，或结束当前步骤。",
+                runtime_recent_action=runtime_recent_action,
+            ), emitted_tool_events
+        if loop_break_reason == "research_route_transport_error":
+            # P3-3A 收敛修复：检索链路瞬时网络错误直接收敛，避免同一步骤内反复失败。
+            return _build_loop_break_payload(
+                step=step,
+                blocker="检索/抓取链路出现瞬时网络错误，当前步骤已停止重试。",
+                next_hint="请稍后重试，或先基于已有信息继续后续步骤。",
                 runtime_recent_action=runtime_recent_action,
             ), emitted_tool_events
         if loop_break_reason == "browser_no_progress":
             return _build_loop_break_payload(
                 step=step,
-                loop_break_reason=loop_break_reason,
                 blocker="浏览器连续观察未发现新的有效信息，当前页面路径已无进展。",
                 next_hint="请更换页面、改用搜索/正文读取，或重新规划当前步骤。",
                 runtime_recent_action=runtime_recent_action,
@@ -2180,7 +1514,6 @@ async def execute_step_with_prompt(
         if consecutive_failure_count >= TOOL_FAILURE_LIMIT:
             return _build_loop_break_payload(
                 step=step,
-                loop_break_reason="tool_failure_limit",
                 blocker="连续工具调用失败次数过多，当前步骤已停止继续重试。",
                 next_hint="请检查参数、改换工具，或将当前步骤拆小后再执行。",
                 runtime_recent_action=runtime_recent_action,
@@ -2193,12 +1526,12 @@ async def execute_step_with_prompt(
             logging.WARNING,
             "等待步骤达到最大轮次仍未进入等待",
             step_id=str(step.id or ""),
-            iteration_count=max(1, int(max_tool_iterations)),
+            requested_max_tool_iterations=requested_max_tool_iterations,
+            iteration_count=effective_max_tool_iterations,
             elapsed_ms=elapsed_ms(started_at),
         )
         return _build_human_wait_missing_interrupt_payload(
             step,
-            reason="human_wait_max_tool_iterations",
             runtime_recent_action=runtime_recent_action,
         ), emitted_tool_events
     log_runtime(
@@ -2206,7 +1539,8 @@ async def execute_step_with_prompt(
         logging.INFO,
         "达到最大工具轮次，返回当前结果",
         step_id=str(step.id or ""),
-        iteration_count=max(1, int(max_tool_iterations)),
+        requested_max_tool_iterations=requested_max_tool_iterations,
+        iteration_count=effective_max_tool_iterations,
         task_mode=task_mode,
         loop_break_reason="max_tool_iterations",
         success=bool(parsed.get("success", True)),

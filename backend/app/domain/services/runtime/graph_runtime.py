@@ -9,10 +9,21 @@ import logging
 from typing import Callable, Optional, Protocol, Type
 
 from app.domain.external import Browser, LLM, Sandbox, Task, TaskRunner
-from app.domain.models import Session, SessionStatus, WorkflowRunStatus
+from app.domain.models import Session, SessionStatus, WorkflowRunStatus, Workspace
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.workspace_runtime import WorkspaceManager
 
 logger = logging.getLogger(__name__)
+
+
+def _log_core(level: int, event: str, **fields: object) -> None:
+    """核心链路日志统一走 runtime_logging 格式；导入失败时降级普通日志。"""
+    try:
+        from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import log_runtime
+
+        log_runtime(logger, level, event, **fields)
+    except Exception:
+        logger.log(level, "规划执行 事件=%s 字段=%s", event, fields)
 
 
 class TaskRunnerFactory(Protocol):
@@ -74,34 +85,67 @@ class DefaultGraphRuntime(GraphRuntime):
         self._task_cls = task_cls
         self._uow_factory = uow_factory
         self._task_runner_factory = task_runner_factory
+        self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
 
     async def get_task(self, session: Session) -> Optional[Task]:
-        """按会话读取任务实例（当前默认实现由 task_id 定位）。"""
-        task_id = session.task_id
-        if not task_id:
+        """按会话读取任务实例。"""
+        workspace = await self._get_workspace(session=session)
+        if workspace is None or not workspace.task_id:
             return None
-        return self._task_cls.get(task_id=task_id)
+        return self._task_cls.get(task_id=workspace.task_id)
+
+    async def _get_workspace(self, session: Session) -> Optional[Workspace]:
+        return await self._workspace_manager.get_workspace(session=session)
 
     async def _build_task_instance(
             self,
             session: Session,
             llm: LLM,
+            workspace: Workspace,
     ) -> tuple[Task, Sandbox, bool]:
         """构建任务实例，统一复用创建/恢复场景。"""
+        _log_core(
+            logging.INFO,
+            "构建任务实例开始",
+            session_id=session.id,
+            workspace_id=workspace.id,
+            sandbox_id=str(workspace.sandbox_id or "").strip(),
+        )
         # 先尝试复用已存在沙箱；不存在时再创建新沙箱，减少外部资源抖动。
         sandbox = None
-        sandbox_id = session.sandbox_id
+        sandbox_id = workspace.sandbox_id
         created_new_sandbox = False
         if sandbox_id:
             sandbox = await self._sandbox_cls.get(id=sandbox_id)
         if not sandbox:
             sandbox = await self._sandbox_cls.create()
             created_new_sandbox = True
+            _log_core(
+                logging.INFO,
+                "创建新沙箱",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                sandbox_id=sandbox.id,
+            )
+        else:
+            _log_core(
+                logging.INFO,
+                "复用已有沙箱",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                sandbox_id=sandbox.id,
+            )
 
         # 浏览器是当前任务运行必需资源，无法获取时应立即失败。
         browser = await sandbox.get_browser()
         if not browser:
-            logger.error("会话%s创建任务失败: 沙箱%s创建浏览器失败", session.id, sandbox_id)
+            _log_core(
+                logging.ERROR,
+                "构建任务实例失败: 沙箱浏览器不可用",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                sandbox_id=str(sandbox_id or ""),
+            )
             raise RuntimeError(f"会话{session.id}创建任务失败: 沙箱{sandbox_id},创建浏览器失败")
 
         task = None
@@ -114,6 +158,15 @@ class DefaultGraphRuntime(GraphRuntime):
                 browser=browser,
             )
             task = self._task_cls.create(task_runner=task_runner)
+            _log_core(
+                logging.INFO,
+                "构建任务实例成功",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                task_id=task.id,
+                sandbox_id=sandbox.id,
+                created_new_sandbox=created_new_sandbox,
+            )
         except Exception:
             # 任务实例构造失败时，若本轮新建了沙箱则立即回收，避免外部资源泄漏。
             if created_new_sandbox:
@@ -126,33 +179,70 @@ class DefaultGraphRuntime(GraphRuntime):
 
     async def create_task(self, session: Session, llm: LLM) -> Task:
         """创建任务并在单一流程内完成会话关联写回与异常补偿。"""
+        workspace = await self._get_workspace(session=session)
+        if workspace is None:
+            workspace = Workspace(session_id=session.id)
+        _log_core(
+            logging.INFO,
+            "创建任务开始",
+            session_id=session.id,
+            workspace_id=workspace.id,
+            source_run_id=str(session.current_run_id or "").strip(),
+        )
+
         task, sandbox, created_new_sandbox = await self._build_task_instance(
             session=session,
             llm=llm,
+            workspace=workspace,
         )
 
         # 记录旧值用于补偿回滚，避免数据库写回失败后内存态悬挂。
-        previous_sandbox_id = session.sandbox_id
-        previous_task_id = session.task_id
+        previous_workspace_id = session.workspace_id
         previous_current_run_id = session.current_run_id
+        previous_status = session.status
+        previous_workspace = workspace.model_copy(deep=True)
 
         # 在单一写回流程中完成 run 创建与会话关联落库，保证关联视图一致性。
-        session.sandbox_id = sandbox.id
-        session.task_id = task.id
         # 会话启动新任务时同步切换为 RUNNING，确保前端可实时展示“思考中”与禁用输入态。
         session.status = SessionStatus.RUNNING
         try:
             async with self._uow_factory() as uow:
+                workspace = await self._workspace_manager.ensure_workspace(session=session, uow=uow)
                 run = await uow.workflow_run.create_for_session(
                     session=session,
                     status=WorkflowRunStatus.RUNNING,
                     thread_id=session.id,
                 )
+                await self._workspace_manager.bind_run(workspace=workspace, run_id=run.id, uow=uow)
+                await self._workspace_manager.ensure_environment(
+                    workspace=workspace,
+                    sandbox_id=sandbox.id,
+                    task_id=task.id,
+                    uow=uow,
+                )
                 session.current_run_id = run.id
                 await uow.session.save(session=session)
+            _log_core(
+                logging.INFO,
+                "创建任务完成",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                run_id=run.id,
+                task_id=task.id,
+                sandbox_id=sandbox.id,
+                created_new_sandbox=created_new_sandbox,
+            )
             return task
         except Exception as save_err:
-            logger.error("会话%s写回sandbox/task关联失败，开始补偿: %s", session.id, save_err)
+            _log_core(
+                logging.ERROR,
+                "创建任务写回失败，开始补偿",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                task_id=getattr(task, "id", ""),
+                sandbox_id=getattr(sandbox, "id", ""),
+                error=str(save_err),
+            )
 
             # 补偿1：撤销任务实例，避免无主任务继续留在运行时注册表。
             try:
@@ -168,11 +258,14 @@ class DefaultGraphRuntime(GraphRuntime):
                     logger.error("会话%s补偿销毁沙箱失败: %s", session.id, destroy_err)
 
             # 补偿3：回滚会话内存态并尽力落库，降低后续读到脏关联字段的概率。
-            session.sandbox_id = previous_sandbox_id
-            session.task_id = previous_task_id
+            session.workspace_id = previous_workspace_id
             session.current_run_id = previous_current_run_id
+            session.status = previous_status
+            workspace = previous_workspace
             try:
                 async with self._uow_factory() as uow:
+                    if previous_workspace_id:
+                        await uow.workspace.save(workspace=workspace)
                     await uow.session.save(session=session)
             except Exception as rollback_err:
                 logger.error("会话%s补偿回滚关联字段失败: %s", session.id, rollback_err)
@@ -180,26 +273,65 @@ class DefaultGraphRuntime(GraphRuntime):
 
     async def resume_task(self, session: Session, llm: LLM) -> Task:
         """为已有 run 重建任务实例，但不新建 workflow_run。"""
-        if not str(session.current_run_id or "").strip():
+        workspace = await self._get_workspace(session=session)
+        if workspace is None:
+            raise RuntimeError(f"会话{session.id}缺少 workspace，无法恢复执行")
+        resolved_run_id = str(workspace.current_run_id or "").strip()
+        if not resolved_run_id:
             raise RuntimeError(f"会话{session.id}缺少 current_run_id，无法恢复执行")
+        _log_core(
+            logging.INFO,
+            "恢复任务开始",
+            session_id=session.id,
+            workspace_id=workspace.id,
+            run_id=resolved_run_id,
+        )
 
         task, sandbox, created_new_sandbox = await self._build_task_instance(
             session=session,
             llm=llm,
+            workspace=workspace,
         )
-        previous_sandbox_id = session.sandbox_id
-        previous_task_id = session.task_id
+        previous_workspace_id = session.workspace_id
+        previous_current_run_id = session.current_run_id
         previous_status = session.status
+        previous_workspace = workspace.model_copy(deep=True)
 
-        session.sandbox_id = sandbox.id
-        session.task_id = task.id
+        session.current_run_id = resolved_run_id
         session.status = SessionStatus.RUNNING
         try:
             async with self._uow_factory() as uow:
+                workspace = await self._workspace_manager.ensure_workspace(session=session, uow=uow)
+                await self._workspace_manager.bind_run(workspace=workspace, run_id=resolved_run_id, uow=uow)
+                await self._workspace_manager.ensure_environment(
+                    workspace=workspace,
+                    sandbox_id=sandbox.id,
+                    task_id=task.id,
+                    uow=uow,
+                )
                 await uow.session.save(session=session)
+            _log_core(
+                logging.INFO,
+                "恢复任务完成",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                run_id=resolved_run_id,
+                task_id=task.id,
+                sandbox_id=sandbox.id,
+                created_new_sandbox=created_new_sandbox,
+            )
             return task
         except Exception as save_err:
-            logger.error("会话%s恢复任务写回失败，开始补偿: %s", session.id, save_err)
+            _log_core(
+                logging.ERROR,
+                "恢复任务写回失败，开始补偿",
+                session_id=session.id,
+                workspace_id=workspace.id,
+                run_id=resolved_run_id,
+                task_id=getattr(task, "id", ""),
+                sandbox_id=getattr(sandbox, "id", ""),
+                error=str(save_err),
+            )
 
             try:
                 await task.cancel()
@@ -212,11 +344,13 @@ class DefaultGraphRuntime(GraphRuntime):
                 except Exception as destroy_err:
                     logger.error("会话%s恢复任务补偿销毁沙箱失败: %s", session.id, destroy_err)
 
-            session.sandbox_id = previous_sandbox_id
-            session.task_id = previous_task_id
+            session.workspace_id = previous_workspace_id
+            session.current_run_id = previous_current_run_id
             session.status = previous_status
+            workspace = previous_workspace
             try:
                 async with self._uow_factory() as uow:
+                    await uow.workspace.save(workspace=workspace)
                     await uow.session.save(session=session)
             except Exception as rollback_err:
                 logger.error("会话%s恢复任务补偿回滚关联字段失败: %s", session.id, rollback_err)

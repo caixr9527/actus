@@ -32,8 +32,7 @@ class Session(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # 会话id
     user_id: Optional[str] = None  # 所属用户id，历史未认领会话允许为空
     current_model_id: Optional[str] = None  # 当前会话显式选择的模型id，None表示走默认模型
-    sandbox_id: Optional[str] = None  # 沙箱id
-    task_id: Optional[str] = None  # 任务id
+    workspace_id: Optional[str] = None  # 关联工作区id
     current_run_id: Optional[str] = None  # 当前运行id（WorkflowRun）
     title: str = ""  # 标题
     unread_message_count: int = 0  # 未读消息数

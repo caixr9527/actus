@@ -51,8 +51,10 @@ class SessionModel(Base):
         String(255),
         nullable=True,
     )  # 当前会话关联运行id（WorkflowRun）
-    sandbox_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 沙箱id
-    task_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 任务id
+    workspace_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 当前会话关联工作区id
     title: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -106,31 +108,47 @@ class SessionModel(Base):
             # 基础字段: 使用BaseModel提供的python字典转换格式
             **session.model_dump(
                 mode="python",
-                exclude={"events", "files", "updated_at", "created_at"},
+                exclude={"events", "files", "final_files", "updated_at", "created_at"},
             ),
             # 复杂字段: 使用BaseModel提供的json字典转换格式
             **session.model_dump(
                 mode="json",
-                include={"files"},
+                include={"files", "final_files"},
             )
         )
 
     def to_domain(self) -> Session:
         """将会话ORM模型转换成领域模型"""
-        return Session.model_validate(self, from_attributes=True)
+        payload = {
+            "id": self.id,
+            "user_id": self.user_id,
+            "current_model_id": self.current_model_id,
+            "workspace_id": self.workspace_id,
+            "current_run_id": self.current_run_id,
+            "title": self.title,
+            "unread_message_count": self.unread_message_count,
+            "latest_message": self.latest_message,
+            "latest_message_at": self.latest_message_at,
+            "files": list(self.files or []),
+            "final_files": list(self.final_files or []),
+            "status": self.status,
+            "updated_at": self.updated_at,
+            "created_at": self.created_at,
+        }
+        return Session.model_validate(payload)
 
     def update_from_domain(self, session: Session) -> None:
         """从传递的领域模型更新ORM数据"""
         # 基础字段: Python模式
         base_data = session.model_dump(
             mode="python",
-            exclude={"events", "files", "updated_at", "created_at"},
+            exclude={"events", "files", "final_files", "updated_at", "created_at"},
         )
 
         # 复杂字段: JSON模式
         json_data = session.model_dump(
             mode="json",
-            include={"files"},
+            include={"files", "final_files"},
         )
 
         # 合并更新

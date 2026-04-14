@@ -50,6 +50,22 @@ def normalize_controlled_value(value: Any, enum_class: type[Enum]) -> str:
     return normalized_value if normalized_value in allowed_values else ""
 
 
+def normalize_optional_bool(value: Any) -> Optional[bool]:
+    """把布尔/数字/常见布尔字符串统一归一化为 Optional[bool]。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized_value = normalize_string_value(value, lower=True)
+    if not normalized_value:
+        return None
+    if normalized_value in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized_value in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
+
+
 def _extract_mapping_fields(raw: Any, field_names: Iterable[str]) -> Dict[str, Any]:
     """统一把 dict / Pydantic 模型 / 普通对象拉平成字段字典。"""
     if isinstance(raw, dict):
@@ -221,6 +237,7 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "blockers",
             "facts_learned",
             "open_questions",
+            "deliver_result_as_attachment",
             "next_hint",
             "reused_from_run_id",
             "reused_from_step_id",
@@ -238,6 +255,7 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
         "blockers": normalize_text_list(source.get("blockers")),
         "facts_learned": normalize_text_list(source.get("facts_learned")),
         "open_questions": normalize_text_list(source.get("open_questions")),
+        "deliver_result_as_attachment": normalize_optional_bool(source.get("deliver_result_as_attachment")),
         "next_hint": next_hint or None,
         "reused_from_run_id": reused_from_run_id or None,
         "reused_from_step_id": reused_from_step_id or None,

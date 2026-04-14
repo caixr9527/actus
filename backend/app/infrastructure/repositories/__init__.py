@@ -12,6 +12,8 @@ from .db_session_repository import DBSessionRepository
 from .db_uow import DBUnitOfWork
 from .db_user_repository import DBUserRepository
 from .db_workflow_run_repository import DBWorkflowRunRepository
+from .db_workspace_artifact_repository import DBWorkspaceArtifactRepository
+from .db_workspace_repository import DBWorkspaceRepository
 from .file_app_config_repository import FileAppConfigRepository
 
 __all__ = [
@@ -22,5 +24,7 @@ __all__ = [
     "DBSessionRepository",
     "DBUserRepository",
     "DBWorkflowRunRepository",
+    "DBWorkspaceRepository",
+    "DBWorkspaceArtifactRepository",
     "DBUnitOfWork",
 ]

@@ -44,9 +44,12 @@ from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
 from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
+from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.runtime.cancellation import (
     build_cancelled_runtime_events,
 )
+from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -85,6 +88,9 @@ class AgentService:
         self._agent_config = agent_config
         self._a2a_config = a2a_config
         self._run_engine_factory = run_engine_factory
+        self._tool_runtime_adapter = ToolRuntimeAdapter(
+            capability_registry=CapabilityRegistry.default_v1(),
+        )
         # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
         # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
         self._graph_runtime = graph_runtime or DefaultGraphRuntime(
@@ -93,7 +99,15 @@ class AgentService:
             uow_factory=self._uow_factory,
             task_runner_factory=self._build_task_runner,
         )
+        self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
+
+    def _get_workspace_manager(self) -> WorkspaceManager:
+        manager = getattr(self, "_workspace_manager", None)
+        if manager is None:
+            manager = WorkspaceManager(uow_factory=self._uow_factory)
+            self._workspace_manager = manager
+        return manager
 
     def _build_task_runner(
             self,
@@ -117,21 +131,15 @@ class AgentService:
             search_engine=self._search_engine,
             sandbox=sandbox,
             run_engine_factory=self._run_engine_factory,
+            tool_runtime_adapter=self._tool_runtime_adapter,
         )
 
     async def _get_task(self, session: Session) -> Optional[Task]:
-        """读取会话任务实例，优先走 GraphRuntime，保留历史回退以兼容旧测试。"""
+        """读取会话任务实例。"""
         runtime = getattr(self, "_graph_runtime", None)
-        if runtime is not None:
-            return await runtime.get_task(session=session)
-
-        task_id = session.task_id
-        if not task_id:
-            return None
-        task_cls = getattr(self, "_task_cls", None)
-        if task_cls is None:
-            return None
-        return task_cls.get(task_id=task_id)
+        if runtime is None:
+            raise RuntimeError("未配置GraphRuntime，无法读取会话任务")
+        return await runtime.get_task(session=session)
 
     async def _resolve_runtime_llm(self, session: Session) -> LLM:
         """根据会话当前模型解析运行时 LLM。"""
@@ -197,11 +205,18 @@ class AgentService:
     async def _inspect_resume_checkpoint(self, session: Session) -> Any:
         """读取当前等待态对应的 checkpoint，确认恢复点仍然有效。"""
         llm = await self._resolve_runtime_llm(session)
+        workspace_runtime_service = WorkspaceRuntimeService(
+            session_id=session.id,
+            uow_factory=self._uow_factory,
+        )
         inspector = LangGraphRunEngine(
             session_id=session.id,
             stage_llms=build_uniform_stage_llms(llm),
             user_id=session.user_id,
             uow_factory=self._uow_factory,
+            runtime_context_service=RuntimeContextService(
+                workspace_runtime_service=workspace_runtime_service,
+            ),
             checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         )
         return await inspector.inspect_resume_checkpoint()
@@ -344,11 +359,12 @@ class AgentService:
 
                 # 如果会话未处于运行状态，或者没有任务，则创建/恢复任务。
                 if task is None:
+                    current_run_id = await self._get_workspace_manager().resolve_current_run_id(session=session)
                     task = await self._create_task(
                         session,
                         reuse_current_run=(
                                 session.status == SessionStatus.RUNNING
-                                and bool(str(session.current_run_id or "").strip())
+                                and bool(current_run_id)
                         ),
                     )
                     if not task:
@@ -608,7 +624,10 @@ class AgentService:
                 status=SessionStatus.CANCELLED,
             )
 
-            run_id = str(session.current_run_id or "").strip()
+            run_id = await self._get_workspace_manager().resolve_current_run_id(
+                session=session,
+                uow=uow,
+            )
             if not run_id:
                 return
 

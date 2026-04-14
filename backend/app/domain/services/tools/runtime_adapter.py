@@ -60,7 +60,7 @@ class ToolRuntimeEventHooks:
     """
 
     get_browser_screenshot: Optional[Callable[[], Awaitable[str]]] = None
-    read_shell_output: Optional[Callable[[str], Awaitable[ToolResult]]] = None
+    get_shell_tool_result: Optional[Callable[[], Awaitable[ToolResult]]] = None
     read_file_content: Optional[Callable[[str], Awaitable[ToolResult]]] = None
     sync_file_to_storage: Optional[Callable[[str], Awaitable[object]]] = None
 
@@ -86,8 +86,8 @@ class ToolRuntimeAdapter:
         CapabilityRegistry.CAPABILITY_MCP,
     )
 
-    def __init__(self, capability_registry: Optional[CapabilityRegistry] = None) -> None:
-        self._capability_registry = capability_registry or CapabilityRegistry.default_v1()
+    def __init__(self, capability_registry: CapabilityRegistry) -> None:
+        self._capability_registry = capability_registry
 
     @staticmethod
     def _render_file_tool_result(event: ToolEvent) -> str:
@@ -224,12 +224,12 @@ class ToolRuntimeAdapter:
             sandbox=capability_context.sandbox,
             browser=capability_context.browser,
             search_engine=capability_context.search_engine,
+            workspace_runtime_service=capability_context.workspace_runtime_service,
             # 优先使用显式参数，其次回退到上下文已有值。
             mcp_tool=mcp_tool if mcp_tool is not None else capability_context.mcp_tool,
             a2a_tool=a2a_tool if a2a_tool is not None else capability_context.a2a_tool,
             mcp_config=mcp_config if mcp_config is not None else capability_context.mcp_config,
             a2a_config=capability_context.a2a_config,
-            session_id=capability_context.session_id,
             user_id=capability_context.user_id,
         )
 
@@ -312,14 +312,19 @@ class ToolRuntimeAdapter:
             return False
 
         if event.tool_name == "shell":
-            session_id = str(event.function_args.get("session_id") or "")
-            if not session_id or hooks.read_shell_output is None:
+            if hooks.get_shell_tool_result is None:
                 event.tool_content = ShellToolContent(console="(No console)")
                 return True
 
-            shell_result = await hooks.read_shell_output(session_id)
+            shell_result = await hooks.get_shell_tool_result()
+            shell_payload = shell_result.data or {}
+            console_content = (
+                shell_payload.get("console_records")
+                or shell_payload.get("output")
+                or "(No console)"
+            )
             event.tool_content = ShellToolContent(
-                console=(shell_result.data or {}).get("console_records", []),
+                console=console_content,
             )
             return True
 

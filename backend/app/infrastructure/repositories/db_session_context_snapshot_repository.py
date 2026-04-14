@@ -28,7 +28,7 @@ class DBSessionContextSnapshotRepository(SessionContextSnapshotRepository):
             "summary_text": snapshot.summary_text,
             "recent_run_briefs": snapshot.model_dump(mode="json", include={"recent_run_briefs"})["recent_run_briefs"],
             "open_questions": list(snapshot.open_questions or []),
-            "artifact_refs": list(snapshot.artifact_refs or []),
+            "artifact_paths": list(snapshot.artifact_paths or []),
             "created_at": snapshot.created_at,
             "updated_at": snapshot.updated_at,
         }

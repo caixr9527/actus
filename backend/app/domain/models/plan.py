@@ -96,6 +96,8 @@ class StepOutcome(BaseModel):
     blockers: List[str] = Field(default_factory=list)
     facts_learned: List[str] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
+    # 结构化附件交付偏好：False 表示本步骤明确禁止最终附件交付；None 表示未显式声明。
+    deliver_result_as_attachment: Optional[bool] = None
     next_hint: Optional[str] = None
     reused_from_run_id: Optional[str] = None
     reused_from_step_id: Optional[str] = None

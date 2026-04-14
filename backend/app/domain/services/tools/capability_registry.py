@@ -11,12 +11,15 @@ from typing import Callable, Dict, Iterable, List, Optional
 from app.domain.models.app_config import A2AConfig, MCPConfig
 from app.domain.external import Browser, Sandbox, SearchEngine
 from app.domain.services.tools.base import BaseTool
-from app.domain.services.tools.browser import BrowserTool
-from app.domain.services.tools.file import FileTool
 from app.domain.services.tools.message import MessageTool
 from app.domain.services.tools.mcp_capability_adapter import MCPCapabilityAdapter
-from app.domain.services.tools.search import SearchTool
-from app.domain.services.tools.shell import ShellTool
+from app.domain.services.workspace_runtime import WorkspaceRuntimeService
+from app.domain.services.workspace_runtime.capabilities import (
+    WorkspaceBrowserCapability,
+    WorkspaceFileCapability,
+    WorkspaceResearchCapability,
+    WorkspaceShellCapability,
+)
 
 
 @dataclass(frozen=True)
@@ -31,11 +34,11 @@ class CapabilityBuildContext:
     sandbox: Sandbox
     browser: Browser
     search_engine: SearchEngine
+    workspace_runtime_service: WorkspaceRuntimeService
     mcp_tool: Optional[BaseTool] = None
     a2a_tool: Optional[BaseTool] = None
     mcp_config: Optional[MCPConfig] = None
     a2a_config: Optional[A2AConfig] = None
-    session_id: Optional[str] = None
     user_id: Optional[str] = None
 
 
@@ -134,25 +137,37 @@ class CapabilityRegistry:
                     capability_id=cls.CAPABILITY_LOCAL_SHELL,
                     description="本地Shell执行能力",
                     tool_family="shell",
-                    factory=lambda context: ShellTool(sandbox=context.sandbox),
+                    factory=lambda context: WorkspaceShellCapability(
+                        sandbox=context.sandbox,
+                        workspace_runtime_service=context.workspace_runtime_service,
+                    ),
                 ),
                 CapabilityDefinition(
                     capability_id=cls.CAPABILITY_SEARCH,
                     description="网络搜索能力",
                     tool_family="search",
-                    factory=lambda context: SearchTool(sandbox=context.sandbox),
+                    factory=lambda context: WorkspaceResearchCapability(
+                        sandbox=context.sandbox,
+                        workspace_runtime_service=context.workspace_runtime_service,
+                    ),
                 ),
                 CapabilityDefinition(
                     capability_id=cls.CAPABILITY_BROWSER,
                     description="浏览器交互能力",
                     tool_family="browser",
-                    factory=lambda context: BrowserTool(browser=context.browser),
+                    factory=lambda context: WorkspaceBrowserCapability(
+                        browser=context.browser,
+                        workspace_runtime_service=context.workspace_runtime_service,
+                    ),
                 ),
                 CapabilityDefinition(
                     capability_id=cls.CAPABILITY_SANDBOX_FILE,
                     description="沙箱文件读写能力",
                     tool_family="file",
-                    factory=lambda context: FileTool(sandbox=context.sandbox),
+                    factory=lambda context: WorkspaceFileCapability(
+                        sandbox=context.sandbox,
+                        workspace_runtime_service=context.workspace_runtime_service,
+                    ),
                 ),
                 CapabilityDefinition(
                     capability_id=cls.CAPABILITY_MESSAGE,
@@ -167,7 +182,7 @@ class CapabilityRegistry:
                     factory=lambda context: MCPCapabilityAdapter(
                         mcp_tool=context.mcp_tool,
                         mcp_config=context.mcp_config,
-                        session_id=context.session_id,
+                        session_id=context.workspace_runtime_service.session_id,
                         user_id=context.user_id,
                     ),
                 ),

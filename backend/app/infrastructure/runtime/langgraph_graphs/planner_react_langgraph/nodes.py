@@ -46,7 +46,7 @@ from app.domain.services.prompts import (
     SYSTEM_PROMPT,
     UPDATE_PLAN_PROMPT,
 )
-from app.domain.services.runtime_context import RuntimeContextService
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import (
@@ -61,6 +61,7 @@ from app.domain.services.runtime.normalizers import (
     build_delivery_text,
     is_attachment_filepath,
     normalize_message_window_entry,
+    normalize_optional_bool,
     normalize_controlled_value,
     normalize_delivery_payload,
     normalize_execution_response,
@@ -85,6 +86,8 @@ from .parsers import (
 )
 from .runtime_logging import describe_llm_runtime, elapsed_ms, log_runtime, now_perf
 from .settings import (
+    ATTACHMENT_DELIVERY_ALLOW_PATTERN,
+    ATTACHMENT_DELIVERY_DENY_PATTERN,
     CONVERSATION_SUMMARY_MAX_PARTS,
     MEMORY_CANDIDATE_MIN_CONFIDENCE,
     MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
@@ -102,7 +105,6 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
-_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
 
 
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -136,6 +138,24 @@ def _clear_plan_only_control_state(control: Dict[str, Any]) -> None:
     control.pop("plan_only", None)
 
 
+def _infer_step_attachment_delivery_preference(
+        *,
+        user_message: str,
+        normalized_execution: Dict[str, Any],
+) -> Optional[bool]:
+    # P3-CASE3 修复：常量在 settings，判定逻辑集中在 nodes。
+    explicit_preference = normalize_optional_bool((normalized_execution or {}).get("deliver_result_as_attachment"))
+    if explicit_preference is not None:
+        return explicit_preference
+    normalized_message = _truncate_text(user_message, max_chars=600).strip().lower()
+    if not normalized_message:
+        return None
+    if ATTACHMENT_DELIVERY_DENY_PATTERN.search(normalized_message):
+        return False
+    if ATTACHMENT_DELIVERY_ALLOW_PATTERN.search(normalized_message):
+        return True
+    return None
+
 # 状态与交付 helper：负责工作记忆默认结构，以及“轻 summary / 重交付正文”分轨。
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     working_memory = dict(state.get("working_memory") or {})
@@ -161,15 +181,16 @@ def _truncate_text(value: Any, *, max_chars: int) -> str:
     return truncate_text(value, max_chars=max_chars)
 
 
-def _build_prompt_context_packet(
+async def _build_prompt_context_packet_async(
         *,
         stage: str,
         state: PlannerReActLangGraphState,
+        runtime_context_service: RuntimeContextService,
         step: Optional[Step] = None,
         task_mode: str = "",
 ) -> Dict[str, Any]:
-    """统一从上下文服务构造 Prompt 数据包。"""
-    return _RUNTIME_CONTEXT_SERVICE.build_packet(
+    """统一从上下文服务异步构造 Prompt 数据包。"""
+    return await runtime_context_service.build_packet_async(
         stage=stage,  # type: ignore[arg-type]
         state=state,
         step=step,
@@ -177,15 +198,31 @@ def _build_prompt_context_packet(
     )
 
 
-def _extract_prompt_context_state_updates(context_packet: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_prompt_context_state_updates(
+        *,
+        runtime_context_service: RuntimeContextService,
+        context_packet: Dict[str, Any],
+) -> Dict[str, Any]:
     """只回写 digest 与 task_mode，避免节点直接操心字段细节。"""
-    return _RUNTIME_CONTEXT_SERVICE.extract_state_updates(context_packet)
+    return runtime_context_service.extract_state_updates(context_packet)
 
 
 def _append_prompt_context_to_prompt(prompt: str, context_packet: Dict[str, Any]) -> str:
     """将结构化 context packet 追加到 Prompt，避免节点手写上下文拼装。"""
     context_json = json.dumps(context_packet, ensure_ascii=False, indent=2)
     return f"{prompt}\n\n已知上下文:\n```json\n{context_json}\n```"
+
+
+def _collect_recent_search_queries_from_tool_events(tool_events: List[ToolEvent]) -> List[str]:
+    queries: List[str] = []
+    for event in tool_events:
+        if str(event.function_name or "").strip().lower() != "search_web":
+            continue
+        query = str((event.function_args or {}).get("query") or (event.function_args or {}).get("q") or "").strip()
+        if not query or query in queries:
+            continue
+        queries.append(query)
+    return queries
 
 
 def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
@@ -286,13 +323,6 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )
     )
-    artifact_groups.append(
-        [
-            str(ref).strip()
-            for ref in list(state.get("artifact_refs") or [])
-            if is_attachment_filepath(ref)
-        ]
-    )
     normalized_groups = [
         normalize_file_path_list(group, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
         for group in artifact_groups
@@ -328,40 +358,73 @@ def _resolve_final_delivery_source_refs(state: PlannerReActLangGraphState) -> Li
     )
 
 
-def _resolve_summary_attachment_refs(
+def _filter_attachment_refs_by_authoritative_paths(
+        refs: List[str],
+        authoritative_paths: List[str],
+) -> List[str]:
+    normalized_refs = normalize_file_path_list(
+        refs,
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
+    if len(authoritative_paths) == 0:
+        return normalized_refs
+    allowed_paths = set(
+        normalize_file_path_list(
+            authoritative_paths,
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        )
+    )
+    return [ref for ref in normalized_refs if ref in allowed_paths]
+
+
+async def _resolve_summary_attachment_refs(
         state: PlannerReActLangGraphState,
         parsed_attachments: Any,
+        runtime_context_service: RuntimeContextService,
 ) -> List[str]:
-    explicit_attachment_refs = normalize_attachments(parsed_attachments)
-    final_delivery_source_refs = _resolve_final_delivery_source_refs(state)
+    workspace_artifact_paths: List[str] = []
+    if runtime_context_service is not None:
+        workspace_artifact_paths = await runtime_context_service.list_workspace_artifact_paths()
+
+    explicit_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
+        normalize_attachments(parsed_attachments),
+        workspace_artifact_paths,
+    )
+    final_delivery_source_refs = _filter_attachment_refs_by_authoritative_paths(
+        _resolve_final_delivery_source_refs(state),
+        workspace_artifact_paths,
+    )
     last_step = state.get("last_executed_step")
-    last_step_attachment_refs = normalize_file_path_list(
-        last_step.outcome.produced_artifacts
-        if last_step is not None and last_step.outcome is not None
-        else [],
-        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    last_step_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
+        normalize_file_path_list(
+            last_step.outcome.produced_artifacts
+            if last_step is not None and last_step.outcome is not None
+            else [],
+            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        ),
+        workspace_artifact_paths,
     )
     known_attachment_refs = normalize_file_path_list(
         merge_attachment_paths(
             final_delivery_source_refs,
             last_step_attachment_refs,
-            [
-                ref
-                for ref in list(state.get("selected_artifacts") or [])
-                if is_attachment_filepath(ref)
-            ],
-            _collect_current_run_artifacts(state),
+            _filter_attachment_refs_by_authoritative_paths(
+                [
+                    ref
+                    for ref in list(state.get("selected_artifacts") or [])
+                    if is_attachment_filepath(ref)
+                ],
+                workspace_artifact_paths,
+            ),
+            _filter_attachment_refs_by_authoritative_paths(
+                _collect_current_run_artifacts(state),
+                workspace_artifact_paths,
+            ),
         ),
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     if len(explicit_attachment_refs) > 0:
-        resolved_explicit_refs = [
-            ref for ref in normalize_file_path_list(
-                explicit_attachment_refs,
-                max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-            )
-            if ref in known_attachment_refs
-        ]
+        resolved_explicit_refs = [ref for ref in explicit_attachment_refs if ref in known_attachment_refs]
         if len(resolved_explicit_refs) > 0:
             return resolved_explicit_refs
 
@@ -371,22 +434,43 @@ def _resolve_summary_attachment_refs(
     if len(last_step_attachment_refs) > 0:
         return last_step_attachment_refs
 
-    selected_attachment_refs = [
-        ref
-        for ref in list(state.get("selected_artifacts") or [])
-        if is_attachment_filepath(ref)
-    ]
+    selected_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
+        [
+            ref
+            for ref in list(state.get("selected_artifacts") or [])
+            if is_attachment_filepath(ref)
+        ],
+        workspace_artifact_paths,
+    )
     if len(selected_attachment_refs) > 0:
-        return normalize_file_path_list(
-            selected_attachment_refs,
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        )
+        return selected_attachment_refs
 
-    current_run_artifacts = _collect_current_run_artifacts(state)
+    current_run_artifacts = _filter_attachment_refs_by_authoritative_paths(
+        _collect_current_run_artifacts(state),
+        workspace_artifact_paths,
+    )
     if len(current_run_artifacts) > 0:
         return current_run_artifacts
 
     return []
+
+
+def _resolve_attachment_delivery_preference_for_summary(
+        *,
+        state: PlannerReActLangGraphState,
+        last_executed_step: Optional[Step],
+) -> Optional[bool]:
+    if last_executed_step is not None and last_executed_step.outcome is not None:
+        step_preference = normalize_optional_bool(last_executed_step.outcome.deliver_result_as_attachment)
+        if step_preference is not None:
+            return step_preference
+
+    working_memory = _ensure_working_memory(state)
+    delivery_controls = dict(working_memory.get("delivery_controls") or {})
+    source_step_id = str(delivery_controls.get("source_step_id") or "").strip()
+    if last_executed_step is not None and source_step_id and source_step_id != str(last_executed_step.id or "").strip():
+        return None
+    return normalize_optional_bool(delivery_controls.get("deliver_result_as_attachment"))
 
 
 def _reduce_state_with_events(
@@ -493,6 +577,12 @@ def _merge_step_outcome_into_working_memory(
             fact,
         )
 
+    # P3-CASE3 修复：把“本步骤是否允许最终附件交付”写入工作记忆，供 summarize 阶段硬门禁使用。
+    updated_working_memory["delivery_controls"] = {
+        "source_step_id": str(step.id or ""),
+        "deliver_result_as_attachment": outcome.deliver_result_as_attachment,
+    }
+
     delivery_payload = _build_step_delivery_payload(step)
     if delivery_payload:
         updated_working_memory["final_delivery_payload"] = delivery_payload
@@ -517,6 +607,7 @@ def _build_reused_step_outcome(
         blockers=normalize_text_list(list(source_outcome.blockers or [])),
         facts_learned=normalize_text_list(list(source_outcome.facts_learned or [])),
         open_questions=normalize_text_list(list(source_outcome.open_questions or [])),
+        deliver_result_as_attachment=source_outcome.deliver_result_as_attachment,
         next_hint=normalize_step_result_text(source_outcome.next_hint),
         reused_from_run_id=reused_from_run_id,
         reused_from_step_id=reused_from_step_id,
@@ -1274,7 +1365,10 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
     }
 
 
-async def direct_answer_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
+async def direct_answer_node(
+        state: PlannerReActLangGraphState,
+        llm: LLM,
+) -> PlannerReActLangGraphState:
     """直接回答类任务跳过 Planner 和工具循环。"""
     started_at = now_perf()
     user_message = str(state.get("user_message") or "").strip()
@@ -1516,7 +1610,11 @@ async def recall_memory_context_node(
     }
 
 
-async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
+async def create_or_reuse_plan_node(
+        state: PlannerReActLangGraphState,
+        llm: LLM,
+        runtime_context_service: RuntimeContextService,
+) -> PlannerReActLangGraphState:
     """创建计划或复用已有计划。"""
     started_at = now_perf()
     control = _get_control_metadata(state)
@@ -1564,11 +1662,15 @@ async def create_or_reuse_plan_node(state: PlannerReActLangGraphState, llm: LLM)
 
     input_parts = list(state.get("input_parts") or [])
     attachments = [part.get("sandbox_filepath") for part in input_parts]
-    planner_context_packet = _build_prompt_context_packet(
+    planner_context_packet = await _build_prompt_context_packet_async(
         stage="planner",
         state=state,
+        runtime_context_service=runtime_context_service,
     )
-    planner_context_updates = _extract_prompt_context_state_updates(planner_context_packet)
+    planner_context_updates = _extract_prompt_context_state_updates(
+        runtime_context_service=runtime_context_service,
+        context_packet=planner_context_packet,
+    )
     user_message_prompt = CREATE_PLAN_PROMPT.format(
         message=user_message,
         attachments=format_attachments_for_prompt(attachments),
@@ -1790,6 +1892,7 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
 async def execute_step_node(
         state: PlannerReActLangGraphState,
         llm: LLM,
+        runtime_context_service: RuntimeContextService,
         skill_runtime: Optional[SkillGraphRuntime] = None,
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
@@ -1847,13 +1950,17 @@ async def execute_step_node(
         delivery_role=str(getattr(step, "delivery_role", "") or "none"),
         delivery_context_state=str(getattr(step, "delivery_context_state", "") or "none"),
     )
-    execute_context_packet = _build_prompt_context_packet(
+    execute_context_packet = await _build_prompt_context_packet_async(
         stage="execute",
         state=state,
+        runtime_context_service=runtime_context_service,
         step=step,
         task_mode=task_mode,
     )
-    execute_context_updates = _extract_prompt_context_state_updates(execute_context_packet)
+    execute_context_updates = _extract_prompt_context_state_updates(
+        runtime_context_service=runtime_context_service,
+        context_packet=execute_context_packet,
+    )
     user_message_prompt = _append_prompt_context_to_prompt(user_message_prompt, execute_context_packet)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
 
@@ -1948,9 +2055,12 @@ async def execute_step_node(
             "attachments": [],
         }
 
-    runtime_recent_action = _RUNTIME_CONTEXT_SERVICE.normalize_runtime_recent_action(
+    runtime_recent_action = runtime_context_service.normalize_runtime_recent_action(
         llm_message.get("runtime_recent_action")
     )
+    recent_search_queries = _collect_recent_search_queries_from_tool_events(tool_events)
+    if recent_search_queries:
+        runtime_recent_action["recent_search_queries"] = recent_search_queries
     interrupt_request = _normalize_interrupt_request(llm_message.get("interrupt_request"))
     if interrupt_request:
         log_runtime(
@@ -1966,11 +2076,11 @@ async def execute_step_node(
         )
         control = _get_control_metadata(state)
         control["step_reuse_hit"] = False
-        interrupt_context_packet = _build_prompt_context_packet(
+        interrupt_context_packet = await _build_prompt_context_packet_async(
             stage="execute",
             state={
                 **state,
-                **_RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
+                **runtime_context_service.merge_runtime_recent_action(
                     state_updates=execute_context_updates,
                     task_mode=task_mode,
                     runtime_recent_action=runtime_recent_action,
@@ -1979,11 +2089,15 @@ async def execute_step_node(
                 "current_step_id": step.id,
                 "pending_interrupt": interrupt_request,
             },
+            runtime_context_service=runtime_context_service,
             step=step,
             task_mode=task_mode,
         )
-        interrupt_context_updates = _RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
-            state_updates=_extract_prompt_context_state_updates(interrupt_context_packet),
+        interrupt_context_updates = runtime_context_service.merge_runtime_recent_action(
+            state_updates=_extract_prompt_context_state_updates(
+                runtime_context_service=runtime_context_service,
+                context_packet=interrupt_context_packet,
+            ),
             task_mode=task_mode,
             runtime_recent_action=runtime_recent_action,
         )
@@ -2017,6 +2131,10 @@ async def execute_step_node(
             else ""
         ),
     )
+    step_deliver_result_as_attachment = _infer_step_attachment_delivery_preference(
+        user_message=user_message,
+        normalized_execution=normalized_execution,
+    )
     model_attachment_paths = normalize_attachments(normalized_execution.get("attachments"))
     tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
     step_attachment_paths = normalize_file_path_list(
@@ -2031,6 +2149,7 @@ async def execute_step_node(
         blockers=normalize_text_list(normalized_execution.get("blockers")),
         facts_learned=normalize_text_list(normalized_execution.get("facts_learned")),
         open_questions=normalize_text_list(normalized_execution.get("open_questions")),
+        deliver_result_as_attachment=step_deliver_result_as_attachment,
         next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),
     )
     step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
@@ -2071,27 +2190,31 @@ async def execute_step_node(
         skill_elapsed_ms=skill_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
     )
-    completed_context_packet = _build_prompt_context_packet(
-            stage="execute",
-            state={
-                **state,
-                **_RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
-                    state_updates=execute_context_updates,
-                    task_mode=task_mode,
-                    runtime_recent_action=runtime_recent_action,
-                ),
-                "plan": plan,
+    completed_context_packet = await _build_prompt_context_packet_async(
+        stage="execute",
+        state={
+            **state,
+            **runtime_context_service.merge_runtime_recent_action(
+                state_updates=execute_context_updates,
+                task_mode=task_mode,
+                runtime_recent_action=runtime_recent_action,
+            ),
+            "plan": plan,
             "last_executed_step": step.model_copy(deep=True),
             "working_memory": working_memory,
             "final_message": step_summary,
             "pending_interrupt": {},
             "emitted_events": append_events(state.get("emitted_events"), *events),
         },
+        runtime_context_service=runtime_context_service,
         step=step,
         task_mode=task_mode,
     )
-    completed_context_updates = _RUNTIME_CONTEXT_SERVICE.merge_runtime_recent_action(
-        state_updates=_extract_prompt_context_state_updates(completed_context_packet),
+    completed_context_updates = runtime_context_service.merge_runtime_recent_action(
+        state_updates=_extract_prompt_context_state_updates(
+            runtime_context_service=runtime_context_service,
+            context_packet=completed_context_packet,
+        ),
         task_mode=task_mode,
         runtime_recent_action=runtime_recent_action,
     )
@@ -2300,7 +2423,11 @@ async def wait_for_human_node(
 
 
 # 重规划节点：当前批次跑完后再决定下一批步骤。
-async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
+async def replan_node(
+        state: PlannerReActLangGraphState,
+        llm: LLM,
+        runtime_context_service: RuntimeContextService,
+) -> PlannerReActLangGraphState:
     """在当前批次执行完成后，基于最新结果生成下一批步骤。"""
     started_at = now_perf()
     plan = state.get("plan")
@@ -2308,16 +2435,20 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
     if plan is None or last_step is None:
         return state
 
-    replan_context_packet = _build_prompt_context_packet(
+    replan_context_packet = await _build_prompt_context_packet_async(
         stage="replan",
         state=state,
+        runtime_context_service=runtime_context_service,
         step=last_step,
         task_mode=state.get("task_mode") or normalize_controlled_value(
             getattr(last_step, "task_mode_hint", None),
             StepTaskModeHint,
         ),
     )
-    replan_context_updates = _extract_prompt_context_state_updates(replan_context_packet)
+    replan_context_updates = _extract_prompt_context_state_updates(
+        runtime_context_service=runtime_context_service,
+        context_packet=replan_context_packet,
+    )
     # replan 仅消费摘要字段，避免把完整步骤和整份计划 JSON 再次塞入 Prompt。
     current_step_snapshot = (
         dict(replan_context_packet.get("current_step") or {})
@@ -2413,7 +2544,11 @@ async def replan_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReA
 
 
 # 总结节点：生成轻 summary，并输出最终重交付正文与附件。
-async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> PlannerReActLangGraphState:
+async def summarize_node(
+        state: PlannerReActLangGraphState,
+        llm: LLM,
+        runtime_context_service: RuntimeContextService,
+) -> PlannerReActLangGraphState:
     """在所有步骤完成后汇总结果。"""
     started_at = now_perf()
     plan = state.get("plan")
@@ -2452,15 +2587,19 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
     final_message = str(state.get("final_message") or "")
     last_executed_step = state.get("last_executed_step")
     summarize_intermediate_round = _is_intermediate_delivery_step(last_executed_step)
-    summary_context_packet = _build_prompt_context_packet(
+    summary_context_packet = await _build_prompt_context_packet_async(
         stage="summary",
         state=state,
+        runtime_context_service=runtime_context_service,
         task_mode=state.get("task_mode") or normalize_controlled_value(
             getattr(last_executed_step, "task_mode_hint", None),
             StepTaskModeHint,
         ),
     )
-    summary_context_updates = _extract_prompt_context_state_updates(summary_context_packet)
+    summary_context_updates = _extract_prompt_context_state_updates(
+        runtime_context_service=runtime_context_service,
+        context_packet=summary_context_packet,
+    )
     llm_runtime = describe_llm_runtime(llm)
     summarize_prompt = (
         _build_intermediate_round_summary_prompt(summary_context_packet)
@@ -2505,11 +2644,27 @@ async def summarize_node(state: PlannerReActLangGraphState, llm: LLM) -> Planner
         state=state,
         raw_candidates=parsed.get("memory_candidates"),
     )
-    # 附件处理
-    summary_attachment_refs = _resolve_summary_attachment_refs(
-        state,
-        parsed.get("attachments"),
+    # P3-CASE3 修复：执行阶段已显式声明“不要作为最终附件”时，summary 禁止任何 fallback 附件回填。
+    attachment_delivery_preference = _resolve_attachment_delivery_preference_for_summary(
+        state=state,
+        last_executed_step=last_executed_step,
     )
+    if attachment_delivery_preference is False:
+        summary_attachment_refs = []
+        log_runtime(
+            logger,
+            logging.INFO,
+            "总结附件已按步骤偏好禁用",
+            state=state,
+            step_id=str(getattr(last_executed_step, "id", "") or ""),
+        )
+    else:
+        # 附件处理
+        summary_attachment_refs = await _resolve_summary_attachment_refs(
+            state,
+            parsed.get("attachments"),
+            runtime_context_service=runtime_context_service,
+        )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
 
     final_events: List[Any] = [

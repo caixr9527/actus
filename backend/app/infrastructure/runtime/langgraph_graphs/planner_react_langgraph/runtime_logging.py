@@ -18,6 +18,11 @@ FIELD_LABELS: dict[str, str] = {
     "trace_id": "追踪ID",
     "session_id": "会话ID",
     "run_id": "运行ID",
+    "workspace_id": "工作区ID",
+    "previous_workspace_id": "历史工作区ID",
+    "fallback_workspace_id": "回退工作区ID",
+    "sandbox_id": "沙箱ID",
+    "task_id": "任务ID",
     "thread_id": "线程ID",
     "current_step_id": "当前步骤ID",
     "execution_count": "执行次数",
@@ -54,6 +59,8 @@ FIELD_LABELS: dict[str, str] = {
     "context_recent_run_count": "近期成功运行数",
     "context_recent_attempt_count": "近期失败运行数",
     "max_tool_iterations": "最大工具轮次",
+    # P3-2A 收敛修复：区分外部请求轮次与 task_mode 生效轮次，便于定位收敛是否生效。
+    "requested_max_tool_iterations": "请求工具轮次",
     "max_execution_steps": "最大执行步数",
     "iteration": "轮次",
     "iteration_count": "轮次数",
@@ -99,6 +106,7 @@ FIELD_LABELS: dict[str, str] = {
     "skill_id": "技能ID",
     "source_run_id": "来源运行ID",
     "source_step_id": "来源步骤ID",
+    "created_new_sandbox": "是否新建沙箱",
 }
 STATE_CONTEXT_KEYS: tuple[str, ...] = (
     "session_id",

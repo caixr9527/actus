@@ -278,25 +278,22 @@ class DBSessionRepository(SessionRepository):
 
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
-
-        # 将文件对象转换为JSON格式的数据
-        file_data = file.model_dump(mode="json")
-
-        # 构建更新语句，将文件添加到会话的files字段中
-        # 使用coalesce函数处理files字段为空的情况，如果为空则视为空列表
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(
-                files=func.coalesce(SessionModel.files, cast([], JSONB)) + cast([file_data], JSONB),
-            )
-        )
-        # 执行更新操作
+        stmt = select(SessionModel).where(SessionModel.id == session_id).with_for_update()
         result = await self.db_session.execute(stmt)
-
-        # 检查是否有行被更新，如果没有则抛出异常
-        if result.rowcount == 0:
+        record = result.scalar_one_or_none()
+        if not record:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+
+        file_data = file.model_dump(mode="json")
+        normalized_filepath = str(file.filepath or "").strip()
+        existing_files = list(record.files or [])
+        deduped_files = [
+            item
+            for item in existing_files
+            if str(item.get("filepath") or "").strip() != normalized_filepath
+        ]
+        deduped_files.append(file_data)
+        record.files = deduped_files
 
     async def add_final_files(self, session_id: str, file: File) -> None:
         # 将文件对象转换为JSON格式的数据
@@ -358,9 +355,9 @@ class DBSessionRepository(SessionRepository):
         if record is None:
             return None
 
-        files = record.files or []
+        files = list(record.files or [])
         # 遍历文件列表，查找匹配指定文件路径的文件
-        for file in files:
+        for file in reversed(files):
             if file.get("filepath", "") == filepath:
                 # 找到匹配的文件，将其转换为File对象并返回
                 return File(**file)

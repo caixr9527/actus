@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 from app.domain.external import LLM
 from app.domain.repositories import LongTermMemoryRepository
 from app.domain.services.runtime import SkillGraphRuntime
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
@@ -48,8 +49,12 @@ def build_planner_react_langgraph_graph(
         max_tool_iterations: int = 5,
         checkpointer: Optional[Any] = None,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
+        *,
+        runtime_context_service: RuntimeContextService,
 ) -> Any:
     """构建 LangGraph Planner-ReAct V1 图。"""
+    if runtime_context_service is None:
+        raise ValueError("runtime_context_service 不能为空")
     stage_llm_map = ensure_required_stage_llms(stage_llms)
 
     skill_runtime: Optional[SkillGraphRuntime] = None
@@ -66,7 +71,11 @@ def build_planner_react_langgraph_graph(
         )
 
     async def _create_plan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await create_or_reuse_plan_node(state, stage_llm_map["planner"])
+        return await create_or_reuse_plan_node(
+            state,
+            stage_llm_map["planner"],
+            runtime_context_service=runtime_context_service,
+        )
 
     async def _entry_router(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await entry_router_node(state)
@@ -92,14 +101,23 @@ def build_planner_react_langgraph_graph(
             stage_llm_map["executor"],
             skill_runtime=skill_runtime,
             runtime_tools=runtime_tools,
+            runtime_context_service=runtime_context_service,
             max_tool_iterations=max_tool_iterations,
         )
 
     async def _replan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await replan_node(state, stage_llm_map["replan"])
+        return await replan_node(
+            state,
+            stage_llm_map["replan"],
+            runtime_context_service=runtime_context_service,
+        )
 
     async def _summarize_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await summarize_node(state, stage_llm_map["summary"])
+        return await summarize_node(
+            state,
+            stage_llm_map["summary"],
+            runtime_context_service=runtime_context_service,
+        )
 
     async def _consolidate_memory(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await consolidate_memory_node(

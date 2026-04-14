@@ -119,6 +119,6 @@ class SessionContextSnapshot(BaseModel):
     summary_text: str = ""
     recent_run_briefs: List[Dict[str, Any]] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
-    artifact_refs: List[str] = Field(default_factory=list)
+    artifact_paths: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)

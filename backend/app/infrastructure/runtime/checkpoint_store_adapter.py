@@ -9,6 +9,7 @@ import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.workspace_runtime import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class CheckpointStoreAdapter:
     ) -> None:
         self._session_id = session_id
         self._uow_factory = uow_factory
+        self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
 
     @staticmethod
     def _normalize_checkpoint_namespace(namespace: Optional[str]) -> str:
@@ -36,16 +38,20 @@ class CheckpointStoreAdapter:
             if session is None:
                 raise ValueError(f"会话[{self._session_id}]不存在，无法构建checkpoint上下文")
 
-            if not session.current_run_id:
+            current_run_id = await self._workspace_manager.resolve_current_run_id(
+                session=session,
+                uow=uow,
+            )
+            if not current_run_id:
                 # 尚未创建 durable run 时，退化为 session 级 thread 运行。
                 return None, session.id, None, None
 
-            run = await uow.workflow_run.get_by_id(session.current_run_id)
+            run = await uow.workflow_run.get_by_id(current_run_id)
             if run is None:
                 logger.warning(
                     "会话[%s]当前运行[%s]不存在，LangGraph 将退化为 session 级 thread 配置",
                     self._session_id,
-                    session.current_run_id,
+                    current_run_id,
                 )
                 return None, session.id, None, None
 

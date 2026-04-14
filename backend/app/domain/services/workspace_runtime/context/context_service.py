@@ -7,17 +7,12 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import (
-    BrowserToolContent,
     ExecutionStatus,
-    FetchPageToolContent,
-    SearchToolContent,
-    ShellToolContent,
     Step,
     StepDeliveryContextState,
     StepDeliveryRole,
     StepOutputMode,
     StepTaskModeHint,
-    ToolEvent,
     normalize_wait_payload,
 )
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
@@ -30,7 +25,7 @@ from app.domain.services.runtime.normalizers import (
     normalize_text_list,
     truncate_text,
 )
-
+from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot, WorkspaceRuntimeService
 from .contracts import PendingConfirmationPacket, PromptContextPacket, PromptStage
 from .policies import ContextPolicy, get_context_policy
 
@@ -53,6 +48,12 @@ _DIGEST_TEXT_MAX_CHARS = 240
 class RuntimeContextService:
     """按 stage + task_mode 构造 PromptContextPacket。"""
 
+    def __init__(
+            self,
+            workspace_runtime_service: Optional[WorkspaceRuntimeService] = None,
+    ) -> None:
+        self._workspace_runtime_service = workspace_runtime_service
+
     def build_packet(
             self,
             *,
@@ -60,6 +61,44 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             step: Optional[Step] = None,
             task_mode: str = "",
+    ) -> PromptContextPacket:
+        """统一生成结构化 Prompt 上下文数据包。"""
+        return self._build_packet(
+            stage=stage,
+            state=state,
+            step=step,
+            task_mode=task_mode,
+            workspace_snapshot=None,
+        )
+
+    async def build_packet_async(
+            self,
+            *,
+            stage: PromptStage,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step] = None,
+            task_mode: str = "",
+    ) -> PromptContextPacket:
+        """基于 workspace 快照构造 Prompt 上下文数据包。"""
+        workspace_snapshot = None
+        if self._workspace_runtime_service is not None:
+            workspace_snapshot = await self._workspace_runtime_service.build_environment_snapshot()
+        return self._build_packet(
+            stage=stage,
+            state=state,
+            step=step,
+            task_mode=task_mode,
+            workspace_snapshot=workspace_snapshot,
+        )
+
+    def _build_packet(
+            self,
+            *,
+            stage: PromptStage,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+            task_mode: str,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
     ) -> PromptContextPacket:
         """统一生成结构化 Prompt 上下文数据包。"""
         resolved_task_mode = self._resolve_task_mode(stage=stage, state=state, step=step, task_mode=task_mode)
@@ -81,6 +120,7 @@ class RuntimeContextService:
                 state=state,
                 stage=stage,
                 task_mode=resolved_task_mode,
+                workspace_snapshot=workspace_snapshot,
             )
         if policy.include_observation_digest:
             packet["observation_digest"] = self._build_observation_digest(
@@ -88,6 +128,7 @@ class RuntimeContextService:
                 stage=stage,
                 task_mode=resolved_task_mode,
                 step=step,
+                workspace_snapshot=workspace_snapshot,
             )
         if policy.include_recent_action_digest:
             packet["recent_action_digest"] = self._build_recent_action_digest(
@@ -125,9 +166,12 @@ class RuntimeContextService:
         task_mode = str(packet.get("task_mode") or "")
         return {
             "task_mode": task_mode,
-            "environment_digest": self._wrap_state_digest(task_mode=task_mode, payload=packet.get("environment_digest")),
-            "observation_digest": self._wrap_state_digest(task_mode=task_mode, payload=packet.get("observation_digest")),
-            "recent_action_digest": self._wrap_state_digest(task_mode=task_mode, payload=packet.get("recent_action_digest")),
+            "environment_digest": self._wrap_state_digest(task_mode=task_mode,
+                                                          payload=packet.get("environment_digest")),
+            "observation_digest": self._wrap_state_digest(task_mode=task_mode,
+                                                          payload=packet.get("observation_digest")),
+            "recent_action_digest": self._wrap_state_digest(task_mode=task_mode,
+                                                            payload=packet.get("recent_action_digest")),
         }
 
     def normalize_runtime_recent_action(self, raw: Any) -> Dict[str, Any]:
@@ -145,6 +189,9 @@ class RuntimeContextService:
         last_no_progress_reason = str(raw.get("last_no_progress_reason") or "").strip()
         if last_no_progress_reason:
             normalized["last_no_progress_reason"] = last_no_progress_reason
+        recent_search_queries = normalize_text_list(raw.get("recent_search_queries"))
+        if recent_search_queries:
+            normalized["recent_search_queries"] = recent_search_queries
         return normalized
 
     def merge_runtime_recent_action(
@@ -161,7 +208,8 @@ class RuntimeContextService:
 
         wrapped_digest = state_updates.get("recent_action_digest")
         existing_payload: Dict[str, Any] = {}
-        if isinstance(wrapped_digest, dict) and str(wrapped_digest.get("task_mode") or "").strip() == str(task_mode or "").strip():
+        if isinstance(wrapped_digest, dict) and str(wrapped_digest.get("task_mode") or "").strip() == str(
+                task_mode or "").strip():
             payload = wrapped_digest.get("payload")
             if isinstance(payload, dict):
                 existing_payload = dict(payload)
@@ -288,6 +336,7 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             stage: PromptStage,
             task_mode: str,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
     ) -> Dict[str, Any]:
         # environment 只保留“当前模式还能依赖什么”，不负责回放完整轨迹。
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
@@ -296,13 +345,21 @@ class RuntimeContextService:
                     state=state,
                     task_mode=task_mode,
                 ),
-                "candidate_links": self._collect_candidate_links(state=state),
-                "read_page_summaries": self._collect_fetch_page_summaries(state=state),
-                "current_page": self._collect_browser_page_summary(state=state),
+                "candidate_links": self._collect_candidate_links(
+                    workspace_snapshot=workspace_snapshot,
+                ),
+                "read_page_summaries": self._collect_fetch_page_summaries(
+                    workspace_snapshot=workspace_snapshot,
+                ),
+                "current_page": self._collect_browser_page_summary(
+                    workspace_snapshot=workspace_snapshot,
+                ),
             }
             return self._clean_dict(digest)
         if task_mode == StepTaskModeHint.BROWSER_INTERACTION.value:
-            current_page = self._collect_browser_page_summary(state=state)
+            current_page = self._collect_browser_page_summary(
+                workspace_snapshot=workspace_snapshot,
+            )
             digest = {
                 "current_page": current_page,
                 "actionable_elements": list(current_page.get("actionable_elements") or [])[:_OPEN_QUESTION_LIMIT],
@@ -310,11 +367,21 @@ class RuntimeContextService:
             return self._clean_dict(digest)
         if task_mode in {StepTaskModeHint.CODING.value, StepTaskModeHint.FILE_PROCESSING.value}:
             digest = {
-                "cwd": self._extract_latest_shell_cwd(state=state),
-                "recent_changed_files": self._collect_recent_changed_files(state=state),
-                "file_tree_summary": self._collect_file_tree_summary(state=state),
-                "available_artifacts": self._collect_available_artifacts(state=state),
-                "shell_session_status": self._extract_shell_session_status(state=state),
+                "cwd": self._extract_latest_shell_cwd(
+                    workspace_snapshot=workspace_snapshot,
+                ),
+                "recent_changed_files": self._collect_recent_changed_files(
+                    workspace_snapshot=workspace_snapshot,
+                ),
+                "file_tree_summary": self._collect_file_tree_summary(
+                    workspace_snapshot=workspace_snapshot,
+                ),
+                "available_artifacts": self._collect_available_artifacts(
+                    workspace_snapshot=workspace_snapshot,
+                ),
+                "shell_session_status": self._extract_shell_session_status(
+                    workspace_snapshot=workspace_snapshot,
+                ),
             }
             return self._clean_dict(digest)
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
@@ -327,7 +394,9 @@ class RuntimeContextService:
             return self._clean_dict(digest)
 
         digest = {
-            "available_artifacts": self._collect_available_artifacts(state=state),
+            "available_artifacts": self._collect_available_artifacts(
+                workspace_snapshot=workspace_snapshot,
+            ),
             "stage": stage,
         }
         return self._clean_dict(digest)
@@ -339,6 +408,7 @@ class RuntimeContextService:
             stage: PromptStage,
             task_mode: str,
             step: Optional[Step],
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
     ) -> Dict[str, Any]:
         # observation 先收敛最近步骤结果，再补当前模式最关键的现场观察。
         last_step = step or state.get("last_executed_step")
@@ -357,18 +427,26 @@ class RuntimeContextService:
                     for item in normalize_text_list(last_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
                 ]
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
-            latest_fetch_summary = self._collect_fetch_page_summaries(state=state)
+            latest_fetch_summary = self._collect_fetch_page_summaries(
+                workspace_snapshot=workspace_snapshot,
+            )
             if latest_fetch_summary:
                 digest["latest_fetch_page"] = latest_fetch_summary[-1]
-            current_page = self._collect_browser_page_summary(state=state)
+            current_page = self._collect_browser_page_summary(
+                workspace_snapshot=workspace_snapshot,
+            )
             if current_page:
                 digest["latest_browser_observation"] = current_page
         elif task_mode == StepTaskModeHint.BROWSER_INTERACTION.value:
-            current_page = self._collect_browser_page_summary(state=state)
+            current_page = self._collect_browser_page_summary(
+                workspace_snapshot=workspace_snapshot,
+            )
             if current_page:
                 digest["latest_browser_observation"] = current_page
         elif task_mode in {StepTaskModeHint.CODING.value, StepTaskModeHint.FILE_PROCESSING.value}:
-            latest_shell_output = self._extract_latest_shell_result(state=state)
+            latest_shell_output = self._extract_latest_shell_result(
+                workspace_snapshot=workspace_snapshot,
+            )
             if latest_shell_output:
                 digest["latest_shell_result"] = latest_shell_output
         digest["stage"] = stage
@@ -393,12 +471,10 @@ class RuntimeContextService:
         if isinstance(same_mode_digest.get("last_blocked_tool_call"), dict):
             digest["last_blocked_tool_call"] = dict(same_mode_digest.get("last_blocked_tool_call") or {})
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
-            digest["recent_search_queries"] = self._collect_recent_search_queries(
-                state=state,
-                task_mode=task_mode,
-            )
+            digest["recent_search_queries"] = normalize_text_list(same_mode_digest.get("recent_search_queries"))
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
-            digest["last_user_wait_reason"] = str(self._build_pending_confirmation(state=state).get("prompt") or "").strip()
+            digest["last_user_wait_reason"] = str(
+                self._build_pending_confirmation(state=state).get("prompt") or "").strip()
         if same_mode_digest.get("last_no_progress_reason"):
             digest["last_no_progress_reason"] = str(same_mode_digest.get("last_no_progress_reason") or "").strip()
         return self._clean_dict(digest)
@@ -599,6 +675,49 @@ class RuntimeContextService:
             if self._has_visible_value(item)
         }
 
+    @staticmethod
+    def _get_workspace_environment_summary(
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+    ) -> Dict[str, Any]:
+        if workspace_snapshot is None:
+            return {}
+        return dict(workspace_snapshot.workspace.environment_summary or {})
+
+    def _get_workspace_artifact_paths(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+    ) -> List[str]:
+        if workspace_snapshot is None:
+            return []
+        paths: List[str] = []
+        for artifact in workspace_snapshot.artifacts:
+            path = str(artifact.path or "").strip()
+            if not path or path in paths:
+                continue
+            paths.append(path)
+        return paths[:_ARTIFACT_LIMIT]
+
+    async def list_workspace_artifact_paths(self) -> List[str]:
+        """返回当前 workspace 已索引的产物路径。"""
+        if self._workspace_runtime_service is None:
+            return []
+        workspace_snapshot = await self._workspace_runtime_service.build_environment_snapshot()
+        return self._get_workspace_artifact_paths(workspace_snapshot=workspace_snapshot)
+
+    def _collect_recent_search_queries(
+            self,
+            *,
+            state: PlannerReActLangGraphState,
+            task_mode: str,
+    ) -> List[str]:
+        stored_digest = self._read_state_digest(
+            state=state,
+            field_name="recent_action_digest",
+            expected_task_mode=task_mode,
+        )
+        return normalize_text_list(stored_digest.get("recent_search_queries"))[:_OPEN_QUESTION_LIMIT]
+
     def _build_current_step(
             self,
             *,
@@ -617,7 +736,8 @@ class RuntimeContextService:
             "step_id": str(target_step.id or "").strip(),
             "title": self._truncate_text(target_step.title, max_chars=80),
             "description": self._truncate_text(target_step.description, max_chars=160),
-            "task_mode_hint": normalize_controlled_value(getattr(target_step, "task_mode_hint", None), StepTaskModeHint),
+            "task_mode_hint": normalize_controlled_value(getattr(target_step, "task_mode_hint", None),
+                                                         StepTaskModeHint),
             "output_mode": normalize_controlled_value(getattr(target_step, "output_mode", None), StepOutputMode),
             "delivery_role": normalize_controlled_value(
                 getattr(target_step, "delivery_role", None),
@@ -681,9 +801,9 @@ class RuntimeContextService:
     def _build_completed_steps(self, *, state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
         step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
         completed_steps = [
-            item for item in step_states
-            if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
-        ][-_COMPLETED_STEP_LIMIT:]
+                              item for item in step_states
+                              if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
+                          ][-_COMPLETED_STEP_LIMIT:]
         sanitized_completed_steps: List[Dict[str, Any]] = []
         for item in completed_steps:
             outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
@@ -776,195 +896,87 @@ class RuntimeContextService:
             "source_refs": normalize_file_path_list(delivery_payload.get("source_refs"))[:_ARTIFACT_LIMIT],
         }
 
-    def _collect_recent_search_queries(
+    def _collect_candidate_links(
             self,
             *,
-            state: PlannerReActLangGraphState,
-            task_mode: str,
-    ) -> List[str]:
-        # 查询历史优先读同模式 digest，再把本轮新增的 search_web 调用补进来。
-        stored_digest = self._read_state_digest(
-            state=state,
-            field_name="recent_action_digest",
-            expected_task_mode=task_mode,
-        )
-        queries = normalize_text_list(stored_digest.get("recent_search_queries"))
-        for event in list(state.get("emitted_events") or []):
-            if not isinstance(event, ToolEvent):
-                continue
-            if str(event.function_name or "").strip().lower() != "search_web":
-                continue
-            query = str((event.function_args or {}).get("query") or (event.function_args or {}).get("q") or "").strip()
-            if query:
-                queries.append(query)
-        deduped_queries: List[str] = []
-        for item in queries:
-            if item in deduped_queries:
-                continue
-            deduped_queries.append(item)
-        return [self._truncate_text(item, max_chars=120) for item in deduped_queries[-_OPEN_QUESTION_LIMIT:]]
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> List[Dict[str, str]]:
+        workspace_links = list(self._get_workspace_environment_summary(workspace_snapshot).get("candidate_links") or [])
+        return [item for item in workspace_links if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
 
-    def _collect_candidate_links(self, *, state: PlannerReActLangGraphState) -> List[Dict[str, str]]:
-        candidate_links: List[Dict[str, str]] = []
-        for event in list(state.get("emitted_events") or []):
-            if not isinstance(event, ToolEvent) or not isinstance(event.tool_content, SearchToolContent):
-                continue
-            for item in list(event.tool_content.results or [])[:_OPEN_QUESTION_LIMIT]:
-                candidate_links.append(
-                    {
-                        "title": self._truncate_text(getattr(item, "title", ""), max_chars=80),
-                        "url": self._truncate_text(getattr(item, "url", ""), max_chars=200),
-                        "snippet": self._truncate_text(getattr(item, "description", ""), max_chars=120),
-                    }
-                )
-            if candidate_links:
-                break
-        # 当前轮没有新的搜索结果时，才回退到已持久化摘要。
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        stored_links = list(stored_digest.get("candidate_links") or [])
-        if candidate_links:
-            return candidate_links[:_OPEN_QUESTION_LIMIT]
-        return [item for item in stored_links if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
+    def _collect_fetch_page_summaries(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> List[Dict[str, Any]]:
+        workspace_pages = list(
+            self._get_workspace_environment_summary(workspace_snapshot).get("read_page_summaries") or [])
+        return [item for item in workspace_pages if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
 
-    def _collect_fetch_page_summaries(self, *, state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
-        page_summaries: List[Dict[str, Any]] = []
-        for event in list(state.get("emitted_events") or []):
-            if not isinstance(event, ToolEvent) or not isinstance(event.tool_content, FetchPageToolContent):
-                continue
-            page_summaries.append(
-                {
-                    "title": self._truncate_text(event.tool_content.title, max_chars=80),
-                    "url": self._truncate_text(event.tool_content.url, max_chars=200),
-                    "excerpt": self._truncate_text(
-                        event.tool_content.excerpt or event.tool_content.content,
-                        max_chars=160,
-                    ),
-                }
-            )
-        if page_summaries:
-            return page_summaries[-_OPEN_QUESTION_LIMIT:]
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        stored_pages = list(stored_digest.get("read_page_summaries") or [])
-        return [item for item in stored_pages if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
-
-    def _collect_browser_page_summary(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:
-        browser_events = [
-            event
-            for event in list(state.get("emitted_events") or [])
-            if isinstance(event, ToolEvent) and isinstance(event.tool_content, BrowserToolContent)
-        ]
-        if browser_events:
-            latest = browser_events[-1].tool_content
-            actionable_elements = [
-                {
-                    "text": self._truncate_text(getattr(item, "text", ""), max_chars=60),
-                    "selector": self._truncate_text(getattr(item, "selector", ""), max_chars=120),
-                    "type": self._truncate_text(getattr(item, "type", ""), max_chars=40),
-                }
-                for item in list(latest.actionable_elements or [])[:_OPEN_QUESTION_LIMIT]
-            ]
-            return {
-                "url": self._truncate_text(latest.url, max_chars=200),
-                "title": self._truncate_text(latest.title, max_chars=80),
-                "page_type": self._truncate_text(latest.page_type, max_chars=40),
-                "main_content_summary": self._truncate_text(
-                    getattr(latest.main_content, "summary", "") or getattr(latest.main_content, "content", ""),
-                    max_chars=200,
-                ),
-                "actionable_elements": actionable_elements,
-                "degrade_reason": self._truncate_text(latest.degrade_reason, max_chars=120),
-            }
-        # 没有新的浏览器观察时，再回退到 environment_digest 的页面摘要。
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        stored_page = dict(stored_digest.get("current_page") or {})
+    def _collect_browser_page_summary(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> Dict[str, Any]:
+        stored_page = dict(
+            workspace_snapshot.workspace.browser_snapshot or {}) if workspace_snapshot is not None else {}
         return {
             key: value
             for key, value in stored_page.items()
             if key in {"url", "title", "page_type", "main_content_summary", "actionable_elements", "degrade_reason"}
         }
 
-    def _extract_latest_shell_cwd(self, *, state: PlannerReActLangGraphState) -> str:
-        for event in reversed(list(state.get("emitted_events") or [])):
-            if not isinstance(event, ToolEvent):
-                continue
-            if not str(event.function_name or "").strip().lower().startswith("shell_"):
-                continue
-            cwd = str((event.function_args or {}).get("cwd") or (event.function_args or {}).get("workdir") or "").strip()
-            if cwd:
-                return cwd
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        return str(stored_digest.get("cwd") or "").strip()
+    def _extract_latest_shell_cwd(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> str:
+        if workspace_snapshot is not None:
+            return str(workspace_snapshot.workspace.cwd or "").strip()
+        return ""
 
-    def _collect_recent_changed_files(self, *, state: PlannerReActLangGraphState) -> List[str]:
-        last_step = state.get("last_executed_step")
-        recent_changed_files = normalize_file_path_list(
-            last_step.outcome.produced_artifacts if last_step is not None and last_step.outcome is not None else []
+    def _collect_recent_changed_files(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> List[str]:
+        workspace_files = normalize_file_path_list(
+            self._get_workspace_environment_summary(workspace_snapshot).get("recent_changed_files")
         )
-        if recent_changed_files:
-            return recent_changed_files[:_ARTIFACT_LIMIT]
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        stored_files = normalize_file_path_list(stored_digest.get("recent_changed_files"))
-        return stored_files[:_ARTIFACT_LIMIT]
+        return workspace_files[:_ARTIFACT_LIMIT]
 
-    def _collect_file_tree_summary(self, *, state: PlannerReActLangGraphState) -> List[str]:
-        file_summaries: List[str] = []
-        for event in list(state.get("emitted_events") or []):
-            if not isinstance(event, ToolEvent):
-                continue
-            function_name = str(event.function_name or "").strip().lower()
-            if function_name not in {"list_files", "find_files"}:
-                continue
-            result_message = ""
-            if event.function_result is not None:
-                result_message = self._truncate_text(event.function_result.message, max_chars=_DIGEST_TEXT_MAX_CHARS)
-            if result_message:
-                file_summaries.append(result_message)
-        if file_summaries:
-            return file_summaries[-_OPEN_QUESTION_LIMIT:]
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        stored_summaries = normalize_text_list(stored_digest.get("file_tree_summary"))
-        return stored_summaries[:_OPEN_QUESTION_LIMIT]
+    def _collect_file_tree_summary(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> List[str]:
+        workspace_summaries = normalize_text_list(
+            self._get_workspace_environment_summary(workspace_snapshot).get("file_tree_summary")
+        )
+        return workspace_summaries[:_OPEN_QUESTION_LIMIT]
 
-    def _collect_available_artifacts(self, *, state: PlannerReActLangGraphState) -> List[str]:
-        artifact_groups = [
-            normalize_file_path_list(state.get("selected_artifacts")),
-            normalize_file_path_list(
-                self._read_state_digest_payload(state=state, field_name="environment_digest").get("available_artifacts")
-            ),
-        ]
-        last_step = state.get("last_executed_step")
-        if last_step is not None and last_step.outcome is not None:
-            artifact_groups.append(normalize_file_path_list(last_step.outcome.produced_artifacts))
-        merged: List[str] = []
-        for group in artifact_groups:
-            for item in group:
-                if item in merged:
-                    continue
-                merged.append(item)
-        return merged[:_ARTIFACT_LIMIT]
+    def _collect_available_artifacts(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> List[str]:
+        return self._get_workspace_artifact_paths(workspace_snapshot=workspace_snapshot)
 
-    def _extract_shell_session_status(self, *, state: PlannerReActLangGraphState) -> str:
-        stored_digest = self._read_state_digest_payload(state=state, field_name="environment_digest")
-        stored_status = str(stored_digest.get("shell_session_status") or "").strip()
-        latest_shell_result = self._extract_latest_shell_result(state=state)
-        if latest_shell_result:
-            return "active"
-        return stored_status
+    def _extract_shell_session_status(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> str:
+        return str(
+            self._get_workspace_environment_summary(workspace_snapshot).get("shell_session_status") or ""
+        ).strip()
 
-    def _extract_latest_shell_result(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:
-        for event in reversed(list(state.get("emitted_events") or [])):
-            if not isinstance(event, ToolEvent) or not isinstance(event.tool_content, ShellToolContent):
-                continue
-            console = event.tool_content.console
-            console_text = self._truncate_text(console, max_chars=_DIGEST_TEXT_MAX_CHARS)
-            return {
-                "function_name": str(event.function_name or "").strip(),
-                "message": self._truncate_text(
-                    event.function_result.message if event.function_result is not None else "",
-                    max_chars=120,
-                ),
-                "console": console_text,
-            }
-        stored_digest = self._read_state_digest_payload(state=state, field_name="observation_digest")
-        stored_result = dict(stored_digest.get("latest_shell_result") or {})
-        return stored_result
+    def _extract_latest_shell_result(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> Dict[str, Any]:
+        workspace_result = self._get_workspace_environment_summary(workspace_snapshot).get("latest_shell_result")
+        if isinstance(workspace_result, dict) and workspace_result:
+            return dict(workspace_result)
+        return {}

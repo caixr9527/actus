@@ -59,7 +59,6 @@ from .session import (
     GetSessionFilesResponse,
     FileReadRequest,
     FileReadResponse,
-    ShellReadRequest,
     ConsoleRecord,
     ShellReadResponse
 )
@@ -111,7 +110,6 @@ __all__ = [
     "GetSessionFilesResponse",
     "FileReadRequest",
     "FileReadResponse",
-    "ShellReadRequest",
     "ConsoleRecord",
     "ShellReadResponse"
 ]
