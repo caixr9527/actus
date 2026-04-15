@@ -172,6 +172,33 @@ class _WriteFileAttemptLLM:
         }
 
 
+class _ReadOnlyWriteAttemptLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-write-file-read-only",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": '{"filepath":"/tmp/course.txt","content":"课程列表"}',
+                        },
+                    }
+                ],
+            }
+        return {
+            "role": "assistant",
+            "content": '{"success": true, "result": "已改为直接读取并输出结果", "attachments": []}',
+        }
+
+
 class _HumanWaitSearchDriftLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -378,6 +405,103 @@ def test_execute_step_with_prompt_should_block_write_file_when_artifact_policy_f
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
     assert "结构化产物策略禁止文件产出" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_block_write_file_for_final_inline_delivery_by_default() -> None:
+    llm = _WriteFileAttemptLLM()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="直接输出最终答复",
+                task_mode_hint="general",
+                output_mode="inline",
+                delivery_role="final",
+                delivery_context_state="ready",
+                artifact_policy="default",
+            ),
+            runtime_tools=[_WriteFileTool()],
+            max_tool_iterations=5,
+            task_mode="general",
+            on_tool_event=None,
+            user_content=[{"type": "text", "text": "请直接给我最终答案"}],
+            user_message="请直接给我最终答案，不要写文件",
+            has_available_file_context=True,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["result"] == "当前步骤已改为直接返回文本结果"
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "write_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "最终内联交付" in str(called_events[0].function_result.message or "")
+
+
+def test_execute_step_with_prompt_should_allow_write_file_when_user_explicitly_requests_file_delivery() -> None:
+    llm = _WriteFileAttemptLLM()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="整理最终结果并交付",
+                task_mode_hint="general",
+                output_mode="inline",
+                delivery_role="final",
+                delivery_context_state="ready",
+                artifact_policy="default",
+            ),
+            runtime_tools=[_WriteFileTool()],
+            max_tool_iterations=5,
+            task_mode="general",
+            on_tool_event=None,
+            user_content=[{"type": "text", "text": "把最终内容保存到文件"}],
+            user_message="请把最终结果保存到 result.md 文件并返回",
+            has_available_file_context=True,
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["result"] == "当前步骤已改为直接返回文本结果"
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "write_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is True
+
+
+def test_execute_step_with_prompt_should_block_write_file_for_read_only_file_request() -> None:
+    llm = _ReadOnlyWriteAttemptLLM()
+
+    async def _run():
+        return await execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                description="读取 /tmp/course.txt 内容并返回结果，不要改文件。",
+                task_mode_hint="file_processing",
+                output_mode="inline",
+            ),
+            runtime_tools=[_WriteFileTool()],
+            max_tool_iterations=5,
+            task_mode="file_processing",
+            on_tool_event=None,
+            user_content=[{"type": "text", "text": "只读取文件内容，不要写入或修改"}],
+        )
+
+    payload, events = asyncio.run(_run())
+
+    assert payload["result"] == "已改为直接读取并输出结果"
+    assert llm.calls == 2
+    called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
+    assert len(called_events) == 1
+    assert called_events[0].function_name == "write_file"
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is False
+    assert "只读文件请求" in str(called_events[0].function_result.message or "")
 
 
 def test_execute_step_with_prompt_should_block_non_interrupt_tool_for_human_wait_step() -> None:
@@ -642,6 +766,64 @@ def test_direct_wait_cancel_replan_execute_should_route_to_replan_instead_of_sum
         "final_message": "新的计划批次已完成",
     }
 
+    assert route_after_execute(next_state) == "replan"
+
+
+def test_route_after_execute_should_fail_fast_to_summarize_on_direct_execute_failed() -> None:
+    failed_plan = Plan(
+        title="直接执行",
+        goal="读取文件",
+        language="zh",
+        steps=[
+            Step(
+                id="direct-execute-step",
+                title="直接执行用户请求",
+                description="读取文件",
+                status=ExecutionStatus.FAILED,
+            )
+        ],
+        status=ExecutionStatus.PENDING,
+    )
+    next_state = {
+        "plan": failed_plan,
+        "last_executed_step": failed_plan.steps[0],
+        "pending_interrupt": {},
+        "execution_count": 1,
+        "max_execution_steps": 20,
+        "graph_metadata": {"control": {"entry_strategy": "direct_execute", "skip_replan_when_plan_finished": True}},
+    }
+    assert route_after_execute(next_state) == "summarize"
+
+
+def test_route_after_execute_should_fail_fast_to_replan_when_failed_step_has_pending_followup() -> None:
+    failed_plan = Plan(
+        title="批次执行",
+        goal="先失败再重规划",
+        language="zh",
+        steps=[
+            Step(
+                id="step-failed",
+                title="失败步骤",
+                description="失败步骤",
+                status=ExecutionStatus.FAILED,
+            ),
+            Step(
+                id="step-pending",
+                title="后续步骤",
+                description="后续步骤",
+                status=ExecutionStatus.PENDING,
+            ),
+        ],
+        status=ExecutionStatus.PENDING,
+    )
+    next_state = {
+        "plan": failed_plan,
+        "last_executed_step": failed_plan.steps[0],
+        "pending_interrupt": {},
+        "execution_count": 1,
+        "max_execution_steps": 20,
+        "graph_metadata": {"control": {}},
+    }
     assert route_after_execute(next_state) == "replan"
 
 

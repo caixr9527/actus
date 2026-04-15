@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 from app.infrastructure.logging import setup_logging
-from app.infrastructure.runtime import get_langgraph_checkpointer
+from app.infrastructure.runtime.langgraph import get_langgraph_checkpointer
 from app.infrastructure.storage import get_redis_client, get_postgres, get_cos
 from app.interfaces.dependencies.auth_guard import validate_api_auth_coverage
 from app.interfaces.dependencies.services import (

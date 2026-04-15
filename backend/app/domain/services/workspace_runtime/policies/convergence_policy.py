@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Set
 
 from app.domain.models import SearchResults, Step, ToolResult
 from app.domain.services.runtime.normalizers import normalize_execution_response
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.settings import (
+from app.domain.services.runtime.contracts.langgraph_settings import (
     ASK_USER_FUNCTION_NAME,
     NOTIFY_USER_FUNCTION_NAME,
     TOOL_RESULT_MAX_LIST_ITEMS,
@@ -18,12 +18,15 @@ from .common import compact_tool_value, hash_payload, truncate_tool_text
 
 BLOCKED_TOOL_LOOP_BREAK_REASONS: Set[str] = {
     "human_wait_non_interrupt_tool_blocked",
+    "read_only_file_intent_write_blocked",
     "research_file_context_required",
     "web_reading_file_tool_blocked",
     "general_inline_file_context_required",
     # P3-CASE3 修复：file_processing 在无显式命令意图时拦截 shell_execute。
     "file_processing_shell_explicit_required",
     "artifact_policy_file_output_blocked",
+    # P3-一次性收口：最终 inline 交付默认禁写文件。
+    "final_inline_file_output_blocked",
     "final_delivery_search_drift_blocked",
     # P3-1A 收敛修复：最终交付阶段拦截 shell 漂移也记为 blocked tool call。
     "final_delivery_shell_drift_blocked",

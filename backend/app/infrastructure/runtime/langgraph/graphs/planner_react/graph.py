@@ -14,8 +14,8 @@ from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
-from app.infrastructure.runtime.langgraph_graphs.skill_subgraphs import build_default_skill_graph_registry
-from .runtime_logging import log_runtime
+from app.infrastructure.runtime.langgraph.graphs.skills.registry import build_default_skill_graph_registry
+from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from .nodes import (
     consolidate_memory_node,
     create_or_reuse_plan_node,

@@ -1,17 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-@Time   : 2026/3/22
-@Author : caixiaorong01@outlook.com
-@File   : skill_subgraphs.py
-"""
+"""LangGraph Skill 子图注册表。"""
 from typing import Any, List, TypedDict
 
 from pydantic import BaseModel, Field
 
 from app.domain.external import LLM
 from app.domain.services.prompts import EXECUTION_PROMPT
-from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
+from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     format_attachments_for_prompt,
     normalize_attachments,
     safe_parse_json,
@@ -62,6 +58,9 @@ class PlannerExecuteStepSkillState(TypedDict, total=False):
     attachments: List[str]
     success: bool
     result: str
+
+
+# 包重构边界说明：此模块承接旧 `skill_subgraphs.py` 职责，统一收口到 `graphs/skills/registry.py`。
 async def _execute_step_skill_node(
         state: PlannerExecuteStepSkillState,
         llm: LLM,

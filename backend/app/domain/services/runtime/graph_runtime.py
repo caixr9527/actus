@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def _log_core(level: int, event: str, **fields: object) -> None:
     """核心链路日志统一走 runtime_logging 格式；导入失败时降级普通日志。"""
     try:
-        from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import log_runtime
+        from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 
         log_runtime(logger, level, event, **fields)
     except Exception:
@@ -87,6 +87,17 @@ class DefaultGraphRuntime(GraphRuntime):
         self._task_runner_factory = task_runner_factory
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
 
+    @staticmethod
+    def _resolve_log_workspace_id(session: Session, workspace: Optional[Workspace]) -> str:
+        """日志统一使用已绑定 workspace_id，避免输出临时对象 id 造成排障混淆。"""
+        session_workspace_id = str(session.workspace_id or "").strip()
+        if session_workspace_id:
+            return session_workspace_id
+        if workspace is None:
+            return ""
+        # 尚未绑定前，workspace 可能是临时对象，不输出该 id 以保证链路口径一致。
+        return ""
+
     async def get_task(self, session: Session) -> Optional[Task]:
         """按会话读取任务实例。"""
         workspace = await self._get_workspace(session=session)
@@ -108,7 +119,7 @@ class DefaultGraphRuntime(GraphRuntime):
             logging.INFO,
             "构建任务实例开始",
             session_id=session.id,
-            workspace_id=workspace.id,
+            workspace_id=self._resolve_log_workspace_id(session, workspace),
             sandbox_id=str(workspace.sandbox_id or "").strip(),
         )
         # 先尝试复用已存在沙箱；不存在时再创建新沙箱，减少外部资源抖动。
@@ -124,7 +135,7 @@ class DefaultGraphRuntime(GraphRuntime):
                 logging.INFO,
                 "创建新沙箱",
                 session_id=session.id,
-                workspace_id=workspace.id,
+                workspace_id=self._resolve_log_workspace_id(session, workspace),
                 sandbox_id=sandbox.id,
             )
         else:
@@ -132,7 +143,7 @@ class DefaultGraphRuntime(GraphRuntime):
                 logging.INFO,
                 "复用已有沙箱",
                 session_id=session.id,
-                workspace_id=workspace.id,
+                workspace_id=self._resolve_log_workspace_id(session, workspace),
                 sandbox_id=sandbox.id,
             )
 
@@ -143,7 +154,7 @@ class DefaultGraphRuntime(GraphRuntime):
                 logging.ERROR,
                 "构建任务实例失败: 沙箱浏览器不可用",
                 session_id=session.id,
-                workspace_id=workspace.id,
+                workspace_id=self._resolve_log_workspace_id(session, workspace),
                 sandbox_id=str(sandbox_id or ""),
             )
             raise RuntimeError(f"会话{session.id}创建任务失败: 沙箱{sandbox_id},创建浏览器失败")
@@ -162,7 +173,7 @@ class DefaultGraphRuntime(GraphRuntime):
                 logging.INFO,
                 "构建任务实例成功",
                 session_id=session.id,
-                workspace_id=workspace.id,
+                workspace_id=self._resolve_log_workspace_id(session, workspace),
                 task_id=task.id,
                 sandbox_id=sandbox.id,
                 created_new_sandbox=created_new_sandbox,
@@ -186,7 +197,7 @@ class DefaultGraphRuntime(GraphRuntime):
             logging.INFO,
             "创建任务开始",
             session_id=session.id,
-            workspace_id=workspace.id,
+            workspace_id=self._resolve_log_workspace_id(session, workspace),
             source_run_id=str(session.current_run_id or "").strip(),
         )
 

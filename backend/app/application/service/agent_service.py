@@ -50,7 +50,7 @@ from app.domain.services.runtime.cancellation import (
 )
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
+from app.infrastructure.runtime.langgraph import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
 

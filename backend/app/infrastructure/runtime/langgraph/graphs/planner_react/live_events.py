@@ -8,7 +8,7 @@ from contextvars import ContextVar, Token
 from typing import Awaitable, Callable, Optional
 
 from app.domain.models import BaseEvent
-from .runtime_logging import log_runtime
+from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 
 logger = logging.getLogger(__name__)
 

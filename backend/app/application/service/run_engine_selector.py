@@ -16,7 +16,7 @@ from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.stage_llm import REQUIRED_STAGE_LLM_NAMES
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, CapabilityBuildContext
 from app.domain.services.workspace_runtime import WorkspaceRuntimeService
-from app.infrastructure.runtime import LangGraphRunEngine, get_langgraph_checkpointer
+from app.infrastructure.runtime.langgraph import LangGraphRunEngine, get_langgraph_checkpointer
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)

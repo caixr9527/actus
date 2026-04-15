@@ -19,11 +19,8 @@ from app.domain.models import (
     build_step_objective_key,
 )
 from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_text_list
-
-_EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN = re.compile(
-    r"((保存|写入|导出|输出|生成|创建|落盘|整理).{0,10}(文件|文档|txt|md|markdown|json|csv))"
-    r"|((文件|文档|txt|md|markdown|json|csv).{0,10}(保存|写入|导出|输出|生成|创建|落盘))",
-    re.IGNORECASE,
+from app.domain.services.runtime.contracts.langgraph_settings import (
+    EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
 )
 _EXPLICIT_INTERMEDIATE_PREVIEW_PATTERN = re.compile(
     r"((草稿|预览|候选|初稿|先看|给我看看|过目).{0,8}(确认|反馈|意见)?)"
@@ -89,7 +86,7 @@ def build_fallback_plan_title(user_message: str) -> str:
 
 def _user_explicitly_requests_file_output(user_message: str) -> bool:
     """仅识别用户自己明确提出的文件产出要求，用于结构化产物策略兜底。"""
-    return bool(_EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(str(user_message or "").strip()))
+    return bool(EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(str(user_message or "").strip()))
 
 
 def _user_explicitly_requests_intermediate_preview(user_message: str) -> bool:

@@ -287,7 +287,10 @@ def test_execute_step_with_prompt_should_block_shell_call_for_research_task_mode
     assert called_events[0].function_name == "shell_execute"
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
-    assert "任务模式 research 不允许调用工具" in str(called_events[0].function_result.message or "")
+    assert (
+        "只读文件请求" in str(called_events[0].function_result.message or "")
+        or "任务模式 research 不允许调用工具" in str(called_events[0].function_result.message or "")
+    )
 
 
 def test_execute_step_with_prompt_should_hide_shell_tool_from_research_schema() -> None:

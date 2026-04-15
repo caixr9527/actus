@@ -231,8 +231,38 @@ ACTION_PATTERN = re.compile(
     r"|(\b(search|read|open|visit|run|execute|write|analyze|inspect|browse|fetch)\b)",
     re.IGNORECASE,
 )
+WRITE_ACTION_PATTERN = re.compile(
+    r"(写入|改写|修改|替换|删除|创建文件|新建文件|覆盖|保存|落盘|执行命令|运行命令|shell_execute|write_file|replace_in_file|shell_)"
+    r"|(\b(write|rewrite|modify|replace|delete|create|save|persist|execute command|run command|shell_execute)\b)",
+    re.IGNORECASE,
+)
+WRITE_ACTION_DENY_PATTERN = re.compile(
+    r"((不要|不需要|无需|别|禁止).{0,8}(写入|改写|修改|替换|删除|创建|执行命令|运行命令|落盘))"
+    r"|(\b(do not|don't|no need to)\s+(write|modify|replace|delete|create|save|execute)\b)",
+    re.IGNORECASE,
+)
 TOOL_REFERENCE_PATTERN = re.compile(
     r"\b(search_web|fetch_page|browser_[a-z_]+|read_file|write_file|list_files|find_files|replace_in_file|search_in_file|shell_[a-z_]+)\b",
+    re.IGNORECASE,
+)
+EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN = re.compile(
+    r"((保存|写入|导出|输出|生成|创建|落盘|整理).{0,10}(文件|文档|txt|md|markdown|json|csv))"
+    r"|((文件|文档|txt|md|markdown|json|csv).{0,10}(保存|写入|导出|输出|生成|创建|落盘))"
+    r"|(\b(save|export|write|generate|create)\b.{0,12}\b(file|document|markdown|json|csv|txt)\b)",
+    re.IGNORECASE,
+)
+# P3-最终收口：replan 禁止生成“工具可用性测试/探活”类漂移步骤，避免偏离用户业务目标。
+REPLAN_META_VALIDATION_STEP_PATTERN = re.compile(
+    r"(工具可用性|工具是否可用|工具探活|测试工具|验证工具|检查工具|tool availability|tool usable|test tools?|validate tools?|smoke test)",
+    re.IGNORECASE,
+)
+REPLAN_META_VALIDATION_ALLOW_PATTERN = re.compile(
+    r"(验证工具|测试工具|检查工具可用性|tool availability|test tools?|validate tools?)",
+    re.IGNORECASE,
+)
+REPLAN_META_VALIDATION_DENY_PATTERN = re.compile(
+    r"((不要|不需要|无需|别|禁止).{0,6}(验证工具|测试工具|检查工具))"
+    r"|(\b(do not|don't|no need to)\s+(test|validate|check)\s+tools?\b)",
     re.IGNORECASE,
 )
 

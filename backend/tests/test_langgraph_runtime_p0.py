@@ -1,7 +1,20 @@
 import asyncio
 import json
 
-from app.domain.models import ExecutionStatus, MessageEvent, Plan, Step, StepOutcome, ToolEventStatus, ToolResult
+from app.domain.models import (
+    ExecutionStatus,
+    MessageEvent,
+    Plan,
+    Step,
+    StepArtifactPolicy,
+    StepDeliveryContextState,
+    StepDeliveryRole,
+    StepOutcome,
+    StepOutputMode,
+    StepTaskModeHint,
+    ToolEventStatus,
+    ToolResult,
+)
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
@@ -1053,6 +1066,141 @@ def test_create_or_reuse_plan_node_should_default_research_step_to_forbid_file_o
     assert "临时文件" in state["plan"].steps[0].description
     assert state["plan"].steps[0].output_mode == "none"
     assert state["plan"].steps[0].artifact_policy == "forbid_file_output"
+
+
+def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_step_contract() -> None:
+    class _PlannerConflictLLM:
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            return {
+                "content": json.dumps(
+                    {
+                        "message": "已生成计划",
+                        "goal": "创建 hello.txt",
+                        "title": "文件创建任务",
+                        "language": "zh",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "description": "在 /tmp 下创建 hello.txt 并写入 HELLO",
+                                "task_mode_hint": "file_processing",
+                                "output_mode": "none",
+                                "artifact_policy": "forbid_file_output",
+                                "delivery_role": "none",
+                                "delivery_context_state": "none",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "在 /tmp 下创建 hello.txt，写入 HELLO",
+                "graph_metadata": {},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_paths": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _PlannerConflictLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert state["plan"].steps[0].artifact_policy == "allow_file_output"
+    assert state["plan"].steps[0].output_mode == "file"
+    # P3-一次性收口：编译后结构化字段必须保持 Enum 类型，禁止字符串回流持久化层。
+    assert isinstance(state["plan"].steps[0].task_mode_hint, StepTaskModeHint)
+    assert isinstance(state["plan"].steps[0].output_mode, StepOutputMode)
+    assert isinstance(state["plan"].steps[0].artifact_policy, StepArtifactPolicy)
+    assert isinstance(state["plan"].steps[0].delivery_role, StepDeliveryRole)
+    assert isinstance(state["plan"].steps[0].delivery_context_state, StepDeliveryContextState)
+
+
+def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enum() -> None:
+    class _PlannerHumanWaitLLM:
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            return {
+                "content": json.dumps(
+                    {
+                        "message": "已生成计划",
+                        "goal": "等待用户确认",
+                        "title": "等待确认任务",
+                        "language": "zh",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "description": "先等待用户确认后再继续",
+                                "task_mode_hint": "human_wait",
+                                "output_mode": "inline",
+                                "artifact_policy": "allow_file_output",
+                                "delivery_role": "final",
+                                "delivery_context_state": "ready",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "先让我确认",
+                "graph_metadata": {},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_paths": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _PlannerHumanWaitLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    step = state["plan"].steps[0]
+    assert isinstance(step.output_mode, StepOutputMode)
+    assert isinstance(step.artifact_policy, StepArtifactPolicy)
+    assert isinstance(step.delivery_role, StepDeliveryRole)
+    assert isinstance(step.delivery_context_state, StepDeliveryContextState)
+    assert step.output_mode == StepOutputMode.NONE
+    assert step.artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+    assert step.delivery_role == StepDeliveryRole.NONE
+    assert step.delivery_context_state == StepDeliveryContextState.NONE
 
 
 def test_direct_execute_node_should_preserve_english_working_language() -> None:

@@ -4,7 +4,7 @@
 
 import asyncio
 
-from app.infrastructure.runtime import get_langgraph_checkpointer
+from app.infrastructure.runtime.langgraph import get_langgraph_checkpointer
 
 
 async def main() -> None:

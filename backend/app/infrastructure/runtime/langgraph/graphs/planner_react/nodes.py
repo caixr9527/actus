@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -48,6 +49,10 @@ from app.domain.services.prompts import (
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime import SkillGraphRuntime
+from app.domain.services.workspace_runtime.policies import (
+    collect_step_contract_hard_issues,
+    compile_step_contracts,
+)
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
@@ -71,7 +76,7 @@ from app.domain.services.runtime.normalizers import (
     truncate_text,
 )
 from app.domain.services.tools import BaseTool
-from app.infrastructure.runtime.langgraph_graphs.graph_parsers import (
+from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     format_attachments_for_prompt,
     normalize_attachments,
     safe_parse_json,
@@ -84,8 +89,8 @@ from .parsers import (
     extract_write_file_paths_from_tool_events,
     merge_attachment_paths,
 )
-from .runtime_logging import describe_llm_runtime, elapsed_ms, log_runtime, now_perf
-from .settings import (
+from app.domain.services.runtime.contracts.runtime_logging import describe_llm_runtime, elapsed_ms, log_runtime, now_perf
+from app.domain.services.runtime.contracts.langgraph_settings import (
     ATTACHMENT_DELIVERY_ALLOW_PATTERN,
     ATTACHMENT_DELIVERY_DENY_PATTERN,
     CONVERSATION_SUMMARY_MAX_PARTS,
@@ -93,6 +98,9 @@ from .settings import (
     MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     MESSAGE_WINDOW_MAX_ITEMS,
     MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+    REPLAN_META_VALIDATION_ALLOW_PATTERN,
+    REPLAN_META_VALIDATION_DENY_PATTERN,
+    REPLAN_META_VALIDATION_STEP_PATTERN,
     STEP_EXECUTION_TIMEOUT_SECONDS,
 )
 from .tools import (
@@ -304,23 +312,65 @@ def _build_intermediate_round_summary_fallback(step: Optional[Step]) -> str:
 
 
 # 附件 helper：只负责当前 run 内附件引用的收集、合并与最终交付选择。
-def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
-    artifact_groups: List[List[str]] = [
-        normalize_file_path_list(
-            ((step_state.get("outcome") or {}).get("produced_artifacts"))
-            if isinstance(step_state, dict) and isinstance(step_state.get("outcome"), dict)
-            else [],
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+def _is_completed_status(value: Any) -> bool:
+    return normalize_controlled_value(value, ExecutionStatus) == ExecutionStatus.COMPLETED.value
+
+
+def _is_successful_step_outcome(status: Any, outcome_raw: Any) -> bool:
+    if not _is_completed_status(status):
+        return False
+    outcome = _hydrate_step_outcome(outcome_raw)
+    return outcome is not None and bool(outcome.done)
+
+
+def _normalize_successful_outcome_artifacts(status: Any, outcome_raw: Any) -> List[str]:
+    if not _is_successful_step_outcome(status, outcome_raw):
+        return []
+    outcome = _hydrate_step_outcome(outcome_raw)
+    if outcome is None:
+        return []
+    return normalize_file_path_list(
+        outcome.produced_artifacts,
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
+
+
+def _collect_last_successful_step_artifacts(state: PlannerReActLangGraphState) -> List[str]:
+    step_states = list(state.get("step_states") or [])
+    for step_state in reversed(step_states):
+        if not isinstance(step_state, dict):
+            continue
+        normalized = _normalize_successful_outcome_artifacts(
+            step_state.get("status"),
+            step_state.get("outcome"),
         )
-        for step_state in list(state.get("step_states") or [])
-    ]
+        if normalized:
+            return normalized
+
+    last_step = state.get("last_executed_step")
+    if isinstance(last_step, Step):
+        normalized = _normalize_successful_outcome_artifacts(last_step.status, last_step.outcome)
+        if normalized:
+            return normalized
+    return []
+
+
+def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
+    artifact_groups: List[List[str]] = []
+    for step_state in list(state.get("step_states") or []):
+        if not isinstance(step_state, dict):
+            continue
+        artifact_groups.append(
+            _normalize_successful_outcome_artifacts(
+                step_state.get("status"),
+                step_state.get("outcome"),
+            )
+        )
     last_step = state.get("last_executed_step")
     artifact_groups.append(
-        normalize_file_path_list(
-            last_step.outcome.produced_artifacts
-            if last_step is not None and last_step.outcome is not None
-            else [],
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        _normalize_successful_outcome_artifacts(
+            getattr(last_step, "status", None),
+            getattr(last_step, "outcome", None),
         )
     )
     normalized_groups = [
@@ -394,33 +444,9 @@ async def _resolve_summary_attachment_refs(
         _resolve_final_delivery_source_refs(state),
         workspace_artifact_paths,
     )
-    last_step = state.get("last_executed_step")
-    last_step_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
-        normalize_file_path_list(
-            last_step.outcome.produced_artifacts
-            if last_step is not None and last_step.outcome is not None
-            else [],
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        ),
-        workspace_artifact_paths,
-    )
+    # P3-一次性收口：summary 附件只允许来自最终交付真相源，不再 fallback 到中间步骤产物。
     known_attachment_refs = normalize_file_path_list(
-        merge_attachment_paths(
-            final_delivery_source_refs,
-            last_step_attachment_refs,
-            _filter_attachment_refs_by_authoritative_paths(
-                [
-                    ref
-                    for ref in list(state.get("selected_artifacts") or [])
-                    if is_attachment_filepath(ref)
-                ],
-                workspace_artifact_paths,
-            ),
-            _filter_attachment_refs_by_authoritative_paths(
-                _collect_current_run_artifacts(state),
-                workspace_artifact_paths,
-            ),
-        ),
+        final_delivery_source_refs,
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     if len(explicit_attachment_refs) > 0:
@@ -430,27 +456,6 @@ async def _resolve_summary_attachment_refs(
 
     if len(final_delivery_source_refs) > 0:
         return final_delivery_source_refs
-
-    if len(last_step_attachment_refs) > 0:
-        return last_step_attachment_refs
-
-    selected_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
-        [
-            ref
-            for ref in list(state.get("selected_artifacts") or [])
-            if is_attachment_filepath(ref)
-        ],
-        workspace_artifact_paths,
-    )
-    if len(selected_attachment_refs) > 0:
-        return selected_attachment_refs
-
-    current_run_artifacts = _filter_attachment_refs_by_authoritative_paths(
-        _collect_current_run_artifacts(state),
-        workspace_artifact_paths,
-    )
-    if len(current_run_artifacts) > 0:
-        return current_run_artifacts
 
     return []
 
@@ -690,6 +695,42 @@ def _merge_replanned_steps_into_plan(plan: Plan, new_steps: List[Step]) -> Tuple
     return merged_steps, "replace_remaining_pending_steps"
 
 
+def _user_explicitly_requests_tool_validation(user_message: str) -> bool:
+    normalized_message = str(user_message or "").strip()
+    if not normalized_message:
+        return False
+    if REPLAN_META_VALIDATION_DENY_PATTERN.search(normalized_message):
+        return False
+    return bool(REPLAN_META_VALIDATION_ALLOW_PATTERN.search(normalized_message))
+
+
+def _is_replan_meta_validation_step(step: Step) -> bool:
+    candidate_text = " ".join(
+        [
+            str(getattr(step, "title", "") or "").strip(),
+            str(getattr(step, "description", "") or "").strip(),
+            " ".join([str(item).strip() for item in list(getattr(step, "success_criteria", []) or []) if str(item).strip()]),
+        ]
+    ).strip()
+    if not candidate_text:
+        return False
+    return bool(REPLAN_META_VALIDATION_STEP_PATTERN.search(candidate_text))
+
+
+def _filter_replan_drift_steps(new_steps: List[Step], *, user_message: str) -> Tuple[List[Step], int]:
+    if _user_explicitly_requests_tool_validation(user_message):
+        return new_steps, 0
+
+    filtered_steps: List[Step] = []
+    dropped_count = 0
+    for step in new_steps:
+        if _is_replan_meta_validation_step(step):
+            dropped_count += 1
+            continue
+        filtered_steps.append(step)
+    return filtered_steps, dropped_count
+
+
 # 记忆 helper：负责总结后的事实/偏好提炼、候选规整与去重治理。
 def _build_memory_query(state: PlannerReActLangGraphState) -> str:
     working_memory = _ensure_working_memory(state)
@@ -789,6 +830,216 @@ def _normalize_memory_preferences(raw: Any) -> Dict[str, Any]:
         if normalized_value:
             normalized_preferences[normalized_key] = normalized_value
     return normalized_preferences
+
+
+def _normalize_summary_evidence_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _extract_summary_evidence_fragments(raw: Any) -> List[str]:
+    fragments: List[str] = []
+    if isinstance(raw, str):
+        normalized = _normalize_summary_evidence_text(raw)
+        if normalized:
+            fragments.append(normalized)
+        return fragments
+    if isinstance(raw, (int, float, bool)):
+        normalized = _normalize_summary_evidence_text(raw)
+        if normalized:
+            fragments.append(normalized)
+        return fragments
+    if isinstance(raw, list):
+        for item in raw:
+            fragments.extend(_extract_summary_evidence_fragments(item))
+        return fragments
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if str(key or "").strip():
+                fragments.extend(_extract_summary_evidence_fragments(key))
+            fragments.extend(_extract_summary_evidence_fragments(value))
+        return fragments
+    return fragments
+
+
+def _collect_successful_tool_event_evidence(state: PlannerReActLangGraphState) -> List[str]:
+    evidence: List[str] = []
+    for event in reversed(list(state.get("emitted_events") or [])):
+        if not isinstance(event, ToolEvent):
+            continue
+        status_value = str(getattr(getattr(event, "status", ""), "value", getattr(event, "status", "")) or "").strip().lower()
+        if status_value != "called":
+            continue
+        function_result = getattr(event, "function_result", None)
+        if function_result is None or not bool(getattr(function_result, "success", False)):
+            continue
+        evidence.extend(
+            _extract_summary_evidence_fragments(
+                {
+                    "function_name": str(getattr(event, "function_name", "") or "").strip(),
+                    "function_args": getattr(event, "function_args", {}) or {},
+                    "message": str(getattr(function_result, "message", "") or "").strip(),
+                    "data": getattr(function_result, "data", {}) or {},
+                }
+            )
+        )
+        if len(evidence) >= 40:
+            break
+    return evidence[:40]
+
+
+def _collect_summary_evidence_texts(
+        *,
+        state: PlannerReActLangGraphState,
+        last_executed_step: Optional[Step],
+) -> List[str]:
+    plan_value = state.get("plan")
+    goal_value = (
+        str(plan_value.get("goal") or "").strip()
+        if isinstance(plan_value, dict)
+        else str(getattr(plan_value, "goal", "") or "").strip()
+    )
+    evidence: List[str] = []
+    evidence.extend(
+        _extract_summary_evidence_fragments(
+            {
+                "user_message": str(state.get("user_message") or "").strip(),
+                "goal": goal_value,
+            }
+        )
+    )
+    if last_executed_step is not None and last_executed_step.outcome is not None:
+        evidence.extend(
+            _extract_summary_evidence_fragments(
+                {
+                    "summary": last_executed_step.outcome.summary,
+                    "delivery_text": last_executed_step.outcome.delivery_text,
+                    "blockers": list(last_executed_step.outcome.blockers or []),
+                    "facts_learned": list(last_executed_step.outcome.facts_learned or []),
+                    "next_hint": last_executed_step.outcome.next_hint,
+                    "produced_artifacts": list(last_executed_step.outcome.produced_artifacts or []),
+                }
+            )
+        )
+    recent_action_digest = state.get("recent_action_digest")
+    if isinstance(recent_action_digest, dict):
+        evidence.extend(_extract_summary_evidence_fragments(recent_action_digest.get("payload")))
+    evidence.extend(_collect_successful_tool_event_evidence(state))
+    deduped: List[str] = []
+    for item in evidence:
+        if not item or item in deduped:
+            continue
+        deduped.append(item)
+    return deduped[:80]
+
+
+def _memory_item_has_execution_evidence(item_text: str, evidence_texts: List[str]) -> bool:
+    normalized_item_text = _normalize_summary_evidence_text(item_text)
+    if not normalized_item_text:
+        return False
+
+    for evidence_text in evidence_texts:
+        if not evidence_text:
+            continue
+        if normalized_item_text in evidence_text:
+            return True
+
+    keyword_tokens = [token for token in re.findall(r"[a-z0-9_./:-]+", normalized_item_text) if len(token) >= 4]
+    for token in keyword_tokens:
+        if any(token in evidence_text for evidence_text in evidence_texts):
+            return True
+
+    zh_tokens = re.findall(r"[\u4e00-\u9fff]{4,}", normalized_item_text)
+    for token in zh_tokens:
+        if any(token in evidence_text for evidence_text in evidence_texts):
+            return True
+    return False
+
+
+def _filter_summary_facts_by_evidence(facts: List[str], evidence_texts: List[str]) -> List[str]:
+    filtered: List[str] = []
+    for fact in facts:
+        if _memory_item_has_execution_evidence(fact, evidence_texts):
+            filtered.append(fact)
+    return filtered
+
+
+def _filter_model_memory_candidates_by_evidence(
+        candidates: List[Dict[str, Any]],
+        evidence_texts: List[str],
+) -> Tuple[List[Dict[str, Any]], int]:
+    filtered: List[Dict[str, Any]] = []
+    dropped_count = 0
+    for item in candidates:
+        if not isinstance(item, dict):
+            dropped_count += 1
+            continue
+        memory_type = str(item.get("memory_type") or "").strip().lower()
+        if memory_type not in {"fact", "instruction", "profile"}:
+            filtered.append(item)
+            continue
+        content = item.get("content") if isinstance(item.get("content"), dict) else {}
+        candidate_fragments = [str(item.get("summary") or "").strip(), str(content.get("text") or "").strip()]
+        if memory_type == "profile":
+            candidate_fragments.extend(
+                [
+                    " ".join([str(key).strip(), str(value).strip()]).strip()
+                    for key, value in content.items()
+                ]
+            )
+        candidate_text = " ".join([fragment for fragment in candidate_fragments if fragment]).strip()
+        if _memory_item_has_execution_evidence(candidate_text, evidence_texts):
+            filtered.append(item)
+            continue
+        dropped_count += 1
+    return filtered, dropped_count
+
+
+def _preference_item_has_execution_evidence(
+        *,
+        key: str,
+        value: Any,
+        evidence_texts: List[str],
+) -> bool:
+    candidate_text = " ".join([str(key or "").strip(), str(value or "").strip()]).strip()
+    if _memory_item_has_execution_evidence(candidate_text, evidence_texts):
+        return True
+    if _memory_item_has_execution_evidence(str(value or "").strip(), evidence_texts):
+        return True
+
+    normalized_key = _normalize_summary_evidence_text(key)
+    normalized_value = _normalize_summary_evidence_text(value)
+    evidence_blob = " ".join(evidence_texts)
+    if normalized_key in {"language", "lang", "语言"}:
+        if normalized_value in {"zh", "zh-cn", "chinese", "中文"} and (
+                "中文" in evidence_blob or "chinese" in evidence_blob
+        ):
+            return True
+        if normalized_value in {"en", "en-us", "english", "英文"} and (
+                "英文" in evidence_blob or "english" in evidence_blob
+        ):
+            return True
+    if normalized_key in {"response_style", "style", "回复风格", "风格"}:
+        if normalized_value in {"concise", "brief", "简洁", "简明"} and (
+                "简洁" in evidence_blob or "简明" in evidence_blob or "concise" in evidence_blob or "brief" in evidence_blob
+        ):
+            return True
+        if normalized_value in {"detailed", "详细"} and ("详细" in evidence_blob or "detailed" in evidence_blob):
+            return True
+    return False
+
+
+def _filter_preferences_by_evidence(
+        preferences: Dict[str, Any],
+        evidence_texts: List[str],
+) -> Tuple[Dict[str, Any], int]:
+    filtered: Dict[str, Any] = {}
+    dropped_count = 0
+    for key, value in dict(preferences or {}).items():
+        if _preference_item_has_execution_evidence(key=str(key or ""), value=value, evidence_texts=evidence_texts):
+            filtered[str(key)] = value
+            continue
+        dropped_count += 1
+    return filtered, dropped_count
 
 
 def _build_outcome_fact_text(
@@ -1234,19 +1485,6 @@ def _build_conversation_summary(
     return " | ".join(parts[-CONVERSATION_SUMMARY_MAX_PARTS:])
 
 
-def _extract_profile_preferences(retrieved_memories: List[Dict[str, Any]]) -> Dict[str, Any]:
-    preferences: Dict[str, Any] = {}
-    for item in retrieved_memories:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("memory_type") or "").strip().lower() != "profile":
-            continue
-        content = item.get("content")
-        if isinstance(content, dict):
-            preferences.update(content)
-    return preferences
-
-
 async def _build_message(llm: LLM, user_message_prompt: str, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if getattr(llm, "multimodal", False) and input_parts is not None and len(input_parts) > 0:
         multiplexed_message = await llm.format_multiplexed_message(input_parts)
@@ -1588,8 +1826,7 @@ async def recall_memory_context_node(
                 recall_elapsed_ms=recall_cost_ms,
                 elapsed_ms=elapsed_ms(started_at),
             )
-    if not dict(working_memory.get("user_preferences") or {}):
-        working_memory["user_preferences"] = _extract_profile_preferences(retrieved_memories)
+    # P3-一次性收口：planner 前禁止把 profile 记忆回写到 working_memory，避免跨任务偏好污染计划。
 
     log_runtime(
         logger,
@@ -1759,6 +1996,30 @@ async def create_or_reuse_plan_node(
             )
             for index, item in enumerate(raw_steps)
         ]
+        # P3-一次性收口：计划步骤入图前统一编译结构化契约，纠偏语义冲突步骤。
+        compiled_steps, contract_issues, corrected_count = compile_step_contracts(
+            steps=steps,
+            user_message=user_message,
+        )
+        contract_issues.extend(collect_step_contract_hard_issues(steps=compiled_steps))
+        if corrected_count > 0:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "计划步骤契约已自动纠偏",
+                state=state,
+                corrected_step_count=corrected_count,
+            )
+        if contract_issues:
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "计划步骤契约校验失败",
+                state=state,
+                issue_count=len(contract_issues),
+                issue_codes=[item.issue_code for item in contract_issues],
+            )
+            compiled_steps = []
         log_runtime(
             logger,
             logging.INFO,
@@ -1766,8 +2027,8 @@ async def create_or_reuse_plan_node(
             state=state,
             plan_title=title,
             language=language,
-            step_count=len(steps),
-            next_step_id=str(steps[0].id or "") if len(steps) > 0 else "",
+            step_count=len(compiled_steps),
+            next_step_id=str(compiled_steps[0].id or "") if len(compiled_steps) > 0 else "",
             llm_elapsed_ms=llm_cost_ms,
             elapsed_ms=elapsed_ms(started_at),
         )
@@ -1776,7 +2037,7 @@ async def create_or_reuse_plan_node(
             goal=goal,
             language=language,
             message=planner_message,
-            steps=steps,
+            steps=compiled_steps,
             status=ExecutionStatus.PENDING,
         )
         next_step = plan.get_next_step()
@@ -1983,6 +2244,9 @@ async def execute_step_node(
                     task_mode=task_mode,
                     on_tool_event=emit_live_events,
                     user_content=user_content,
+                    user_message=user_message,
+                    attachment_paths=attachments,
+                    artifact_paths=available_file_context_refs,
                     has_available_file_context=available_file_context,
                 )
                 tool_cost_ms = elapsed_ms(tool_started_at)
@@ -2013,7 +2277,7 @@ async def execute_step_node(
             #         skill_cost_ms = elapsed_ms(skill_started_at)
             #         llm_message = {
             #             "success": bool(getattr(skill_result, "success", True)),
-            #             "result": str(getattr(skill_result, "result", "") or f"已完成步骤：{step.description}"),
+            #             "result": str(getattr(skill_result, "result", "") or f"步骤执行完成：{step.description}"),
             #             "attachments": normalize_attachments(getattr(skill_result, "attachments", [])),
             #         }
             #     except Exception as e:
@@ -2118,7 +2382,7 @@ async def execute_step_node(
     step_success = bool(normalized_execution.get("success", True))
     step_summary = normalize_step_result_text(
         normalized_execution.get("summary"),
-        fallback=f"已完成步骤：{step.description}" if step_success else f"步骤执行失败：{step.description}",
+        fallback=f"步骤执行完成：{step.description}" if step_success else f"步骤执行失败：{step.description}",
     )
     step_delivery_text = normalize_step_result_text(
         _sanitize_step_delivery_text(step, normalized_execution.get("delivery_text")),
@@ -2480,37 +2744,104 @@ async def replan_node(
         last_step_id=str(last_step.id or ""),
         current_step_count=len(list(plan.steps or [])),
     )
-    llm_started_at = now_perf()
-    llm_message = await llm.invoke(
-        messages=[{"role": "user", "content": prompt}],
-        tools=[],
-        response_format={"type": "json_object"},
-    )
-    llm_cost_ms = elapsed_ms(llm_started_at)
-    parsed = safe_parse_json(llm_message.get("content"))
+    user_message = str(state.get("user_message") or getattr(plan, "goal", "") or "")
+    llm_cost_ms_total = 0
+    new_steps: List[Step] = []
+    replan_prompt = prompt
+    for attempt in range(2):
+        llm_started_at = now_perf()
+        llm_message = await llm.invoke(
+            messages=[{"role": "user", "content": replan_prompt}],
+            tools=[],
+            response_format={"type": "json_object"},
+        )
+        llm_cost_ms = elapsed_ms(llm_started_at)
+        llm_cost_ms_total += llm_cost_ms
+        parsed = safe_parse_json(llm_message.get("content"))
 
-    raw_steps = parsed.get("steps")
-    if not isinstance(raw_steps, list):
+        raw_steps = parsed.get("steps")
+        if not isinstance(raw_steps, list):
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "重规划返回无效结果",
+                state=state,
+                response_keys=sorted(parsed.keys()),
+                llm_elapsed_ms=llm_cost_ms_total,
+                elapsed_ms=elapsed_ms(started_at),
+            )
+            return state
+
+        candidate_steps = [
+            build_step_from_payload(
+                item,
+                index,
+                user_message=user_message,
+            )
+            for index, item in enumerate(raw_steps)
+        ]
+        # P3-一次性收口：重规划步骤同样走统一契约编译，避免新批次继续放大结构化矛盾。
+        candidate_steps, contract_issues, corrected_count = compile_step_contracts(
+            steps=candidate_steps,
+            user_message=user_message,
+        )
+        contract_issues.extend(collect_step_contract_hard_issues(steps=candidate_steps))
+        if corrected_count > 0:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "重规划步骤契约已自动纠偏",
+                state=state,
+                corrected_step_count=corrected_count,
+                attempt=attempt + 1,
+            )
+        if contract_issues:
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "重规划步骤契约校验失败",
+                state=state,
+                issue_count=len(contract_issues),
+                issue_codes=[item.issue_code for item in contract_issues],
+                attempt=attempt + 1,
+            )
+            candidate_steps = []
+        filtered_steps, dropped_drift_steps = _filter_replan_drift_steps(
+            candidate_steps,
+            user_message=user_message,
+        )
+        if dropped_drift_steps > 0:
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "重规划已拦截漂移元步骤",
+                state=state,
+                dropped_step_count=dropped_drift_steps,
+                attempt=attempt + 1,
+            )
+        if filtered_steps:
+            new_steps = filtered_steps
+            break
+        if dropped_drift_steps == 0:
+            break
+        if attempt == 0:
+            replan_prompt = replan_prompt + """
+
+补充限制（必须遵守）：
+- 只生成直接推进用户业务目标的步骤。
+- 禁止生成“测试工具可用性 / 验证工具 / 探活 / smoke test”这类元步骤。
+"""
+            continue
         log_runtime(
             logger,
             logging.WARNING,
-            "重规划返回无效结果",
+            "重规划结果全部被判定为漂移步骤，已保持原计划不变",
             state=state,
-            response_keys=sorted(parsed.keys()),
-            llm_elapsed_ms=llm_cost_ms,
+            llm_elapsed_ms=llm_cost_ms_total,
             elapsed_ms=elapsed_ms(started_at),
         )
         return state
 
-    user_message = str(state.get("user_message") or getattr(plan, "goal", "") or "")
-    new_steps = [
-        build_step_from_payload(
-            item,
-            index,
-            user_message=user_message,
-        )
-        for index, item in enumerate(raw_steps)
-    ]
     updated_steps, merge_mode = _merge_replanned_steps_into_plan(plan, new_steps)
     plan.steps = updated_steps
 
@@ -2528,7 +2859,7 @@ async def replan_node(
         total_step_count=len(list(plan.steps or [])),
         merge_mode=merge_mode,
         next_step_id=str(next_step.id or "") if next_step is not None else "",
-        llm_elapsed_ms=llm_cost_ms,
+        llm_elapsed_ms=llm_cost_ms_total,
         elapsed_ms=elapsed_ms(started_at),
     )
     return _reduce_state_with_events(
@@ -2644,6 +2975,37 @@ async def summarize_node(
         state=state,
         raw_candidates=parsed.get("memory_candidates"),
     )
+    # P3-1A 收敛修复：总结阶段的事实与记忆候选必须绑定执行证据，避免“总结幻觉写入记忆”。
+    summary_evidence_texts = _collect_summary_evidence_texts(
+        state=state,
+        last_executed_step=last_executed_step,
+    )
+    extracted_facts = _filter_summary_facts_by_evidence(extracted_facts, summary_evidence_texts)
+    extracted_preferences, dropped_extracted_preferences = _filter_preferences_by_evidence(
+        extracted_preferences,
+        summary_evidence_texts,
+    )
+    # P3-一次性收口：历史偏好也必须绑定本轮证据，避免跨任务污染回流到长期记忆。
+    existing_preferences, dropped_existing_preferences = _filter_preferences_by_evidence(
+        dict(working_memory.get("user_preferences") or {}),
+        summary_evidence_texts,
+    )
+    working_memory["user_preferences"] = existing_preferences
+    model_memory_candidates, dropped_model_memory_candidates = _filter_model_memory_candidates_by_evidence(
+        model_memory_candidates,
+        summary_evidence_texts,
+    )
+    if dropped_model_memory_candidates > 0 or dropped_extracted_preferences > 0 or dropped_existing_preferences > 0:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "总结记忆已按执行证据过滤",
+            state=state,
+            dropped_memory_candidate_count=dropped_model_memory_candidates,
+            dropped_extracted_preference_count=dropped_extracted_preferences,
+            dropped_existing_preference_count=dropped_existing_preferences,
+            evidence_count=len(summary_evidence_texts),
+        )
     # P3-CASE3 修复：执行阶段已显式声明“不要作为最终附件”时，summary 禁止任何 fallback 附件回填。
     attachment_delivery_preference = _resolve_attachment_delivery_preference_for_summary(
         state=state,
@@ -2694,7 +3056,7 @@ async def summarize_node(
             fact,
         )
     if extracted_preferences:
-        merged_preferences = dict(working_memory.get("user_preferences") or {})
+        merged_preferences = dict(existing_preferences)
         merged_preferences.update(extracted_preferences)
         working_memory["user_preferences"] = merged_preferences
 
@@ -2709,8 +3071,21 @@ async def summarize_node(
             next_state_for_memory,
             summary_message=summary_message,
         )
-        if outcome_candidate is not None:
+        outcome_text = str(
+            ((outcome_candidate or {}).get("content") or {}).get("text")
+            or (outcome_candidate or {}).get("summary")
+            or ""
+        ).strip()
+        if outcome_candidate is not None and _memory_item_has_execution_evidence(outcome_text, summary_evidence_texts):
             memory_candidates = [outcome_candidate]
+        elif outcome_candidate is not None:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "任务结果候选缺少执行证据，已跳过入库",
+                state=state,
+                dropped_outcome_candidate=True,
+            )
     memory_candidates = _merge_memory_candidates(memory_candidates, model_memory_candidates)
     log_runtime(
         logger,

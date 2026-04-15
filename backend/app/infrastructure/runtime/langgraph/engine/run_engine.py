@@ -45,13 +45,13 @@ from app.domain.services.runtime.normalizers import (
 )
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
-from app.infrastructure.runtime.checkpoint_store_adapter import CheckpointStoreAdapter
-from app.infrastructure.runtime.langgraph_graphs import (
+from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
+from app.infrastructure.runtime.langgraph.graphs import (
     bind_live_event_sink,
     build_planner_react_langgraph_graph,
     unbind_live_event_sink,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import (
+from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
     build_trace_id,
     describe_stage_llms,
@@ -60,7 +60,7 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime
     now_perf,
     reset_trace_id,
 )
-from app.infrastructure.runtime.langgraph_long_term_memory_repository import LangGraphLongTermMemoryRepository
+from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.utils import BaseUtils
 
 logger = logging.getLogger(__name__)

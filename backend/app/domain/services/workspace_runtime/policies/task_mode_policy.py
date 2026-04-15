@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 from app.domain.models import Step, StepTaskModeHint
 from app.domain.services.runtime.normalizers import normalize_controlled_value
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.settings import (
+from app.domain.services.runtime.contracts.langgraph_settings import (
     ABSOLUTE_PATH_PATTERN,
     ACTION_PATTERN,
     CODING_PATTERN,
@@ -28,6 +28,8 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.setting
     TASK_MODE_ALLOWED_FUNCTIONS,
     TASK_MODE_ALLOWED_PREFIXES,
     TOOL_REFERENCE_PATTERN,
+    WRITE_ACTION_DENY_PATTERN,
+    WRITE_ACTION_PATTERN,
     URL_PATTERN,
     WAIT_PATTERN,
     WAIT_REQUEST_PATTERN,
@@ -40,6 +42,16 @@ from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.setting
 
 def normalize_intent_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def classify_file_access_intent(value: str) -> str:
+    """把文件访问语义分成三态，供执行期精确治理。"""
+    signals = analyze_text_intent(value)
+    if bool(signals.get("has_write_action_signal")):
+        return "write_intent"
+    if bool(signals.get("has_read_action_signal")):
+        return "read_only_intent"
+    return "unknown"
 
 
 def has_explicit_wait_semantics(value: str) -> bool:
@@ -77,6 +89,7 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
             "has_file_signal": False,
             "has_coding_signal": False,
             "has_action_signal": False,
+            "has_write_action_signal": False,
             "has_tool_reference": False,
             "clause_count": 0,
         }
@@ -110,6 +123,11 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
         "has_file_signal": bool(FILE_PATTERN.search(normalized_text)),
         "has_coding_signal": bool(CODING_PATTERN.search(normalized_text)),
         "has_action_signal": bool(ACTION_PATTERN.search(normalized_text)),
+        # P3-1A 收敛修复：统一识别“写入/改写/执行命令”等写副作用意图，供只读任务硬拦截复用。
+        "has_write_action_signal": bool(
+            WRITE_ACTION_PATTERN.search(normalized_text)
+            and not WRITE_ACTION_DENY_PATTERN.search(normalized_text)
+        ),
         "has_tool_reference": bool(TOOL_REFERENCE_PATTERN.search(normalized_text)),
         "clause_count": clause_count,
     }

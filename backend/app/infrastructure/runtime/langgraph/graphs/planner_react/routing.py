@@ -6,8 +6,9 @@ import logging
 from typing import Literal
 
 from app.domain.models import ExecutionStatus
+from app.domain.services.runtime.normalizers import normalize_controlled_value
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState, get_graph_control
-from .runtime_logging import log_runtime
+from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,33 @@ def route_after_execute(
     pending_interrupt = state.get("pending_interrupt")
     if isinstance(pending_interrupt, dict) and len(pending_interrupt) > 0:
         return "wait_for_human"
+
+    last_step = state.get("last_executed_step")
+    # P3-一次性收口：统一用受控枚举归一化，避免 Enum 字符串化导致 fail-fast 失效。
+    last_step_status = normalize_controlled_value(
+        getattr(last_step, "status", ""),
+        ExecutionStatus,
+    )
+    if last_step_status == ExecutionStatus.FAILED.value:
+        plan = state.get("plan")
+        has_next_step = bool(plan is not None and plan.get_next_step() is not None)
+        if has_next_step and not bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
+            log_runtime(
+                logger,
+                logging.INFO,
+                "当前步骤失败，停止后续步骤并进入重规划",
+                state=state,
+                last_step_id=str(getattr(last_step, "id", "") or ""),
+            )
+            return "replan"
+        log_runtime(
+            logger,
+            logging.INFO,
+            "当前步骤失败，按当前路径收尾总结",
+            state=state,
+            last_step_id=str(getattr(last_step, "id", "") or ""),
+        )
+        return "summarize"
     return _route_after_completed_step(state)
 
 

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 def _log_core(level: int, event: str, **fields: object) -> None:
     """核心链路日志统一走 runtime_logging 格式；导入失败时降级普通日志。"""
     try:
-        from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.runtime_logging import log_runtime
+        from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 
         log_runtime(logger, level, event, **fields)
     except Exception:

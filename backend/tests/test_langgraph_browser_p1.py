@@ -761,6 +761,7 @@ def test_execute_step_with_prompt_should_block_wrong_click_index_after_listing_l
             step=Step(description="从当前列表页中点击匹配到的详情项"),
             runtime_tools=[tool],
             task_mode="web_reading",
+            max_tool_iterations=6,
             user_content=[{"type": "text", "text": "请从当前列表页中点击匹配到的详情项"}],
         )
     )

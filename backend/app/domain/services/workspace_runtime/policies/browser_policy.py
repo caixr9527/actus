@@ -15,7 +15,7 @@ from app.domain.models import (
     BrowserPageType,
     ToolResult,
 )
-from app.infrastructure.runtime.langgraph_graphs.planner_react_langgraph.settings import (
+from app.domain.services.runtime.contracts.langgraph_settings import (
     BROWSER_ATOMIC_FUNCTION_NAMES,
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
 )

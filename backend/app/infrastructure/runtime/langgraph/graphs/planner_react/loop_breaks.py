@@ -1,0 +1,93 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""P3 重构：循环收敛原因映射。"""
+
+from typing import Any, Dict, Optional
+
+from app.domain.models import Step
+from app.domain.services.workspace_runtime.policies import (
+    build_loop_break_payload as _build_loop_break_payload,
+)
+from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import safe_parse_json
+
+
+def build_loop_break_result(
+    *,
+    loop_break_reason: str,
+    step: Step,
+    tool_result: Optional[Any] = None,
+    runtime_recent_action: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if loop_break_reason == "repeat_tool_call_success_fallback":
+        payload = _normalize_repeat_success_payload(tool_result)
+        delivery_text = str(payload.get("delivery_text") or "").strip()
+        summary_text = str(payload.get("summary") or "").strip() or delivery_text
+        if not summary_text:
+            summary_text = f"步骤执行完成：{step.description}"
+        return {
+            "success": True,
+            "summary": summary_text,
+            "result": summary_text,
+            "delivery_text": delivery_text,
+            "attachments": list(payload.get("attachments") or []),
+            "blockers": [],
+            "next_hint": "",
+            "runtime_recent_action": runtime_recent_action or {},
+        }
+    if loop_break_reason == "repeat_tool_call":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="同一工具及参数被重复调用过多次，当前步骤已被强制收敛。",
+            next_hint="请改用其他工具、调整参数，或将当前步骤拆小后再执行。",
+            runtime_recent_action=runtime_recent_action,
+        )
+    if loop_break_reason == "search_repeat":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="同一搜索查询已重复触发多次，当前检索路径没有继续收获。",
+            next_hint="请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。",
+            runtime_recent_action=runtime_recent_action,
+        )
+    if loop_break_reason == "research_route_fingerprint_repeat":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="同一页面抓取请求已重复触发多次，当前检索路径没有新增信息。",
+            next_hint="请切换其他候选 URL、改用其他工具，或结束当前步骤。",
+            runtime_recent_action=runtime_recent_action,
+        )
+    if loop_break_reason == "research_route_transport_error":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="检索/抓取链路出现瞬时网络错误，当前步骤已停止重试。",
+            next_hint="请稍后重试，或先基于已有信息继续后续步骤。",
+            runtime_recent_action=runtime_recent_action,
+        )
+    if loop_break_reason == "browser_no_progress":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="浏览器连续观察未发现新的有效信息，当前页面路径已无进展。",
+            next_hint="请更换页面、改用搜索/正文读取，或重新规划当前步骤。",
+            runtime_recent_action=runtime_recent_action,
+        )
+    return None
+
+
+def _normalize_repeat_success_payload(tool_result: Optional[Any]) -> Dict[str, Any]:
+    if tool_result is None:
+        return {"summary": "", "delivery_text": "", "attachments": []}
+    message_text = str(getattr(tool_result, "message", "") or "").strip()
+    data = getattr(tool_result, "data", None)
+    parsed_data = data if isinstance(data, dict) else {}
+    feedback_content = str(parsed_data.get("feedback_content") or "").strip()
+    parsed_feedback = safe_parse_json(feedback_content) if feedback_content else {}
+    summary_from_feedback = str(parsed_feedback.get("message") or "").strip()
+    delivery_from_feedback = str(parsed_feedback.get("data", {}).get("content") or "").strip()
+    attachments = []
+    raw_attachments = parsed_feedback.get("attachments")
+    if isinstance(raw_attachments, list):
+        attachments = [str(item).strip() for item in raw_attachments if str(item).strip()]
+    return {
+        "summary": summary_from_feedback or message_text,
+        "delivery_text": delivery_from_feedback or "",
+        "attachments": attachments,
+    }

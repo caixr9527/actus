@@ -5,19 +5,25 @@
 import logging
 import time
 import asyncio
+import json
 
 from app.domain.models import Step, ToolResult
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_context import (
     ExecutionContext,
+    build_execution_context,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_state import (
     ExecutionState,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.finalizer import (
+    finalize_max_iterations,
     finalize_no_tool_call,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_effects import (
     apply_tool_result_effects,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_handlers import (
+    execute_tool_with_policy,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_events import (
     ToolEventDispatcher,
@@ -61,6 +67,26 @@ def test_finalize_no_tool_call_should_retry_empty_payload_and_block_human_wait()
     assert isinstance(wait_result.payload.get("blockers"), list)
 
 
+def test_finalize_max_iterations_should_always_return_failure_payload() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="读取并整理文件内容")
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="file_processing",
+        llm_message={"content": '{"success": true, "summary": "误报完成"}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=3,
+        iteration_count=3,
+        runtime_recent_action={"last_failed_action": {"function_name": "read_file"}},
+    )
+
+    assert payload["success"] is False
+    assert payload["summary"] == "当前步骤暂时未能完成：读取并整理文件内容"
+    assert payload["blockers"] == ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"]
+
+
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="检索网页并读取正文")
@@ -70,12 +96,14 @@ def test_apply_tool_result_effects_should_update_research_search_state() -> None
         available_function_names=set(),
         browser_route_enabled=False,
         blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
         general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
         final_delivery_search_blocked_function_names=set(),
         final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -113,6 +141,47 @@ def test_apply_tool_result_effects_should_update_research_search_state() -> None
         "https://example.com/a",
         "https://example.com/b",
     ]
+
+
+def test_build_execution_context_should_not_infer_read_only_from_prompt_noise() -> None:
+    step = Step(description="生成报告并保存结果")
+    prompt_like_user_content = [
+        {
+            "type": "text",
+            "text": (
+                "执行指令中包含大量读取规则：读取页面、读取文件；"
+                "但这只是系统提示词，不代表用户只读意图。"
+            ),
+        }
+    ]
+    ctx = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=3,
+        user_content=prompt_like_user_content,
+        read_only_intent_text="继续执行并整理结果",
+        has_available_file_context=True,
+        available_tools=[],
+        available_function_names={"write_file", "replace_in_file", "shell_execute"},
+    )
+    assert ctx.read_only_file_blocked_function_names == set()
+    assert "write_file" not in ctx.blocked_function_names
+    assert "replace_in_file" not in ctx.blocked_function_names
+
+
+def test_build_execution_context_should_block_write_tools_for_explicit_read_only_intent() -> None:
+    step = Step(description="读取并展示文件内容")
+    ctx = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=3,
+        user_content=[{"type": "text", "text": "任意内容"}],
+        read_only_intent_text="读取 /tmp/report.md 并展示内容，不要修改文件",
+        has_available_file_context=True,
+        available_tools=[],
+        available_function_names={"write_file", "replace_in_file", "shell_execute"},
+    )
+    assert ctx.read_only_file_blocked_function_names == {"write_file", "replace_in_file", "shell_execute"}
 
 
 def test_tool_call_lifecycle_and_events_should_keep_contract_consistent() -> None:
@@ -174,3 +243,182 @@ def test_tool_event_dispatcher_should_emit_and_callback() -> None:
     asyncio.run(dispatcher.emit(build_calling_event(lifecycle)))
     assert len(dispatcher.emitted_events) == 1
     assert captured == ["fetch_page"]
+
+
+def test_execute_tool_with_policy_should_use_success_fallback_on_repeat_read_file() -> None:
+    class _ReadOnlyTool:
+        name = "file"
+
+        async def invoke(self, function_name, **kwargs):
+            return ToolResult(success=True, data={"content": "hello"})
+
+    step = Step(
+        id="step-1",
+        title="读取文件",
+        description="读取 /tmp/hello.txt 内容",
+    )
+    ctx = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取文件内容"}],
+        available_tools=[],
+        available_function_names={"read_file"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    state = ExecutionState()
+    state.same_tool_repeat_count = 3
+    state.last_tool_fingerprint = "same-fingerprint"
+    state.last_successful_tool_call = {
+        "function_name": "read_file",
+        "function_args": {"filepath": "/tmp/hello.txt"},
+        "message": "读取成功",
+        "data": {"content": "hello"},
+    }
+    state.last_successful_tool_fingerprint = "same-fingerprint"
+
+    decision = asyncio.run(
+        execute_tool_with_policy(
+            logger=logging.getLogger(__name__),
+            step=step,
+            function_name="read_file",
+            normalized_function_name="read_file",
+            function_args={"filepath": "/tmp/hello.txt"},
+            matched_tool=_ReadOnlyTool(),
+            tool_name="file",
+            browser_route_state_key="",
+            ctx=ctx,
+            state=state,
+            started_at=time.perf_counter(),
+        )
+    )
+
+    assert decision.loop_break_reason == "repeat_tool_call_success_fallback"
+    assert decision.tool_result.success is True
+    assert decision.tool_result.data == {"content": "hello"}
+
+
+def test_execute_tool_with_policy_should_not_use_success_fallback_when_fingerprint_mismatch() -> None:
+    class _ReadOnlyTool:
+        name = "file"
+
+        async def invoke(self, function_name, **kwargs):
+            return ToolResult(success=True, data={"content": "hello"})
+
+    step = Step(
+        id="step-1",
+        title="读取文件",
+        description="读取 /tmp/hello.txt 内容",
+    )
+    ctx = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取文件内容"}],
+        available_tools=[],
+        available_function_names={"read_file"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    state = ExecutionState()
+    state.same_tool_repeat_count = 3
+    state.last_tool_fingerprint = "fingerprint-b"
+    state.last_successful_tool_call = {
+        "function_name": "read_file",
+        "function_args": {"filepath": "/tmp/hello-a.txt"},
+        "message": "读取成功",
+        "data": {"content": "hello-a"},
+    }
+    state.last_successful_tool_fingerprint = "fingerprint-a"
+
+    decision = asyncio.run(
+        execute_tool_with_policy(
+            logger=logging.getLogger(__name__),
+            step=step,
+            function_name="read_file",
+            normalized_function_name="read_file",
+            function_args={"filepath": "/tmp/hello-b.txt"},
+            matched_tool=_ReadOnlyTool(),
+            tool_name="file",
+            browser_route_state_key="",
+            ctx=ctx,
+            state=state,
+            started_at=time.perf_counter(),
+        )
+    )
+
+    assert decision.loop_break_reason == "repeat_tool_call"
+    assert decision.tool_result.success is False
+
+
+def test_apply_tool_result_effects_should_record_success_feedback_payload_for_fallback_delivery() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="读取并输出文件内容")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取并输出内容"}],
+        available_tools=[],
+        available_function_names={"read_file"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=3,
+        effective_max_tool_iterations=3,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    tool_result = ToolResult(
+        success=True,
+        message="读取成功",
+        data={
+            "filepath": "/tmp/a.txt",
+            "content": "A content",
+        },
+    )
+
+    _ = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="read_file",
+        normalized_function_name="read_file",
+        function_args={"filepath": "/tmp/a.txt"},
+        tool_result=tool_result,
+        loop_break_reason="",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+    )
+
+    feedback_content = str(execution_state.last_successful_tool_call.get("feedback_content") or "")
+    parsed_feedback = json.loads(feedback_content)
+    assert parsed_feedback["success"] is True
+    assert parsed_feedback["data"]["content"] == "A content"

@@ -37,11 +37,17 @@ from .task_mode_policy import (
     build_step_candidate_text,
     build_task_mode_disallowed_names,
     classify_confirmed_user_task_mode,
+    classify_file_access_intent,
     classify_step_task_mode,
     has_explicit_wait_semantics,
     infer_entry_strategy,
     is_allowed_in_task_mode,
     requests_plan_only,
+)
+from .step_contract_policy import (
+    StepContractCompilationIssue,
+    collect_step_contract_hard_issues,
+    compile_step_contracts,
 )
 
 __all__ = [
@@ -67,6 +73,7 @@ __all__ = [
     "build_tool_fingerprint",
     "build_task_mode_disallowed_names",
     "classify_confirmed_user_task_mode",
+    "classify_file_access_intent",
     "classify_step_task_mode",
     "coerce_optional_int",
     "collect_temporarily_blocked_browser_high_level_function_names",
@@ -80,6 +87,9 @@ __all__ = [
     "normalize_browser_page_type",
     "normalize_execution_payload",
     "requests_plan_only",
+    "StepContractCompilationIssue",
+    "collect_step_contract_hard_issues",
+    "compile_step_contracts",
     "summarize_tool_result_data",
     "truncate_tool_text",
 ]

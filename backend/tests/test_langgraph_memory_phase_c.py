@@ -467,10 +467,7 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
     assert repository.search_calls[2]["mode"] == LongTermMemorySearchMode.HYBRID.value
     assert next_state["retrieved_memories"][0]["id"] == "mem-1"
     assert next_state["retrieved_memories"][1]["id"] == "mem-2"
-    assert next_state["working_memory"]["user_preferences"] == {
-        "language": "zh",
-        "style": "concise",
-    }
+    assert next_state["working_memory"]["user_preferences"] == {}
 
 
 def test_execute_step_node_should_not_write_string_none_when_no_executor_path_available() -> None:
@@ -1264,6 +1261,77 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
     assert next_state["current_step_id"] == step_ids[1]
 
 
+def test_replan_node_should_filter_meta_tool_validation_steps_and_retry_once() -> None:
+    class _DriftThenValidReplanLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def invoke(self, messages, tools, response_format):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "content": json.dumps(
+                        {
+                            "steps": [
+                                {
+                                    "id": "step-meta",
+                                    "title": "测试 shell 工具可用性",
+                                    "description": "先验证 shell_execute 是否可用",
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    )
+                }
+            return {
+                "content": json.dumps(
+                    {
+                        "steps": [
+                            {
+                                "id": "step-real",
+                                "title": "读取目录并整理结果",
+                                "description": "读取当前目录并输出文件列表摘要",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    completed_step = Step(
+        id="step-a",
+        title="完成已有步骤",
+        description="完成已有步骤",
+        objective_key="objective-step-a",
+        success_criteria=["完成已有步骤"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(done=True, summary="已完成"),
+    )
+    plan = Plan(
+        title="重规划测试",
+        goal="继续执行目录信息收集",
+        language="zh",
+        message="开始重规划",
+        steps=[completed_step],
+    )
+    llm = _DriftThenValidReplanLLM()
+    state = {
+        "plan": plan,
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "user_message": "继续读取目录并给我结果，不要测试工具",
+        "emitted_events": [],
+    }
+
+    next_state = asyncio.run(replan_node(state, llm))
+
+    assert llm.calls == 2
+    replanned_steps = next_state["plan"].steps
+    assert len(replanned_steps) == 2
+    assert "工具可用性" not in replanned_steps[1].description
+    assert "验证 shell_execute" not in replanned_steps[1].description
+    assert "读取当前目录" in replanned_steps[1].description
+
+
 def test_replan_node_should_use_summarized_prompt_inputs_instead_of_full_plan_json() -> None:
     completed_step = Step(
         id="step-a",
@@ -1308,7 +1376,7 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
         "user_id": "user-1",
         "run_id": "run-1",
         "thread_id": "thread-1",
-        "user_message": "帮我完成总结",
+        "user_message": "帮我完成总结，并且后续请用中文回复",
         "plan": _build_plan(),
         "execution_count": 1,
         "step_states": [
@@ -1324,7 +1392,7 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
         },
         "pending_memory_writes": [],
         "message_window": [
-            {"role": "user", "message": "帮我完成总结", "attachment_paths": []},
+            {"role": "user", "message": "帮我完成总结，并且后续请用中文回复", "attachment_paths": []},
         ],
         "graph_metadata": {},
         "emitted_events": [],
@@ -1668,6 +1736,68 @@ def test_summarize_should_use_final_delivery_source_refs_as_attachment_truth_sou
     ]
 
 
+def test_summarize_should_not_fallback_to_last_step_artifacts_without_final_delivery_source_refs() -> None:
+    llm = _FakeUnknownSummaryAttachmentLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成文档",
+            description="生成课程目录文档",
+            objective_key="objective-step-1",
+            success_criteria=["文档生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成真实附件",
+                produced_artifacts=["/home/ubuntu/intermediate.md"],
+            ),
+        ),
+        "selected_artifacts": ["/home/ubuntu/intermediate.md"],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成真实附件",
+                    "produced_artifacts": ["/home/ubuntu/intermediate.md"],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证无真相源时不回退中间附件",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "",
+                "sections": [],
+                "source_refs": [],
+            },
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    # P3-一次性收口：未声明 final_delivery_payload.source_refs 时，不再回退到中间步骤产物。
+    assert summarized_state["selected_artifacts"] == []
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
+
+
 def test_summarize_should_filter_non_file_refs_from_final_delivery_source_refs() -> None:
     llm = _FakeLightSummaryLLM()
     state = {
@@ -1860,9 +1990,10 @@ def test_summarize_should_filter_explicit_summary_attachments_by_workspace_artif
         )
     )
 
-    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    # P3-一次性收口：显式 attachments 仅可选取真相源(source_refs)子集；未声明真相源时应全部丢弃。
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> None:
@@ -1906,15 +2037,9 @@ def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> 
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == [
-        "/home/ubuntu/final-output.md",
-        "/home/ubuntu/final-checklist.md",
-    ]
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == [
-        "/home/ubuntu/final-output.md",
-        "/home/ubuntu/final-checklist.md",
-    ]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 def test_summarize_should_block_direct_wait_without_original_execution(monkeypatch) -> None:
@@ -2167,6 +2292,17 @@ def test_summarize_should_generate_candidates_from_structured_extraction_when_wo
         "thread_id": "thread-1",
         "user_message": "后续任务只看 backend，并用中文简洁回复",
         "plan": _build_plan(),
+        "last_executed_step": Step(
+            id="step-1",
+            title="整理 backend 结论",
+            description="整理 backend 结论",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="当前任务后续都只需要关注 backend",
+                delivery_text="后续仅关注 backend。",
+            ),
+        ),
         "execution_count": 1,
         "step_states": [
             {
@@ -2203,6 +2339,69 @@ def test_summarize_should_generate_candidates_from_structured_extraction_when_wo
     }
 
 
+def test_summarize_should_drop_unverified_fact_and_memory_candidates() -> None:
+    class _HallucinatedMemoryLLM:
+        async def invoke(self, messages, tools, response_format):
+            return {
+                "content": json.dumps(
+                    {
+                        "message": "总结完成",
+                        "attachments": [],
+                        "facts_in_session": ["项目已经迁移到 golang"],
+                        "user_preferences": {"budget": "5000"},
+                        "memory_candidates": [
+                            {
+                                "memory_type": "fact",
+                                "summary": "项目已经迁移到 golang",
+                                "content": {"text": "项目已经迁移到 golang"},
+                                "confidence": 0.9,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    llm = _HallucinatedMemoryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请总结当前任务",
+        "plan": _build_plan(),
+        "last_executed_step": Step(
+            id="step-1",
+            title="整理 Python 结果",
+            description="整理 Python 结果",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="当前项目仍是 Python 后端",
+            ),
+        ),
+        "execution_count": 1,
+        "working_memory": {
+            "goal": "验证证据过滤",
+            "decisions": [],
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["working_memory"]["facts_in_session"] == []
+    assert summarized_state["working_memory"]["user_preferences"] == {}
+    assert all(item.get("summary") != "项目已经迁移到 golang" for item in summarized_state["pending_memory_writes"])
+    assert all(item.get("memory_type") != "profile" for item in summarized_state["pending_memory_writes"])
+    assert summarized_state["pending_memory_writes"] == []
+
+
 def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_memory_available() -> None:
     llm = _FakeLLM()
     state = {
@@ -2212,6 +2411,16 @@ def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_
         "thread_id": "thread-1",
         "user_message": "帮我完成任务",
         "plan": _build_plan(),
+        "last_executed_step": Step(
+            id="step-1",
+            title="收敛任务结果",
+            description="收敛任务结果",
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="最终总结",
+            ),
+        ),
         "execution_count": 1,
         "step_states": [
             {
@@ -2238,7 +2447,7 @@ def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_
     assert summarized_state["pending_memory_writes"][0]["tags"] == ["task_outcome"]
 
 
-def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_empty_attachments() -> None:
+def test_summarize_should_not_fallback_to_last_step_artifacts_when_model_returns_empty_attachments() -> None:
     llm = _FakeLLM()
     last_executed_step = Step(
         id="step-1",
@@ -2282,9 +2491,9 @@ def test_summarize_should_fallback_to_last_step_artifacts_when_model_returns_emp
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/course_directory.md"]
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/course_directory.md"]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 def test_summarize_should_not_fallback_attachments_when_last_step_disables_attachment_delivery() -> None:
@@ -2338,6 +2547,81 @@ def test_summarize_should_not_fallback_attachments_when_last_step_disables_attac
     assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
     assert message_event.attachments == []
+
+
+def test_summarize_should_ignore_failed_step_artifacts_when_resolving_summary_attachments() -> None:
+    llm = _FakeUnknownSummaryAttachmentLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "整理成 md 文档",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "last_executed_step": Step(
+            id="step-2",
+            title="失败步骤",
+            description="失败步骤",
+            objective_key="objective-step-2",
+            success_criteria=["失败步骤完成"],
+            status=ExecutionStatus.FAILED,
+            outcome=StepOutcome(
+                done=False,
+                summary="执行失败",
+                produced_artifacts=["/home/ubuntu/sensitive-temp.json"],
+            ),
+        ),
+        "selected_artifacts": [
+            "/home/ubuntu/sensitive-temp.json",
+            "/home/ubuntu/final-output.md",
+        ],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "成功步骤",
+                    "produced_artifacts": ["/home/ubuntu/final-output.md"],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            },
+            {
+                "step_id": "step-2",
+                "status": ExecutionStatus.FAILED.value,
+                "outcome": {
+                    "done": False,
+                    "summary": "失败步骤",
+                    "produced_artifacts": ["/home/ubuntu/sensitive-temp.json"],
+                    "blockers": ["失败"],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            },
+        ],
+        "working_memory": {
+            "goal": "验证失败产物隔离",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["selected_artifacts"] == []
+    message_event = summarized_state["emitted_events"][0]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
+    assert all(
+        attachment.filepath != "/home/ubuntu/sensitive-temp.json"
+        for attachment in message_event.attachments
+    )
 
 
 class _FakeSummaryAttachmentLLM:
@@ -2410,9 +2694,9 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 class _FakeUnknownSummaryAttachmentLLM:
@@ -2482,9 +2766,9 @@ def test_summarize_should_fallback_when_model_returns_unknown_summary_attachment
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/intermediate.md"]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(monkeypatch) -> None:
