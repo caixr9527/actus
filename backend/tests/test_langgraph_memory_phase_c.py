@@ -1332,6 +1332,60 @@ def test_replan_node_should_filter_meta_tool_validation_steps_and_retry_once() -
     assert "读取当前目录" in replanned_steps[1].description
 
 
+def test_replan_node_should_drop_semantically_duplicated_steps_after_replan() -> None:
+    completed_step = Step(
+        id="step-completed",
+        title="初始化目录",
+        description="初始化目录",
+        objective_key="objective-step-completed",
+        success_criteria=["初始化目录"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(done=True, summary="已完成"),
+    )
+    plan = Plan(
+        title="重规划语义去重测试",
+        goal="收集目录信息并输出",
+        language="zh",
+        message="开始重规划",
+        steps=[completed_step],
+    )
+    state = {
+        "plan": plan,
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "user_message": "继续收集目录信息并输出结果",
+        "emitted_events": [],
+    }
+    llm = _FakeReplanLLM(
+        steps=[
+            {
+                "id": "step-a",
+                "title": "读取当前目录并输出结果",
+                "description": "读取当前目录并输出结果",
+                "success_criteria": ["读取目录", "输出结果"],
+            },
+            {
+                "id": "step-b",
+                "title": "读取当前目录并输出结果",
+                "description": "读取当前目录并输出结果",
+                "success_criteria": ["读取目录", "输出结果"],
+            },
+            {
+                "id": "step-c",
+                "title": "读取 hello.txt 内容",
+                "description": "读取 hello.txt 内容并确认",
+                "success_criteria": ["读取 hello.txt"],
+            },
+        ]
+    )
+
+    next_state = asyncio.run(replan_node(state, llm))
+
+    replanned_steps = next_state["plan"].steps
+    assert len(replanned_steps) == 3
+    assert replanned_steps[1].description == "读取当前目录并输出结果"
+    assert replanned_steps[2].description == "读取 hello.txt 内容并确认"
+
+
 def test_replan_node_should_use_summarized_prompt_inputs_instead_of_full_plan_json() -> None:
     completed_step = Step(
         id="step-a",

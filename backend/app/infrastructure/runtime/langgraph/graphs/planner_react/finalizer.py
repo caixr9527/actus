@@ -18,6 +18,7 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     safe_parse_json,
 )
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime
+from .convergence.judge import ConvergenceJudge
 
 
 @dataclass(slots=True)
@@ -82,7 +83,8 @@ def finalize_no_tool_call(
         "未调用工具直接完成当前轮次",
         step_id=str(step.id or ""),
         iteration=iteration,
-        success=bool(parsed.get("success", True)),
+        success=inferred_success,
+        has_explicit_success=has_explicit_success,
         attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         llm_elapsed_ms=llm_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
@@ -115,6 +117,7 @@ def finalize_max_iterations(
     requested_max_tool_iterations: int,
     iteration_count: int,
     runtime_recent_action: Optional[Dict[str, Any]] = None,
+    step_file_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     parsed = safe_parse_json(llm_message.get("content"))
     if task_mode == "human_wait":
@@ -144,6 +147,25 @@ def finalize_max_iterations(
         attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         elapsed_ms=elapsed_ms(started_at),
     )
+    # P3 解耦：先尝试按关键事实收敛，避免 file_processing final inline 在事实已满足时误判失败。
+    converged_payload = ConvergenceJudge.build_max_iteration_convergence_payload(
+        step=step,
+        task_mode=task_mode,
+        runtime_recent_action=runtime_recent_action,
+        step_file_context=dict(step_file_context or {}),
+    )
+    if converged_payload is not None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "达到最大工具轮次但关键事实已满足，按成功收敛",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            requested_max_tool_iterations=requested_max_tool_iterations,
+            iteration_count=iteration_count,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return converged_payload
     # P3-1A 收敛修复：max_tool_iterations 到达后一律按未完成收敛，不再返回 success=true。
     return _build_loop_break_payload(
         step=step,

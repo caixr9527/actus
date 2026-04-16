@@ -12,6 +12,7 @@ from app.domain.services.workspace_runtime.policies import (
 )
 from .execution_context import ExecutionContext
 from .execution_state import ExecutionState
+from .tool_schema import extract_function_name
 from app.domain.services.runtime.contracts.langgraph_settings import ASK_USER_FUNCTION_NAME, BROWSER_ATOMIC_FUNCTION_NAMES
 
 
@@ -84,19 +85,10 @@ def _filter_available_tools(
     filtered_tools: List[Dict[str, Any]] = []
     blocked_names = set(disallowed_function_names or set())
     for tool_schema in available_tools:
-        function_name = _extract_function_name(tool_schema)
+        function_name = extract_function_name(tool_schema)
         if function_name in blocked_names:
             continue
         if function_name == ASK_USER_FUNCTION_NAME and not allow_ask_user:
             continue
         filtered_tools.append(tool_schema)
     return filtered_tools
-
-
-def _extract_function_name(tool_schema: Dict[str, Any]) -> str:
-    if not isinstance(tool_schema, dict):
-        return ""
-    function = tool_schema.get("function")
-    if not isinstance(function, dict):
-        return ""
-    return str(function.get("name") or "").strip().lower()

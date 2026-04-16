@@ -6,6 +6,7 @@ import logging
 import time
 import asyncio
 import json
+from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step, ToolResult
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_context import (
@@ -25,6 +26,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_effects impo
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_handlers import (
     execute_tool_with_policy,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
+    ConvergenceJudge,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_events import (
     ToolEventDispatcher,
     bind_tool_name,
@@ -33,6 +37,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_events impor
     build_tool_call_lifecycle,
     build_tool_feedback_message,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tools import execute_step_with_prompt
 
 
 def test_finalize_no_tool_call_should_retry_empty_payload_and_block_human_wait() -> None:
@@ -85,6 +90,30 @@ def test_finalize_max_iterations_should_always_return_failure_payload() -> None:
     assert payload["success"] is False
     assert payload["summary"] == "当前步骤暂时未能完成：读取并整理文件内容"
     assert payload["blockers"] == ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"]
+
+
+def test_finalize_max_iterations_should_converge_success_when_file_facts_ready() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        description="获取目录文件列表并以文本输出",
+        task_mode_hint="file_processing",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="file_processing",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=6,
+        iteration_count=6,
+        runtime_recent_action={"last_failed_action": {"function_name": "list_files"}},
+        step_file_context={"called_functions": {"list_files", "read_file"}},
+    )
+    assert payload["success"] is True
+    assert "收敛成功" in str(payload["summary"])
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -422,3 +451,103 @@ def test_apply_tool_result_effects_should_record_success_feedback_payload_for_fa
     parsed_feedback = json.loads(feedback_content)
     assert parsed_feedback["success"] is True
     assert parsed_feedback["data"]["content"] == "A content"
+
+
+def test_convergence_judge_should_break_when_file_processing_facts_ready() -> None:
+    judge = ConvergenceJudge()
+    step = Step(
+        id="step-final",
+        description="列出目录并文本交付",
+        task_mode_hint="file_processing",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+    context = {"called_functions": {"write_file", "list_files"}}
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="file_processing",
+        recent_function_name="read_file",
+        tool_result_success=True,
+        step_file_context=context,
+        runtime_recent_action={},
+    )
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.payload["success"] is True
+    assert result.reason_code == "file_processing_facts_ready"
+
+
+class _FakeNoToolLLM:
+    def __init__(self, message: Dict[str, Any]) -> None:
+        self._message = message
+
+    async def invoke(self, **kwargs: Any) -> Dict[str, Any]:
+        return dict(self._message)
+
+
+class _FakeToolOnly:
+    def __init__(self, schema: Dict[str, Any]) -> None:
+        self._schema = schema
+        self.name = "fake-tool"
+
+    def get_tools(self) -> List[Dict[str, Any]]:
+        return [dict(self._schema)]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == str(
+            (self._schema.get("function") or {}).get("name") or ""
+        ).strip().lower()
+
+    async def invoke(self, function_name: str, **kwargs: Any) -> Any:
+        return {"ok": True}
+
+
+def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missing_ask_user() -> None:
+    llm = _FakeNoToolLLM({"content": '{"success": true, "summary": "ok"}'})
+    step = Step(description="等待用户确认后继续")
+    runtime_tools = [
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+    ]
+
+    payload, tool_events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=step,
+            runtime_tools=runtime_tools,  # type: ignore[arg-type]
+            task_mode="human_wait",
+        )
+    )
+
+    assert payload["success"] is False
+    blockers = [str(item) for item in list(payload.get("blockers") or [])]
+    assert any("缺少可用的 message_ask_user 工具" in item for item in blockers)
+    assert tool_events == []
+
+
+def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_empty_model_output() -> None:
+    llm = _FakeNoToolLLM({"content": '{"success": false, "summary": "", "delivery_text": ""}'})
+    step = Step(description="整理当前目录结果")
+
+    payload, tool_events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=step,
+            runtime_tools=[],
+            task_mode="general",
+        )
+    )
+
+    assert payload["success"] is False
+    blockers = [str(item) for item in list(payload.get("blockers") or [])]
+    assert any("当前步骤无可用工具" in item for item in blockers)
+    assert tool_events == []

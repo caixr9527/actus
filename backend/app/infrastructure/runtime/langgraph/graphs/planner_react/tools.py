@@ -11,7 +11,6 @@ from app.domain.external import LLM
 from app.domain.models import (
     Step,
     ToolEvent,
-    ToolResult,
 )
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.runtime.normalizers import (
@@ -38,21 +37,17 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
 )
 from .execution_context import build_execution_context
 from .execution_state import ExecutionState
-from .finalizer import finalize_max_iterations, finalize_no_tool_call
+from .convergence.judge import ConvergenceJudge
 from .iteration_context import build_iteration_context
-from .loop_breaks import build_loop_break_result
+from .policy_engine.engine import ToolPolicyEngine
+from .tool_schema import extract_function_name
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ASK_USER_FUNCTION_NAME,
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     NOTIFY_USER_FUNCTION_NAME,
 )
-from .tool_effects import (
-    apply_tool_result_effects,
-    build_interrupt_payload,
-    extract_interrupt_request,
-    reached_tool_failure_limit,
-)
+from .tool_effects import build_interrupt_payload, extract_interrupt_request
 from .tool_events import (
     ToolEventDispatcher,
     bind_tool_name,
@@ -61,8 +56,6 @@ from .tool_events import (
     build_tool_call_lifecycle,
     build_tool_feedback_message,
 )
-from .tool_guards import evaluate_tool_guard
-from .tool_handlers import execute_tool_with_policy
 
 logger = logging.getLogger(__name__)
 
@@ -150,15 +143,6 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
     available_tools.sort(key=_tool_priority)
     return available_tools
 
-def _extract_function_name(tool_schema: Dict[str, Any]) -> str:
-    if not isinstance(tool_schema, dict):
-        return ""
-    function = tool_schema.get("function")
-    if not isinstance(function, dict):
-        return ""
-    return str(function.get("name") or "").strip().lower()
-
-
 def _tool_call_priority(
         function_name: str,
         *,
@@ -199,7 +183,7 @@ def pick_preferred_tool_call(
 
     available_function_names: set[str] = set()
     for tool_schema in available_tools:
-        function_name = _extract_function_name(tool_schema)
+        function_name = extract_function_name(tool_schema)
         if function_name:
             available_function_names.add(function_name)
 
@@ -302,13 +286,18 @@ async def execute_step_with_prompt(
         logger=logger,
         on_tool_event=on_tool_event,
     )
+    policy_engine = ToolPolicyEngine(logger=logger)
+    convergence_judge = ConvergenceJudge()
+    step_file_context: Dict[str, Any] = {
+        "called_functions": set(),
+    }
 
     available_tools = collect_available_tools(runtime_tools)
-    available_function_names = {
-        _extract_function_name(tool_schema)
-        for tool_schema in available_tools
-        if _extract_function_name(tool_schema)
-    }
+    available_function_names: set[str] = set()
+    for tool_schema in available_tools:
+        function_name = extract_function_name(tool_schema)
+        if function_name:
+            available_function_names.add(function_name)
     # P3 重构：上下文构建统一沉淀到独立模块，tools.py 仅保留编排职责。
     execution_context = build_execution_context(
         step=step,
@@ -437,8 +426,7 @@ async def execute_step_with_prompt(
         llm_cost_ms = elapsed_ms(llm_started_at)
         tool_calls = execution_state.llm_message.get("tool_calls") or []
         if len(tool_calls) == 0:
-            no_tool_call_result = finalize_no_tool_call(
-                logger=logger,
+            no_tool_call_result = policy_engine.finalize_no_tool_call(
                 step=step,
                 task_mode=task_mode,
                 llm_message=execution_state.llm_message,
@@ -509,62 +497,24 @@ async def execute_step_with_prompt(
 
         matched_tool = _resolve_tool_by_function_name(function_name=lifecycle.function_name, runtime_tools=runtime_tools)
         bind_tool_name(lifecycle, matched_tool)
-        tool_cost_ms = 0
-        loop_break_reason = ""
         await event_dispatcher.emit(build_calling_event(lifecycle))
-
-        guard_decision = evaluate_tool_guard(
-            logger=logger,
+        policy_result = await policy_engine.evaluate_tool_call(
             step=step,
             task_mode=task_mode,
             function_name=lifecycle.function_name,
             normalized_function_name=lifecycle.normalized_function_name,
             function_args=lifecycle.function_args,
             matched_tool=matched_tool,
-            iteration_blocked_function_names=iteration_context.iteration_blocked_function_names,
-            ctx=execution_context,
-            state=execution_state,
-        )
-        if guard_decision.should_skip:
-            loop_break_reason = guard_decision.loop_break_reason
-            tool_result = guard_decision.tool_result or ToolResult(
-                success=False,
-                message=f"调用工具失败: {lifecycle.function_name}",
-            )
-        else:
-            # P3 重构：工具执行路径由独立处理器接管，统一搜索/抓取/浏览器分支收敛策略。
-            execution_decision = await execute_tool_with_policy(
-                logger=logger,
-                step=step,
-                function_name=lifecycle.function_name,
-                normalized_function_name=lifecycle.normalized_function_name,
-                function_args=lifecycle.function_args,
-                matched_tool=matched_tool,
-                tool_name=lifecycle.tool_name,
-                browser_route_state_key=iteration_context.browser_route_state_key,
-                ctx=execution_context,
-                state=execution_state,
-                started_at=started_at,
-            )
-            loop_break_reason = execution_decision.loop_break_reason
-            tool_cost_ms = execution_decision.tool_cost_ms
-            tool_result = execution_decision.tool_result
-
-        # P3 重构：工具结果状态落库统一走 reducer，避免主流程继续堆叠状态分支。
-        effects_result = apply_tool_result_effects(
-            logger=logger,
-            step=step,
-            function_name=lifecycle.function_name,
-            normalized_function_name=lifecycle.normalized_function_name,
-            function_args=lifecycle.function_args,
-            tool_result=tool_result,
-            loop_break_reason=loop_break_reason,
+            tool_name=lifecycle.tool_name,
             browser_route_state_key=iteration_context.browser_route_state_key,
+            iteration_blocked_function_names=iteration_context.iteration_blocked_function_names,
             execution_context=execution_context,
             execution_state=execution_state,
+            started_at=started_at,
         )
-        tool_result = effects_result.tool_result
-        loop_break_reason = effects_result.loop_break_reason
+        tool_result = policy_result.tool_result
+        loop_break_reason = policy_result.loop_break_reason
+        tool_cost_ms = policy_result.tool_cost_ms
 
         await event_dispatcher.emit(build_called_event(lifecycle, tool_result))
         interrupt_request = extract_interrupt_request(tool_result)
@@ -607,24 +557,35 @@ async def execute_step_with_prompt(
                 feedback_content_builder=_build_tool_feedback_content,
             )
         )
-        loop_break_payload = build_loop_break_result(
-            loop_break_reason=loop_break_reason,
+        convergence_result = policy_engine.evaluate_iteration_convergence(
+            loop_break_reason=loop_break_reason or "",
             step=step,
             tool_result=tool_result,
+            execution_state=execution_state,
+        )
+        if convergence_result.should_break and convergence_result.payload is not None:
+            return convergence_result.payload, event_dispatcher.emitted_events
+        progress_result = convergence_judge.evaluate_file_processing_progress(
+            step=step,
+            task_mode=task_mode,
+            recent_function_name=lifecycle.normalized_function_name,
+            tool_result_success=bool(tool_result.success),
+            step_file_context=step_file_context,
             runtime_recent_action=execution_state.runtime_recent_action,
         )
-        if loop_break_payload is not None:
-            return loop_break_payload, event_dispatcher.emitted_events
-        if reached_tool_failure_limit(execution_state):
-            return _build_loop_break_payload(
-                step=step,
-                blocker="连续工具调用失败次数过多，当前步骤已停止继续重试。",
-                next_hint="请检查参数、改换工具，或将当前步骤拆小后再执行。",
-                runtime_recent_action=execution_state.runtime_recent_action,
-            ), event_dispatcher.emitted_events
+        if progress_result.should_break and progress_result.payload is not None:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "关键事实满足，提前收敛步骤",
+                step_id=str(step.id or ""),
+                task_mode=task_mode,
+                reason_code=progress_result.reason_code,
+                iteration=index,
+            )
+            return progress_result.payload, event_dispatcher.emitted_events
 
-    return finalize_max_iterations(
-        logger=logger,
+    return policy_engine.finalize_max_iterations(
         step=step,
         task_mode=task_mode,
         llm_message=execution_state.llm_message,
@@ -632,4 +593,5 @@ async def execute_step_with_prompt(
         requested_max_tool_iterations=execution_context.requested_max_tool_iterations,
         iteration_count=execution_context.effective_max_tool_iterations,
         runtime_recent_action=execution_state.runtime_recent_action,
+        step_file_context=step_file_context,
     ), event_dispatcher.emitted_events

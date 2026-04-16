@@ -6,7 +6,6 @@ import hashlib
 import json
 import logging
 import re
-import uuid
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from langgraph.types import interrupt
@@ -111,8 +110,14 @@ from .tools import (
     infer_entry_strategy,
     requests_plan_only,
 )
+from .replan import ReplanMergeEngine
 
 logger = logging.getLogger(__name__)
+_REPLAN_MERGE_ENGINE = ReplanMergeEngine(
+    replan_meta_validation_step_pattern=REPLAN_META_VALIDATION_STEP_PATTERN,
+    replan_meta_validation_allow_pattern=REPLAN_META_VALIDATION_ALLOW_PATTERN,
+    replan_meta_validation_deny_pattern=REPLAN_META_VALIDATION_DENY_PATTERN,
+)
 
 
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -652,83 +657,6 @@ def _find_reusable_step_outcome(
         return candidate_outcome, current_run_id, str(candidate.id)
 
     return None
-
-
-def _dedupe_replanned_steps(existing_steps: List[Step], new_steps: List[Step]) -> List[Step]:
-    """重规划时确保新步骤 ID 不与已保留步骤冲突。"""
-    seen_step_ids = {
-        str(step.id).strip()
-        for step in existing_steps
-        if str(step.id).strip()
-    }
-    deduped_steps: List[Step] = []
-    for step in new_steps:
-        normalized_step = step.model_copy(deep=True)
-        step_id = str(normalized_step.id).strip()
-        if not step_id or step_id in seen_step_ids:
-            normalized_step.id = str(uuid.uuid4())
-            step_id = normalized_step.id
-        seen_step_ids.add(step_id)
-        deduped_steps.append(normalized_step)
-    return deduped_steps
-
-
-def _merge_replanned_steps_into_plan(plan: Plan, new_steps: List[Step]) -> Tuple[List[Step], str]:
-    """按批次语义合并重规划结果，避免在整批执行后丢失新增步骤。"""
-    first_pending_index: Optional[int] = None
-    for index, current_step in enumerate(plan.steps):
-        if not current_step.done:
-            first_pending_index = index
-            break
-
-    if first_pending_index is None:
-        completed_steps = list(plan.steps)
-        merged_steps = list(completed_steps)
-        # 当前批次全部执行完成后，replan 产出的步骤代表下一批待执行步骤，应直接追加到已完成批次之后。
-        merged_steps.extend(_dedupe_replanned_steps(completed_steps, new_steps))
-        return merged_steps, "append_after_completed_batch"
-
-    preserved_steps = plan.steps[:first_pending_index]
-    merged_steps = list(preserved_steps)
-    # 若仍存在未完成步骤，则从首个未完成步骤开始整体替换，避免旧步骤残留。
-    merged_steps.extend(_dedupe_replanned_steps(preserved_steps, new_steps))
-    return merged_steps, "replace_remaining_pending_steps"
-
-
-def _user_explicitly_requests_tool_validation(user_message: str) -> bool:
-    normalized_message = str(user_message or "").strip()
-    if not normalized_message:
-        return False
-    if REPLAN_META_VALIDATION_DENY_PATTERN.search(normalized_message):
-        return False
-    return bool(REPLAN_META_VALIDATION_ALLOW_PATTERN.search(normalized_message))
-
-
-def _is_replan_meta_validation_step(step: Step) -> bool:
-    candidate_text = " ".join(
-        [
-            str(getattr(step, "title", "") or "").strip(),
-            str(getattr(step, "description", "") or "").strip(),
-            " ".join([str(item).strip() for item in list(getattr(step, "success_criteria", []) or []) if str(item).strip()]),
-        ]
-    ).strip()
-    if not candidate_text:
-        return False
-    return bool(REPLAN_META_VALIDATION_STEP_PATTERN.search(candidate_text))
-
-
-def _filter_replan_drift_steps(new_steps: List[Step], *, user_message: str) -> Tuple[List[Step], int]:
-    if _user_explicitly_requests_tool_validation(user_message):
-        return new_steps, 0
-
-    filtered_steps: List[Step] = []
-    dropped_count = 0
-    for step in new_steps:
-        if _is_replan_meta_validation_step(step):
-            dropped_count += 1
-            continue
-        filtered_steps.append(step)
-    return filtered_steps, dropped_count
 
 
 # 记忆 helper：负责总结后的事实/偏好提炼、候选规整与去重治理。
@@ -2806,7 +2734,7 @@ async def replan_node(
                 attempt=attempt + 1,
             )
             candidate_steps = []
-        filtered_steps, dropped_drift_steps = _filter_replan_drift_steps(
+        filtered_steps, dropped_drift_steps = _REPLAN_MERGE_ENGINE.filter_replan_drift_steps(
             candidate_steps,
             user_message=user_message,
         )
@@ -2842,7 +2770,7 @@ async def replan_node(
         )
         return state
 
-    updated_steps, merge_mode = _merge_replanned_steps_into_plan(plan, new_steps)
+    updated_steps, merge_mode = _REPLAN_MERGE_ENGINE.merge_replanned_steps_into_plan(plan, new_steps)
     plan.steps = updated_steps
 
     next_step = plan.get_next_step()
