@@ -878,6 +878,15 @@ def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> No
     ) == "file_processing"
 
 
+def test_classify_step_task_mode_should_ignore_low_value_success_criteria_noise() -> None:
+    assert classify_step_task_mode(
+        Step(
+            description="读取 /tmp/backend.log 并整理错误摘要",
+            success_criteria=["完成任务", "继续处理"],
+        )
+    ) == "file_processing"
+
+
 def test_classify_step_task_mode_should_prefer_web_reading_over_browser_interaction_for_page_reading() -> None:
     assert classify_step_task_mode(
         Step(description="打开 https://openai.com/blog 阅读页面内容并提炼要点")
@@ -1307,7 +1316,7 @@ def test_execute_step_with_prompt_should_block_fetch_page_before_search_for_rese
     assert "请先调用 search_web 获取候选链接" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_block_repeated_search_before_fetch_page() -> None:
+def test_execute_step_with_prompt_should_rewrite_repeated_search_to_fetch_page() -> None:
     llm = _SearchThenRepeatSearchLLM()
     search_fetch_tool = _SearchFetchTool()
 
@@ -1324,13 +1333,12 @@ def test_execute_step_with_prompt_should_block_repeated_search_before_fetch_page
 
     assert payload["success"] is True
     assert payload["result"] == "已停止重复搜索并结束步骤"
-    assert search_fetch_tool.invocations == ["search_web"]
+    assert search_fetch_tool.invocations == ["search_web", "fetch_page"]
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 2
-    assert called_events[1].function_name == "search_web"
+    assert called_events[1].function_name == "fetch_page"
     assert called_events[1].function_result is not None
-    assert called_events[1].function_result.success is False
-    assert "优先对搜索结果中的 URL 调用 fetch_page" in str(called_events[1].function_result.message or "")
+    assert called_events[1].function_result.success is True
 
 
 def test_execute_step_with_prompt_should_prefer_fetch_page_after_search_results_are_ready() -> None:
@@ -1395,7 +1403,7 @@ def test_execute_step_with_prompt_should_break_on_repeated_fetch_page_url() -> N
 
     assert payload["success"] is False
     assert payload["blockers"] == ["同一页面抓取请求已重复触发多次，当前检索路径没有新增信息。"]
-    assert payload["next_hint"] == "请切换其他候选 URL、改用其他工具，或结束当前步骤。"
+    assert str(payload["next_hint"]).startswith("请切换其他候选 URL、改用其他工具，或结束当前步骤。")
     assert search_fetch_tool.invocations == ["fetch_page", "fetch_page"]
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 3

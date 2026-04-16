@@ -112,6 +112,36 @@ def test_merge_engine_should_dedupe_semantic_duplicates_in_new_steps() -> None:
     assert merged_steps[1].id == "new-c"
 
 
+def test_merge_engine_should_dedupe_when_only_low_value_success_criteria_differs() -> None:
+    engine = _build_engine()
+    plan = Plan(
+        title="replan",
+        goal="收集目录信息",
+        language="zh",
+        steps=[],
+    )
+    new_steps = [
+        Step(
+            id="new-a",
+            title="读取目录",
+            description="读取目录并输出",
+            success_criteria=["读取目录", "输出结果"],
+            status=ExecutionStatus.PENDING,
+        ),
+        Step(
+            id="new-b",
+            title="读取目录",
+            description="读取目录并输出",
+            success_criteria=["完成任务", "继续处理", "读取目录", "输出结果"],
+            status=ExecutionStatus.PENDING,
+        ),
+    ]
+
+    merged_steps, _ = engine.merge_replanned_steps_into_plan(plan, new_steps)
+    assert len(merged_steps) == 1
+    assert merged_steps[0].id == "new-a"
+
+
 def test_filter_replan_drift_steps_should_respect_user_deny_signal() -> None:
     engine = _build_engine()
     steps = [
@@ -161,4 +191,3 @@ def test_filter_replan_drift_steps_should_allow_meta_when_user_explicitly_reques
     assert dropped_count == 0
     assert len(filtered_steps) == 1
     assert filtered_steps[0].id == "meta-1"
-

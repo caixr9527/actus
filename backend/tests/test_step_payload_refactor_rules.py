@@ -30,14 +30,11 @@ def test_build_step_from_payload_should_fallback_description_to_title() -> None:
 
     assert step.title == "整理需求"
     assert step.description == "整理需求"
-    assert step.execution_template == "整理需求"
-    assert step.required_slots == []
-    assert step.execution_slots == {}
     assert step.success_criteria == ["整理需求"]
     assert step.objective_key == build_step_objective_key("整理需求", "整理需求")
 
 
-def test_build_step_from_payload_should_keep_execution_template_and_slots() -> None:
+def test_build_step_from_payload_should_ignore_legacy_execution_fields() -> None:
     step = build_step_from_payload(
         {
             "description": "生成最终输出",
@@ -48,9 +45,20 @@ def test_build_step_from_payload_should_keep_execution_template_and_slots() -> N
         fallback_index=0,
     )
 
-    assert step.execution_template == "根据{{city}}整理{{days}}天行程"
-    assert step.required_slots == ["city", "days"]
-    assert step.execution_slots == {"city": "上海", "days": 3}
+    assert step.description == "生成最终输出"
+    assert step.success_criteria == ["生成最终输出"]
+
+
+def test_build_step_from_payload_should_filter_low_value_success_criteria() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "根据检索结果生成候选清单",
+            "success_criteria": ["完成任务", "继续处理", "至少给出3个候选并附来源链接"],
+        },
+        fallback_index=0,
+    )
+
+    assert step.success_criteria == ["至少给出3个候选并附来源链接"]
 
 
 def test_build_step_from_payload_should_normalize_task_mode_hint() -> None:

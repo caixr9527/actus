@@ -1056,6 +1056,67 @@ class _FakeNoToolLLM:
         return dict(self._message)
 
 
+class _FakeSequentialToolCallLLM:
+    def __init__(self, messages: List[Dict[str, Any]]) -> None:
+        self._messages = list(messages)
+
+    async def invoke(self, **kwargs: Any) -> Dict[str, Any]:
+        if len(self._messages) == 0:
+            return {"content": '{"success": true, "summary": "ok"}'}
+        return dict(self._messages.pop(0))
+
+
+class _FakeSearchFetchTool:
+    name = "search"
+
+    def __init__(self) -> None:
+        self.invocations: List[tuple[str, Dict[str, Any]]] = []
+
+    def get_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fetch_page",
+                    "description": "fetch",
+                    "parameters": {"type": "object", "properties": {"url": {"type": "string"}}},
+                },
+            },
+        ]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() in {"search_web", "fetch_page"}
+
+    async def invoke(self, function_name: str, **kwargs: Any) -> ToolResult:
+        self.invocations.append((str(function_name or "").strip(), dict(kwargs)))
+        if str(function_name or "").strip() == "search_web":
+            return ToolResult(
+                success=True,
+                data={
+                    "results": [
+                        {"url": "https://alpha.example.com/a"},
+                        {"url": "https://beta.example.org/b"},
+                    ]
+                },
+            )
+        return ToolResult(
+            success=True,
+            data={
+                "url": str(kwargs.get("url") or ""),
+                "final_url": str(kwargs.get("url") or ""),
+                "content": "ok",
+            },
+        )
+
+
 class _FakeToolOnly:
     def __init__(self, schema: Dict[str, Any]) -> None:
         self._schema = schema
@@ -1211,3 +1272,58 @@ def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_emp
     blockers = [str(item) for item in list(payload.get("blockers") or [])]
     assert any("当前步骤无可用工具" in item for item in blockers)
     assert tool_events == []
+
+
+def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_explicit_url_present() -> None:
+    llm = _FakeSequentialToolCallLLM(
+        messages=[
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "上海周边周末自驾游"}, ensure_ascii=False),
+                        },
+                    }
+                ]
+            },
+            {
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "summary": "已读取目标URL",
+                        "delivery_text": "",
+                        "attachments": [],
+                        "blockers": [],
+                        "facts_learned": [],
+                        "open_questions": [],
+                        "next_hint": "",
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        ]
+    )
+    tool = _FakeSearchFetchTool()
+    step = Step(description="读取URL https://www.sohu.com/a/880046224_121956422 的页面内容")
+
+    payload, tool_events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,  # type: ignore[arg-type]
+            step=step,
+            runtime_tools=[tool],  # type: ignore[arg-type]
+            task_mode="research",
+            max_tool_iterations=2,
+            user_content=[{"type": "text", "text": "请读取这个链接并总结"}],
+        )
+    )
+
+    assert payload.get("success") is True
+    assert len(tool.invocations) >= 1
+    assert tool.invocations[0][0] == "fetch_page"
+    assert tool.invocations[0][1]["url"] == "https://www.sohu.com/a/880046224_121956422"
+    called_events = [event for event in tool_events if str(event.status.value) == "called"]
+    assert len(called_events) >= 1
+    assert called_events[0].function_name == "fetch_page"

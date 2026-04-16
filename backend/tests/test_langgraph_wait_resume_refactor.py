@@ -594,15 +594,12 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
                 id="step-1",
                 title="等待用户选择课程",
                 description="展示三门课程并等待用户选择",
-                required_slots=["course_name"],
                 status=ExecutionStatus.RUNNING,
             ),
             Step(
                 id="step-2",
                 title="继续处理",
                 description="根据用户选择继续后续步骤",
-                execution_template="根据{{course_name}}继续后续步骤",
-                required_slots=["course_name"],
                 status=ExecutionStatus.PENDING,
             ),
         ],
@@ -640,8 +637,7 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     next_step = next_state["plan"].get_next_step()
     assert next_step is not None
     assert next_step.id == "step-2"
-    assert next_step.execution_slots["course_name"] == "AI 人工智能算法工程师体系课"
-    assert next_state["working_memory"]["confirmed_slots"]["course_name"] == "AI 人工智能算法工程师体系课"
+    assert next_state["working_memory"]["confirmed_facts"]["latest_user_input"] == "AI 人工智能算法工程师体系课"
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
 
 
@@ -939,7 +935,7 @@ def test_route_after_wait_should_continue_current_batch_before_replan() -> None:
     assert route_after_wait({"plan": plan, "execution_count": 2, "max_execution_steps": 20}) == "replan"
 
 
-def test_execute_step_node_should_render_execution_template_with_confirmed_slots() -> None:
+def test_execute_step_node_should_append_confirmed_facts_to_description_context() -> None:
     class _CapturePromptLLM:
         def __init__(self) -> None:
             self.last_prompt_text = ""
@@ -971,9 +967,6 @@ def test_execute_step_node_should_render_execution_template_with_confirmed_slots
                 id="step-render",
                 title="执行模板步骤",
                 description="根据用户输入继续处理",
-                execution_template="根据{{course_name}}继续处理，预算{{budget}}元",
-                required_slots=["course_name", "budget"],
-                execution_slots={"budget": 3000},
                 status=ExecutionStatus.PENDING,
             )
         ],
@@ -984,7 +977,7 @@ def test_execute_step_node_should_render_execution_template_with_confirmed_slots
         "pending_interrupt": {},
         "graph_metadata": {},
         "message_window": [],
-        "working_memory": {"confirmed_slots": {"course_name": "AI 工程师课程"}},
+        "working_memory": {"confirmed_facts": {"course_name": "AI 工程师课程", "budget": 3000}},
         "execution_count": 0,
         "user_message": "继续执行",
         "input_parts": [],
@@ -999,4 +992,7 @@ def test_execute_step_node_should_render_execution_template_with_confirmed_slots
     )
 
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert "根据AI 工程师课程继续处理，预算3000元" in llm.last_prompt_text
+    assert "根据用户输入继续处理" in llm.last_prompt_text
+    assert "已确认用户输入（仅作当前步骤执行上下文，不改写原步骤描述）" in llm.last_prompt_text
+    assert "- course_name: AI 工程师课程" in llm.last_prompt_text
+    assert "- budget: 3000" in llm.last_prompt_text

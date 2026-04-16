@@ -1464,7 +1464,8 @@ def test_replan_node_should_use_summarized_prompt_inputs_instead_of_full_plan_js
 
     assert "当前步骤摘要" in llm.last_prompt
     assert "当前计划快照" in llm.last_prompt
-    assert "success_criteria" not in llm.last_prompt
+    context_prompt = llm.last_prompt.split("已知上下文:", 1)[-1]
+    assert '"success_criteria"' not in context_prompt
 
 
 def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates() -> None:

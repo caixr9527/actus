@@ -1,10 +1,12 @@
 import json
 import unittest
+from os import environ
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.interfaces.errors import AppException, BadRequestException
 from app.services.searxng import SearXNGService
+from app.services.search_quality_policy import get_search_quality_policy
 
 
 class _FakeResponse:
@@ -69,6 +71,16 @@ class _FakeAsyncWebCrawler:
 
 
 class SearXNGServiceTestCase(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self) -> None:
+        for key in (
+            "SEARXNG_SEARCH_INTERMEDIATE_HOSTS",
+            "SEARXNG_SEARCH_ENGINE_BONUS_NAMES",
+            "SEARXNG_SEARCH_DOMAIN_DIVERSITY_TOP_WINDOW",
+            "SEARXNG_SEARCH_DOMAIN_CAP_IN_TOP_WINDOW",
+        ):
+            environ.pop(key, None)
+        get_search_quality_policy.cache_clear()
+
 
     async def test_search_should_parse_json_payload(self) -> None:
         payload = {
@@ -102,6 +114,133 @@ class SearXNGServiceTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.results[0].url, "https://openai.com")
         self.assertEqual(result.suggestions, ["open ai"])
         self.assertEqual(result.unresponsive_engines, ["duckduckgo"])
+
+    async def test_search_should_filter_intermediate_urls_and_dedupe_tracking_variants(self) -> None:
+        payload = {
+            "query": "上海 周末 自驾游",
+            "results": [
+                {
+                    "title": "百度中间页",
+                    "url": "https://mbd.baidu.com/newspage/data/dtlandingsuper?nid=123",
+                    "content": "中间页",
+                    "engine": "baidu",
+                },
+                {
+                    "title": "候选A-1",
+                    "url": "https://example.com/guide?source=bing&utm_source=test",
+                    "content": "上海周末自驾游攻略",
+                    "engine": "bing",
+                },
+                {
+                    "title": "候选A-2",
+                    "url": "https://example.com/guide?source=baidu",
+                    "content": "上海周末自驾游攻略重复",
+                    "engine": "baidu",
+                },
+                {
+                    "title": "候选B",
+                    "url": "https://travel.example.org/plan",
+                    "content": "2天1夜行程",
+                    "engine": "bing",
+                },
+            ],
+        }
+        service = SearXNGService()
+
+        with patch("app.services.searxng.urlopen", return_value=_FakeResponse(status=200, body=json.dumps(payload))):
+            result = await service.search(query="上海 周末 自驾游")
+
+        self.assertEqual(len(result.results), 2)
+        urls = [item.url for item in result.results]
+        self.assertTrue(all("mbd.baidu.com" not in item for item in urls))
+        self.assertEqual(len([item for item in urls if "example.com/guide" in item]), 1)
+
+    async def test_search_policy_should_support_env_override_for_intermediate_hosts(self) -> None:
+        environ["SEARXNG_SEARCH_INTERMEDIATE_HOSTS"] = "redirect.example.com"
+        get_search_quality_policy.cache_clear()
+        payload = {
+            "query": "openai release notes",
+            "results": [
+                {
+                    "title": "中间页",
+                    "url": "https://redirect.example.com/jump?id=1",
+                    "content": "redirect",
+                    "engine": "bing",
+                },
+                {
+                    "title": "目标页",
+                    "url": "https://docs.example.com/notes",
+                    "content": "release notes",
+                    "engine": "bing",
+                },
+            ],
+        }
+
+        service = SearXNGService()
+        with patch("app.services.searxng.urlopen", return_value=_FakeResponse(status=200, body=json.dumps(payload))):
+            result = await service.search(query="openai release notes")
+
+        urls = [item.url for item in result.results]
+        self.assertEqual(urls, ["https://docs.example.com/notes"])
+
+    async def test_search_should_limit_same_domain_in_top_window(self) -> None:
+        payload = {
+            "query": "上海 周末 自驾游",
+            "results": [
+                {
+                    "title": f"同域{i}",
+                    "url": f"https://same.example.com/article-{i}",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "bing",
+                }
+                for i in range(5)
+            ] + [
+                {
+                    "title": "异域1",
+                    "url": "https://other.example.org/a",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "baidu",
+                },
+                {
+                    "title": "异域2",
+                    "url": "https://another.example.net/b",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "baidu",
+                },
+                {
+                    "title": "异域3",
+                    "url": "https://city.example.cn/c",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "bing",
+                },
+                {
+                    "title": "异域4",
+                    "url": "https://news.example.com/d",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "bing",
+                },
+                {
+                    "title": "异域5",
+                    "url": "https://tips.example.io/e",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "baidu",
+                },
+                {
+                    "title": "异域6",
+                    "url": "https://travel.example.co/f",
+                    "content": "上海 周末 自驾游 推荐",
+                    "engine": "baidu",
+                },
+            ],
+        }
+        service = SearXNGService()
+
+        with patch("app.services.searxng.urlopen", return_value=_FakeResponse(status=200, body=json.dumps(payload))):
+            result = await service.search(query="上海 周末 自驾游")
+
+        top_urls = [item.url for item in result.results[:8]]
+        same_domain_count = len([item for item in top_urls if "same.example.com" in item])
+        self.assertLessEqual(same_domain_count, 2)
 
     async def test_search_should_reject_empty_query(self) -> None:
         service = SearXNGService()

@@ -121,9 +121,6 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
             id="step-2",
             title="增量步骤",
             description="增量步骤",
-            execution_template="根据{{topic}}执行增量步骤",
-            required_slots=["topic"],
-            execution_slots={"topic": "runtime"},
             task_mode_hint=StepTaskModeHint.RESEARCH,
             output_mode=StepOutputMode.NONE,
             artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
@@ -145,9 +142,6 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
     assert step_record.step_id == "step-2"
     assert step_record.step_index == 2
     assert step_record.objective_key == "objective-step-2"
-    assert step_record.execution_template == "根据{{topic}}执行增量步骤"
-    assert step_record.required_slots == ["topic"]
-    assert step_record.execution_slots == {"topic": "runtime"}
     assert step_record.status == ExecutionStatus.RUNNING.value
     assert step_record.task_mode_hint == StepTaskModeHint.RESEARCH.value
     assert step_record.output_mode == StepOutputMode.NONE.value
@@ -186,9 +180,6 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
             id="step-3",
             title="新描述",
             description="新描述",
-            execution_template="根据{{city}}生成新描述",
-            required_slots=["city"],
-            execution_slots={"city": "上海"},
             task_mode_hint=StepTaskModeHint.GENERAL,
             output_mode=StepOutputMode.INLINE,
             artifact_policy=StepArtifactPolicy.DEFAULT,
@@ -211,9 +202,6 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     assert run_record.current_step_id is None
     assert existing_step_record.title == "新描述"
     assert existing_step_record.description == "新描述"
-    assert existing_step_record.execution_template == "根据{{city}}生成新描述"
-    assert existing_step_record.required_slots == ["city"]
-    assert existing_step_record.execution_slots == {"city": "上海"}
     assert existing_step_record.objective_key == "objective-step-3"
     assert existing_step_record.status == ExecutionStatus.COMPLETED.value
     assert existing_step_record.task_mode_hint == StepTaskModeHint.GENERAL.value
@@ -244,9 +232,6 @@ def test_workflow_run_step_model_to_domain_should_filter_non_file_artifacts_from
         step_index=0,
         title="步骤1",
         description="步骤1",
-        execution_template="根据{{slot}}执行步骤1",
-        required_slots=["slot"],
-        execution_slots={"slot": "value"},
         objective_key="objective-step-1",
         success_criteria=["步骤1完成"],
         status=ExecutionStatus.COMPLETED.value,
@@ -273,9 +258,6 @@ def test_workflow_run_step_model_to_domain_should_filter_non_file_artifacts_from
 
     domain_record = record.to_domain()
 
-    assert domain_record.execution_template == "根据{{slot}}执行步骤1"
-    assert domain_record.required_slots == ["slot"]
-    assert domain_record.execution_slots == {"slot": "value"}
     assert domain_record.outcome is not None
     assert domain_record.outcome.produced_artifacts == ["/tmp/file-1.md"]
 
