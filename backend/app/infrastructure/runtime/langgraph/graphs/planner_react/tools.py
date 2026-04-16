@@ -265,6 +265,35 @@ def _build_assistant_tool_call_message(
     return assistant_message
 
 
+def _build_tool_feedback_content_with_runtime_progress(
+        *,
+        function_name: str,
+        tool_result: Any,
+        execution_context: Any,
+        execution_state: ExecutionState,
+) -> str:
+    feedback_content = _build_tool_feedback_content(function_name, tool_result)
+    if not bool(getattr(execution_context, "research_route_enabled", False)):
+        return feedback_content
+    normalized_function_name = str(function_name or "").strip().lower()
+    if normalized_function_name not in {"search_web", "fetch_page"}:
+        return feedback_content
+    parsed_feedback = safe_parse_json(feedback_content)
+    if not isinstance(parsed_feedback, dict):
+        return feedback_content
+    research_progress = dict(execution_state.runtime_recent_action.get("research_progress") or {})
+    if len(research_progress) == 0:
+        return feedback_content
+    parsed_feedback["research_progress"] = research_progress
+    missing_signals = list(research_progress.get("missing_signals") or [])
+    if missing_signals:
+        parsed_feedback["next_action_hint"] = (
+            "请优先补齐缺失信息后再继续检索："
+            + "；".join([str(item) for item in missing_signals[:2] if str(item).strip()])
+        )
+    return json.dumps(parsed_feedback, ensure_ascii=False)
+
+
 async def execute_step_with_prompt(
         *,
         llm: LLM,
@@ -531,6 +560,11 @@ async def execute_step_with_prompt(
             loop_break_reason=loop_break_reason or "",
             browser_no_progress_count=execution_state.browser_no_progress_count,
             consecutive_failure_count=execution_state.consecutive_failure_count,
+            research_candidate_url_count=len(execution_state.research_candidate_urls),
+            research_fetched_url_count=len(execution_state.research_fetched_urls),
+            research_candidate_domain_count=len(execution_state.research_candidate_domains),
+            research_fetched_domain_count=len(execution_state.research_fetched_domains),
+            research_coverage_score=execution_state.research_coverage_score,
             llm_elapsed_ms=llm_cost_ms,
             tool_elapsed_ms=tool_cost_ms if matched_tool is not None else 0,
             elapsed_ms=elapsed_ms(started_at),
@@ -554,7 +588,14 @@ async def execute_step_with_prompt(
             build_tool_feedback_message(
                 lifecycle=lifecycle,
                 tool_result=tool_result,
-                feedback_content_builder=_build_tool_feedback_content,
+                feedback_content_builder=lambda function_name, current_tool_result: (
+                    _build_tool_feedback_content_with_runtime_progress(
+                        function_name=function_name,
+                        tool_result=current_tool_result,
+                        execution_context=execution_context,
+                        execution_state=execution_state,
+                    )
+                ),
             )
         )
         convergence_result = policy_engine.evaluate_iteration_convergence(

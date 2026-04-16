@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set
 
+from app.domain.services.runtime.normalizers import extract_url_domain, normalize_url_value
 from app.domain.models import Step, ToolResult
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.policies import (
@@ -14,7 +15,13 @@ from app.domain.services.workspace_runtime.policies import (
 from .execution_context import ExecutionContext, step_allows_user_wait
 from .execution_state import ExecutionState
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
-from app.domain.services.runtime.contracts.langgraph_settings import ASK_USER_FUNCTION_NAME, READ_ONLY_FILE_FUNCTION_NAMES
+from app.domain.services.runtime.contracts.langgraph_settings import (
+    ASK_USER_FUNCTION_NAME,
+    READ_ONLY_FILE_FUNCTION_NAMES,
+    RESEARCH_CROSS_DOMAIN_REPEAT_BLOCK_LIMIT,
+    RESEARCH_MIN_DOMAIN_COUNT,
+    RESEARCH_MIN_FETCH_COUNT,
+)
 
 
 @dataclass(slots=True)
@@ -310,20 +317,71 @@ def evaluate_tool_guard(
         ctx.research_route_enabled
         and normalized_function_name == "search_web"
         and state.research_search_ready
-        and not state.research_fetch_completed
+        and not ctx.research_has_explicit_url
     ):
-        candidate_hint = "；".join(state.research_candidate_urls[:3])
-        return GuardDecision(
-            should_skip=True,
-            loop_break_reason="research_route_fetch_required",
-            tool_result=ToolResult(
-                success=False,
-                message=(
-                    "已经拿到候选链接，请优先对搜索结果中的 URL 调用 fetch_page 读取正文。"
-                    + (f" 可用链接示例: {candidate_hint}" if candidate_hint else "")
+        pending_candidate_urls = _collect_pending_candidate_urls(state=state)
+        needs_fetch_count = state.research_fetch_success_count < RESEARCH_MIN_FETCH_COUNT
+        needs_domain_coverage = len(state.research_fetched_domains) < RESEARCH_MIN_DOMAIN_COUNT
+        if pending_candidate_urls and (needs_fetch_count or needs_domain_coverage):
+            candidate_hint = "；".join((pending_candidate_urls or state.research_candidate_urls)[:3])
+            return GuardDecision(
+                should_skip=True,
+                loop_break_reason="research_route_fetch_required",
+                tool_result=ToolResult(
+                    success=False,
+                    message=(
+                        "已经拿到候选链接，请优先对搜索结果中的 URL 调用 fetch_page 读取正文。"
+                        f" 当前已抓取 {state.research_fetch_success_count} 个来源，目标至少 {RESEARCH_MIN_FETCH_COUNT} 个；"
+                        f" 已覆盖 {len(state.research_fetched_domains)} 个站点，目标至少 {RESEARCH_MIN_DOMAIN_COUNT} 个。"
+                        + (f" 可用链接示例: {candidate_hint}" if candidate_hint else "")
+                    ),
                 ),
-            ),
+            )
+    if (
+        ctx.research_route_enabled
+        and normalized_function_name == "fetch_page"
+        and not ctx.research_has_explicit_url
+        and len(state.research_fetched_domains) < RESEARCH_MIN_DOMAIN_COUNT
+    ):
+        requested_url = normalize_url_value(function_args.get("url"))
+        requested_domain = _extract_domain(requested_url)
+        fetched_domains = set(state.research_fetched_domains)
+        cross_domain_candidate = _pick_pending_cross_domain_candidate(
+            state=state,
+            excluded_domains=fetched_domains,
         )
+        # P3-一次性收口：覆盖不足时同域重复抓取先可恢复拦截，超过阈值后再收敛终止。
+        if requested_domain and requested_domain in fetched_domains and cross_domain_candidate:
+            state.research_cross_domain_repeat_blocks += 1
+            should_break = state.research_cross_domain_repeat_blocks > RESEARCH_CROSS_DOMAIN_REPEAT_BLOCK_LIMIT
+            loop_break_reason = "research_route_cross_domain_fetch_limit" if should_break else ""
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "检索覆盖不足，已拦截同域重复抓取",
+                step_id=str(step.id or ""),
+                function_name=function_name,
+                requested_url=requested_url,
+                requested_domain=requested_domain,
+                fetched_domain_count=len(fetched_domains),
+                next_cross_domain_url=cross_domain_candidate,
+                cross_domain_repeat_blocks=state.research_cross_domain_repeat_blocks,
+                cross_domain_repeat_block_limit=RESEARCH_CROSS_DOMAIN_REPEAT_BLOCK_LIMIT,
+                should_break=should_break,
+            )
+            return GuardDecision(
+                should_skip=True,
+                loop_break_reason=loop_break_reason,
+                tool_result=ToolResult(
+                    success=False,
+                    message=(
+                        "当前研究步骤尚未覆盖足够来源，请优先抓取不同站点候选链接，避免重复读取同域页面。"
+                        f" 建议先读取: {cross_domain_candidate}"
+                    ),
+                ),
+            )
+        # 未触发“同域重复且存在跨域候选”拦截时，清理历史累计，避免旧计数污染后续轮次。
+        state.research_cross_domain_repeat_blocks = 0
     if function_name == ASK_USER_FUNCTION_NAME and not step_allows_user_wait(step, function_args):
         log_runtime(
             logger,
@@ -342,3 +400,48 @@ def evaluate_tool_guard(
         )
 
     return GuardDecision(should_skip=False)
+
+
+def _collect_pending_candidate_urls(*, state: ExecutionState) -> list[str]:
+    fetched_url_set = {
+        _normalize_fetch_dedupe_key(url)
+        for url in list(state.research_fetched_urls or [])
+        if _normalize_fetch_dedupe_key(url)
+    }
+    pending: list[str] = []
+    seen_pending_keys: set[str] = set()
+    for raw_url in list(state.research_candidate_urls or []):
+        normalized = _normalize_url(raw_url)
+        pending_key = _normalize_fetch_dedupe_key(normalized)
+        if (
+            not normalized
+            or not pending_key
+            or pending_key in fetched_url_set
+            or pending_key in seen_pending_keys
+        ):
+            continue
+        seen_pending_keys.add(pending_key)
+        pending.append(normalized)
+    return pending
+
+
+def _pick_pending_cross_domain_candidate(*, state: ExecutionState, excluded_domains: set[str]) -> str:
+    pending_urls = _collect_pending_candidate_urls(state=state)
+    for url in pending_urls:
+        domain = _extract_domain(url)
+        if domain and domain not in excluded_domains:
+            return url
+    return ""
+
+
+def _normalize_url(url: Any) -> str:
+    return normalize_url_value(url)
+
+
+def _normalize_fetch_dedupe_key(url: Any) -> str:
+    # 只用于“是否已读/是否重复”判定：忽略 query 降低追踪参数导致的重复抓取噪音。
+    return normalize_url_value(url, drop_query=True)
+
+
+def _extract_domain(url: str) -> str:
+    return extract_url_domain(url)

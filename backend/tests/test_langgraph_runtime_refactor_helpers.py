@@ -20,8 +20,14 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.finalizer import 
     finalize_max_iterations,
     finalize_no_tool_call,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import (
+    build_loop_break_result,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_effects import (
     apply_tool_result_effects,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_guards import (
+    evaluate_tool_guard,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_handlers import (
     execute_tool_with_policy,
@@ -114,6 +120,33 @@ def test_finalize_max_iterations_should_converge_success_when_file_facts_ready()
     )
     assert payload["success"] is True
     assert "收敛成功" in str(payload["summary"])
+
+
+def test_finalize_max_iterations_should_include_research_gap_hint() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="调研并给出结论")
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=6,
+        iteration_count=6,
+        runtime_recent_action={
+            "research_progress": {
+                "missing_signals": [
+                    "至少读取 2 个来源页面正文",
+                    "至少覆盖 2 个不同站点来源",
+                ]
+            }
+        },
+    )
+
+    assert payload["success"] is False
+    assert "研究缺口" in str(payload.get("next_hint") or "")
+    assert "至少读取 2 个来源页面正文" in str(payload.get("next_hint") or "")
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -453,6 +486,413 @@ def test_apply_tool_result_effects_should_record_success_feedback_payload_for_fa
     assert parsed_feedback["data"]["content"] == "A content"
 
 
+def test_apply_tool_result_effects_should_record_research_progress_snapshot() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并读取目的地详情")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    _ = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "淀山湖 周末 行程", "language": "zh-CN"},
+        tool_result=ToolResult(
+            success=True,
+            data={
+                "query": "淀山湖 周末 行程",
+                "results": [
+                    {"url": "https://example.com/a"},
+                    {"url": "https://travel.example.org/b"},
+                ],
+            },
+        ),
+        loop_break_reason="",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+    )
+    progress_after_search = dict(execution_state.runtime_recent_action.get("research_progress") or {})
+    assert progress_after_search.get("query_count") == 1
+    assert progress_after_search.get("candidate_url_count") == 2
+    assert progress_after_search.get("candidate_domain_count") == 2
+    assert progress_after_search.get("fetched_domain_count") == 0
+    assert progress_after_search.get("fetch_success_count") == 0
+
+    _ = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://travel.example.org/b"},
+        tool_result=ToolResult(
+            success=True,
+            data={
+                "url": "https://travel.example.org/b",
+                "final_url": "https://travel.example.org/b",
+                "title": "淀山湖攻略",
+                "content": "行程与交通说明",
+            },
+        ),
+        loop_break_reason="",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+    )
+    progress_after_fetch = dict(execution_state.runtime_recent_action.get("research_progress") or {})
+    assert progress_after_fetch.get("fetch_success_count") == 1
+    assert progress_after_fetch.get("fetched_url_count") == 1
+    assert float(progress_after_fetch.get("coverage_score") or 0.0) > 0.0
+
+
+def test_evaluate_tool_guard_should_block_same_domain_fetch_when_cross_domain_candidate_exists() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并补齐多来源证据")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = True
+    execution_state.research_fetch_success_count = 1
+    execution_state.research_candidate_urls = [
+        "https://same.example.com/a",
+        "https://other.example.org/b",
+    ]
+    execution_state.research_fetched_urls = [
+        "https://same.example.com/intro",
+    ]
+    execution_state.research_fetched_domains = ["same.example.com"]
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://same.example.com/a"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is True
+    assert guard.loop_break_reason == ""
+    assert "different" not in str(guard.tool_result.message or "").lower()
+    assert "不同站点" in str(guard.tool_result.message or "")
+
+
+def test_evaluate_tool_guard_should_allow_cross_domain_fetch_when_coverage_not_enough() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并补齐多来源证据")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = True
+    execution_state.research_fetch_success_count = 1
+    execution_state.research_candidate_urls = [
+        "https://same.example.com/a",
+        "https://other.example.org/b",
+    ]
+    execution_state.research_fetched_urls = [
+        "https://same.example.com/intro",
+    ]
+    execution_state.research_fetched_domains = ["same.example.com"]
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://other.example.org/b"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is False
+
+
+def test_evaluate_tool_guard_should_block_search_web_when_pending_candidates_and_coverage_not_enough() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并补齐多来源证据")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = True
+    execution_state.research_fetch_completed = True
+    execution_state.research_fetch_success_count = 1
+    execution_state.research_fetched_domains = ["same.example.com"]
+    execution_state.research_candidate_urls = [
+        "https://same.example.com/a",
+        "https://other.example.org/b",
+    ]
+    execution_state.research_fetched_urls = [
+        "https://same.example.com/read",
+    ]
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "重新搜索"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is True
+    assert guard.loop_break_reason == "research_route_fetch_required"
+    assert "优先对搜索结果中的 URL 调用 fetch_page" in str(guard.tool_result.message or "")
+
+
+def test_evaluate_tool_guard_should_break_after_repeated_same_domain_fetch_blocks() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并补齐多来源证据")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = True
+    execution_state.research_fetch_success_count = 2
+    execution_state.research_candidate_urls = [
+        "https://same.example.com/a",
+        "https://other.example.org/b",
+    ]
+    execution_state.research_fetched_urls = [
+        "https://same.example.com/intro",
+    ]
+    execution_state.research_fetched_domains = ["same.example.com"]
+
+    for _ in range(2):
+        guard = evaluate_tool_guard(
+            logger=logger,
+            step=step,
+            task_mode="research",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://same.example.com/a"},
+            matched_tool=object(),  # type: ignore[arg-type]
+            iteration_blocked_function_names=set(),
+            ctx=execution_context,
+            state=execution_state,
+        )
+        assert guard.should_skip is True
+        assert guard.loop_break_reason == ""
+
+    final_guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://same.example.com/a"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert final_guard.should_skip is True
+    assert final_guard.loop_break_reason == "research_route_cross_domain_fetch_limit"
+
+
+def test_evaluate_tool_guard_should_reset_cross_domain_repeat_blocks_when_not_blocked() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并补齐多来源证据")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = True
+    execution_state.research_fetch_success_count = 2
+    execution_state.research_fetched_domains = ["same.example.com"]
+    execution_state.research_candidate_urls = [
+        "https://same.example.com/a",
+        "https://other.example.org/b",
+    ]
+    execution_state.research_fetched_urls = [
+        "https://same.example.com/intro",
+    ]
+    execution_state.research_cross_domain_repeat_blocks = 2
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://other.example.org/b"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is False
+    assert execution_state.research_cross_domain_repeat_blocks == 0
+
+
+def test_evaluate_tool_guard_should_treat_query_variant_as_already_fetched_url() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并补齐多来源证据")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = True
+    execution_state.research_fetch_success_count = 1
+    execution_state.research_fetched_domains = ["same.example.com"]
+    execution_state.research_candidate_urls = [
+        "https://same.example.com/a?source=bing",
+        "https://other.example.org/b",
+    ]
+    execution_state.research_fetched_urls = [
+        "https://same.example.com/a?source=baidu",
+    ]
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "重新搜索"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is True
+    message = str(guard.tool_result.message or "")
+    assert "https://same.example.com/a?source=bing" not in message
+    assert "https://other.example.org/b" in message
+
+
 def test_convergence_judge_should_break_when_file_processing_facts_ready() -> None:
     judge = ConvergenceJudge()
     step = Step(
@@ -585,6 +1025,25 @@ def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missi
     blockers = [str(item) for item in list(payload.get("blockers") or [])]
     assert any("缺少可用的 message_ask_user 工具" in item for item in blockers)
     assert tool_events == []
+
+
+def test_build_loop_break_result_should_append_research_progress_hint() -> None:
+    payload = build_loop_break_result(
+        loop_break_reason="search_repeat",
+        step=Step(description="检索并总结"),
+        runtime_recent_action={
+            "research_progress": {
+                "missing_signals": [
+                    "至少读取 2 个来源页面正文",
+                    "至少覆盖 2 个不同站点来源",
+                ]
+            }
+        },
+    )
+    assert payload is not None
+    hints = str(payload.get("next_hint") or "")
+    assert "当前缺口" in hints
+    assert "至少读取 2 个来源页面正文" in hints
 
 
 def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_empty_model_output() -> None:

@@ -892,6 +892,42 @@ def test_runtime_context_service_should_not_inherit_previous_task_mode_in_planne
     assert context_packet["retrieved_memory_digest"][0]["memory_type"] == "instruction"
 
 
+def test_runtime_context_service_should_exclude_profile_memory_in_planner_stage() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "task_mode": StepTaskModeHint.GENERAL.value,
+        "retrieved_memories": [
+            {
+                "id": "mem-profile-1",
+                "memory_type": "profile",
+                "summary": "常从上海出发",
+                "content": {"text": "常从上海出发"},
+            },
+            {
+                "id": "mem-fact-1",
+                "memory_type": "fact",
+                "summary": "预算上限 2000",
+                "content": {"text": "预算上限 2000"},
+            },
+            {
+                "id": "mem-instruction-1",
+                "memory_type": "instruction",
+                "summary": "用户要求先确认再继续",
+                "content": {"text": "用户要求先确认再继续"},
+            },
+        ],
+    }
+
+    context_packet = context_service.build_packet(
+        stage="planner",
+        state=state,
+    )
+
+    memory_types = [item["memory_type"] for item in context_packet["retrieved_memory_digest"]]
+    assert "profile" not in memory_types
+    assert memory_types == ["fact", "instruction"]
+
+
 def test_runtime_context_service_should_filter_retrieved_memories_by_stage_and_task_mode_policy() -> None:
     context_service = RuntimeContextService()
     state = {

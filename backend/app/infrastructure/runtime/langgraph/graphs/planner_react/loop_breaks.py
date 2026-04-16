@@ -42,17 +42,25 @@ def build_loop_break_result(
             runtime_recent_action=runtime_recent_action,
         )
     if loop_break_reason == "search_repeat":
+        next_hint = "请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。"
         return _build_loop_break_payload(
             step=step,
             blocker="同一搜索查询已重复触发多次，当前检索路径没有继续收获。",
-            next_hint="请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。",
+            next_hint=_append_research_progress_hint(
+                runtime_recent_action=runtime_recent_action,
+                next_hint=next_hint,
+            ),
             runtime_recent_action=runtime_recent_action,
         )
     if loop_break_reason == "research_route_fingerprint_repeat":
+        next_hint = "请切换其他候选 URL、改用其他工具，或结束当前步骤。"
         return _build_loop_break_payload(
             step=step,
             blocker="同一页面抓取请求已重复触发多次，当前检索路径没有新增信息。",
-            next_hint="请切换其他候选 URL、改用其他工具，或结束当前步骤。",
+            next_hint=_append_research_progress_hint(
+                runtime_recent_action=runtime_recent_action,
+                next_hint=next_hint,
+            ),
             runtime_recent_action=runtime_recent_action,
         )
     if loop_break_reason == "research_route_transport_error":
@@ -60,6 +68,16 @@ def build_loop_break_result(
             step=step,
             blocker="检索/抓取链路出现瞬时网络错误，当前步骤已停止重试。",
             next_hint="请稍后重试，或先基于已有信息继续后续步骤。",
+            runtime_recent_action=runtime_recent_action,
+        )
+    if loop_break_reason == "research_route_cross_domain_fetch_limit":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="当前研究步骤在同域页面重复抓取，尚未形成跨来源覆盖。",
+            next_hint=_append_research_progress_hint(
+                runtime_recent_action=runtime_recent_action,
+                next_hint="请优先抓取不同域名的候选链接，再继续总结。",
+            ),
             runtime_recent_action=runtime_recent_action,
         )
     if loop_break_reason == "browser_no_progress":
@@ -70,6 +88,14 @@ def build_loop_break_result(
             runtime_recent_action=runtime_recent_action,
         )
     return None
+
+
+def _append_research_progress_hint(*, runtime_recent_action: Optional[Dict[str, Any]], next_hint: str) -> str:
+    research_progress = dict((runtime_recent_action or {}).get("research_progress") or {})
+    missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
+    if len(missing_signals) == 0:
+        return next_hint
+    return next_hint + " 当前缺口：" + "；".join(missing_signals[:2]) + "。"
 
 
 def _normalize_repeat_success_payload(tool_result: Optional[Any]) -> Dict[str, Any]:

@@ -170,6 +170,29 @@ def finalize_max_iterations(
     return _build_loop_break_payload(
         step=step,
         blocker="达到最大工具调用轮次，当前步骤仍未形成可交付结果。",
-        next_hint="请缩小步骤范围、改用更合适工具，或让模型直接给出当前可确认的结果。",
+        next_hint=_build_max_iteration_next_hint(
+            task_mode=task_mode,
+            runtime_recent_action=runtime_recent_action,
+        ),
         runtime_recent_action=runtime_recent_action,
+    )
+
+
+def _build_max_iteration_next_hint(
+    *,
+    task_mode: str,
+    runtime_recent_action: Optional[Dict[str, Any]],
+) -> str:
+    default_hint = "请缩小步骤范围、改用更合适工具，或让模型直接给出当前可确认的结果。"
+    if task_mode not in {"research", "web_reading"}:
+        return default_hint
+    recent_action = dict(runtime_recent_action or {})
+    research_progress = dict(recent_action.get("research_progress") or {})
+    missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
+    if len(missing_signals) == 0:
+        return default_hint
+    return (
+        "请先补齐研究缺口后再继续："
+        + "；".join(missing_signals[:2])
+        + "。若当前证据已足够，请直接基于已抓取内容输出结果。"
     )

@@ -12,6 +12,14 @@ class ExecutionState:
     research_search_ready: bool = False
     research_fetch_completed: bool = False
     research_candidate_urls: List[str] = field(default_factory=list)
+    research_query_history: List[str] = field(default_factory=list)
+    research_fetched_urls: List[str] = field(default_factory=list)
+    research_candidate_domains: List[str] = field(default_factory=list)
+    research_fetched_domains: List[str] = field(default_factory=list)
+    research_cross_domain_repeat_blocks: int = 0
+    research_fetch_success_count: int = 0
+    research_total_search_results: int = 0
+    research_coverage_score: float = 0.0
     browser_page_type: str = ""
     browser_structured_ready: bool = False
     browser_main_content_ready: bool = False

@@ -19,7 +19,11 @@ from app.domain.services.workspace_runtime.policies import (
 from .execution_context import ExecutionContext
 from .execution_state import ExecutionState
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
-from app.domain.services.runtime.contracts.langgraph_settings import FETCH_REPEAT_LIMIT, REPEAT_TOOL_LIMIT, SEARCH_REPEAT_LIMIT
+from app.domain.services.runtime.contracts.langgraph_settings import (
+    FETCH_REPEAT_LIMIT,
+    REPEAT_TOOL_LIMIT,
+    SEARCH_REPEAT_LIMIT,
+)
 
 
 @dataclass(slots=True)

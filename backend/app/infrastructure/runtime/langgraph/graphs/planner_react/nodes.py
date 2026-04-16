@@ -2602,6 +2602,10 @@ async def wait_for_human_node(
     if str(waiting_step.id or "").strip() == "direct-wait-confirm":
         # synthetic confirm 只负责授权继续执行，后续节点仍应保留原始请求作为当前任务。
         next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
+    else:
+        # P3-一次性收口：常规 human_wait 收到用户补充后先重规划，避免沿用等待前已写死的后续步骤参数。
+        control["wait_resume_action"] = "replan"
+        next_step = None
     working_memory = _merge_step_outcome_into_working_memory(
         _ensure_working_memory(state),
         step=waiting_step,

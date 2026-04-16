@@ -94,7 +94,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         include_open_questions=True,
         include_working_memory_digest=True,
         include_retrieved_memory_digest=True,
-        retrieved_memory_allowed_types=frozenset({"profile", "fact", "instruction"}),
+        # P3-一次性收口：planner 不消费 profile 记忆，避免把历史偏好误当本轮已确认事实。
+        retrieved_memory_allowed_types=frozenset({"fact", "instruction"}),
         retrieved_memory_max_items=5,
         include_stable_background=True,
         stable_background=StableBackgroundPolicy(

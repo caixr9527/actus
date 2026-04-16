@@ -628,11 +628,12 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     assert next_state["pending_interrupt"] == {}
     assert next_state["execution_count"] == 1
     assert next_state["user_message"] == "AI 人工智能算法工程师体系课"
-    assert next_state["current_step_id"] == "step-2"
+    assert next_state["current_step_id"] is None
     assert next_state["last_executed_step"].id == "step-1"
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert "已收到用户选择" in str(next_state["last_executed_step"].outcome.summary)
-    assert next_state["graph_metadata"] == {}
+    assert next_state["graph_metadata"]["control"]["wait_resume_action"] == "replan"
+    assert route_after_wait(next_state) == "replan"
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
 
 
@@ -898,6 +899,7 @@ def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> 
     assert executed_state["last_executed_step"].id == "direct-wait-execute"
     assert executed_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert control["direct_wait_original_task_executed"] is True
+    assert "wait_resume_action" not in control
     assert "direct_wait_execute_task_mode" not in control
     assert "direct_wait_original_message" not in control
 

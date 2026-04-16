@@ -4,6 +4,7 @@
 
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel
 
@@ -17,6 +18,44 @@ def normalize_string_value(
     """通用字符串归一化，统一处理空值、裁剪空白与大小写。"""
     normalized_value = str(value or default).strip()
     return normalized_value.lower() if lower else normalized_value
+
+
+def normalize_url_value(
+        value: Any,
+        *,
+        drop_query: bool = False,
+) -> str:
+    """统一规整 URL：去空白、去 fragment、标准化 scheme/netloc、裁剪多余尾斜杠。"""
+    normalized_value = normalize_string_value(value)
+    if not normalized_value:
+        return ""
+    try:
+        parsed = urlsplit(normalized_value)
+    except Exception:
+        return normalized_value
+    if not parsed.netloc:
+        return normalized_value
+    scheme = normalize_string_value(parsed.scheme, lower=True) or "https"
+    netloc = normalize_string_value(parsed.netloc, lower=True)
+    path = normalize_string_value(parsed.path)
+    if path == "/":
+        path = ""
+    elif path.endswith("/"):
+        path = path.rstrip("/")
+    query = "" if drop_query else normalize_string_value(parsed.query)
+    return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def extract_url_domain(value: Any) -> str:
+    """从 URL 中提取标准化域名，非法输入返回空字符串。"""
+    normalized_url = normalize_url_value(value)
+    if not normalized_url:
+        return ""
+    try:
+        parsed = urlsplit(normalized_url)
+        return normalize_string_value(parsed.netloc, lower=True)
+    except Exception:
+        return ""
 
 
 def truncate_text(value: Any, *, max_chars: int) -> str:
