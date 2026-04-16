@@ -594,12 +594,15 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
                 id="step-1",
                 title="等待用户选择课程",
                 description="展示三门课程并等待用户选择",
+                required_slots=["course_name"],
                 status=ExecutionStatus.RUNNING,
             ),
             Step(
                 id="step-2",
                 title="继续处理",
                 description="根据用户选择继续后续步骤",
+                execution_template="根据{{course_name}}继续后续步骤",
+                required_slots=["course_name"],
                 status=ExecutionStatus.PENDING,
             ),
         ],
@@ -628,12 +631,17 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     assert next_state["pending_interrupt"] == {}
     assert next_state["execution_count"] == 1
     assert next_state["user_message"] == "AI 人工智能算法工程师体系课"
-    assert next_state["current_step_id"] is None
+    assert next_state["current_step_id"] == "step-2"
     assert next_state["last_executed_step"].id == "step-1"
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert "已收到用户选择" in str(next_state["last_executed_step"].outcome.summary)
-    assert next_state["graph_metadata"]["control"]["wait_resume_action"] == "replan"
-    assert route_after_wait(next_state) == "replan"
+    assert "wait_resume_action" not in next_state["graph_metadata"].get("control", {})
+    assert route_after_wait(next_state) == "guard_step_reuse"
+    next_step = next_state["plan"].get_next_step()
+    assert next_step is not None
+    assert next_step.id == "step-2"
+    assert next_step.execution_slots["course_name"] == "AI 人工智能算法工程师体系课"
+    assert next_state["working_memory"]["confirmed_slots"]["course_name"] == "AI 人工智能算法工程师体系课"
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
 
 
@@ -929,3 +937,66 @@ def test_route_after_wait_should_continue_current_batch_before_replan() -> None:
 
     plan.steps[1].status = ExecutionStatus.COMPLETED
     assert route_after_wait({"plan": plan, "execution_count": 2, "max_execution_steps": 20}) == "replan"
+
+
+def test_execute_step_node_should_render_execution_template_with_confirmed_slots() -> None:
+    class _CapturePromptLLM:
+        def __init__(self) -> None:
+            self.last_prompt_text = ""
+
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            for message in messages:
+                if message.get("role") != "user":
+                    continue
+                content = message.get("content")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            self.last_prompt_text = str(item.get("text") or "")
+                            break
+                elif isinstance(content, str):
+                    self.last_prompt_text = content
+            return {
+                "role": "assistant",
+                "content": '{"success": true, "result": "执行完成", "attachments": []}',
+            }
+
+    llm = _CapturePromptLLM()
+    plan = Plan(
+        title="模板渲染",
+        goal="验证执行模板渲染",
+        language="zh",
+        steps=[
+            Step(
+                id="step-render",
+                title="执行模板步骤",
+                description="根据用户输入继续处理",
+                execution_template="根据{{course_name}}继续处理，预算{{budget}}元",
+                required_slots=["course_name", "budget"],
+                execution_slots={"budget": 3000},
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "current_step_id": "step-render",
+        "pending_interrupt": {},
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {"confirmed_slots": {"course_name": "AI 工程师课程"}},
+        "execution_count": 0,
+        "user_message": "继续执行",
+        "input_parts": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm,
+            runtime_tools=[],
+        )
+    )
+
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert "根据AI 工程师课程继续处理，预算3000元" in llm.last_prompt_text

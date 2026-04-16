@@ -121,6 +121,19 @@ def _extract_mapping_fields(raw: Any, field_names: Iterable[str]) -> Dict[str, A
     return extracted
 
 
+def _normalize_json_object(raw: Any) -> Dict[str, Any]:
+    """归一化 JSON 对象字段，只保留非空字符串键。"""
+    if not isinstance(raw, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    for key, value in raw.items():
+        normalized_key = normalize_string_value(key)
+        if not normalized_key:
+            continue
+        normalized[normalized_key] = value
+    return normalized
+
+
 def _normalize_items(
         items: Iterable[Any],
         *,
@@ -321,6 +334,9 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "id",
             "title",
             "description",
+            "execution_template",
+            "required_slots",
+            "execution_slots",
             "task_mode_hint",
             "output_mode",
             "artifact_policy",
@@ -339,6 +355,9 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
     normalized_step: Dict[str, Any] = {
         "title": normalize_string_value(source.get("title")),
         "description": normalize_string_value(source.get("description")),
+        "execution_template": normalize_string_value(source.get("execution_template")),
+        "required_slots": normalize_text_list(source.get("required_slots")),
+        "execution_slots": _normalize_json_object(source.get("execution_slots")),
         "objective_key": normalize_string_value(source.get("objective_key")),
         "success_criteria": normalize_text_list(source.get("success_criteria")),
         "status": (

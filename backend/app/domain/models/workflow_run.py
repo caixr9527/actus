@@ -71,6 +71,10 @@ class WorkflowRunStepRecord(BaseModel):
     step_index: int = 0
     title: str = ""
     description: str = ""
+    # 仅用于运行时内部执行，不直接用于前端展示。
+    execution_template: str = ""
+    required_slots: List[str] = Field(default_factory=list)
+    execution_slots: Dict[str, Any] = Field(default_factory=dict)
     objective_key: str = ""
     success_criteria: List[str] = Field(default_factory=list)
     # 步骤快照需要保留结构化语义，避免恢复/排障时丢失运行时决策上下文。

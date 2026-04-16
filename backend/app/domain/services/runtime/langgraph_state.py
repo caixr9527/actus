@@ -59,6 +59,9 @@ class StepState(TypedDict, total=False):
     step_index: int
     title: str
     description: str
+    execution_template: str
+    required_slots: List[str]
+    execution_slots: Dict[str, Any]
     task_mode_hint: str
     output_mode: str
     artifact_policy: str
@@ -353,6 +356,9 @@ class GraphStateContractMapper:
             "step_index": step_index,
             "title": step.title,
             "description": step.description,
+            "execution_template": str(getattr(step, "execution_template", "") or ""),
+            "required_slots": normalize_text_list(getattr(step, "required_slots", [])),
+            "execution_slots": dict(getattr(step, "execution_slots", {}) or {}),
             "status": step.status.value,
         }
         step_state.update(cls._normalize_step_control_state(step))
@@ -366,6 +372,9 @@ class GraphStateContractMapper:
         """统一规整步骤结构化语义，保证 plan、step_states、恢复链路使用同一套字段。"""
         if isinstance(raw, Step):
             raw_values = {
+                "execution_template": getattr(raw, "execution_template", None),
+                "required_slots": getattr(raw, "required_slots", None),
+                "execution_slots": getattr(raw, "execution_slots", None),
                 "task_mode_hint": getattr(raw, "task_mode_hint", None),
                 "output_mode": getattr(raw, "output_mode", None),
                 "artifact_policy": getattr(raw, "artifact_policy", None),
@@ -374,6 +383,9 @@ class GraphStateContractMapper:
             }
         elif isinstance(raw, dict):
             raw_values = {
+                "execution_template": raw.get("execution_template"),
+                "required_slots": raw.get("required_slots"),
+                "execution_slots": raw.get("execution_slots"),
                 "task_mode_hint": raw.get("task_mode_hint"),
                 "output_mode": raw.get("output_mode"),
                 "artifact_policy": raw.get("artifact_policy"),
@@ -383,7 +395,10 @@ class GraphStateContractMapper:
         else:
             return {}
 
-        normalized_values = {
+        normalized_values: Dict[str, Any] = {
+            "execution_template": str(raw_values.get("execution_template") or "").strip(),
+            "required_slots": normalize_text_list(raw_values.get("required_slots")),
+            "execution_slots": cls._normalize_dict_memory(raw_values.get("execution_slots")),
             "task_mode_hint": normalize_controlled_value(raw_values.get("task_mode_hint"), StepTaskModeHint),
             "output_mode": normalize_controlled_value(raw_values.get("output_mode"), StepOutputMode),
             "artifact_policy": normalize_controlled_value(raw_values.get("artifact_policy"), StepArtifactPolicy),
@@ -393,11 +408,12 @@ class GraphStateContractMapper:
                 StepDeliveryContextState,
             ),
         }
-        return {
+        normalized_control: Dict[str, Any] = {
             key: value
             for key, value in normalized_values.items()
             if value
         }
+        return normalized_control
 
     @classmethod
     def _normalize_step_outcome_state(cls, raw: Any) -> Optional[StepOutcomeState]:

@@ -191,8 +191,12 @@ def _build_max_iteration_next_hint(
     missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
     if len(missing_signals) == 0:
         return default_hint
+    extra_hint = ""
+    if bool(research_progress.get("is_low_recall")):
+        extra_hint = " 请先改写检索词（实体词+限定词）再继续。"
     return (
         "请先补齐研究缺口后再继续："
         + "；".join(missing_signals[:2])
         + "。若当前证据已足够，请直接基于已抓取内容输出结果。"
+        + extra_hint
     )

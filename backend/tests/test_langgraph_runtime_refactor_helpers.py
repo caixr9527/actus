@@ -149,6 +149,30 @@ def test_finalize_max_iterations_should_include_research_gap_hint() -> None:
     assert "至少读取 2 个来源页面正文" in str(payload.get("next_hint") or "")
 
 
+def test_finalize_max_iterations_should_include_query_rewrite_hint_for_low_recall() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="调研并给出结论")
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=6,
+        iteration_count=6,
+        runtime_recent_action={
+            "research_progress": {
+                "is_low_recall": True,
+                "missing_signals": ["候选链接过少，请改写关键词提高召回"],
+            }
+        },
+    )
+
+    assert payload["success"] is False
+    assert "改写检索词" in str(payload.get("next_hint") or "")
+
+
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="检索网页并读取正文")
@@ -538,6 +562,8 @@ def test_apply_tool_result_effects_should_record_research_progress_snapshot() ->
     assert progress_after_search.get("candidate_domain_count") == 2
     assert progress_after_search.get("fetched_domain_count") == 0
     assert progress_after_search.get("fetch_success_count") == 0
+    assert progress_after_search.get("is_low_recall") is False
+    assert progress_after_search.get("is_low_domain_diversity") is False
 
     _ = apply_tool_result_effects(
         logger=logger,
@@ -563,6 +589,57 @@ def test_apply_tool_result_effects_should_record_research_progress_snapshot() ->
     assert progress_after_fetch.get("fetch_success_count") == 1
     assert progress_after_fetch.get("fetched_url_count") == 1
     assert float(progress_after_fetch.get("coverage_score") or 0.0) > 0.0
+
+
+def test_apply_tool_result_effects_should_mark_low_recall_when_candidates_too_few() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并读取目的地详情")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    _ = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "上海 旅游"},
+        tool_result=ToolResult(
+            success=True,
+            data={
+                "query": "上海 旅游",
+                "results": [
+                    {"url": "https://example.com/a"},
+                ],
+            },
+        ),
+        loop_break_reason="",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+    )
+    progress = dict(execution_state.runtime_recent_action.get("research_progress") or {})
+    assert progress.get("candidate_url_count") == 1
+    assert progress.get("is_low_recall") is True
+    assert any("候选链接过少" in str(item) for item in list(progress.get("missing_signals") or []))
 
 
 def test_evaluate_tool_guard_should_block_same_domain_fetch_when_cross_domain_candidate_exists() -> None:
@@ -1044,6 +1121,77 @@ def test_build_loop_break_result_should_append_research_progress_hint() -> None:
     hints = str(payload.get("next_hint") or "")
     assert "当前缺口" in hints
     assert "至少读取 2 个来源页面正文" in hints
+
+
+def test_build_loop_break_result_should_append_query_rewrite_hint_when_low_recall() -> None:
+    payload = build_loop_break_result(
+        loop_break_reason="search_repeat",
+        step=Step(description="检索并总结"),
+        runtime_recent_action={
+            "research_progress": {
+                "is_low_recall": True,
+                "missing_signals": ["候选链接过少，请改写关键词提高召回"],
+            }
+        },
+    )
+    assert payload is not None
+    hints = str(payload.get("next_hint") or "")
+    assert "实体词+限定词" in hints
+
+
+def test_execute_tool_with_policy_should_normalize_search_query_before_invoke() -> None:
+    class _CaptureSearchTool:
+        name = "search"
+
+        def __init__(self) -> None:
+            self.received_query = ""
+
+        async def invoke(self, function_name, **kwargs):
+            self.received_query = str(kwargs.get("query") or "")
+            return ToolResult(success=True, data={"results": [{"url": "https://example.com"}]})
+
+    tool = _CaptureSearchTool()
+    step = Step(description="搜索并总结")
+    ctx = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    state = ExecutionState()
+
+    _ = asyncio.run(
+        execute_tool_with_policy(
+            logger=logging.getLogger(__name__),
+            step=step,
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": "请帮我查一下 上海 周末 亲子 游玩 有哪些 推荐 景点"},
+            matched_tool=tool,  # type: ignore[arg-type]
+            tool_name="search",
+            browser_route_state_key="",
+            ctx=ctx,
+            state=state,
+            started_at=time.perf_counter(),
+        )
+    )
+
+    assert tool.received_query != ""
+    assert "请帮我" not in tool.received_query
 
 
 def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_empty_model_output() -> None:

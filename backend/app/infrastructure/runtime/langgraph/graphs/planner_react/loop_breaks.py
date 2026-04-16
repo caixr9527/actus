@@ -93,6 +93,8 @@ def build_loop_break_result(
 def _append_research_progress_hint(*, runtime_recent_action: Optional[Dict[str, Any]], next_hint: str) -> str:
     research_progress = dict((runtime_recent_action or {}).get("research_progress") or {})
     missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
+    if bool(research_progress.get("is_low_recall")):
+        next_hint = next_hint + " 建议把口语问句改成实体词+限定词（例如：城市 景点 预算 2026）。"
     if len(missing_signals) == 0:
         return next_hint
     return next_hint + " 当前缺口：" + "；".join(missing_signals[:2]) + "。"

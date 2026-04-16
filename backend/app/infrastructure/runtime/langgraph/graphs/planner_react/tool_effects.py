@@ -336,27 +336,45 @@ def _estimate_research_coverage_score(state: ExecutionState) -> float:
     fetch_factor = min(float(state.research_fetch_success_count) / float(max(RESEARCH_MIN_FETCH_COUNT, 1)), 1.0)
     domain_factor = min(float(len(state.research_fetched_domains)) / float(max(RESEARCH_MIN_DOMAIN_COUNT, 1)), 1.0)
     candidate_factor = min(float(len(state.research_candidate_urls)) / 5.0, 1.0)
-    score = (0.5 * fetch_factor) + (0.35 * domain_factor) + (0.15 * candidate_factor)
+    query_factor = min(float(len(state.research_query_history)) / 2.0, 1.0)
+    # 检索质量收口：覆盖度不仅看抓取与域名，也看查询是否充分展开。
+    score = (0.45 * fetch_factor) + (0.30 * domain_factor) + (0.15 * candidate_factor) + (0.10 * query_factor)
     return round(score, 3)
 
 
 def _build_research_progress_snapshot(state: ExecutionState) -> Dict[str, Any]:
     missing_signals: List[str] = []
+    query_count = len(state.research_query_history)
+    candidate_url_count = len(state.research_candidate_urls)
+    fetched_url_count = len(state.research_fetched_urls)
+    candidate_domain_count = len(state.research_candidate_domains)
+    fetched_domain_count = len(state.research_fetched_domains)
+    low_recall = candidate_url_count <= 1
+    low_domain_diversity = candidate_domain_count <= 1 and query_count > 0
+
+    if query_count == 0:
+        missing_signals.append("先执行一次高质量搜索并返回候选链接")
+    elif low_recall:
+        missing_signals.append("候选链接过少，请改写关键词提高召回")
+    elif low_domain_diversity:
+        missing_signals.append("候选来源过于集中，请补充不同站点检索词")
     if state.research_fetch_success_count < RESEARCH_MIN_FETCH_COUNT:
         missing_signals.append(f"至少读取 {RESEARCH_MIN_FETCH_COUNT} 个来源页面正文")
-    if len(state.research_fetched_domains) < RESEARCH_MIN_DOMAIN_COUNT:
+    if fetched_domain_count < RESEARCH_MIN_DOMAIN_COUNT:
         missing_signals.append(f"至少覆盖 {RESEARCH_MIN_DOMAIN_COUNT} 个不同站点来源")
-    if len(state.research_candidate_urls) == 0:
+    if candidate_url_count == 0:
         missing_signals.append("补充可抓取候选链接")
     return {
-        "query_count": len(state.research_query_history),
-        "candidate_url_count": len(state.research_candidate_urls),
-        "fetched_url_count": len(state.research_fetched_urls),
-        "candidate_domain_count": len(state.research_candidate_domains),
-        "fetched_domain_count": len(state.research_fetched_domains),
+        "query_count": query_count,
+        "candidate_url_count": candidate_url_count,
+        "fetched_url_count": fetched_url_count,
+        "candidate_domain_count": candidate_domain_count,
+        "fetched_domain_count": fetched_domain_count,
         "fetch_success_count": int(state.research_fetch_success_count),
         "total_search_result_count": int(state.research_total_search_results),
         "coverage_score": float(state.research_coverage_score),
+        "is_low_recall": low_recall,
+        "is_low_domain_diversity": low_domain_diversity,
         "missing_signals": missing_signals,
         "latest_query": str(state.research_query_history[-1] if state.research_query_history else ""),
         "latest_fetched_url": str(state.research_fetched_urls[-1] if state.research_fetched_urls else ""),

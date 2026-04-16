@@ -3,6 +3,7 @@
 """P3 重构：工具调用执行与专用分支处理。"""
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -31,6 +32,35 @@ class ToolExecutionDecision:
     tool_result: ToolResult
     tool_cost_ms: int = 0
     loop_break_reason: str = ""
+
+
+_SEARCH_QUERY_SPLIT_PATTERN = re.compile(r"[\s,，;；|/]+")
+_SEARCH_QUERY_STOPWORDS = {
+    "请",
+    "帮我",
+    "帮忙",
+    "一下",
+    "有没有",
+    "可以",
+    "如何",
+    "怎么",
+    "什么",
+    "哪些",
+    "相关",
+    "信息",
+    "资料",
+    "内容",
+    "and",
+    "the",
+    "for",
+    "with",
+    "about",
+    "please",
+}
+_SEARCH_QUERY_PREFIX_NOISE_PATTERN = re.compile(
+    r"^(请帮我|帮我|请|麻烦|查一下|搜一下|看一下|告诉我|请问|能否|可以|有没有)",
+    re.IGNORECASE,
+)
 
 
 async def execute_tool_with_policy(
@@ -125,6 +155,12 @@ async def execute_tool_with_policy(
         )
 
     if normalized_function_name == "search_web":
+        normalized_search_query = _normalize_search_query(function_args.get("query"))
+        if normalized_search_query:
+            function_args = {
+                **dict(function_args or {}),
+                "query": normalized_search_query,
+            }
         search_fingerprint = _build_search_fingerprint(function_args)
         state.search_repeat_counter[search_fingerprint] = state.search_repeat_counter.get(search_fingerprint, 0) + 1
         if state.search_repeat_counter[search_fingerprint] > SEARCH_REPEAT_LIMIT:
@@ -330,6 +366,35 @@ def _is_transient_research_transport_error(raw_error: Any) -> bool:
         "unexpected eof",
     )
     return any(marker in message for marker in transient_markers)
+
+
+def _normalize_search_query(raw_query: Any) -> str:
+    """统一规整 search_web 查询，降低口语问句导致的低质量召回。"""
+    query = str(raw_query or "").strip()
+    if not query:
+        return ""
+    # 先清理口语前缀，再做关键词切分。
+    while True:
+        next_query = _SEARCH_QUERY_PREFIX_NOISE_PATTERN.sub("", query).strip()
+        if next_query == query:
+            break
+        query = next_query
+    lowered_query = query.lower()
+    tokens = []
+    seen_tokens: set[str] = set()
+    for raw_token in _SEARCH_QUERY_SPLIT_PATTERN.split(lowered_query):
+        token = raw_token.strip()
+        if not token or token in _SEARCH_QUERY_STOPWORDS:
+            continue
+        if token in seen_tokens:
+            continue
+        seen_tokens.add(token)
+        tokens.append(token)
+        if len(tokens) >= 8:
+            break
+    if len(tokens) >= 2:
+        return " ".join(tokens)
+    return query
 
 
 def _build_repeat_success_fallback_result(

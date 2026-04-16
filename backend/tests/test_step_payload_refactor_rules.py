@@ -30,8 +30,27 @@ def test_build_step_from_payload_should_fallback_description_to_title() -> None:
 
     assert step.title == "整理需求"
     assert step.description == "整理需求"
+    assert step.execution_template == "整理需求"
+    assert step.required_slots == []
+    assert step.execution_slots == {}
     assert step.success_criteria == ["整理需求"]
     assert step.objective_key == build_step_objective_key("整理需求", "整理需求")
+
+
+def test_build_step_from_payload_should_keep_execution_template_and_slots() -> None:
+    step = build_step_from_payload(
+        {
+            "description": "生成最终输出",
+            "execution_template": "根据{{city}}整理{{days}}天行程",
+            "required_slots": ["city", "days"],
+            "execution_slots": {"city": "上海", "days": 3, "": "invalid"},
+        },
+        fallback_index=0,
+    )
+
+    assert step.execution_template == "根据{{city}}整理{{days}}天行程"
+    assert step.required_slots == ["city", "days"]
+    assert step.execution_slots == {"city": "上海", "days": 3}
 
 
 def test_build_step_from_payload_should_normalize_task_mode_hint() -> None:

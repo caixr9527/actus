@@ -118,6 +118,7 @@ _REPLAN_MERGE_ENGINE = ReplanMergeEngine(
     replan_meta_validation_allow_pattern=REPLAN_META_VALIDATION_ALLOW_PATTERN,
     replan_meta_validation_deny_pattern=REPLAN_META_VALIDATION_DENY_PATTERN,
 )
+_EXECUTION_TEMPLATE_SLOT_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
 
 
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -192,6 +193,83 @@ def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
 
 def _truncate_text(value: Any, *, max_chars: int) -> str:
     return truncate_text(value, max_chars=max_chars)
+
+
+def _normalize_execution_slot_map(raw_slots: Any) -> Dict[str, Any]:
+    """规整槽位字典：只保留非空键。"""
+    if not isinstance(raw_slots, dict):
+        return {}
+    normalized_slots: Dict[str, Any] = {}
+    for raw_key, raw_value in raw_slots.items():
+        normalized_key = str(raw_key or "").strip()
+        if not normalized_key:
+            continue
+        normalized_slots[normalized_key] = raw_value
+    return normalized_slots
+
+
+def _slot_value_is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return len(value.strip()) == 0
+    return False
+
+
+def _slot_value_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value).strip()
+
+
+def _merge_execution_slots(
+        *,
+        memory_slots: Dict[str, Any],
+        step_slots: Dict[str, Any],
+) -> Dict[str, Any]:
+    """合并槽位：本轮确认槽位优先，覆盖旧步骤里可能残留的预填值。"""
+    merged_slots = dict(step_slots or {})
+    merged_slots.update(memory_slots or {})
+    return _normalize_execution_slot_map(merged_slots)
+
+
+def _render_step_execution_text(step: Step) -> Tuple[str, List[str]]:
+    """渲染步骤执行文本，仅用于后端执行提示词，不影响前端展示文案。"""
+    execution_template = str(getattr(step, "execution_template", "") or "").strip()
+    execution_text = execution_template or str(step.description or "").strip()
+    if not execution_text:
+        return "", []
+
+    execution_slots = _normalize_execution_slot_map(getattr(step, "execution_slots", {}))
+    required_slots = normalize_text_list(getattr(step, "required_slots", []))
+    missing_slots: List[str] = []
+
+    def _replace_slot(match: re.Match[str]) -> str:
+        slot_key = str(match.group(1) or "").strip()
+        if not slot_key:
+            return match.group(0)
+        if slot_key not in execution_slots or _slot_value_is_missing(execution_slots.get(slot_key)):
+            if slot_key not in missing_slots:
+                missing_slots.append(slot_key)
+            return match.group(0)
+        return _slot_value_to_text(execution_slots.get(slot_key))
+
+    rendered_text = _EXECUTION_TEMPLATE_SLOT_PATTERN.sub(_replace_slot, execution_text)
+    for slot_key in required_slots:
+        if slot_key in missing_slots:
+            continue
+        if slot_key not in execution_slots or _slot_value_is_missing(execution_slots.get(slot_key)):
+            missing_slots.append(slot_key)
+    return rendered_text or execution_text, missing_slots
 
 
 async def _build_prompt_context_packet_async(
@@ -1522,6 +1600,58 @@ def _build_wait_resume_outcome(
     )
 
 
+def _extract_confirmed_slots_from_resume(
+        *,
+        waiting_step: Optional[Step],
+        payload: Dict[str, Any],
+        resume_value: Any,
+        resumed_message: str,
+) -> Dict[str, Any]:
+    """
+    从 human_wait 恢复输入中提取结构化槽位。
+    优先 payload 显式键，其次回退 waiting_step.required_slots 单槽位映射。
+    """
+    confirmed_slots: Dict[str, Any] = {}
+    normalized_resumed_message = str(resumed_message or "").strip()
+    candidate_value = resume_value if not _slot_value_is_missing(resume_value) else normalized_resumed_message
+    if _slot_value_is_missing(candidate_value):
+        return confirmed_slots
+
+    payload_response_key = str(payload.get("response_key") or payload.get("slot_key") or "").strip()
+    waiting_required_slots = normalize_text_list(getattr(waiting_step, "required_slots", []))
+    if payload_response_key:
+        confirmed_slots[payload_response_key] = candidate_value
+    elif len(waiting_required_slots) == 1:
+        confirmed_slots[waiting_required_slots[0]] = candidate_value
+
+    options = payload.get("options")
+    if isinstance(options, list):
+        matched_option = None
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            if option.get("resume_value") == resume_value:
+                matched_option = option
+                break
+        if isinstance(matched_option, dict):
+            option_slot_key = str(
+                matched_option.get("slot_key")
+                or matched_option.get("response_key")
+                or ""
+            ).strip()
+            if option_slot_key and option_slot_key not in confirmed_slots:
+                confirmed_slots[option_slot_key] = candidate_value
+            option_slot_updates = matched_option.get("slot_updates")
+            if isinstance(option_slot_updates, dict):
+                for raw_key, raw_value in option_slot_updates.items():
+                    normalized_key = str(raw_key or "").strip()
+                    if not normalized_key:
+                        continue
+                    confirmed_slots[normalized_key] = raw_value
+
+    return _normalize_execution_slot_map(confirmed_slots)
+
+
 # 入口路由节点：决定 direct_answer / direct_wait / direct_execute / planner 主链入口。
 async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
     """P0 入口轻路由：先判断是否需要完整记忆召回和 Planner。"""
@@ -2123,6 +2253,13 @@ async def execute_step_node(
     explicit_direct_wait_task_mode = str(control.get("direct_wait_execute_task_mode") or "").strip()
     task_mode = explicit_direct_wait_task_mode if is_direct_wait_execute_step and explicit_direct_wait_task_mode else classify_step_task_mode(
         step)
+    working_memory = _ensure_working_memory(state)
+    confirmed_slots = _normalize_execution_slot_map(working_memory.get("confirmed_slots"))
+    step.execution_slots = _merge_execution_slots(
+        memory_slots=confirmed_slots,
+        step_slots=getattr(step, "execution_slots", {}),
+    )
+    step_execution_text, missing_execution_slots = _render_step_execution_text(step)
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     await emit_live_events(started_event)
@@ -2137,6 +2274,7 @@ async def execute_step_node(
         attachment_count=len(list(state.get("input_parts") or [])),
         runtime_tool_count=len(list(runtime_tools or [])),
         has_skill_runtime=skill_runtime is not None,
+        missing_execution_slots=missing_execution_slots,
     )
 
     user_message = str(state.get("user_message", ""))
@@ -2157,7 +2295,7 @@ async def execute_step_node(
         message=user_message,
         attachments=format_attachments_for_prompt(attachments),
         language=language,
-        step=step.description,
+        step=step_execution_text,
         delivery_role=str(getattr(step, "delivery_role", "") or "none"),
         delivery_context_state=str(getattr(step, "delivery_context_state", "") or "none"),
     )
@@ -2242,19 +2380,20 @@ async def execute_step_node(
             #             elapsed_ms=elapsed_ms(started_at),
             #         )
     except TimeoutError:
+        step_label = _build_step_label(step)
         log_runtime(
             logger,
             logging.WARNING,
             "步骤执行超时",
             state=state,
             step_id=str(step.id or ""),
-            step_description=str(step.description or ""),
+            step_description=step_label,
             timeout_seconds=STEP_EXECUTION_TIMEOUT_SECONDS,
             elapsed_ms=elapsed_ms(started_at),
         )
         llm_message = {
             "success": False,
-            "summary": f"步骤执行超时：{step.description}",
+            "summary": f"步骤执行超时：{step_label}",
             "delivery_text": "",
             "attachments": [],
             "blockers": [f"当前步骤超过 {STEP_EXECUTION_TIMEOUT_SECONDS} 秒未完成"],
@@ -2262,9 +2401,10 @@ async def execute_step_node(
         }
 
     if llm_message is None:
+        step_label = _build_step_label(step)
         llm_message = {
             "success": False,
-            "summary": f"步骤执行失败：{step.description}",
+            "summary": f"步骤执行失败：{step_label}",
             "delivery_text": "",
             "attachments": [],
         }
@@ -2330,9 +2470,10 @@ async def execute_step_node(
 
     normalized_execution = normalize_execution_response(llm_message)
     step_success = bool(normalized_execution.get("success", True))
+    step_label = _build_step_label(step)
     step_summary = normalize_step_result_text(
         normalized_execution.get("summary"),
-        fallback=f"步骤执行完成：{step.description}" if step_success else f"步骤执行失败：{step.description}",
+        fallback=f"步骤执行完成：{step_label}" if step_success else f"步骤执行失败：{step_label}",
     )
     step_delivery_text = normalize_step_result_text(
         _sanitize_step_delivery_text(step, normalized_execution.get("delivery_text")),
@@ -2385,7 +2526,7 @@ async def execute_step_node(
         control.pop("direct_wait_execute_task_mode", None)
         control.pop("direct_wait_original_message", None)
     working_memory = _merge_step_outcome_into_working_memory(
-        _ensure_working_memory(state),
+        working_memory,
         step=step,
     )
     log_runtime(
@@ -2540,6 +2681,12 @@ async def wait_for_human_node(
         }
 
     resume_branch = _resolve_wait_resume_branch(interrupt_request, resume_value)
+    confirmed_slots = _extract_confirmed_slots_from_resume(
+        waiting_step=waiting_step,
+        payload=interrupt_request,
+        resume_value=resume_value,
+        resumed_message=resumed_message,
+    )
 
     if resume_branch == "confirm_cancel":
         waiting_step.outcome = StepOutcome(
@@ -2599,15 +2746,24 @@ async def wait_for_human_node(
     await emit_live_events(completed_event)
     next_step = plan.get_next_step()
     next_user_message = resumed_message
+    working_memory = _ensure_working_memory(state)
+    merged_confirmed_slots = _merge_execution_slots(
+        memory_slots=_normalize_execution_slot_map(working_memory.get("confirmed_slots")),
+        step_slots=confirmed_slots,
+    )
+    if merged_confirmed_slots:
+        working_memory["confirmed_slots"] = merged_confirmed_slots
     if str(waiting_step.id or "").strip() == "direct-wait-confirm":
         # synthetic confirm 只负责授权继续执行，后续节点仍应保留原始请求作为当前任务。
         next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
-    else:
-        # P3-一次性收口：常规 human_wait 收到用户补充后先重规划，避免沿用等待前已写死的后续步骤参数。
-        control["wait_resume_action"] = "replan"
-        next_step = None
+    elif next_step is not None:
+        # P3-参数化执行：等待恢复后把已确认槽位注入下一步，避免默认重规划。
+        next_step.execution_slots = _merge_execution_slots(
+            memory_slots=merged_confirmed_slots,
+            step_slots=_normalize_execution_slot_map(getattr(next_step, "execution_slots", {})),
+        )
     working_memory = _merge_step_outcome_into_working_memory(
-        _ensure_working_memory(state),
+        working_memory,
         step=waiting_step,
     )
     log_runtime(
@@ -2617,6 +2773,7 @@ async def wait_for_human_node(
         state=state,
         step_id=str(waiting_step.id or ""),
         resumed_message_length=len(resumed_message),
+        confirmed_slot_keys=sorted(list(merged_confirmed_slots.keys())),
         next_step_id=str(next_step.id or "") if next_step is not None else "",
         elapsed_ms=elapsed_ms(started_at),
     )

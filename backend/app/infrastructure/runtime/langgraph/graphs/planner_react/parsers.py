@@ -4,7 +4,7 @@
 
 import re
 import uuid
-from typing import Any, List
+from typing import Any, Dict, List
 
 from app.domain.models import (
     Step,
@@ -82,6 +82,19 @@ def build_fallback_plan_title(user_message: str) -> str:
 
     title = normalized[:24]
     return title if len(normalized) <= 24 else f"{title}..."
+
+
+def _normalize_execution_slots(raw_slots: Any) -> Dict[str, Any]:
+    """规整 execution_slots，只保留非空键。"""
+    if not isinstance(raw_slots, dict):
+        return {}
+    normalized_slots: Dict[str, Any] = {}
+    for raw_key, raw_value in raw_slots.items():
+        normalized_key = str(raw_key or "").strip()
+        if not normalized_key:
+            continue
+        normalized_slots[normalized_key] = raw_value
+    return normalized_slots
 
 
 def _user_explicitly_requests_file_output(user_message: str) -> bool:
@@ -187,6 +200,9 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
         raw_title = str(payload.get("title") or "").strip()
         description = raw_description or raw_title or f"步骤{fallback_index + 1}"
         title = raw_title or description
+        execution_template = str(payload.get("execution_template") or "").strip() or description
+        required_slots = normalize_text_list(payload.get("required_slots"))
+        execution_slots = _normalize_execution_slots(payload.get("execution_slots"))
         success_criteria = normalize_text_list(payload.get("success_criteria"))
         # 先消费 planner/replan 输出的结构化模式，再回退到执行器里的文本判定规则。
         raw_task_mode_hint = normalize_controlled_value(payload.get("task_mode_hint"), StepTaskModeHint)
@@ -215,6 +231,9 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
             id=step_id,
             title=title,
             description=description,
+            execution_template=execution_template,
+            required_slots=required_slots,
+            execution_slots=execution_slots,
             task_mode_hint=task_mode_hint,
             output_mode=output_mode,
             artifact_policy=artifact_policy,
@@ -230,6 +249,9 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
         id=str(uuid.uuid4()),
         title=description,
         description=description,
+        execution_template=description,
+        required_slots=[],
+        execution_slots={},
         output_mode="none",
         artifact_policy="default",
         delivery_role="none",

@@ -8,7 +8,7 @@
 import uuid
 import hashlib
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -109,6 +109,12 @@ class Step(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str = ""
     description: str = ""
+    # 仅供执行链路使用的内部模板，不用于前端展示。
+    execution_template: str = ""
+    # 执行模板中依赖的槽位键；用于 wait->resume 后参数注入。
+    required_slots: List[str] = Field(default_factory=list)
+    # 当前步骤已绑定的槽位值；执行前用于渲染执行文本。
+    execution_slots: Dict[str, Any] = Field(default_factory=dict)
     # 结构化步骤模式优先，文本规则只做兜底。
     task_mode_hint: Optional[StepTaskModeHint] = None
     # 结构化输出模式，表示该步骤默认产出形态。
