@@ -70,6 +70,7 @@ from app.domain.services.runtime.normalizers import (
     normalize_delivery_payload,
     normalize_execution_response,
     normalize_file_path_list,
+    normalize_success_criteria,
     normalize_step_result_text,
     normalize_text_list,
     truncate_text,
@@ -118,9 +119,6 @@ _REPLAN_MERGE_ENGINE = ReplanMergeEngine(
     replan_meta_validation_allow_pattern=REPLAN_META_VALIDATION_ALLOW_PATTERN,
     replan_meta_validation_deny_pattern=REPLAN_META_VALIDATION_DENY_PATTERN,
 )
-_EXECUTION_TEMPLATE_SLOT_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}")
-
-
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     return get_graph_control(state.get("graph_metadata"))
 
@@ -179,6 +177,8 @@ def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     working_memory.setdefault("open_questions", [])
     working_memory.setdefault("user_preferences", {})
     working_memory.setdefault("facts_in_session", [])
+    # description-only 主干：human_wait 恢复后的已确认信息统一沉淀到 confirmed_facts。
+    working_memory.setdefault("confirmed_facts", {})
     # 轻 summary 与重交付正文分轨：最终长正文只放在 working_memory，不进入 final_message 热路径。
     working_memory.setdefault(
         "final_delivery_payload",
@@ -195,20 +195,20 @@ def _truncate_text(value: Any, *, max_chars: int) -> str:
     return truncate_text(value, max_chars=max_chars)
 
 
-def _normalize_execution_slot_map(raw_slots: Any) -> Dict[str, Any]:
-    """规整槽位字典：只保留非空键。"""
-    if not isinstance(raw_slots, dict):
+def _normalize_confirmed_fact_map(raw_facts: Any) -> Dict[str, Any]:
+    """规整确认事实字典：只保留非空键。"""
+    if not isinstance(raw_facts, dict):
         return {}
-    normalized_slots: Dict[str, Any] = {}
-    for raw_key, raw_value in raw_slots.items():
+    normalized_facts: Dict[str, Any] = {}
+    for raw_key, raw_value in raw_facts.items():
         normalized_key = str(raw_key or "").strip()
         if not normalized_key:
             continue
-        normalized_slots[normalized_key] = raw_value
-    return normalized_slots
+        normalized_facts[normalized_key] = raw_value
+    return normalized_facts
 
 
-def _slot_value_is_missing(value: Any) -> bool:
+def _fact_value_is_missing(value: Any) -> bool:
     if value is None:
         return True
     if isinstance(value, str):
@@ -216,7 +216,7 @@ def _slot_value_is_missing(value: Any) -> bool:
     return False
 
 
-def _slot_value_to_text(value: Any) -> str:
+def _fact_value_to_text(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -231,45 +231,38 @@ def _slot_value_to_text(value: Any) -> str:
         return str(value).strip()
 
 
-def _merge_execution_slots(
+def _merge_confirmed_facts(
         *,
-        memory_slots: Dict[str, Any],
-        step_slots: Dict[str, Any],
+        memory_facts: Dict[str, Any],
+        new_facts: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """合并槽位：本轮确认槽位优先，覆盖旧步骤里可能残留的预填值。"""
-    merged_slots = dict(step_slots or {})
-    merged_slots.update(memory_slots or {})
-    return _normalize_execution_slot_map(merged_slots)
+    """合并确认事实：最新确认信息优先，覆盖旧值。"""
+    merged_facts = dict(memory_facts or {})
+    merged_facts.update(new_facts or {})
+    return _normalize_confirmed_fact_map(merged_facts)
 
 
-def _render_step_execution_text(step: Step) -> Tuple[str, List[str]]:
-    """渲染步骤执行文本，仅用于后端执行提示词，不影响前端展示文案。"""
-    execution_template = str(getattr(step, "execution_template", "") or "").strip()
-    execution_text = execution_template or str(step.description or "").strip()
-    if not execution_text:
-        return "", []
-
-    execution_slots = _normalize_execution_slot_map(getattr(step, "execution_slots", {}))
-    required_slots = normalize_text_list(getattr(step, "required_slots", []))
-    missing_slots: List[str] = []
-
-    def _replace_slot(match: re.Match[str]) -> str:
-        slot_key = str(match.group(1) or "").strip()
-        if not slot_key:
-            return match.group(0)
-        if slot_key not in execution_slots or _slot_value_is_missing(execution_slots.get(slot_key)):
-            if slot_key not in missing_slots:
-                missing_slots.append(slot_key)
-            return match.group(0)
-        return _slot_value_to_text(execution_slots.get(slot_key))
-
-    rendered_text = _EXECUTION_TEMPLATE_SLOT_PATTERN.sub(_replace_slot, execution_text)
-    for slot_key in required_slots:
-        if slot_key in missing_slots:
-            continue
-        if slot_key not in execution_slots or _slot_value_is_missing(execution_slots.get(slot_key)):
-            missing_slots.append(slot_key)
-    return rendered_text or execution_text, missing_slots
+def _build_step_execution_text(step: Step, *, working_memory: Dict[str, Any]) -> str:
+    """
+    description-only 主干：执行提示词只基于原始 description，
+    human_wait 恢复得到的确认事实作为临时上下文追加，不回写 step.description。
+    """
+    step_description = str(step.description or "").strip()
+    if not step_description:
+        return ""
+    confirmed_facts = _normalize_confirmed_fact_map(working_memory.get("confirmed_facts"))
+    fact_lines = [
+        f"- {key}: {_fact_value_to_text(value)}"
+        for key, value in confirmed_facts.items()
+        if not _fact_value_is_missing(value)
+    ]
+    if len(fact_lines) == 0:
+        return step_description
+    return (
+        f"{step_description}\n\n"
+        f"已确认用户输入（仅作当前步骤执行上下文，不改写原步骤描述）:\n"
+        + "\n".join(fact_lines)
+    ).strip()
 
 
 async def _build_prompt_context_packet_async(
@@ -1600,7 +1593,7 @@ def _build_wait_resume_outcome(
     )
 
 
-def _extract_confirmed_slots_from_resume(
+def _extract_confirmed_facts_from_resume(
         *,
         waiting_step: Optional[Step],
         payload: Dict[str, Any],
@@ -1608,21 +1601,19 @@ def _extract_confirmed_slots_from_resume(
         resumed_message: str,
 ) -> Dict[str, Any]:
     """
-    从 human_wait 恢复输入中提取结构化槽位。
-    优先 payload 显式键，其次回退 waiting_step.required_slots 单槽位映射。
+    从 human_wait 恢复输入中提取结构化确认事实。
+    优先使用 payload 的显式字段，避免依赖步骤外部约定做隐式推断。
     """
-    confirmed_slots: Dict[str, Any] = {}
+    _ = waiting_step  # description-only 主干：等待恢复阶段不依赖步骤内部扩展字段。
+    confirmed_facts: Dict[str, Any] = {}
     normalized_resumed_message = str(resumed_message or "").strip()
-    candidate_value = resume_value if not _slot_value_is_missing(resume_value) else normalized_resumed_message
-    if _slot_value_is_missing(candidate_value):
-        return confirmed_slots
+    candidate_value = resume_value if not _fact_value_is_missing(resume_value) else normalized_resumed_message
+    if _fact_value_is_missing(candidate_value):
+        return confirmed_facts
 
     payload_response_key = str(payload.get("response_key") or payload.get("slot_key") or "").strip()
-    waiting_required_slots = normalize_text_list(getattr(waiting_step, "required_slots", []))
     if payload_response_key:
-        confirmed_slots[payload_response_key] = candidate_value
-    elif len(waiting_required_slots) == 1:
-        confirmed_slots[waiting_required_slots[0]] = candidate_value
+        confirmed_facts[payload_response_key] = candidate_value
 
     options = payload.get("options")
     if isinstance(options, list):
@@ -1639,17 +1630,19 @@ def _extract_confirmed_slots_from_resume(
                 or matched_option.get("response_key")
                 or ""
             ).strip()
-            if option_slot_key and option_slot_key not in confirmed_slots:
-                confirmed_slots[option_slot_key] = candidate_value
+            if option_slot_key and option_slot_key not in confirmed_facts:
+                confirmed_facts[option_slot_key] = candidate_value
             option_slot_updates = matched_option.get("slot_updates")
             if isinstance(option_slot_updates, dict):
                 for raw_key, raw_value in option_slot_updates.items():
                     normalized_key = str(raw_key or "").strip()
                     if not normalized_key:
                         continue
-                    confirmed_slots[normalized_key] = raw_value
+                    confirmed_facts[normalized_key] = raw_value
 
-    return _normalize_execution_slot_map(confirmed_slots)
+    if not payload_response_key and len(confirmed_facts) == 0:
+        confirmed_facts["latest_user_input"] = candidate_value
+    return _normalize_confirmed_fact_map(confirmed_facts)
 
 
 # 入口路由节点：决定 direct_answer / direct_wait / direct_execute / planner 主链入口。
@@ -2076,6 +2069,27 @@ async def create_or_reuse_plan_node(
             )
             for index, item in enumerate(raw_steps)
         ]
+        criteria_missing_count = 0
+        criteria_filtered_count = 0
+        for index, raw_item in enumerate(raw_steps):
+            if not isinstance(raw_item, dict):
+                criteria_missing_count += 1
+                continue
+            step_description = str(steps[index].description or "").strip() if index < len(steps) else ""
+            normalized_criteria, criteria_metrics = normalize_success_criteria(
+                raw_item.get("success_criteria"),
+                fallback_description=step_description,
+            )
+            raw_criteria = raw_item.get("success_criteria")
+            raw_has_criteria = isinstance(raw_criteria, list) and len(raw_criteria) > 0
+            if not raw_has_criteria:
+                criteria_missing_count += 1
+            # 过滤统计只统计模型显式给出的候选，避免把 fallback 误记为过滤。
+            if raw_has_criteria:
+                criteria_filtered_count += int(criteria_metrics.get("filtered_low_value_count", 0))
+                criteria_filtered_count += int(criteria_metrics.get("filtered_too_short_count", 0))
+            # 二次防御：确保步骤对象中的 criteria 与统一归一化结果一致。
+            steps[index].success_criteria = list(normalized_criteria)
         # P3-一次性收口：计划步骤入图前统一编译结构化契约，纠偏语义冲突步骤。
         compiled_steps, contract_issues, corrected_count = compile_step_contracts(
             steps=steps,
@@ -2108,6 +2122,8 @@ async def create_or_reuse_plan_node(
             plan_title=title,
             language=language,
             step_count=len(compiled_steps),
+            success_criteria_missing_count=criteria_missing_count,
+            success_criteria_filtered_count=criteria_filtered_count,
             next_step_id=str(compiled_steps[0].id or "") if len(compiled_steps) > 0 else "",
             llm_elapsed_ms=llm_cost_ms,
             elapsed_ms=elapsed_ms(started_at),
@@ -2254,12 +2270,15 @@ async def execute_step_node(
     task_mode = explicit_direct_wait_task_mode if is_direct_wait_execute_step and explicit_direct_wait_task_mode else classify_step_task_mode(
         step)
     working_memory = _ensure_working_memory(state)
-    confirmed_slots = _normalize_execution_slot_map(working_memory.get("confirmed_slots"))
-    step.execution_slots = _merge_execution_slots(
-        memory_slots=confirmed_slots,
-        step_slots=getattr(step, "execution_slots", {}),
+    step_execution_text = _build_step_execution_text(
+        step,
+        working_memory=working_memory,
     )
-    step_execution_text, missing_execution_slots = _render_step_execution_text(step)
+    confirmed_fact_keys = sorted(
+        list(
+            _normalize_confirmed_fact_map(working_memory.get("confirmed_facts")).keys()
+        )
+    )
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     await emit_live_events(started_event)
@@ -2274,7 +2293,7 @@ async def execute_step_node(
         attachment_count=len(list(state.get("input_parts") or [])),
         runtime_tool_count=len(list(runtime_tools or [])),
         has_skill_runtime=skill_runtime is not None,
-        missing_execution_slots=missing_execution_slots,
+        confirmed_fact_keys=confirmed_fact_keys,
     )
 
     user_message = str(state.get("user_message", ""))
@@ -2681,7 +2700,7 @@ async def wait_for_human_node(
         }
 
     resume_branch = _resolve_wait_resume_branch(interrupt_request, resume_value)
-    confirmed_slots = _extract_confirmed_slots_from_resume(
+    confirmed_facts = _extract_confirmed_facts_from_resume(
         waiting_step=waiting_step,
         payload=interrupt_request,
         resume_value=resume_value,
@@ -2747,21 +2766,15 @@ async def wait_for_human_node(
     next_step = plan.get_next_step()
     next_user_message = resumed_message
     working_memory = _ensure_working_memory(state)
-    merged_confirmed_slots = _merge_execution_slots(
-        memory_slots=_normalize_execution_slot_map(working_memory.get("confirmed_slots")),
-        step_slots=confirmed_slots,
+    merged_confirmed_facts = _merge_confirmed_facts(
+        memory_facts=_normalize_confirmed_fact_map(working_memory.get("confirmed_facts")),
+        new_facts=confirmed_facts,
     )
-    if merged_confirmed_slots:
-        working_memory["confirmed_slots"] = merged_confirmed_slots
+    if merged_confirmed_facts:
+        working_memory["confirmed_facts"] = merged_confirmed_facts
     if str(waiting_step.id or "").strip() == "direct-wait-confirm":
         # synthetic confirm 只负责授权继续执行，后续节点仍应保留原始请求作为当前任务。
         next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
-    elif next_step is not None:
-        # P3-参数化执行：等待恢复后把已确认槽位注入下一步，避免默认重规划。
-        next_step.execution_slots = _merge_execution_slots(
-            memory_slots=merged_confirmed_slots,
-            step_slots=_normalize_execution_slot_map(getattr(next_step, "execution_slots", {})),
-        )
     working_memory = _merge_step_outcome_into_working_memory(
         working_memory,
         step=waiting_step,
@@ -2773,7 +2786,7 @@ async def wait_for_human_node(
         state=state,
         step_id=str(waiting_step.id or ""),
         resumed_message_length=len(resumed_message),
-        confirmed_slot_keys=sorted(list(merged_confirmed_slots.keys())),
+        confirmed_fact_keys=sorted(list(merged_confirmed_facts.keys())),
         next_step_id=str(next_step.id or "") if next_step is not None else "",
         elapsed_ms=elapsed_ms(started_at),
     )
@@ -2891,6 +2904,25 @@ async def replan_node(
             )
             for index, item in enumerate(raw_steps)
         ]
+        criteria_missing_count = 0
+        criteria_filtered_count = 0
+        for index, raw_item in enumerate(raw_steps):
+            if not isinstance(raw_item, dict):
+                criteria_missing_count += 1
+                continue
+            step_description = str(candidate_steps[index].description or "").strip() if index < len(candidate_steps) else ""
+            normalized_criteria, criteria_metrics = normalize_success_criteria(
+                raw_item.get("success_criteria"),
+                fallback_description=step_description,
+            )
+            raw_criteria = raw_item.get("success_criteria")
+            raw_has_criteria = isinstance(raw_criteria, list) and len(raw_criteria) > 0
+            if not raw_has_criteria:
+                criteria_missing_count += 1
+            if raw_has_criteria:
+                criteria_filtered_count += int(criteria_metrics.get("filtered_low_value_count", 0))
+                criteria_filtered_count += int(criteria_metrics.get("filtered_too_short_count", 0))
+            candidate_steps[index].success_criteria = list(normalized_criteria)
         # P3-一次性收口：重规划步骤同样走统一契约编译，避免新批次继续放大结构化矛盾。
         candidate_steps, contract_issues, corrected_count = compile_step_contracts(
             steps=candidate_steps,
@@ -2904,6 +2936,8 @@ async def replan_node(
                 "重规划步骤契约已自动纠偏",
                 state=state,
                 corrected_step_count=corrected_count,
+                success_criteria_missing_count=criteria_missing_count,
+                success_criteria_filtered_count=criteria_filtered_count,
                 attempt=attempt + 1,
             )
         if contract_issues:
@@ -2928,6 +2962,8 @@ async def replan_node(
                 "重规划已拦截漂移元步骤",
                 state=state,
                 dropped_step_count=dropped_drift_steps,
+                success_criteria_missing_count=criteria_missing_count,
+                success_criteria_filtered_count=criteria_filtered_count,
                 attempt=attempt + 1,
             )
         if filtered_steps:
@@ -2969,6 +3005,9 @@ async def replan_node(
         new_step_count=len(new_steps),
         total_step_count=len(list(plan.steps or [])),
         merge_mode=merge_mode,
+        success_criteria_missing_count=0 if len(new_steps) == 0 else len(
+            [step for step in new_steps if len(list(step.success_criteria or [])) == 0]
+        ),
         next_step_id=str(next_step.id or "") if next_step is not None else "",
         llm_elapsed_ms=llm_cost_ms_total,
         elapsed_ms=elapsed_ms(started_at),

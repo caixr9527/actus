@@ -491,19 +491,45 @@ async def execute_step_with_prompt(
         if selected_tool_call is None:
             continue
 
-        messages.append(
-            _build_assistant_tool_call_message(
-                execution_state.llm_message,
-                selected_tool_call=selected_tool_call,
-            )
-        )
-
         lifecycle = build_tool_call_lifecycle(
             selected_tool_call=selected_tool_call,
             parse_tool_call_args=_parse_tool_call_args,
         )
         if lifecycle is None:
             continue
+        rewrite_decision = policy_engine.evaluate_rewrite(
+            lifecycle=lifecycle,
+            execution_context=execution_context,
+            execution_state=execution_state,
+            step=step,
+        )
+        lifecycle = rewrite_decision.lifecycle
+        rewrite_reason = rewrite_decision.reason
+        if rewrite_reason:
+            selected_tool_call = {
+                **dict(selected_tool_call),
+                "function": {
+                    **dict(selected_tool_call.get("function") or {}),
+                    "name": lifecycle.function_name,
+                    "arguments": json.dumps(lifecycle.function_args, ensure_ascii=False),
+                },
+            }
+            log_runtime(
+                logger,
+                logging.INFO,
+                "研究链路工具自动纠偏",
+                step_id=str(step.id or ""),
+                iteration=index,
+                rewrite_reason=rewrite_reason,
+                **dict(rewrite_decision.metadata or {}),
+            )
+
+        messages.append(
+            _build_assistant_tool_call_message(
+                execution_state.llm_message,
+                selected_tool_call=selected_tool_call,
+            )
+        )
 
         tool_fingerprint = _build_tool_fingerprint(lifecycle.normalized_function_name, lifecycle.function_args)
         if tool_fingerprint == execution_state.last_tool_fingerprint:
@@ -522,6 +548,7 @@ async def execute_step_with_prompt(
             task_mode=task_mode,
             same_tool_repeat_count=execution_state.same_tool_repeat_count,
             arg_keys=sorted(lifecycle.function_args.keys()),
+            rewrite_reason=rewrite_reason,
         )
 
         matched_tool = _resolve_tool_by_function_name(function_name=lifecycle.function_name, runtime_tools=runtime_tools)

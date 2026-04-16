@@ -12,10 +12,12 @@ from ..execution_context import ExecutionContext
 from ..execution_state import ExecutionState
 from ..finalizer import finalize_max_iterations, finalize_no_tool_call
 from .plugins import (
+    RewriteDecision,
     run_convergence_plugin,
     run_effects_plugin,
     run_executor_plugin,
     run_guard_plugin,
+    run_rewrite_plugin,
 )
 
 
@@ -41,6 +43,22 @@ class ToolPolicyEngine:
 
     def __init__(self, *, logger: logging.Logger) -> None:
         self._logger = logger
+
+    def evaluate_rewrite(
+        self,
+        *,
+        lifecycle: Any,
+        execution_context: ExecutionContext,
+        execution_state: ExecutionState,
+        step: Step,
+    ) -> RewriteDecision:
+        """统一处理调用前工具改写策略。"""
+        return run_rewrite_plugin(
+            lifecycle=lifecycle,
+            execution_context=execution_context,
+            execution_state=execution_state,
+            step=step,
+        )
 
     @staticmethod
     def _require_matched_tool(matched_tool: Optional[BaseTool]) -> BaseTool:

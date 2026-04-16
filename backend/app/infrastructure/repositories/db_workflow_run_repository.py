@@ -131,9 +131,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                 step_index=await self._resolve_step_index(run_record=run_record, step_id=step.id),
                 title=step.title,
                 description=step.description,
-                execution_template=str(getattr(step, "execution_template", "") or ""),
-                required_slots=list(getattr(step, "required_slots", []) or []),
-                execution_slots=dict(getattr(step, "execution_slots", {}) or {}),
                 objective_key=step.objective_key,
                 success_criteria=list(step.success_criteria or []),
                 status=step.status.value,
@@ -154,9 +151,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             # 步骤已存在时仅更新内容与结构化语义，不改既有顺序。
             step_record.title = step.title
             step_record.description = step.description
-            step_record.execution_template = str(getattr(step, "execution_template", "") or "")
-            step_record.required_slots = list(getattr(step, "required_slots", []) or [])
-            step_record.execution_slots = dict(getattr(step, "execution_slots", {}) or {})
             step_record.objective_key = step.objective_key
             step_record.success_criteria = list(step.success_criteria or [])
             step_record.status = step.status.value
@@ -287,9 +281,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                     step_index=index,
                     title=step.title,
                     description=step.description,
-                    execution_template=str(getattr(step, "execution_template", "") or ""),
-                    required_slots=list(getattr(step, "required_slots", []) or []),
-                    execution_slots=dict(getattr(step, "execution_slots", {}) or {}),
                     objective_key=step.objective_key,
                     success_criteria=list(step.success_criteria or []),
                     status=step.status.value,

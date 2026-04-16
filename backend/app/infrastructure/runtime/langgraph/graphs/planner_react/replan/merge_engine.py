@@ -9,6 +9,7 @@ import uuid
 from typing import List, Optional, Tuple
 
 from app.domain.models import Plan, Step
+from app.domain.services.runtime.normalizers import normalize_success_criteria
 
 
 class ReplanMergeEngine:
@@ -90,7 +91,10 @@ class ReplanMergeEngine:
         description = str(getattr(step, "description", "") or "").strip().lower()
         success_criteria_items = [
             str(item or "").strip().lower()
-            for item in list(getattr(step, "success_criteria", []) or [])
+            for item in normalize_success_criteria(
+                getattr(step, "success_criteria", []),
+                fallback_description=description,
+            )[0]
             if str(item or "").strip()
         ]
         success_criteria = "|".join(sorted(set(success_criteria_items)))
@@ -106,6 +110,10 @@ class ReplanMergeEngine:
         return bool(self._replan_meta_validation_allow_pattern.search(normalized_message))
 
     def _is_replan_meta_validation_step(self, step: Step) -> bool:
+        normalized_success_criteria, _ = normalize_success_criteria(
+            getattr(step, "success_criteria", []),
+            fallback_description=str(getattr(step, "description", "") or "").strip(),
+        )
         candidate_text = " ".join(
             [
                 str(getattr(step, "title", "") or "").strip(),
@@ -113,7 +121,7 @@ class ReplanMergeEngine:
                 " ".join(
                     [
                         str(item).strip()
-                        for item in list(getattr(step, "success_criteria", []) or [])
+                        for item in normalized_success_criteria
                         if str(item).strip()
                     ]
                 ),

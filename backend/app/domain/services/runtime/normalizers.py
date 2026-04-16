@@ -2,11 +2,19 @@
 # -*- coding: utf-8 -*-
 """Runtime 共享归一化纯函数。"""
 
+import re
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel
+
+_LOW_VALUE_SUCCESS_CRITERIA_PATTERN = re.compile(
+    r"^(完成任务|继续处理|执行步骤|按计划执行|处理完成|待处理|进行中|done|complete|continue|next step)$",
+    re.IGNORECASE,
+)
+_SUCCESS_CRITERIA_MAX_ITEMS = 3
+_SUCCESS_CRITERIA_MIN_CHARS = 4
 
 
 def normalize_string_value(
@@ -168,6 +176,39 @@ def normalize_text_list(
     if not isinstance(raw, list):
         return []
     return _normalize_items(raw, dedupe=dedupe, max_items=max_items)
+
+
+def normalize_success_criteria(
+        raw_criteria: Any,
+        *,
+        fallback_description: str,
+) -> tuple[List[str], Dict[str, int]]:
+    """规整步骤成功判据，并返回可观测的过滤统计。"""
+    normalized_items = normalize_text_list(raw_criteria, dedupe=True)
+    metrics = {
+        "input_count": len(normalized_items),
+        "filtered_low_value_count": 0,
+        "filtered_too_short_count": 0,
+    }
+    refined_items: List[str] = []
+    for item in normalized_items:
+        candidate = str(item or "").strip()
+        if not candidate:
+            continue
+        if len(candidate) < _SUCCESS_CRITERIA_MIN_CHARS:
+            metrics["filtered_too_short_count"] += 1
+            continue
+        if _LOW_VALUE_SUCCESS_CRITERIA_PATTERN.match(candidate):
+            metrics["filtered_low_value_count"] += 1
+            continue
+        refined_items.append(candidate)
+        if len(refined_items) >= _SUCCESS_CRITERIA_MAX_ITEMS:
+            break
+
+    fallback = str(fallback_description or "").strip()
+    if len(refined_items) == 0 and fallback:
+        refined_items = [fallback]
+    return refined_items, metrics
 
 
 def normalize_ref_list(
@@ -334,9 +375,6 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "id",
             "title",
             "description",
-            "execution_template",
-            "required_slots",
-            "execution_slots",
             "task_mode_hint",
             "output_mode",
             "artifact_policy",
@@ -355,9 +393,6 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
     normalized_step: Dict[str, Any] = {
         "title": normalize_string_value(source.get("title")),
         "description": normalize_string_value(source.get("description")),
-        "execution_template": normalize_string_value(source.get("execution_template")),
-        "required_slots": normalize_text_list(source.get("required_slots")),
-        "execution_slots": _normalize_json_object(source.get("execution_slots")),
         "objective_key": normalize_string_value(source.get("objective_key")),
         "success_criteria": normalize_text_list(source.get("success_criteria")),
         "status": (

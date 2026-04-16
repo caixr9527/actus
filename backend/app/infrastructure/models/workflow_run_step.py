@@ -74,21 +74,6 @@ class WorkflowRunStepModel(Base):
         nullable=False,
         server_default=text("''::text"),
     )
-    execution_template: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        server_default=text("''::text"),
-    )
-    required_slots: Mapped[List[str]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'[]'::jsonb"),
-    )
-    execution_slots: Mapped[dict] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'{}'::jsonb"),
-    )
     objective_key: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -132,9 +117,6 @@ class WorkflowRunStepModel(Base):
             step_index=record.step_index,
             title=record.title,
             description=record.description,
-            execution_template=record.execution_template,
-            required_slots=list(record.required_slots or []),
-            execution_slots=dict(record.execution_slots or {}),
             objective_key=record.objective_key,
             success_criteria=list(record.success_criteria or []),
             status=record.status.value,
@@ -163,9 +145,6 @@ class WorkflowRunStepModel(Base):
             step_index=self.step_index,
             title=self.title,
             description=self.description,
-            execution_template=str(self.execution_template or ""),
-            required_slots=list(self.required_slots or []),
-            execution_slots=dict(self.execution_slots or {}),
             objective_key=self.objective_key,
             success_criteria=list(self.success_criteria or []),
             status=ExecutionStatus(self.status),

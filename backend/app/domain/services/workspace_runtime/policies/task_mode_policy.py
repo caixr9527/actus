@@ -8,7 +8,7 @@ import re
 from typing import Any, Dict, List
 
 from app.domain.models import Step, StepTaskModeHint
-from app.domain.services.runtime.normalizers import normalize_controlled_value
+from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_success_criteria
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ABSOLUTE_PATH_PATTERN,
     ACTION_PATTERN,
@@ -288,10 +288,14 @@ def classify_task_mode_from_signals(signals: Dict[str, Any]) -> str:
 
 
 def build_step_candidate_text(step: Step) -> str:
+    normalized_criteria, _ = normalize_success_criteria(
+        getattr(step, "success_criteria", []),
+        fallback_description=str(step.description or "").strip(),
+    )
     candidate_parts = [
         str(step.title or "").strip(),
         str(step.description or "").strip(),
-        *[str(item or "").strip() for item in list(step.success_criteria or [])],
+        *normalized_criteria,
     ]
     return " ".join([part for part in candidate_parts if part])
 

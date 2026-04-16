@@ -91,9 +91,14 @@ CREATE_PLAN_PROMPT = """
 - `human_wait` 步骤之后的执行步骤，必须标注真实执行模式，不得继续标为 `human_wait`
 - 历史偏好与长期记忆只能作为候选线索，不能当作本轮已确认事实写死到后续执行步骤
 - 任何会实质影响执行结果的关键参数（如时间、地点、对象、范围、阈值、约束条件、资源标识等）在本轮未被用户明确确认前，后续步骤必须保持参数占位，不得写入具体值
+- `description` 必须保持“可执行动作 + 条件占位”语义，不得把未确认参数写成具体值
 - 禁止示例：在未确认前写“对 `prod` 库执行变更”“给 `A 客户` 发正式邮件”“按 `5000 元预算` 下单”
 - 允许示例：写“待确认目标环境后执行变更”“待确认收件对象后发送邮件”“待确认预算上限后给出采购方案”
 - 检索步骤描述必须写明“检索关键词维度与质量约束”（如实体词、时间范围、地域范围、来源多样性），避免“先搜索一下”这类低信息量描述
+- `success_criteria` 为可选字段；建议每步提供 1-3 条可验证的完成判据（结果导向，不写空话）
+- `success_criteria` 禁止示例："完成任务"、"继续处理"、"执行步骤"
+- `success_criteria` 允许示例："至少产出 3 个候选方案并给出对比依据"、"返回的信息需包含来源与时间范围"
+- 若关键参数尚未确认，`success_criteria` 也必须使用占位表达，不得写死具体值
 - 除非用户明确要求“先看草稿 / 预览 / 候选结果再决定”，否则不要规划中间预览步骤；默认只保留步骤过程与最终交付
 - 如果用户明确说“先不要执行 / 只给步骤 / 只出计划”，只负责生成计划步骤，不要为了等待确认再插入额外的草稿预览步骤
 
@@ -171,6 +176,8 @@ interface CreatePlanResponse {{
     delivery_role: string;
     /** 最终交付上下文状态：none | needs_preparation | ready **/
     delivery_context_state: string;
+    /** 可选。步骤完成判据，建议 1-3 条，必须可验证 **/
+    success_criteria?: string[];
   }}>;
   /** 本次计划的总目标描述 **/
   goal: string;
@@ -206,7 +213,8 @@ interface CreatePlanResponse {{
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
       "delivery_role": "none",
-      "delivery_context_state": "none"
+      "delivery_context_state": "none",
+      "success_criteria": ["至少检索到 5 个主流工具", "每个工具包含名称、定价与核心能力"]
     }},
     {{
       "id": "2",
@@ -215,7 +223,8 @@ interface CreatePlanResponse {{
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
       "delivery_role": "none",
-      "delivery_context_state": "none"
+      "delivery_context_state": "none",
+      "success_criteria": ["至少补充 3 个工具的官网或评测细节", "记录来源链接与发布时间"]
     }},
     {{
       "id": "3",
@@ -224,7 +233,8 @@ interface CreatePlanResponse {{
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
       "delivery_role": "none",
-      "delivery_context_state": "none"
+      "delivery_context_state": "none",
+      "success_criteria": ["形成统一对比维度", "产出可直接用于最终报告的结构化结论"]
     }},
     {{
       "id": "4",
@@ -233,7 +243,8 @@ interface CreatePlanResponse {{
       "output_mode": "file",
       "artifact_policy": "require_file_output",
       "delivery_role": "none",
-      "delivery_context_state": "none"
+      "delivery_context_state": "none",
+      "success_criteria": ["输出一个可下载的 Markdown 报告文件"]
     }}
   ]
 }}
@@ -296,6 +307,7 @@ UPDATE_PLAN_PROMPT = """
 - `human_wait` 步骤之后的执行步骤，必须标注真实执行模式，不得继续标为 `human_wait`
 - 历史偏好与长期记忆只能作为候选线索，不能当作本轮已确认事实写死到后续执行步骤
 - 任何会实质影响执行结果的关键参数（如时间、地点、对象、范围、阈值、约束条件、资源标识等）在本轮未被用户明确确认前，后续步骤必须保持参数占位，不得写入具体值
+- `description` 必须保持“可执行动作 + 条件占位”语义，不得把未确认参数写成具体值
 - 禁止示例：在未确认前写“对 `prod` 库执行变更”“给 `A 客户` 发正式邮件”“按 `5000 元预算` 下单”
 - 允许示例：写“待确认目标环境后执行变更”“待确认收件对象后发送邮件”“待确认预算上限后给出采购方案”
 - 检索步骤描述必须写明“检索关键词维度与质量约束”（如实体词、时间范围、地域范围、来源多样性），避免“先搜索一下”这类低信息量描述
@@ -334,6 +346,8 @@ UPDATE_PLAN_PROMPT = """
 - `delivery_role="final"` 只用于“承担最终重交付正文”的步骤；同一条计划里通常最多只有一个 `final`
 - `delivery_context_state="ready"` 只用于“当前步骤应直接组织最终正文”的场景；这种步骤不要继续发起新的 `search_web` / `fetch_page`
 - `delivery_context_state="needs_preparation"` 只用于“当前步骤最终仍要交付正文，但还要先继续准备上下文”的场景
+- `success_criteria` 为可选字段；建议每步提供 1-3 条可验证完成判据，禁止“完成任务/继续处理”这类空泛语句
+- 若关键参数尚未在本轮被确认，`success_criteria` 也必须保持占位描述，不得写死具体值
 - runtime 会对 `research` 的无文件上下文读文件、`web_reading` 的文件读取，以及 `artifact_policy="forbid_file_output"` 下的文件写入做硬拦截；这里的约束重点是结构化字段与步骤语义，而不是额外的文本正则修补
 
 ---
@@ -360,6 +374,8 @@ interface UpdatePlanResponse {{
     delivery_role: string;
     /** 最终交付上下文状态：none | needs_preparation | ready **/
     delivery_context_state: string;
+    /** 可选。步骤完成判据，建议 1-3 条，必须可验证 **/
+    success_criteria?: string[];
   }}>;
 }}
 ```
@@ -383,7 +399,8 @@ interface UpdatePlanResponse {{
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
       "delivery_role": "none",
-      "delivery_context_state": "none"
+      "delivery_context_state": "none",
+      "success_criteria": ["收到用户明确选择结果"]
     }},
     {{
       "id": "2",
@@ -392,7 +409,8 @@ interface UpdatePlanResponse {{
       "output_mode": "inline",
       "artifact_policy": "default",
       "delivery_role": "final",
-      "delivery_context_state": "needs_preparation"
+      "delivery_context_state": "needs_preparation",
+      "success_criteria": ["输出课程详情说明并包含来源链接"]
     }}
   ]
 }}
