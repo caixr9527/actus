@@ -468,6 +468,11 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
         step=step,
         task_mode="file_processing",
         recent_function_name="read_file",
+        function_args={"filepath": "/home/ubuntu/workspace/hello.txt"},
+        tool_result_data={
+            "filepath": "/home/ubuntu/workspace/hello.txt",
+            "content": "P3_WORKSPACE_OK",
+        },
         tool_result_success=True,
         step_file_context=context,
         runtime_recent_action={},
@@ -476,6 +481,54 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
     assert result.payload is not None
     assert result.payload["success"] is True
     assert result.reason_code == "file_processing_facts_ready"
+    delivery_text = str(result.payload.get("delivery_text") or "")
+    assert "已读取文件" in delivery_text
+    assert "/home/ubuntu/workspace/hello.txt" in delivery_text
+    assert "P3_WORKSPACE_OK" not in delivery_text
+    assert "读取内容长度" in delivery_text
+
+
+def test_convergence_judge_should_break_when_find_files_and_read_file_facts_ready() -> None:
+    judge = ConvergenceJudge()
+    step = Step(
+        id="step-final-find",
+        description="读取课程目录并文本交付",
+        task_mode_hint="file_processing",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+    shared_context = {}
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="file_processing",
+        recent_function_name="find_files",
+        function_args={"dir_path": "/home/ubuntu/workspace"},
+        tool_result_data={
+            "dir_path": "/home/ubuntu/workspace",
+            "files": ["hello.txt", "notes.md"],
+        },
+        tool_result_success=True,
+        step_file_context=shared_context,
+        runtime_recent_action={},
+    )
+    assert result.should_break is False
+
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="file_processing",
+        recent_function_name="read_file",
+        function_args={"filepath": "/home/ubuntu/workspace/hello.txt"},
+        tool_result_data={
+            "filepath": "/home/ubuntu/workspace/hello.txt",
+            "content": "HELLO",
+        },
+        tool_result_success=True,
+        step_file_context=shared_context,
+        runtime_recent_action={},
+    )
+    assert result.should_break is True
+    assert "目录文件" in str((result.payload or {}).get("delivery_text") or "")
 
 
 class _FakeNoToolLLM:

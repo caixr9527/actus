@@ -516,6 +516,28 @@ def _resolve_direct_delivery_context_state(task_mode: str) -> str:
     return StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
+def _should_skip_summary_llm_for_final_delivery(
+        *,
+        summarize_intermediate_round: bool,
+        last_executed_step: Optional[Step],
+        deterministic_delivery_text: str,
+) -> bool:
+    if summarize_intermediate_round:
+        return False
+    if not deterministic_delivery_text:
+        return False
+    if last_executed_step is None:
+        return False
+    step_status = normalize_controlled_value(getattr(last_executed_step, "status", None), ExecutionStatus)
+    output_mode = normalize_controlled_value(getattr(last_executed_step, "output_mode", None), StepOutputMode)
+    delivery_role = normalize_controlled_value(getattr(last_executed_step, "delivery_role", None), StepDeliveryRole)
+    return (
+        step_status == ExecutionStatus.COMPLETED.value
+        and output_mode == StepOutputMode.INLINE.value
+        and delivery_role == StepDeliveryRole.FINAL.value
+    )
+
+
 # Summary helper：负责总结阶段的快照裁剪、结果复用和最终轻量输入构造。
 def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
     """把 dict/领域对象统一规整为 StepOutcome。"""
@@ -2846,19 +2868,35 @@ async def summarize_node(
     final_message = str(state.get("final_message") or "")
     last_executed_step = state.get("last_executed_step")
     summarize_intermediate_round = _is_intermediate_delivery_step(last_executed_step)
-    summary_context_packet = await _build_prompt_context_packet_async(
-        stage="summary",
-        state=state,
-        runtime_context_service=runtime_context_service,
-        task_mode=state.get("task_mode") or normalize_controlled_value(
-            getattr(last_executed_step, "task_mode_hint", None),
-            StepTaskModeHint,
-        ),
+    deterministic_delivery_text = (
+        ""
+        if summarize_intermediate_round
+        else build_delivery_text(
+            working_memory.get("final_delivery_payload"),
+            fallback="",
+        )
     )
-    summary_context_updates = _extract_prompt_context_state_updates(
-        runtime_context_service=runtime_context_service,
-        context_packet=summary_context_packet,
+    skip_summary_llm = _should_skip_summary_llm_for_final_delivery(
+        summarize_intermediate_round=summarize_intermediate_round,
+        last_executed_step=last_executed_step,
+        deterministic_delivery_text=deterministic_delivery_text,
     )
+    summary_context_updates: Dict[str, Any] = {}
+    summary_context_packet: Dict[str, Any] = {}
+    if not skip_summary_llm:
+        summary_context_packet = await _build_prompt_context_packet_async(
+            stage="summary",
+            state=state,
+            runtime_context_service=runtime_context_service,
+            task_mode=state.get("task_mode") or normalize_controlled_value(
+                getattr(last_executed_step, "task_mode_hint", None),
+                StepTaskModeHint,
+            ),
+        )
+        summary_context_updates = _extract_prompt_context_state_updates(
+            runtime_context_service=runtime_context_service,
+            context_packet=summary_context_packet,
+        )
     llm_runtime = describe_llm_runtime(llm)
     summarize_prompt = (
         _build_intermediate_round_summary_prompt(summary_context_packet)
@@ -2867,36 +2905,51 @@ async def summarize_node(
             context_packet=json.dumps(summary_context_packet, ensure_ascii=False)
         )
     )
-    log_runtime(
-        logger,
-        logging.INFO,
-        "开始生成总结",
-        state=state,
-        stage_name="summary",
-        model_name=llm_runtime["model_name"],
-        max_tokens=llm_runtime["max_tokens"],
-        execution_count=int(state.get("execution_count") or 0),
-        step_count=len(list(plan.steps or [])),
-        final_message_length=len(final_message),
-        intermediate_round=summarize_intermediate_round,
-    )
-    llm_started_at = now_perf()
-    llm_message = await llm.invoke(
-        messages=[{"role": "user", "content": summarize_prompt}],
-        tools=[],
-        response_format={"type": "json_object"},
-    )
-    llm_cost_ms = elapsed_ms(llm_started_at)
-    parsed = safe_parse_json(llm_message.get("content"))
-    summary_message = str(
-        parsed.get("message")
-        or (
-            _build_intermediate_round_summary_fallback(last_executed_step)
-            if summarize_intermediate_round
-            else final_message
+    parsed: Dict[str, Any] = {}
+    llm_cost_ms = 0
+    if skip_summary_llm:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "命中确定性交付正文，跳过总结模型调用",
+            state=state,
+            stage_name="summary",
+            deterministic_delivery_text_length=len(deterministic_delivery_text),
+            execution_count=int(state.get("execution_count") or 0),
+            step_count=len(list(plan.steps or [])),
         )
-        or ""
-    ).strip()
+        summary_message = final_message
+    else:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "开始生成总结",
+            state=state,
+            stage_name="summary",
+            model_name=llm_runtime["model_name"],
+            max_tokens=llm_runtime["max_tokens"],
+            execution_count=int(state.get("execution_count") or 0),
+            step_count=len(list(plan.steps or [])),
+            final_message_length=len(final_message),
+            intermediate_round=summarize_intermediate_round,
+        )
+        llm_started_at = now_perf()
+        llm_message = await llm.invoke(
+            messages=[{"role": "user", "content": summarize_prompt}],
+            tools=[],
+            response_format={"type": "json_object"},
+        )
+        llm_cost_ms = elapsed_ms(llm_started_at)
+        parsed = safe_parse_json(llm_message.get("content"))
+        summary_message = str(
+            parsed.get("message")
+            or (
+                _build_intermediate_round_summary_fallback(last_executed_step)
+                if summarize_intermediate_round
+                else final_message
+            )
+            or ""
+        ).strip()
     extracted_facts = _normalize_memory_fact_items(parsed.get("facts_in_session"))
     extracted_preferences = _normalize_memory_preferences(parsed.get("user_preferences"))
     model_memory_candidates = _build_model_memory_candidates(
@@ -2964,9 +3017,13 @@ async def summarize_node(
             message=(
                 summary_message
                 if summarize_intermediate_round
-                else build_delivery_text(
-                    working_memory.get("final_delivery_payload"),
-                    fallback=summary_message,
+                else (
+                    deterministic_delivery_text
+                    if deterministic_delivery_text
+                    else build_delivery_text(
+                        working_memory.get("final_delivery_payload"),
+                        fallback=summary_message,
+                    )
                 )
             ),
             attachments=summary_attachment_paths,

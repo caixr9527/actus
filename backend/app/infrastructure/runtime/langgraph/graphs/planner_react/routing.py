@@ -5,7 +5,7 @@
 import logging
 from typing import Literal
 
-from app.domain.models import ExecutionStatus
+from app.domain.models import ExecutionStatus, StepDeliveryRole, StepOutputMode
 from app.domain.services.runtime.normalizers import normalize_controlled_value
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState, get_graph_control
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
@@ -64,6 +64,16 @@ def _route_after_completed_step(
         )
         return "guard_step_reuse"
 
+    # P3-一次性收口：最终 inline 交付步骤完成后直接收尾，不再进入空转 replan。
+    if _is_completed_inline_final_step(state):
+        log_runtime(
+            logger,
+            logging.INFO,
+            "最终交付步骤已完成，跳过重规划",
+            state=state,
+        )
+        return "summarize"
+
     if bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
         log_runtime(
             logger,
@@ -80,6 +90,29 @@ def _route_after_completed_step(
         state=state,
     )
     return "replan"
+
+
+def _is_completed_inline_final_step(state: PlannerReActLangGraphState) -> bool:
+    last_step = state.get("last_executed_step")
+    if last_step is None:
+        return False
+    last_step_status = normalize_controlled_value(
+        getattr(last_step, "status", ""),
+        ExecutionStatus,
+    )
+    output_mode = normalize_controlled_value(
+        getattr(last_step, "output_mode", ""),
+        StepOutputMode,
+    )
+    delivery_role = normalize_controlled_value(
+        getattr(last_step, "delivery_role", ""),
+        StepDeliveryRole,
+    )
+    return (
+        last_step_status == ExecutionStatus.COMPLETED.value
+        and output_mode == StepOutputMode.INLINE.value
+        and delivery_role == StepDeliveryRole.FINAL.value
+    )
 
 
 def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:

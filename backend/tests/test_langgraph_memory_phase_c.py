@@ -180,6 +180,15 @@ class _FakeLightSummaryLLM:
         }
 
 
+class _FailIfSummaryLLMCalled:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools, response_format):
+        self.calls += 1
+        raise AssertionError("命中确定性交付正文时不应调用总结模型")
+
+
 class _FailIfCalledSummaryLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -1613,6 +1622,113 @@ def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_
     assert message_event.type == "message"
     assert message_event.stage == "final"
     assert message_event.message == "这是用户最终应该看到的完整攻略正文。"
+
+
+def test_summarize_should_skip_llm_when_final_delivery_text_ready() -> None:
+    llm = _FailIfSummaryLLMCalled()
+    final_step = Step(
+        id="step-final",
+        title="输出最终结果",
+        description="输出最终结果",
+        output_mode="inline",
+        delivery_role="final",
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="步骤完成",
+            delivery_text="这是确定性的最终正文，应该直接返回给用户。",
+        ),
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": final_step,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证确定性交付跳过总结模型",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是确定性的最终正文，应该直接返回给用户。",
+                "sections": [],
+                "source_refs": [],
+            },
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "轻量摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert llm.calls == 0
+    assert summarized_state["final_message"] == "轻量摘要"
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.type == "message"
+    assert message_event.stage == "final"
+    assert message_event.message == "这是确定性的最终正文，应该直接返回给用户。"
+
+
+def test_summarize_should_not_build_summary_context_when_skipping_llm(monkeypatch) -> None:
+    llm = _FailIfSummaryLLMCalled()
+    final_step = Step(
+        id="step-final",
+        title="输出最终结果",
+        description="输出最终结果",
+        output_mode="inline",
+        delivery_role="final",
+        status=ExecutionStatus.COMPLETED,
+    )
+
+    async def _should_not_be_called(*args, **kwargs):
+        raise AssertionError("跳过 summary LLM 时不应构建 summary context")
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes._build_prompt_context_packet_async",
+        _should_not_be_called,
+    )
+
+    state = {
+        "session_id": "session-ctx-skip",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": final_step,
+        "working_memory": {
+            "goal": "验证跳过总结时不构建上下文",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是确定性的最终正文，应该直接返回给用户。",
+                "sections": [],
+                "source_refs": [],
+            },
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "轻量摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["final_message"] == "轻量摘要"
 
 
 def test_summarize_should_emit_light_summary_for_intermediate_round_even_with_stale_final_payload() -> None:

@@ -827,6 +827,34 @@ def test_route_after_execute_should_fail_fast_to_replan_when_failed_step_has_pen
     assert route_after_execute(next_state) == "replan"
 
 
+def test_route_after_execute_should_skip_replan_when_final_inline_step_completed() -> None:
+    completed_plan = Plan(
+        title="批次执行",
+        goal="最终交付",
+        language="zh",
+        steps=[
+            Step(
+                id="step-final-inline",
+                title="输出最终结果",
+                description="直接输出最终结果",
+                output_mode="inline",
+                delivery_role="final",
+                status=ExecutionStatus.COMPLETED,
+            )
+        ],
+        status=ExecutionStatus.PENDING,
+    )
+    next_state = {
+        "plan": completed_plan,
+        "last_executed_step": completed_plan.steps[0],
+        "pending_interrupt": {},
+        "execution_count": 1,
+        "max_execution_steps": 20,
+        "graph_metadata": {"control": {}},
+    }
+    assert route_after_execute(next_state) == "summarize"
+
+
 def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> None:
     user_message = "先让我确认后再继续搜索课程"
     llm = _IllegalAskUserLLM()

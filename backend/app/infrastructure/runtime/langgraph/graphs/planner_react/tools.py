@@ -569,6 +569,8 @@ async def execute_step_with_prompt(
             step=step,
             task_mode=task_mode,
             recent_function_name=lifecycle.normalized_function_name,
+            function_args=lifecycle.function_args,
+            tool_result_data=tool_result.data,
             tool_result_success=bool(tool_result.success),
             step_file_context=step_file_context,
             runtime_recent_action=execution_state.runtime_recent_action,
