@@ -242,6 +242,49 @@ class SearXNGServiceTestCase(unittest.IsolatedAsyncioTestCase):
         same_domain_count = len([item for item in top_urls if "same.example.com" in item])
         self.assertLessEqual(same_domain_count, 2)
 
+    async def test_search_should_tokenize_chinese_natural_language_query_for_scoring(self) -> None:
+        payload = {
+            "query": "AI编程助手有哪些",
+            "results": [
+                {
+                    "title": "AI编程助手综述",
+                    "url": "https://example.com/a",
+                    "content": "主流AI编程助手盘点",
+                    "engine": "bing",
+                },
+                {
+                    "title": "无关结果",
+                    "url": "https://example.com/b",
+                    "content": "完全无关文本",
+                    "engine": "bing",
+                },
+            ],
+        }
+        service = SearXNGService()
+        with patch("app.services.searxng.urlopen", return_value=_FakeResponse(status=200, body=json.dumps(payload))):
+            result = await service.search(query="AI编程助手有哪些")
+        self.assertEqual(len(result.results), 2)
+        self.assertEqual(result.results[0].url, "https://example.com/a")
+
+    async def test_search_should_limit_query_tokens_when_chinese_query_is_long(self) -> None:
+        long_query = "这是一条用于测试中文自然语言搜索查询分词上限的非常长的句子，包含多个主题片段和描述性文本"
+        payload = {
+            "query": long_query,
+            "results": [
+                {
+                    "title": "测试结果",
+                    "url": "https://example.com/a",
+                    "content": "测试内容",
+                    "engine": "bing",
+                }
+            ],
+        }
+        service = SearXNGService()
+        with patch("app.services.searxng.urlopen", return_value=_FakeResponse(status=200, body=json.dumps(payload))):
+            _ = await service.search(query=long_query)
+        tokens = service._tokenize_query(long_query, policy=service.quality_policy)
+        self.assertLessEqual(len(tokens), 48)
+
     async def test_search_should_reject_empty_query(self) -> None:
         service = SearXNGService()
 

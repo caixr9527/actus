@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Optional, Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit, parse_qsl
@@ -21,6 +22,7 @@ from app.models import SearXNGFetchPageResult, SearXNGSearchItem, SearXNGSearchR
 from app.services.search_quality_policy import SearchQualityPolicy, get_search_quality_policy
 
 logger = logging.getLogger(__name__)
+MAX_QUERY_TOKENS = 48
 
 
 class SearXNGService:
@@ -399,14 +401,41 @@ class SearXNGService:
 
     @staticmethod
     def _tokenize_query(query: str, *, policy: SearchQualityPolicy) -> list[str]:
+        # P3-一次性收口：对中文自然语言查询做短语切分，避免整句成为单一 token 导致误降权。
         tokens: list[str] = []
         seen: set[str] = set()
-        for raw_token in policy.query_token_pattern.split(str(query or "").strip().lower()):
+        normalized_query = str(query or "").strip().lower()
+        if not normalized_query:
+            return tokens
+        for raw_token in policy.query_token_pattern.split(normalized_query):
             token = str(raw_token or "").strip()
             if len(token) < 2 or token in seen:
                 continue
             seen.add(token)
             tokens.append(token)
+            if len(tokens) >= MAX_QUERY_TOKENS:
+                return tokens
+        zh_chunks = [chunk for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", normalized_query) if chunk]
+        for chunk in zh_chunks:
+            chunk_len = len(chunk)
+            if chunk_len <= 4:
+                if chunk not in seen:
+                    seen.add(chunk)
+                    tokens.append(chunk)
+                    if len(tokens) >= MAX_QUERY_TOKENS:
+                        return tokens
+                continue
+            # 对较长中文片段按 2~4 长度滑窗补充 token，提升中文自然语言检索打分鲁棒性。
+            max_window = min(4, chunk_len)
+            for window in range(2, max_window + 1):
+                for start in range(0, chunk_len - window + 1):
+                    token = chunk[start:start + window]
+                    if token in seen:
+                        continue
+                    seen.add(token)
+                    tokens.append(token)
+                    if len(tokens) >= MAX_QUERY_TOKENS:
+                        return tokens
         return tokens
 
     @staticmethod
