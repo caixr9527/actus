@@ -1602,6 +1602,7 @@ def test_execute_step_with_prompt_should_block_search_for_final_delivery_step() 
                 output_mode="inline",
                 artifact_policy="default",
                 delivery_role="final",
+                delivery_context_state="ready",
             ),
             runtime_tools=[search_tool],
             task_mode="general",

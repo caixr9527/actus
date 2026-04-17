@@ -50,6 +50,7 @@ def apply_tool_result_effects(
     browser_route_state_key: str,
     execution_context: ExecutionContext,
     execution_state: ExecutionState,
+    tool_executed: bool = True,
 ) -> ToolEffectsResult:
     if bool(tool_result.success):
         execution_state.consecutive_failure_count = 0
@@ -78,6 +79,15 @@ def apply_tool_result_effects(
         if blocked_tool_call:
             execution_state.runtime_recent_action["last_blocked_tool_call"] = blocked_tool_call
         execution_state.consecutive_failure_count += 1
+        if execution_context.research_route_enabled and normalized_function_name == "fetch_page":
+            # 仅“真实执行 fetch_page 失败”才累计 fetch 失败计数。
+            if tool_executed:
+                execution_state.consecutive_fetch_failure_count += 1
+            # P3-一次性收口：fetch_page 失败 URL 进入黑名单，仅在真实执行失败时写入，避免 guard 误污染。
+            if tool_executed:
+                failed_url_key = _normalize_fetch_dedupe_key(function_args.get("url"))
+                if failed_url_key:
+                    execution_state.research_failed_fetch_url_keys.add(failed_url_key)
         if (
             normalized_function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES
             and loop_break_reason != "browser_high_level_retry_blocked"
@@ -108,6 +118,9 @@ def apply_tool_result_effects(
             )
 
     if execution_context.research_route_enabled and normalized_function_name == "search_web" and bool(tool_result.success):
+        # P3-一次性收口：search 成功扩召回后应重置 fetch 连续失败计数，
+        # 避免因历史失败残留导致后续长期停留在 search-only 循环。
+        execution_state.consecutive_fetch_failure_count = 0
         extracted_query = _extract_search_query(tool_result, function_args=function_args)
         if extracted_query:
             _append_unique_text(
@@ -128,8 +141,13 @@ def apply_tool_result_effects(
     elif execution_context.research_route_enabled and normalized_function_name == "fetch_page" and bool(tool_result.success):
         execution_state.research_fetch_completed = True
         execution_state.research_fetch_success_count += 1
+        execution_state.consecutive_fetch_failure_count = 0
         execution_state.research_cross_domain_repeat_blocks = 0
         fetched_url = _extract_fetched_page_url(tool_result)
+        # 抓取成功后，若此前误入失败黑名单，立即清理对应 key。
+        successful_url_key = _normalize_fetch_dedupe_key(fetched_url or function_args.get("url"))
+        if successful_url_key and successful_url_key in execution_state.research_failed_fetch_url_keys:
+            execution_state.research_failed_fetch_url_keys.discard(successful_url_key)
         if fetched_url:
             _append_unique_text(
                 execution_state.research_fetched_urls,
@@ -319,6 +337,10 @@ def _extract_domains(urls: List[str]) -> List[str]:
         seen_domains.add(domain)
         domains.append(domain)
     return domains
+
+
+def _normalize_fetch_dedupe_key(url: Any) -> str:
+    return normalize_url_value(url, drop_query=True)
 
 
 def _append_unique_text(target: List[str], value: str, *, max_items: int) -> None:

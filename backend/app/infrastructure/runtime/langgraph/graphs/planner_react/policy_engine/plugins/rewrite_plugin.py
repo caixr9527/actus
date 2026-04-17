@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """P3 解耦：工具改写策略插件（研究链路）。"""
-
-import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
@@ -11,9 +9,7 @@ from app.domain.services.runtime.normalizers import (
     extract_url_domain,
     normalize_url_value,
 )
-from app.domain.services.workspace_runtime.policies import (
-    build_step_candidate_text as _build_step_candidate_text,
-)
+from ...research_url_extractor import extract_explicit_url_from_research_context
 from ...execution_context import ExecutionContext
 from ...execution_state import ExecutionState
 from ...tool_events import ToolCallLifecycle
@@ -38,6 +34,7 @@ def _collect_pending_candidate_urls_for_research(execution_state: ExecutionState
         for url in list(execution_state.research_fetched_urls or [])
         if _normalize_fetch_dedupe_key(url)
     }
+    failed_keys = set(list(execution_state.research_failed_fetch_url_keys or set()))
     pending_urls: List[str] = []
     seen_pending_keys: set[str] = set()
     for raw_url in list(execution_state.research_candidate_urls or []):
@@ -45,29 +42,11 @@ def _collect_pending_candidate_urls_for_research(execution_state: ExecutionState
         pending_key = _normalize_fetch_dedupe_key(normalized_url)
         if not normalized_url or not pending_key:
             continue
-        if pending_key in fetched_keys or pending_key in seen_pending_keys:
+        if pending_key in fetched_keys or pending_key in failed_keys or pending_key in seen_pending_keys:
             continue
         seen_pending_keys.add(pending_key)
         pending_urls.append(normalized_url)
     return pending_urls
-
-
-def _extract_explicit_url_from_text(step: Step, execution_context: ExecutionContext) -> str:
-    step_text = _build_step_candidate_text(step)
-    step_url_match = re.search(r"https?://[^\s)\]>\"']+", str(step_text or ""), re.IGNORECASE)
-    if step_url_match:
-        return normalize_url_value(step_url_match.group(0))
-    candidate_text = "\n".join(
-        [
-            str((item or {}).get("text") or "").strip()
-            for item in list(getattr(execution_context, "normalized_user_content", []) or [])
-            if isinstance(item, dict) and str((item or {}).get("type") or "").strip().lower() == "text"
-        ]
-    )
-    url_match = re.search(r"https?://[^\s)\]>\"']+", candidate_text, re.IGNORECASE)
-    if url_match:
-        return normalize_url_value(url_match.group(0))
-    return ""
 
 
 def _pick_research_fetch_url_for_rewrite(
@@ -75,22 +54,28 @@ def _pick_research_fetch_url_for_rewrite(
         step: Step,
         execution_context: ExecutionContext,
         execution_state: ExecutionState,
-) -> str:
+) -> tuple[str, str]:
+    """返回 (rewrite_url, source)。source: candidate | explicit"""
+    pending_candidate_urls = _collect_pending_candidate_urls_for_research(execution_state)
+    fetched_domains = set(list(execution_state.research_fetched_domains or []))
+    if len(pending_candidate_urls) > 0:
+        for url in pending_candidate_urls:
+            domain = extract_url_domain(url)
+            if domain and domain not in fetched_domains:
+                return url, "candidate"
+        return pending_candidate_urls[0], "candidate"
+
     explicit_url = ""
     if bool(getattr(execution_context, "research_has_explicit_url", False)):
-        explicit_url = _extract_explicit_url_from_text(step, execution_context)
-    if explicit_url:
-        return explicit_url
+        explicit_url = extract_explicit_url_from_research_context(step=step, ctx=execution_context)
+    explicit_key = _normalize_fetch_dedupe_key(explicit_url)
+    explicit_blacklisted = bool(
+        explicit_key and explicit_key in set(list(execution_state.research_failed_fetch_url_keys or set()))
+    )
+    if explicit_url and not explicit_blacklisted:
+        return explicit_url, "explicit"
 
-    pending_candidate_urls = _collect_pending_candidate_urls_for_research(execution_state)
-    if len(pending_candidate_urls) == 0:
-        return ""
-    fetched_domains = set(list(execution_state.research_fetched_domains or []))
-    for url in pending_candidate_urls:
-        domain = extract_url_domain(url)
-        if domain and domain not in fetched_domains:
-            return url
-    return pending_candidate_urls[0]
+    return "", ""
 
 
 def run_rewrite_plugin(
@@ -108,7 +93,21 @@ def run_rewrite_plugin(
             execution_state.research_search_ready):
         return RewriteDecision(lifecycle=lifecycle)
 
-    rewrite_url = _pick_research_fetch_url_for_rewrite(
+    # P3-一次性收口：连续 fetch 失败后，优先恢复为 search 扩召回，不再盲目 search->fetch 重写。
+    if execution_state.consecutive_fetch_failure_count >= 2 and execution_state.research_search_ready:
+        return RewriteDecision(
+            lifecycle=lifecycle,
+            reason="research_search_recovery_after_fetch_failures",
+            metadata={
+                "rewrite_from": "search_web",
+                "rewrite_to": "search_web",
+                "skipped_rewrite": True,
+                "consecutive_fetch_failure_count": execution_state.consecutive_fetch_failure_count,
+                "failed_fetch_url_count": len(list(execution_state.research_failed_fetch_url_keys or [])),
+            },
+        )
+
+    rewrite_url, rewrite_source = _pick_research_fetch_url_for_rewrite(
         step=step,
         execution_context=execution_context,
         execution_state=execution_state,
@@ -120,6 +119,12 @@ def run_rewrite_plugin(
     lifecycle.function_name = "fetch_page"
     lifecycle.normalized_function_name = "fetch_page"
     lifecycle.function_args = {"url": rewrite_url}
+    explicit_url = extract_explicit_url_from_research_context(step=step, ctx=execution_context)
+    explicit_url_key = _normalize_fetch_dedupe_key(explicit_url)
+    explicit_url_blacklisted = bool(
+        explicit_url_key and explicit_url_key in set(list(execution_state.research_failed_fetch_url_keys or set()))
+    )
+    pending_candidates = _collect_pending_candidate_urls_for_research(execution_state)
     return RewriteDecision(
         lifecycle=lifecycle,
         reason="research_search_to_fetch_rewrite",
@@ -127,9 +132,13 @@ def run_rewrite_plugin(
             "rewrite_from": "search_web",
             "rewrite_to": "fetch_page",
             "rewrite_url": rewrite_url,
+            "rewrite_source": rewrite_source,
             "had_explicit_url": bool(getattr(execution_context, "research_has_explicit_url", False)),
+            "explicit_url_blacklisted": explicit_url_blacklisted,
+            "failed_fetch_url_count": len(list(execution_state.research_failed_fetch_url_keys or [])),
             "previous_arg_keys": sorted(previous_args.keys()),
-            "pending_candidate_count": len(_collect_pending_candidate_urls_for_research(execution_state)),
+            "pending_candidate_count": len(pending_candidates),
+            "skipped_due_to_blacklist": bool(rewrite_source == "candidate" and explicit_url_blacklisted),
             "fetched_domain_count": len(list(execution_state.research_fetched_domains or [])),
         },
     )

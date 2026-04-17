@@ -104,6 +104,7 @@ class ToolPolicyEngine:
                 message=f"调用工具失败: {function_name}",
             )
             tool_cost_ms = 0
+            tool_executed = False
         else:
             execution_decision = await run_executor_plugin(
                 logger=self._logger,
@@ -121,6 +122,7 @@ class ToolPolicyEngine:
             loop_break_reason = execution_decision.loop_break_reason
             tool_cost_ms = execution_decision.tool_cost_ms
             tool_result = execution_decision.tool_result
+            tool_executed = True
 
         effects_result = run_effects_plugin(
             logger=self._logger,
@@ -133,6 +135,7 @@ class ToolPolicyEngine:
             browser_route_state_key=browser_route_state_key,
             execution_context=execution_context,
             execution_state=execution_state,
+            tool_executed=tool_executed,
         )
         return PolicyEvaluationResult(
             tool_result=effects_result.tool_result,

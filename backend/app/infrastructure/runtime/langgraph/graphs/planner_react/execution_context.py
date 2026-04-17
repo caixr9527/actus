@@ -266,15 +266,9 @@ def _resolve_step_delivery_context_state(step: Step, *, task_mode: str) -> str:
     )
     if delivery_context_state:
         return delivery_context_state
-    if not _step_owns_final_delivery(step):
-        return StepDeliveryContextState.NONE.value
-    inferred_task_mode = (
-        normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint)
-        or normalize_controlled_value(task_mode, StepTaskModeHint)
-    )
-    if inferred_task_mode == StepTaskModeHint.GENERAL.value:
-        return StepDeliveryContextState.READY.value
-    return StepDeliveryContextState.NEEDS_PREPARATION.value
+    # P3-一次性收口：未显式标注 delivery_context_state 时保持中性 none，
+    # 避免仅凭 task_mode=general 推断 ready，导致“最终步骤仍需补证据”场景被提前拦截检索。
+    return StepDeliveryContextState.NONE.value
 
 
 def _step_final_delivery_context_ready(step: Step, *, task_mode: str) -> bool:

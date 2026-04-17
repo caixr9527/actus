@@ -23,6 +23,7 @@ def run_effects_plugin(
     browser_route_state_key: str,
     execution_context: ExecutionContext,
     execution_state: ExecutionState,
+    tool_executed: bool = True,
 ) -> ToolEffectsResult:
     """归并工具执行结果，更新执行态。"""
     return apply_tool_result_effects(
@@ -36,5 +37,5 @@ def run_effects_plugin(
         browser_route_state_key=browser_route_state_key,
         execution_context=execution_context,
         execution_state=execution_state,
+        tool_executed=tool_executed,
     )
-

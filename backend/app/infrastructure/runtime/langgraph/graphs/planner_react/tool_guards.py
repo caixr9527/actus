@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """P3 重构：工具调用前置守卫。"""
-
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set
@@ -14,6 +13,7 @@ from app.domain.services.workspace_runtime.policies import (
 )
 from .execution_context import ExecutionContext, step_allows_user_wait
 from .execution_state import ExecutionState
+from .research_url_extractor import extract_explicit_url_from_research_context
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ASK_USER_FUNCTION_NAME,
@@ -305,13 +305,25 @@ def evaluate_tool_guard(
         and ctx.research_has_explicit_url
         and not state.research_fetch_completed
     ):
-        return GuardDecision(
-            should_skip=True,
-            loop_break_reason="research_route_fetch_required",
-            tool_result=ToolResult(
-                success=False,
-                message="当前步骤已提供明确 URL，请直接调用 fetch_page 读取页面正文，不要先重复搜索。",
-            ),
+        # P3-一次性收口：显式 URL 抓取连续失败后允许恢复 search_web 扩召回，避免固定 URL 死循环。
+        explicit_url_blacklisted = _is_explicit_url_blacklisted(step=step, ctx=ctx, state=state)
+        if (not explicit_url_blacklisted) and state.consecutive_fetch_failure_count < 2:
+            return GuardDecision(
+                should_skip=True,
+                loop_break_reason="research_route_fetch_required",
+                tool_result=ToolResult(
+                    success=False,
+                    message="当前步骤已提供明确 URL，请直接调用 fetch_page 读取页面正文，不要先重复搜索。",
+                ),
+            )
+        log_runtime(
+            logger,
+            logging.INFO,
+            "显式 URL 已失败，允许恢复 search_web 扩召回",
+            step_id=str(step.id or ""),
+            function_name=function_name,
+            consecutive_fetch_failure_count=state.consecutive_fetch_failure_count,
+            explicit_url_blacklisted=explicit_url_blacklisted,
         )
     if (
         ctx.research_route_enabled
@@ -319,6 +331,17 @@ def evaluate_tool_guard(
         and state.research_search_ready
         and not ctx.research_has_explicit_url
     ):
+        # P3-一次性收口：fetch 连续失败后，不再强制“先 fetch 再 search”，避免策略自锁。
+        if state.consecutive_fetch_failure_count >= 2:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "研究链路连续失败后允许 search_web 恢复召回",
+                step_id=str(step.id or ""),
+                function_name=function_name,
+                consecutive_fetch_failure_count=state.consecutive_fetch_failure_count,
+            )
+            return GuardDecision(should_skip=False)
         pending_candidate_urls = _collect_pending_candidate_urls(state=state)
         needs_fetch_count = state.research_fetch_success_count < RESEARCH_MIN_FETCH_COUNT
         needs_domain_coverage = len(state.research_fetched_domains) < RESEARCH_MIN_DOMAIN_COUNT
@@ -408,6 +431,7 @@ def _collect_pending_candidate_urls(*, state: ExecutionState) -> list[str]:
         for url in list(state.research_fetched_urls or [])
         if _normalize_fetch_dedupe_key(url)
     }
+    failed_url_set = set(list(state.research_failed_fetch_url_keys or set()))
     pending: list[str] = []
     seen_pending_keys: set[str] = set()
     for raw_url in list(state.research_candidate_urls or []):
@@ -417,6 +441,7 @@ def _collect_pending_candidate_urls(*, state: ExecutionState) -> list[str]:
             not normalized
             or not pending_key
             or pending_key in fetched_url_set
+            or pending_key in failed_url_set
             or pending_key in seen_pending_keys
         ):
             continue
@@ -445,3 +470,11 @@ def _normalize_fetch_dedupe_key(url: Any) -> str:
 
 def _extract_domain(url: str) -> str:
     return extract_url_domain(url)
+
+
+def _is_explicit_url_blacklisted(*, step: Step, ctx: ExecutionContext, state: ExecutionState) -> bool:
+    explicit_url = extract_explicit_url_from_research_context(step=step, ctx=ctx)
+    explicit_key = _normalize_fetch_dedupe_key(explicit_url)
+    if not explicit_key:
+        return False
+    return explicit_key in set(list(state.research_failed_fetch_url_keys or set()))
