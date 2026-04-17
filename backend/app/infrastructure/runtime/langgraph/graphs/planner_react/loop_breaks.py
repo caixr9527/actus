@@ -42,7 +42,7 @@ def build_loop_break_result(
             runtime_recent_action=runtime_recent_action,
         )
     if loop_break_reason == "search_repeat":
-        next_hint = "请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。"
+        next_hint = "请改写搜索主题描述、缩小范围，或改用 fetch_page / 文件读取继续。"
         return _build_loop_break_payload(
             step=step,
             blocker="同一搜索查询已重复触发多次，当前检索路径没有继续收获。",
@@ -50,6 +50,13 @@ def build_loop_break_result(
                 runtime_recent_action=runtime_recent_action,
                 next_hint=next_hint,
             ),
+            runtime_recent_action=runtime_recent_action,
+        )
+    if loop_break_reason == "research_query_style_blocked":
+        return _build_loop_break_payload(
+            step=step,
+            blocker="当前检索查询属于关键词堆叠，未满足自然语言查询规范。",
+            next_hint="请使用单主题自然语言短句表达查询目标，再继续调用 search_web。",
             runtime_recent_action=runtime_recent_action,
         )
     if loop_break_reason == "research_route_fingerprint_repeat":
@@ -94,7 +101,7 @@ def _append_research_progress_hint(*, runtime_recent_action: Optional[Dict[str, 
     research_progress = dict((runtime_recent_action or {}).get("research_progress") or {})
     missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
     if bool(research_progress.get("is_low_recall")):
-        next_hint = next_hint + " 建议把口语问句改成实体词+限定词（例如：城市 景点 预算 2026）。"
+        next_hint = next_hint + " 建议先用单主题自然语言短句检索，必要时逐轮仅增加一个筛选条件。"
     if len(missing_signals) == 0:
         return next_hint
     return next_hint + " 当前缺口：" + "；".join(missing_signals[:2]) + "。"

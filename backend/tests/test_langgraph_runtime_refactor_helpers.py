@@ -167,13 +167,13 @@ def test_finalize_max_iterations_should_include_query_rewrite_hint_for_low_recal
         runtime_recent_action={
             "research_progress": {
                 "is_low_recall": True,
-                "missing_signals": ["候选链接过少，请改写关键词提高召回"],
+                "missing_signals": ["候选链接过少，请改写主题描述提高召回"],
             }
         },
     )
 
     assert payload["success"] is False
-    assert "改写检索词" in str(payload.get("next_hint") or "")
+    assert "单主题自然语言短句" in str(payload.get("next_hint") or "")
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -1512,16 +1512,29 @@ def test_build_loop_break_result_should_append_query_rewrite_hint_when_low_recal
         runtime_recent_action={
             "research_progress": {
                 "is_low_recall": True,
-                "missing_signals": ["候选链接过少，请改写关键词提高召回"],
+                "missing_signals": ["候选链接过少，请改写主题描述提高召回"],
             }
         },
     )
     assert payload is not None
     hints = str(payload.get("next_hint") or "")
-    assert "实体词+限定词" in hints
+    assert "单主题自然语言短句" in hints
 
 
-def test_execute_tool_with_policy_should_normalize_search_query_before_invoke() -> None:
+def test_build_loop_break_result_should_handle_research_query_style_blocked() -> None:
+    payload = build_loop_break_result(
+        loop_break_reason="research_query_style_blocked",
+        step=Step(description="检索并总结"),
+        runtime_recent_action={},
+    )
+    assert payload is not None
+    assert payload.get("success") is False
+    blockers = [str(item) for item in list(payload.get("blockers") or [])]
+    assert any("关键词堆叠" in item for item in blockers)
+    assert "单主题自然语言短句" in str(payload.get("next_hint") or "")
+
+
+def test_execute_tool_with_policy_should_preserve_search_query_before_invoke() -> None:
     class _CaptureSearchTool:
         name = "search"
 
@@ -1573,7 +1586,170 @@ def test_execute_tool_with_policy_should_normalize_search_query_before_invoke() 
     )
 
     assert tool.received_query != ""
-    assert "请帮我" not in tool.received_query
+    assert tool.received_query == "请帮我查一下 上海 周末 亲子 游玩 有哪些 推荐 景点"
+
+
+def test_evaluate_tool_guard_should_block_keyword_stacked_search_query() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并总结")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "AI 编程助手 IDE 支持 价格 对比 最新"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is True
+    assert guard.loop_break_reason == "research_query_style_blocked"
+    assert "单主题自然语言描述" in str(guard.tool_result.message or "")
+
+
+def test_evaluate_tool_guard_should_allow_natural_language_search_query() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并总结")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "主流 AI 编程助手及其支持的 IDE"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is False
+
+
+def test_evaluate_tool_guard_should_allow_compact_natural_language_query_with_structure_word() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并总结")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "主流AI编程助手支持哪些IDE"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is False
+
+
+def test_evaluate_tool_guard_should_block_compact_keyword_stacked_search_query() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="检索并总结")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "搜索并读取"}],
+        available_tools=[],
+        available_function_names={"search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "AI编程助手IDE支持价格对比最新"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is True
+    assert guard.loop_break_reason == "research_query_style_blocked"
 
 
 def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_empty_model_output() -> None:

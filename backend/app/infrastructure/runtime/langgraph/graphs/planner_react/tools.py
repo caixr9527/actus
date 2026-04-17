@@ -22,6 +22,7 @@ from app.domain.services.workspace_runtime.policies import (
     build_tool_feedback_content as _build_tool_feedback_content,
     build_tool_fingerprint as _build_tool_fingerprint,
     analyze_text_intent as _analyze_text_intent,
+    build_log_text_preview as _build_log_text_preview,
     build_step_candidate_text as _build_step_candidate_text,
     build_browser_preferred_function_names as _build_browser_preferred_function_names,
     classify_confirmed_user_task_mode,
@@ -548,6 +549,11 @@ async def execute_step_with_prompt(
             task_mode=task_mode,
             same_tool_repeat_count=execution_state.same_tool_repeat_count,
             arg_keys=sorted(lifecycle.function_args.keys()),
+            search_query_preview=(
+                _build_log_text_preview(lifecycle.function_args.get("query"), max_chars=100)
+                if lifecycle.normalized_function_name == "search_web"
+                else ""
+            ),
             rewrite_reason=rewrite_reason,
         )
 

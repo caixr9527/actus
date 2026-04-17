@@ -377,9 +377,9 @@ def _build_research_progress_snapshot(state: ExecutionState) -> Dict[str, Any]:
     if query_count == 0:
         missing_signals.append("先执行一次高质量搜索并返回候选链接")
     elif low_recall:
-        missing_signals.append("候选链接过少，请改写关键词提高召回")
+        missing_signals.append("候选链接过少，请改写主题描述提高召回")
     elif low_domain_diversity:
-        missing_signals.append("候选来源过于集中，请补充不同站点检索词")
+        missing_signals.append("候选来源过于集中，请补充不同站点的主题描述")
     if state.research_fetch_success_count < RESEARCH_MIN_FETCH_COUNT:
         missing_signals.append(f"至少读取 {RESEARCH_MIN_FETCH_COUNT} 个来源页面正文")
     if fetched_domain_count < RESEARCH_MIN_DOMAIN_COUNT:

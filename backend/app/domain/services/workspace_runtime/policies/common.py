@@ -21,6 +21,16 @@ def truncate_tool_text(value: Any, *, max_chars: int = TOOL_RESULT_MAX_TEXT_CHAR
     return truncate_text(value, max_chars=max_chars)
 
 
+def build_log_text_preview(value: Any, *, max_chars: int = 120) -> str:
+    """构建日志可读预览：压平空白并按长度截断。"""
+    normalized = " ".join(str(value or "").split()).strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars]}..."
+
+
 def compact_tool_value(value: Any, *, depth: int = 0) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value

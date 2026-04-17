@@ -2,6 +2,12 @@ import importlib.util
 from pathlib import Path
 
 from app.domain.models import build_step_objective_key, build_step_objective_source
+from app.domain.services.prompts import CREATE_PLAN_PROMPT, EXECUTION_PROMPT, UPDATE_PLAN_PROMPT
+from app.domain.services.prompts.en.planner import (
+    CREATE_PLAN_PROMPT as EN_CREATE_PLAN_PROMPT,
+    UPDATE_PLAN_PROMPT as EN_UPDATE_PLAN_PROMPT,
+)
+from app.domain.services.prompts.en.react import EXECUTION_PROMPT as EN_EXECUTION_PROMPT
 from app.infrastructure.runtime.langgraph.graphs.planner_react.parsers import (
     build_step_from_payload,
 )
@@ -248,3 +254,15 @@ def test_migration_objective_key_rule_should_match_runtime_rule() -> None:
             title,
             description,
         )
+
+
+def test_prompts_should_require_single_topic_natural_language_search() -> None:
+    for prompt in (CREATE_PLAN_PROMPT, UPDATE_PLAN_PROMPT, EXECUTION_PROMPT):
+        assert "单主题自然语言" in prompt
+        assert "关键词堆叠" in prompt
+
+
+def test_en_prompts_should_require_single_topic_natural_language_search() -> None:
+    for prompt in (EN_CREATE_PLAN_PROMPT, EN_UPDATE_PLAN_PROMPT, EN_EXECUTION_PROMPT):
+        assert "single-topic natural-language" in prompt
+        assert "keyword stacking" in prompt

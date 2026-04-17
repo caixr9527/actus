@@ -34,6 +34,7 @@ BLOCKED_TOOL_LOOP_BREAK_REASONS: Set[str] = {
     "task_mode_tool_blocked",
     "research_route_search_required",
     "research_route_fetch_required",
+    "research_query_style_blocked",
     # P3-2A/3A 收敛修复：检索链路重复/瞬时错误统一沉淀到 recent_action。
     "research_route_fingerprint_repeat",
     "research_route_transport_error",

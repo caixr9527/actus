@@ -25,3 +25,14 @@ def test_format_runtime_log_should_include_bound_trace_id() -> None:
     assert '会话ID="session-1"' in rendered
     assert '运行ID="run-1"' in rendered
     assert '步骤ID="step-1"' in rendered
+
+
+def test_format_runtime_log_should_render_search_query_preview_field() -> None:
+    rendered = format_runtime_log(
+        "已选择工具调用",
+        step_id="step-2",
+        function_name="search_web",
+        search_query_preview="主流 AI 编程助手及其支持的 IDE",
+    )
+    assert '函数名="search_web"' in rendered
+    assert '检索查询预览="主流 AI 编程助手及其支持的 IDE"' in rendered

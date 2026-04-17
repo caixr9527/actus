@@ -19,7 +19,7 @@ from .browser_policy import (
     is_browser_high_level_temporarily_blocked,
     normalize_browser_page_type,
 )
-from .common import compact_tool_value, hash_payload, truncate_tool_text
+from .common import build_log_text_preview, compact_tool_value, hash_payload, truncate_tool_text
 from .convergence_policy import (
     BLOCKED_TOOL_LOOP_BREAK_REASONS,
     build_human_wait_missing_interrupt_payload,
@@ -62,6 +62,7 @@ __all__ = [
     "build_browser_preferred_function_names",
     "build_browser_route_block_message",
     "build_browser_route_state_key",
+    "build_log_text_preview",
     "build_listing_click_target_block_message",
     "build_human_wait_missing_interrupt_payload",
     "build_loop_break_payload",

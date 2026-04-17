@@ -70,6 +70,7 @@ FIELD_LABELS: dict[str, str] = {
     "candidate_count": "候选数",
     "selected_function": "选中函数",
     "arg_keys": "参数键",
+    "search_query_preview": "检索查询预览",
     "response_keys": "返回键",
     "event_type": "事件类型",
     "language": "语言",

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """P3 重构：工具调用前置守卫。"""
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Set
 
@@ -9,6 +10,7 @@ from app.domain.services.runtime.normalizers import extract_url_domain, normaliz
 from app.domain.models import Step, ToolResult
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.policies import (
+    build_log_text_preview as _build_log_text_preview,
     build_browser_route_block_message as _build_browser_route_block_message,
 )
 from .execution_context import ExecutionContext, step_allows_user_wait
@@ -21,6 +23,21 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     RESEARCH_CROSS_DOMAIN_REPEAT_BLOCK_LIMIT,
     RESEARCH_MIN_DOMAIN_COUNT,
     RESEARCH_MIN_FETCH_COUNT,
+)
+
+_SEARCH_QUERY_CJK_KEYWORD_STACK_PATTERN = re.compile(
+    r"^[\u4e00-\u9fffA-Za-z0-9]{1,8}(?:\s+[\u4e00-\u9fffA-Za-z0-9]{1,8}){4,}$"
+)
+_SEARCH_QUERY_CJK_COMPACT_KEYWORD_STACK_PATTERN = re.compile(
+    r"^(?=.{12,}$)(?=(?:.*[\u4e00-\u9fff]){4,})(?=(?:.*[A-Za-z]){2,})[\u4e00-\u9fffA-Za-z0-9]+$"
+)
+_SEARCH_QUERY_NATURAL_LANGUAGE_HINT_PATTERN = re.compile(
+    r"(的|了|吗|如何|怎么|哪些|是什么|以及|并且|并|与|及其|是否|请|关于|where|what|which|how|why|when|who|that)",
+    re.IGNORECASE,
+)
+_SEARCH_QUERY_EN_STOPWORD_PATTERN = re.compile(
+    r"\b(and|or|with|for|to|from|in|on|at|by|about|vs|versus)\b",
+    re.IGNORECASE,
 )
 
 
@@ -44,6 +61,30 @@ def evaluate_tool_guard(
     ctx: ExecutionContext,
     state: ExecutionState,
 ) -> GuardDecision:
+    if (
+        normalized_function_name == "search_web"
+        and _is_keyword_stacked_search_query(function_args.get("query"))
+    ):
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "检索查询风格不符合自然语言约束",
+            step_id=str(step.id or ""),
+            function_name=function_name,
+            search_query_preview=_build_log_text_preview(function_args.get("query"), max_chars=100),
+        )
+        return GuardDecision(
+            should_skip=True,
+            loop_break_reason="research_query_style_blocked",
+            tool_result=ToolResult(
+                success=False,
+                message=(
+                    "search_web 的 query 必须使用单主题自然语言描述，禁止关键词堆叠。"
+                    " 请改为一句完整的主题描述，例如“主流 AI 编程助手及其支持的 IDE”。"
+                ),
+            ),
+        )
+
     if matched_tool is None:
         log_runtime(
             logger,
@@ -478,3 +519,37 @@ def _is_explicit_url_blacklisted(*, step: Step, ctx: ExecutionContext, state: Ex
     if not explicit_key:
         return False
     return explicit_key in set(list(state.research_failed_fetch_url_keys or set()))
+
+
+def _is_keyword_stacked_search_query(raw_query: Any) -> bool:
+    query = str(raw_query or "").strip()
+    if not query:
+        return False
+    normalized = " ".join(query.split())
+    if len(normalized) < 12:
+        return False
+    if "http://" in normalized or "https://" in normalized:
+        return False
+    if _SEARCH_QUERY_NATURAL_LANGUAGE_HINT_PATTERN.search(normalized):
+        return False
+    if _SEARCH_QUERY_CJK_COMPACT_KEYWORD_STACK_PATTERN.fullmatch(normalized):
+        return True
+    if _SEARCH_QUERY_EN_STOPWORD_PATTERN.search(normalized):
+        english_tokens = [token for token in re.findall(r"[A-Za-z]+", normalized) if token]
+        if len(english_tokens) >= 3:
+            return False
+    if _SEARCH_QUERY_CJK_KEYWORD_STACK_PATTERN.fullmatch(normalized):
+        return True
+    if " " not in normalized:
+        return False
+    tokens = [token for token in normalized.split(" ") if token]
+    if len(tokens) < 4:
+        return False
+    short_token_count = 0
+    for token in tokens:
+        if any(ch in token for ch in ",，。！？?;；:/\\|()[]{}\"'“”‘’"):
+            return False
+        if len(token) <= 8:
+            short_token_count += 1
+    # 关键词堆叠通常表现为大量短词并列，缺少自然语言结构词。
+    return len(tokens) >= 5 and short_token_count >= max(5, len(tokens) - 1)

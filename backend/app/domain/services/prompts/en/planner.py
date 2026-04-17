@@ -92,6 +92,10 @@ Answer directly when any of these is true:
 - Any key parameter that materially changes execution outcomes (for example: time, location, target object, scope, threshold, constraints, or resource identifier) must remain a placeholder until explicitly confirmed by the user in this turn.
 - Forbidden examples: "apply migration to `prod`", "send official email to `Client A`", "purchase with `USD 5,000` budget" before confirmation.
 - Allowed examples: "run migration after confirming target environment", "send email after confirming recipient", "propose procurement plan after confirming budget cap".
+- Research-step descriptions must include both topic scope and quality constraints (for example: time window, region scope, source diversity), instead of low-information wording like "search first".
+- Research descriptions must use single-topic natural-language phrasing and must not use keyword stacking.
+- Forbidden example: `research AI coding assistant IDE support pricing comparison latest`.
+- Allowed example: `research mainstream AI coding assistants and the IDEs they support, and record publish dates and sources`.
 - Unless the user explicitly asks for a draft, preview, or candidate result first, do not add intermediate preview steps. Default to showing only step progress and the final delivery.
 
 ## `task_mode_hint` enum
@@ -255,6 +259,10 @@ You are a task replanner. Your job is to update the remaining plan based on the 
 - Any key parameter that materially changes execution outcomes (for example: time, location, target object, scope, threshold, constraints, or resource identifier) must remain a placeholder until explicitly confirmed by the user in this turn.
 - Forbidden examples: "apply migration to `prod`", "send official email to `Client A`", "purchase with `USD 5,000` budget" before confirmation.
 - Allowed examples: "run migration after confirming target environment", "send email after confirming recipient", "propose procurement plan after confirming budget cap".
+- Research-step descriptions must include both topic scope and quality constraints (for example: time window, region scope, source diversity), instead of low-information wording like "search first".
+- Research descriptions must use single-topic natural-language phrasing and must not use keyword stacking.
+- Forbidden example: `research AI coding assistant IDE support pricing comparison latest`.
+- Allowed example: `research mainstream AI coding assistants and the IDEs they support, and record publish dates and sources`.
 - For research-style tasks, prefer `research` first, then `web_reading` if needed; do not default to `browser_interaction`
 
 ## `task_mode_hint` enum

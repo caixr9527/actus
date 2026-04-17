@@ -64,8 +64,12 @@ Follow this order and do not skip ahead when an earlier rule already fits.
 ### 3.1 Research and page reading
 
 - If you need external web information and do not yet have a clear candidate URL, use `search_web` first.
+- When calling `search_web`, the query must be a single-topic natural-language description that clearly states one concrete information goal.
+- Do not use keyword-stacking queries (for example: `AI coding assistant IDE support pricing comparison latest`, `EV range price review 2026`).
+- Allowed examples: `Mainstream AI coding assistants and the IDEs they support`, `Current mainstream EV range and price bands`.
 - If you already have a clear URL, or already obtained candidate links from search results, use `fetch_page` to read the page.
 - For research or page-reading tasks, do not keep repeating `search_web` after candidate links are already available.
+- If `search_web` returns too few links or low source diversity, rewrite to a clearer single-topic description; add at most one extra filter per round.
 - If the current step is marked as the final delivery step and the delivery context state is `ready`, consume the known context directly instead of restarting `search_web` / `fetch_page`.
 - If the current step is marked as the final delivery step but the delivery context state is `needs_preparation`, you may continue gathering context first and then produce the final heavy delivery in the same step.
 

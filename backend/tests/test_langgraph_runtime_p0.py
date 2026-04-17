@@ -2279,4 +2279,4 @@ def test_execute_step_with_prompt_should_preserve_loop_break_blockers_and_next_h
 
     assert payload["success"] is False
     assert payload["blockers"] == ["同一搜索查询已重复触发多次，当前检索路径没有继续收获。"]
-    assert payload["next_hint"] == "请改写搜索关键词、缩小范围，或改用 fetch_page / 文件读取继续。"
+    assert payload["next_hint"] == "请改写搜索主题描述、缩小范围，或改用 fetch_page / 文件读取继续。"

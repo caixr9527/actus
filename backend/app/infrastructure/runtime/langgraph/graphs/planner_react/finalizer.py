@@ -193,7 +193,7 @@ def _build_max_iteration_next_hint(
         return default_hint
     extra_hint = ""
     if bool(research_progress.get("is_low_recall")):
-        extra_hint = " 请先改写检索词（实体词+限定词）再继续。"
+        extra_hint = " 请先用单主题自然语言短句检索，必要时逐轮仅增加一个筛选条件。"
     return (
         "请先补齐研究缺口后再继续："
         + "；".join(missing_signals[:2])
