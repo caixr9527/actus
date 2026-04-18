@@ -96,7 +96,7 @@ class WorkspaceResearchCapability(BaseTool):
             time_range: Optional[str] = None,
             safesearch: Optional[int] = None,
     ) -> ToolResult[SearchResults]:
-        sandbox_result = await self._sandbox.search_searxng(
+        sandbox_result = await self._sandbox.search(
             query=query,
             categories=categories,
             engines=engines,

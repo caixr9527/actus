@@ -171,7 +171,7 @@ class Sandbox(Protocol):
         """
         ...
 
-    async def search_searxng(
+    async def search(
             self,
             query: str,
             categories: Optional[str] = None,

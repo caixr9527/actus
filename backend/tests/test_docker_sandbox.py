@@ -99,7 +99,7 @@ def test_search_searxng_should_post_search_request_to_sandbox() -> None:
     sandbox = docker_sandbox.DockerSandbox(ip="127.0.0.1", container_name="sandbox-1")
     sandbox.client = fake_client
 
-    result = asyncio.run(sandbox.search_searxng(
+    result = asyncio.run(sandbox.search(
         query="openai",
         language="zh-CN",
         page=2,

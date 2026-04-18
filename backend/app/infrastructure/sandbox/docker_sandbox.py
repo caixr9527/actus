@@ -381,7 +381,7 @@ class DockerSandbox(Sandbox):
         )
         return ToolResult.from_sandbox(**response.json())
 
-    async def search_searxng(
+    async def search(
             self,
             query: str,
             categories: Optional[str] = None,
@@ -392,17 +392,24 @@ class DockerSandbox(Sandbox):
             safesearch: Optional[int] = None,
     ) -> ToolResult:
         response = await self.client.post(
-            f"{self._base_url}/api/searxng/search",
+            f"{self._base_url}/api/searxng/ai-search",
             json={
                 "query": query,
-                "categories": categories,
-                "engines": engines,
-                "language": language,
-                "page": page,
-                "time_range": time_range,
-                "safesearch": safesearch,
             }
         )
+        if response.status_code != 200:
+            response = await self.client.post(
+                f"{self._base_url}/api/searxng/search",
+                json={
+                    "query": query,
+                    "categories": categories,
+                    "engines": engines,
+                    "language": language,
+                    "page": page,
+                    "time_range": time_range,
+                    "safesearch": safesearch,
+                }
+            )
         return ToolResult.from_sandbox(**response.json())
 
     async def fetch_searxng_page(
