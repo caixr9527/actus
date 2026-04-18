@@ -144,9 +144,11 @@ COPY searxng/settings.yml /etc/searxng/settings.yml
 EXPOSE 8081 8082 9222 5900 5901
 
 # 额外的环境变量配置
+ARG BOCHA_API_KEY=""
 ENV CHROME_ARGS=""
 ENV UVI_ARGS=""
 ENV SEARXNG_SECRET=""
+ENV BOCHA_API_KEY=${BOCHA_API_KEY}
 ENV PLAYWRIGHT_BROWSERS_PATH=/home/ubuntu/.cache/ms-playwright
 
 # 使用supervisor管理所有进程

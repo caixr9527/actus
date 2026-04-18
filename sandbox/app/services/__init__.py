@@ -8,6 +8,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .bocha_search import BochaSearchService
     from .file import FileService
     from .searxng import SearXNGService
     from .shell import ShellService
@@ -18,6 +19,7 @@ __all__ = [
     "FileService",
     "SupervisorService",
     "SearXNGService",
+    "BochaSearchService",
 ]
 
 
@@ -35,4 +37,7 @@ def __getattr__(name: str):
     if name == "SearXNGService":
         from .searxng import SearXNGService
         return SearXNGService
+    if name == "BochaSearchService":
+        from .bocha_search import BochaSearchService
+        return BochaSearchService
     raise AttributeError(f"module 'app.services' has no attribute '{name}'")

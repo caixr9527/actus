@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock
 
-from app.interfaces.endpoints.searxng import fetch_page, get_status, search
+from app.interfaces.endpoints.search import fetch_page, get_status, search, ai_search
 from app.interfaces.schemas import SearXNGFetchPageRequest, SearXNGSearchRequest
 from app.models import SearXNGFetchPageResult, SearXNGStatusResult, SearXNGSearchResult, SearXNGSearchItem
 
@@ -46,6 +46,31 @@ class SearXNGEndpointTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.data.query, "openai")
         self.assertEqual(len(response.data.results), 1)
         fake_service.search.assert_awaited_once()
+
+    async def test_ai_search_route_should_return_bocha_search_results(self) -> None:
+        fake_service = AsyncMock()
+        fake_service.search.return_value = SearXNGSearchResult(
+            query="openai",
+            number_of_results=1,
+            results=[
+                SearXNGSearchItem(
+                    title="OpenAI",
+                    url="https://openai.com",
+                    content="AI research and products",
+                    engine="bocha",
+                )
+            ],
+        )
+
+        response = await ai_search(
+            request=SearXNGSearchRequest(query="openai", page=1),
+            bocha_search_service=fake_service,
+        )
+
+        self.assertEqual(response.code, 200)
+        self.assertEqual(response.data.query, "openai")
+        self.assertEqual(len(response.data.results), 1)
+        fake_service.search.assert_awaited_once_with(query="openai")
 
     async def test_fetch_page_route_should_return_page_content(self) -> None:
         fake_service = AsyncMock()

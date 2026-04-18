@@ -8,9 +8,9 @@
 from fastapi import APIRouter, Depends
 
 from app.interfaces.schemas import Response, SearXNGFetchPageRequest, SearXNGSearchRequest
-from app.interfaces.service_dependencies import get_searxng_service
+from app.interfaces.service_dependencies import get_searxng_service, get_bocha_search_service
 from app.models import SearXNGFetchPageResult, SearXNGStatusResult, SearXNGSearchResult
-from app.services import SearXNGService
+from app.services import SearXNGService, BochaSearchService
 
 router = APIRouter(prefix="/searxng", tags=["SearXNG模块"])
 
@@ -52,6 +52,25 @@ async def search(
     )
     return Response.success(
         msg=f"SearXNG搜索成功, 返回{len(result.results)}条结果",
+        data=result,
+    )
+
+
+@router.post(
+    path="/ai-search",
+    response_model=Response[SearXNGSearchResult],
+    summary="调用Bocha执行AI搜索",
+    description="调用博查 web-search，并返回与 SearXNG/search 尽量一致的响应结构",
+)
+async def ai_search(
+        request: SearXNGSearchRequest,
+        bocha_search_service: BochaSearchService = Depends(get_bocha_search_service)
+) -> Response[SearXNGSearchResult]:
+    result = await bocha_search_service.search(
+        query=request.query,
+    )
+    return Response.success(
+        msg=f"Bocha搜索成功, 返回{len(result.results)}条结果",
         data=result,
     )
 

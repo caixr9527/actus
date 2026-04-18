@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from app.services import ShellService, FileService, SupervisorService, SearXNGService
+    from app.services import ShellService, FileService, SupervisorService, SearXNGService, BochaSearchService
 
 
 @lru_cache()
@@ -34,3 +34,9 @@ def get_supervisor_service() -> "SupervisorService":
 def get_searxng_service() -> "SearXNGService":
     from app.services import SearXNGService
     return SearXNGService()
+
+
+@lru_cache()
+def get_bocha_search_service() -> "BochaSearchService":
+    from app.services import BochaSearchService
+    return BochaSearchService()
