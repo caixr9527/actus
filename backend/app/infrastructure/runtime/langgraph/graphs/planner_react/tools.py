@@ -14,6 +14,7 @@ from app.domain.models import (
 )
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.runtime.normalizers import (
+    normalize_url_value,
     normalize_file_path_list,
     normalize_execution_response,
 )
@@ -143,6 +144,23 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
 
     available_tools.sort(key=_tool_priority)
     return available_tools
+
+
+def _has_pending_research_candidate_urls(execution_state: ExecutionState) -> bool:
+    fetched_keys = {
+        normalize_url_value(url, drop_query=True)
+        for url in list(execution_state.research_fetched_urls or [])
+        if normalize_url_value(url, drop_query=True)
+    }
+    failed_keys = set(list(execution_state.research_failed_fetch_url_keys or set()))
+    for raw_url in list(execution_state.research_candidate_urls or []):
+        pending_key = normalize_url_value(raw_url, drop_query=True)
+        if not pending_key:
+            continue
+        if pending_key in fetched_keys or pending_key in failed_keys:
+            continue
+        return True
+    return False
 
 def _tool_call_priority(
         function_name: str,
@@ -337,6 +355,7 @@ async def execute_step_with_prompt(
         has_available_file_context=has_available_file_context,
         available_tools=available_tools,
         available_function_names=available_function_names,
+        user_message_text=user_message,
         read_only_intent_text=_build_read_only_intent_text(
             step=step,
             user_message=user_message,
@@ -474,8 +493,9 @@ async def execute_step_with_prompt(
             available_tools=iteration_context.iteration_tools,
             preferred_function_names=(
                 ("fetch_page",)
-                if execution_context.research_route_enabled and not execution_state.research_fetch_completed and (
-                            execution_state.research_search_ready or execution_context.research_has_explicit_url)
+                if execution_context.research_route_enabled
+                   and not execution_state.research_fetch_completed
+                   and _has_pending_research_candidate_urls(execution_state)
                 else _build_browser_preferred_function_names(
                     task_mode=task_mode,
                     available_function_names=execution_context.available_function_names,

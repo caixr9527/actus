@@ -15,20 +15,16 @@ _URL_PATTERN = re.compile(r"https?://[^\s)\]>\"']+", re.IGNORECASE)
 
 
 def extract_explicit_url_from_research_context(*, step: Step, ctx: ExecutionContext) -> str:
-    """从步骤文本与用户输入上下文提取显式 URL（优先 step 文本）。"""
+    """从步骤文本与本轮用户原始输入提取显式 URL（优先 step 文本）。"""
     step_text = _build_step_candidate_text(step)
     step_url_match = _URL_PATTERN.search(str(step_text or ""))
     if step_url_match:
         return normalize_url_value(step_url_match.group(0))
 
-    content_text = "\n".join(
-        [
-            str((item or {}).get("text") or "").strip()
-            for item in list(getattr(ctx, "normalized_user_content", []) or [])
-            if isinstance(item, dict) and str((item or {}).get("type") or "").strip().lower() == "text"
-        ]
-    )
-    content_url_match = _URL_PATTERN.search(content_text)
-    if content_url_match:
-        return normalize_url_value(content_url_match.group(0))
+    # P3-一次性收口：仅使用当前轮用户原始输入，避免系统拼接提示词/历史上下文 URL 污染。
+    user_message_text = str(getattr(ctx, "current_user_message_text", "") or "").strip()
+    if user_message_text:
+        content_url_match = _URL_PATTERN.search(user_message_text)
+        if content_url_match:
+            return normalize_url_value(content_url_match.group(0))
     return ""

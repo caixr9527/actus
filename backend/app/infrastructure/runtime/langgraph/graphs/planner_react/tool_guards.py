@@ -15,6 +15,7 @@ from app.domain.services.workspace_runtime.policies import (
 )
 from .execution_context import ExecutionContext, step_allows_user_wait
 from .execution_state import ExecutionState
+from .research_intent_policy import is_explicit_single_page_fetch_intent
 from .research_url_extractor import extract_explicit_url_from_research_context
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.langgraph_settings import (
@@ -346,9 +347,24 @@ def evaluate_tool_guard(
         and ctx.research_has_explicit_url
         and not state.research_fetch_completed
     ):
-        # P3-一次性收口：显式 URL 抓取连续失败后允许恢复 search_web 扩召回，避免固定 URL 死循环。
+        # P3-一次性收口：仅“明确单页读取意图 + explicit URL 未被消费”时强制 fetch。
+        # 非单页读取场景或 explicit 已改写过时，允许 search_web 持续扩召回，避免锁死。
         explicit_url_blacklisted = _is_explicit_url_blacklisted(step=step, ctx=ctx, state=state)
-        if (not explicit_url_blacklisted) and state.consecutive_fetch_failure_count < 2:
+        explicit_url = extract_explicit_url_from_research_context(step=step, ctx=ctx)
+        explicit_url_key = _normalize_fetch_dedupe_key(explicit_url)
+        explicit_url_already_rewritten = bool(
+            explicit_url_key and explicit_url_key in set(list(state.research_explicit_rewrite_url_keys or set()))
+        )
+        explicit_single_page_fetch_intent = is_explicit_single_page_fetch_intent(
+            step,
+            explicit_url=explicit_url,
+        )
+        if (
+            explicit_single_page_fetch_intent
+            and (not explicit_url_blacklisted)
+            and (not explicit_url_already_rewritten)
+            and state.consecutive_fetch_failure_count < 2
+        ):
             return GuardDecision(
                 should_skip=True,
                 loop_break_reason="research_route_fetch_required",
@@ -360,11 +376,24 @@ def evaluate_tool_guard(
         log_runtime(
             logger,
             logging.INFO,
-            "显式 URL 已失败，允许恢复 search_web 扩召回",
+            "显式 URL 策略已放行 search_web",
             step_id=str(step.id or ""),
             function_name=function_name,
             consecutive_fetch_failure_count=state.consecutive_fetch_failure_count,
             explicit_url_blacklisted=explicit_url_blacklisted,
+            explicit_url_already_rewritten=explicit_url_already_rewritten,
+            explicit_single_page_fetch_intent=explicit_single_page_fetch_intent,
+            allow_search_reason=(
+                "not_single_page_intent"
+                if not explicit_single_page_fetch_intent
+                else "explicit_blacklisted"
+                if explicit_url_blacklisted
+                else "explicit_already_rewritten"
+                if explicit_url_already_rewritten
+                else "fetch_failure_recovery"
+                if state.consecutive_fetch_failure_count >= 2
+                else "policy_allow"
+            ),
         )
     if (
         ctx.research_route_enabled

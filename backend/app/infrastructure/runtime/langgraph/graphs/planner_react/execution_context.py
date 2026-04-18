@@ -51,6 +51,8 @@ class ExecutionContext:
     allow_ask_user: bool
     research_route_enabled: bool
     research_has_explicit_url: bool
+    # 当前轮用户原始输入文本（不含系统拼接提示），供研究链路显式 URL 判定使用。
+    current_user_message_text: str = ""
 
 
 def step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
@@ -76,6 +78,7 @@ def build_execution_context(
     has_available_file_context: bool,
     available_tools: List[Dict[str, Any]],
     available_function_names: Set[str],
+    user_message_text: str = "",
     read_only_intent_text: str = "",
     file_output_intent_text: str = "",
 ) -> ExecutionContext:
@@ -209,6 +212,7 @@ def build_execution_context(
     research_has_explicit_url = research_route_enabled and _step_or_user_content_has_url(
         step,
         normalized_user_content,
+        user_message_text=user_message_text,
     )
 
     return ExecutionContext(
@@ -230,6 +234,7 @@ def build_execution_context(
         allow_ask_user=allow_ask_user,
         research_route_enabled=research_route_enabled,
         research_has_explicit_url=research_has_explicit_url,
+        current_user_message_text=str(user_message_text or "").strip(),
     )
 
 
@@ -336,11 +341,21 @@ def _step_requests_read_only_file_access(
     return _classify_file_access_intent(candidate_text) == "read_only_intent"
 
 
-def _step_or_user_content_has_url(step: Step, user_content: Optional[List[Dict[str, Any]]]) -> bool:
+def _step_or_user_content_has_url(
+        step: Step,
+        user_content: Optional[List[Dict[str, Any]]],
+        *,
+        user_message_text: str = "",
+) -> bool:
+    # P3-一次性收口：显式 URL 判定优先使用“步骤语义 + 当前轮用户原始输入”，
+    # 避免系统拼接提示词/历史上下文中的 URL 污染当前轮研究路由。
+    current_user_text = str(user_message_text or "").strip()
     candidate_text = "\n".join(
         [
             _build_step_candidate_text(step),
-            _extract_text_from_user_content(user_content),
+            current_user_text,
+            # 兼容当前调用形态：在没有显式用户文本时再退回 user_content。
+            _extract_text_from_user_content(user_content) if not current_user_text else "",
         ]
     )
     return bool(_analyze_text_intent(candidate_text)["has_url"])

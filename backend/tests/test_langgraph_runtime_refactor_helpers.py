@@ -369,6 +369,231 @@ def test_run_rewrite_plugin_should_prefer_candidate_url_when_explicit_url_blackl
     assert decision.metadata.get("explicit_url_blacklisted") is True
 
 
+def test_run_rewrite_plugin_should_not_rewrite_to_explicit_without_single_page_intent() -> None:
+    step = Step(description="调研厦门周末亲子游攻略并总结可信来源")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "请参考 https://example.com/seed"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+        current_user_message_text="请参考 https://example.com/seed",
+    )
+    execution_state = ExecutionState()
+    lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-2",
+            "function": {"name": "search_web", "arguments": {"query": "厦门 周末 亲子游"}}},
+        parse_tool_call_args=lambda raw: raw if isinstance(raw, dict) else {},
+    )
+    assert lifecycle is not None
+    decision = run_rewrite_plugin(
+        lifecycle=lifecycle,
+        execution_context=execution_context,
+        execution_state=execution_state,
+        step=step,
+    )
+    assert decision.reason == ""
+    assert decision.lifecycle.function_name == "search_web"
+
+
+def test_run_rewrite_plugin_should_rewrite_explicit_only_once_for_single_page_intent() -> None:
+    step = Step(description="请读取并抓取这个页面正文：https://example.com/a")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取 https://example.com/a"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+        current_user_message_text="读取 https://example.com/a",
+    )
+    execution_state = ExecutionState()
+
+    first_lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-3",
+            "function": {"name": "search_web", "arguments": {"query": "读取页面"}}},
+        parse_tool_call_args=lambda raw: raw if isinstance(raw, dict) else {},
+    )
+    assert first_lifecycle is not None
+    first_decision = run_rewrite_plugin(
+        lifecycle=first_lifecycle,
+        execution_context=execution_context,
+        execution_state=execution_state,
+        step=step,
+    )
+    assert first_decision.reason == "research_search_to_fetch_rewrite"
+    assert first_decision.lifecycle.function_name == "fetch_page"
+    assert first_decision.metadata.get("rewrite_source") == "explicit"
+
+    second_lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-4",
+            "function": {"name": "search_web", "arguments": {"query": "读取页面"}}},
+        parse_tool_call_args=lambda raw: raw if isinstance(raw, dict) else {},
+    )
+    assert second_lifecycle is not None
+    second_decision = run_rewrite_plugin(
+        lifecycle=second_lifecycle,
+        execution_context=execution_context,
+        execution_state=execution_state,
+        step=step,
+    )
+    assert second_decision.reason == ""
+    assert second_decision.lifecycle.function_name == "search_web"
+
+
+def test_run_rewrite_plugin_should_rewrite_explicit_for_open_url_extract_summary_intent() -> None:
+    step = Step(description="打开 https://example.com/news 并提取页面要点")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "打开并提取要点"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+        current_user_message_text="打开并提取要点",
+    )
+    execution_state = ExecutionState()
+    lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-4a",
+            "function": {"name": "search_web", "arguments": {"query": "新闻要点"}}},
+        parse_tool_call_args=lambda raw: raw if isinstance(raw, dict) else {},
+    )
+    assert lifecycle is not None
+    decision = run_rewrite_plugin(
+        lifecycle=lifecycle,
+        execution_context=execution_context,
+        execution_state=execution_state,
+        step=step,
+    )
+    assert decision.reason == "research_search_to_fetch_rewrite"
+    assert decision.lifecycle.function_name == "fetch_page"
+    assert decision.metadata.get("rewrite_source") == "explicit"
+
+
+def test_run_rewrite_plugin_should_rewrite_when_explicit_url_only_in_current_user_input() -> None:
+    step = Step(description="读取用户提供的页面并提炼核心信息")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "系统拼接内容"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+        current_user_message_text="请读取这个页面：https://example.com/article/123",
+    )
+    execution_state = ExecutionState()
+    lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-4c",
+            "function": {"name": "search_web", "arguments": {"query": "提炼核心信息"}}},
+        parse_tool_call_args=lambda raw: raw if isinstance(raw, dict) else {},
+    )
+    assert lifecycle is not None
+    decision = run_rewrite_plugin(
+        lifecycle=lifecycle,
+        execution_context=execution_context,
+        execution_state=execution_state,
+        step=step,
+    )
+    assert decision.reason == "research_search_to_fetch_rewrite"
+    assert decision.lifecycle.function_name == "fetch_page"
+    assert decision.metadata.get("rewrite_source") == "explicit"
+
+
+def test_run_rewrite_plugin_should_not_rewrite_explicit_for_multi_source_research_intent() -> None:
+    step = Step(description="对比 https://example.com/a 与其他来源并汇总结论")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "对比多个来源"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+        current_user_message_text="对比多个来源",
+    )
+    execution_state = ExecutionState()
+    lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-4b",
+            "function": {"name": "search_web", "arguments": {"query": "对比结论"}}},
+        parse_tool_call_args=lambda raw: raw if isinstance(raw, dict) else {},
+    )
+    assert lifecycle is not None
+    decision = run_rewrite_plugin(
+        lifecycle=lifecycle,
+        execution_context=execution_context,
+        execution_state=execution_state,
+        step=step,
+    )
+    assert decision.reason == ""
+    assert decision.lifecycle.function_name == "search_web"
+
+
 def test_evaluate_tool_guard_should_allow_search_web_when_explicit_url_blacklisted() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="读取 https://same.example.com/a?from=ctx 的页面")
@@ -404,6 +629,48 @@ def test_evaluate_tool_guard_should_allow_search_web_when_explicit_url_blacklist
         function_name="search_web",
         normalized_function_name="search_web",
         function_args={"query": "苏州 旅游 景点"},
+        matched_tool=object(),  # type: ignore[arg-type]
+        iteration_blocked_function_names=set(),
+        ctx=execution_context,
+        state=execution_state,
+    )
+    assert guard.should_skip is False
+
+
+def test_evaluate_tool_guard_should_not_force_fetch_when_not_single_page_intent() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="调研厦门周末亲子游并汇总多个来源")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "请参考 https://example.com/seed"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+        current_user_message_text="请参考 https://example.com/seed",
+    )
+    execution_state = ExecutionState()
+    execution_state.research_search_ready = False
+
+    guard = evaluate_tool_guard(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        function_name="search_web",
+        normalized_function_name="search_web",
+        function_args={"query": "厦门 周末 亲子游"},
         matched_tool=object(),  # type: ignore[arg-type]
         iteration_blocked_function_names=set(),
         ctx=execution_context,

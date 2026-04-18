@@ -12,6 +12,7 @@ from app.domain.services.runtime.normalizers import (
 from ...research_url_extractor import extract_explicit_url_from_research_context
 from ...execution_context import ExecutionContext
 from ...execution_state import ExecutionState
+from ...research_intent_policy import is_explicit_single_page_fetch_intent
 from ...tool_events import ToolCallLifecycle
 
 
@@ -68,11 +69,19 @@ def _pick_research_fetch_url_for_rewrite(
     explicit_url = ""
     if bool(getattr(execution_context, "research_has_explicit_url", False)):
         explicit_url = extract_explicit_url_from_research_context(step=step, ctx=execution_context)
+    # P3-一次性收口：当没有候选链接时，不再把 explicit URL 当作默认兜底，避免 search->fetch 锁死。
+    # explicit 仅在“明确单页读取意图”下允许改写；该意图可由步骤文本与当前轮显式 URL 共同判定。
+    if not is_explicit_single_page_fetch_intent(step, explicit_url=explicit_url):
+        return "", ""
     explicit_key = _normalize_fetch_dedupe_key(explicit_url)
     explicit_blacklisted = bool(
         explicit_key and explicit_key in set(list(execution_state.research_failed_fetch_url_keys or set()))
     )
-    if explicit_url and not explicit_blacklisted:
+    explicit_already_rewritten = bool(
+        explicit_key and explicit_key in set(list(execution_state.research_explicit_rewrite_url_keys or set()))
+    )
+    # P3-一次性收口：同一 explicit URL 在同一步骤内只允许改写一次，避免重复抓取同页。
+    if explicit_url and (not explicit_blacklisted) and (not explicit_already_rewritten):
         return explicit_url, "explicit"
 
     return "", ""
@@ -119,10 +128,17 @@ def run_rewrite_plugin(
     lifecycle.function_name = "fetch_page"
     lifecycle.normalized_function_name = "fetch_page"
     lifecycle.function_args = {"url": rewrite_url}
+    if rewrite_source == "explicit":
+        rewrite_key = _normalize_fetch_dedupe_key(rewrite_url)
+        if rewrite_key:
+            execution_state.research_explicit_rewrite_url_keys.add(rewrite_key)
     explicit_url = extract_explicit_url_from_research_context(step=step, ctx=execution_context)
     explicit_url_key = _normalize_fetch_dedupe_key(explicit_url)
     explicit_url_blacklisted = bool(
         explicit_url_key and explicit_url_key in set(list(execution_state.research_failed_fetch_url_keys or set()))
+    )
+    explicit_url_rewritten = bool(
+        explicit_url_key and explicit_url_key in set(list(execution_state.research_explicit_rewrite_url_keys or set()))
     )
     pending_candidates = _collect_pending_candidate_urls_for_research(execution_state)
     return RewriteDecision(
@@ -135,6 +151,7 @@ def run_rewrite_plugin(
             "rewrite_source": rewrite_source,
             "had_explicit_url": bool(getattr(execution_context, "research_has_explicit_url", False)),
             "explicit_url_blacklisted": explicit_url_blacklisted,
+            "explicit_url_rewritten": explicit_url_rewritten,
             "failed_fetch_url_count": len(list(execution_state.research_failed_fetch_url_keys or [])),
             "previous_arg_keys": sorted(previous_args.keys()),
             "pending_candidate_count": len(pending_candidates),
