@@ -5,6 +5,8 @@ from app.domain.models import (
     ExecutionStatus,
     MessageEvent,
     Plan,
+    SearchResultItem,
+    SearchResults,
     Step,
     StepArtifactPolicy,
     StepDeliveryContextState,
@@ -16,6 +18,11 @@ from app.domain.models import (
     ToolResult,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.policies.task_mode_policy import (
+    classify_confirmed_user_task_mode,
+    classify_step_task_mode,
+)
+from app.domain.services.workspace_runtime.policies.step_contract_policy import compile_step_contracts
 from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
@@ -32,8 +39,6 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.language_checker 
     infer_working_language_from_message,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tools import (
-    classify_confirmed_user_task_mode,
-    classify_step_task_mode,
     execute_step_with_prompt,
     has_available_file_context,
 )
@@ -257,16 +262,16 @@ class _SearchFetchTool(BaseTool):
         self.invocations.append("search_web")
         return ToolResult(
             success=True,
-            data={
-                "query": query,
-                "results": [
-                    {
-                        "url": "https://example.com/article",
-                        "title": "Example Article",
-                        "content": "Example snippet",
-                    }
+            data=SearchResults(
+                query=query,
+                results=[
+                    SearchResultItem(
+                        url="https://example.com/article",
+                        title="Example Article",
+                        snippet="Short snippet",
+                    )
                 ],
-            },
+            ),
         )
 
     @tool(
@@ -282,8 +287,8 @@ class _SearchFetchTool(BaseTool):
             data={
                 "url": url,
                 "title": "Example Article",
-                "content": "Example article content",
-                "excerpt": "Example article content",
+                "content": "Example article content " * 20,
+                "excerpt": "Example article content " * 5,
             },
         )
 
@@ -535,6 +540,7 @@ class _FetchBeforeSearchLLM:
 class _SearchThenRepeatSearchLLM:
     def __init__(self) -> None:
         self.calls = 0
+        self.tool_feedback_payloads: list[dict] = []
 
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         self.calls += 1
@@ -552,6 +558,12 @@ class _SearchThenRepeatSearchLLM:
                 ],
             }
         if self.calls == 2:
+            tool_messages = [
+                message for message in list(messages or [])
+                if isinstance(message, dict) and message.get("role") == "tool"
+            ]
+            if tool_messages:
+                self.tool_feedback_payloads.append(json.loads(str(tool_messages[-1].get("content") or "{}")))
             return {
                 "content": "",
                 "tool_calls": [
@@ -874,8 +886,14 @@ def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> No
         Step(description="执行 `pytest backend/tests/test_run_engine_selector.py -q` 并修复失败")
     ) == "coding"
     assert classify_step_task_mode(
+        Step(description="在 /tmp 下创建 hello.txt 并写入 HELLO")
+    ) == "coding"
+    assert classify_step_task_mode(
         Step(description="读取 /tmp/backend.log 并整理错误摘要")
     ) == "file_processing"
+    assert classify_step_task_mode(
+        Step(description="改写这段文案，让表达更自然")
+    ) == "general"
 
 
 def test_classify_step_task_mode_should_ignore_low_value_success_criteria_noise() -> None:
@@ -1134,6 +1152,7 @@ def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_ste
     )
 
     assert state["plan"] is not None
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.CODING
     assert state["plan"].steps[0].artifact_policy == "allow_file_output"
     assert state["plan"].steps[0].output_mode == "file"
     # P3-一次性收口：编译后结构化字段必须保持 Enum 类型，禁止字符串回流持久化层。
@@ -1142,6 +1161,29 @@ def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_ste
     assert isinstance(state["plan"].steps[0].artifact_policy, StepArtifactPolicy)
     assert isinstance(state["plan"].steps[0].delivery_role, StepDeliveryRole)
     assert isinstance(state["plan"].steps[0].delivery_context_state, StepDeliveryContextState)
+
+
+def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="改写这段文案，让表达更自然",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                delivery_role="none",
+                delivery_context_state="none",
+            )
+        ],
+        user_message="帮我改写这段文案",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.GENERAL
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+    assert steps[0].output_mode == StepOutputMode.NONE
 
 
 def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enum() -> None:
@@ -1316,7 +1358,7 @@ def test_execute_step_with_prompt_should_block_fetch_page_before_search_for_rese
     assert "请先调用 search_web 获取候选链接" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_rewrite_repeated_search_to_fetch_page() -> None:
+def test_execute_step_with_prompt_should_return_search_snippet_feedback_before_optional_fetch() -> None:
     llm = _SearchThenRepeatSearchLLM()
     search_fetch_tool = _SearchFetchTool()
 
@@ -1333,10 +1375,14 @@ def test_execute_step_with_prompt_should_rewrite_repeated_search_to_fetch_page()
 
     assert payload["success"] is True
     assert payload["result"] == "已停止重复搜索并结束步骤"
-    assert search_fetch_tool.invocations == ["search_web", "fetch_page"]
+    assert search_fetch_tool.invocations == ["search_web", "search_web"]
+    assert llm.tool_feedback_payloads
+    assert llm.tool_feedback_payloads[0]["search_evidence_quality"]["need_fetch"] is True
+    assert llm.tool_feedback_payloads[0]["recommended_fetch_urls"] == ["https://example.com/article"]
+    assert llm.tool_feedback_payloads[0]["search_evidence_summaries"][0]["snippet"] == "Short snippet"
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 2
-    assert called_events[1].function_name == "fetch_page"
+    assert called_events[1].function_name == "search_web"
     assert called_events[1].function_result is not None
     assert called_events[1].function_result.success is True
 

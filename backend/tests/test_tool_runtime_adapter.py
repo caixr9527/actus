@@ -11,6 +11,7 @@ from app.domain.models import (
     MCPTransport,
     SearchResultItem,
     SearchResults,
+    ToolDiagnosticContent,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
@@ -124,6 +125,71 @@ def test_tool_runtime_adapter_should_enrich_fetch_page_event() -> None:
     assert event.tool_content.title == "example title"
     assert event.tool_content.content == "example page content"
     assert event.tool_content.max_chars == 2000
+
+
+def test_tool_runtime_adapter_should_render_search_diagnostic_content_when_blocked() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+    event = ToolEvent(
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "漳州周末旅游攻略"},
+        function_result=ToolResult(
+            success=False,
+            message="当前必须先抓取候选页面，再决定是否继续搜索。",
+            data={
+                "reason_code": "research_route_fetch_required",
+                "block_mode": "hard_block_break",
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert isinstance(event.tool_content, ToolDiagnosticContent)
+    assert event.tool_content.reason_code == "research_route_fetch_required"
+    assert event.tool_content.message == "当前必须先抓取候选页面，再决定是否继续搜索。"
+    assert event.tool_content.diagnostic_type == "tool_result_fallback"
+
+
+def test_tool_runtime_adapter_should_render_fetch_diagnostic_content_when_low_value() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+    event = ToolEvent(
+        tool_name="search",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/listing"},
+        function_result=ToolResult(
+            success=False,
+            message="页面已读取，但正文价值不足，未拿到可用于当前研究步骤的有效信息。",
+            data={
+                "research_diagnosis": {
+                    "code": "fetch_low_value",
+                    "message": "页面抓取已执行，但正文价值不足，未拿到有效信息。",
+                    "candidate_url_count": 5,
+                },
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(),
+        )
+    )
+
+    assert handled is True
+    assert isinstance(event.tool_content, ToolDiagnosticContent)
+    assert event.tool_content.reason_code == "fetch_low_value"
+    assert event.tool_content.diagnostic_type == "research_diagnosis"
+    assert event.tool_content.details["candidate_url_count"] == 5
 
 
 def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> None:

@@ -641,6 +641,101 @@ def test_wait_for_human_node_should_complete_waiting_step_after_resume(monkeypat
     assert next_state["message_window"][-1]["message"] == "AI 人工智能算法工程师体系课"
 
 
+def test_wait_for_human_node_should_append_execute_step_when_plan_only_contains_wait_step(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
+        lambda payload: "从杭州出发，两天一夜",
+    )
+
+    plan = Plan(
+        title="出行规划",
+        goal="先补充关键信息",
+        language="zh",
+        steps=[
+            Step(
+                id="wait-step",
+                title="等待用户补充信息",
+                description="请补充出发地和时长",
+                status=ExecutionStatus.RUNNING,
+                task_mode_hint="human_wait",
+            )
+        ],
+    )
+
+    next_state = asyncio.run(
+        wait_for_human_node(
+            {
+                "plan": plan,
+                "current_step_id": "wait-step",
+                "pending_interrupt": {
+                    "kind": "input_text",
+                    "prompt": "请补充出发地和时长",
+                },
+                "graph_metadata": {},
+                "message_window": [],
+                "working_memory": {},
+                "execution_count": 0,
+                "user_message": "帮我规划一个周末出行方案",
+            }
+        )
+    )
+
+    next_step = next_state["plan"].get_next_step()
+    assert next_step is not None
+    assert next_step.id != "wait-step"
+    assert next_step.task_mode_hint == "research"
+    assert next_step.description == "帮我规划一个周末出行方案"
+    assert next_state["current_step_id"] == next_step.id
+    assert next_state["user_message"] == "帮我规划一个周末出行方案"
+    assert route_after_wait(next_state) == "guard_step_reuse"
+
+
+def test_wait_for_human_node_should_preserve_real_task_mode_when_appending_post_wait_step(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
+        lambda payload: "重点关注近两年的主流产品",
+    )
+
+    plan = Plan(
+        title="AI 编程助手调研",
+        goal="先补充调研范围",
+        language="zh",
+        steps=[
+            Step(
+                id="wait-step",
+                title="等待用户补充信息",
+                description="请补充调研范围",
+                status=ExecutionStatus.RUNNING,
+                task_mode_hint="human_wait",
+            )
+        ],
+    )
+
+    next_state = asyncio.run(
+        wait_for_human_node(
+            {
+                "plan": plan,
+                "current_step_id": "wait-step",
+                "pending_interrupt": {
+                    "kind": "input_text",
+                    "prompt": "请补充调研范围",
+                },
+                "graph_metadata": {},
+                "message_window": [],
+                "working_memory": {},
+                "execution_count": 0,
+                "user_message": "调研主流 AI 编程助手及其支持的 IDE，并汇总差异",
+            }
+        )
+    )
+
+    next_step = next_state["plan"].get_next_step()
+    assert next_step is not None
+    assert next_step.id != "wait-step"
+    assert next_step.task_mode_hint == "research"
+    assert next_step.description == "调研主流 AI 编程助手及其支持的 IDE，并汇总差异"
+
+
 def test_wait_for_human_node_should_cancel_waiting_step_and_replan_after_confirm_cancel(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",

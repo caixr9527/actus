@@ -748,7 +748,6 @@ def test_runtime_context_service_should_build_structured_packet_with_separated_c
     assert context_packet["retrieved_memory_digest"][0]["summary"] == "偏好中文"
     assert context_packet["retrieved_memory_digest"][0]["content_preview"] == "language: zh"
     assert "embedding" not in context_packet["retrieved_memory_digest"][0]
-    assert "candidate_links" not in context_packet["environment_digest"]
 
 
 def test_runtime_context_service_should_clear_previous_mode_digest_when_switching_to_coding() -> None:
@@ -1078,6 +1077,50 @@ def test_runtime_context_service_should_prefer_workspace_snapshot_for_coding_dig
     assert context_packet["environment_digest"]["shell_session_status"] == "active"
     assert context_packet["environment_digest"]["available_artifacts"] == ["/workspace/project/report.md"]
     assert context_packet["observation_digest"]["latest_shell_result"]["console"] == "pytest -q\n24 passed"
+
+
+def test_runtime_context_service_should_project_search_evidence_from_workspace_snapshot() -> None:
+    context_service = RuntimeContextService(
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(
+            WorkspaceEnvironmentSnapshot(
+                workspace=Workspace(
+                    id="workspace-1",
+                    session_id="session-1",
+                    environment_summary={
+                        "candidate_links": [
+                            {
+                                "title": "OpenAI 文档",
+                                "url": "https://example.com/docs",
+                                "snippet": "OpenAI 文档的搜索摘要，可用于先判断是否已经有足够信息。",
+                            }
+                        ],
+                    },
+                ),
+                artifacts=[],
+            )
+        )
+    )
+    state = {
+        "session_id": "session-1",
+        "task_mode": StepTaskModeHint.RESEARCH.value,
+        "working_memory": {"goal": "继续调研"},
+    }
+
+    context_packet = asyncio.run(
+        context_service.build_packet_async(
+            stage="execute",
+            state=state,
+            task_mode=StepTaskModeHint.RESEARCH.value,
+        )
+    )
+
+    assert context_packet["environment_digest"]["search_evidence_summaries"] == [
+        {
+            "title": "OpenAI 文档",
+            "snippet": "OpenAI 文档的搜索摘要，可用于先判断是否已经有足够信息。",
+            "url": "https://example.com/docs",
+        }
+    ]
 
 
 def test_runtime_context_service_should_ignore_emitted_events_for_environment_truth() -> None:
