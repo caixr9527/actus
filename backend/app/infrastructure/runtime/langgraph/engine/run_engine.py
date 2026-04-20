@@ -29,8 +29,15 @@ from app.domain.models import (
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
-from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.domain.services.workspace_runtime import WorkspaceManager
+from app.domain.services.runtime.contracts.runtime_logging import (
+    bind_trace_id,
+    build_trace_id,
+    describe_stage_llms,
+    elapsed_ms,
+    log_runtime,
+    now_perf,
+    reset_trace_id,
+)
 from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
     PlannerReActLangGraphState,
@@ -45,20 +52,13 @@ from app.domain.services.runtime.normalizers import (
 )
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
+from app.domain.services.workspace_runtime import WorkspaceManager
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
     bind_live_event_sink,
     build_planner_react_langgraph_graph,
     unbind_live_event_sink,
-)
-from app.domain.services.runtime.contracts.runtime_logging import (
-    bind_trace_id,
-    build_trace_id,
-    describe_stage_llms,
-    elapsed_ms,
-    log_runtime,
-    now_perf,
-    reset_trace_id,
 )
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.utils import BaseUtils
@@ -262,9 +262,9 @@ class LangGraphRunEngine(RunEngine):
                     workspace = await self._workspace_manager.get_workspace(session=session, uow=uow)
 
                 resolved_run_id = (
-                    run_id
-                    or (await self._workspace_manager.resolve_current_run_id(session=session, uow=uow)
-                        if self._workspace_manager is not None else None)
+                        run_id
+                        or (await self._workspace_manager.resolve_current_run_id(session=session, uow=uow)
+                            if self._workspace_manager is not None else None)
                 )
                 run = (
                     await uow.workflow_run.get_by_id(resolved_run_id)

@@ -13,42 +13,36 @@ from app.domain.models import (
     ToolEvent,
 )
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
-from app.domain.services.runtime.normalizers import (
-    normalize_url_value,
-    normalize_file_path_list,
-    normalize_execution_response,
-)
-from app.domain.services.workspace_runtime.policies import (
-    build_loop_break_payload as _build_loop_break_payload,
-    build_tool_feedback_content as _build_tool_feedback_content,
-    build_tool_fingerprint as _build_tool_fingerprint,
-    analyze_text_intent as _analyze_text_intent,
-    build_log_text_preview as _build_log_text_preview,
-    build_step_candidate_text as _build_step_candidate_text,
-    build_browser_preferred_function_names as _build_browser_preferred_function_names,
-    classify_confirmed_user_task_mode,
-    classify_step_task_mode,
-    infer_entry_strategy,
-    normalize_execution_payload as _normalize_execution_payload,
-    requests_plan_only,
-)
-from app.domain.services.tools import BaseTool
-from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
-    normalize_attachments,
-    safe_parse_json,
-)
-from .execution_context import build_execution_context
-from .execution_state import ExecutionState
-from .convergence.judge import ConvergenceJudge
-from .iteration_context import build_iteration_context
-from .policy_engine.engine import ToolPolicyEngine
-from .tool_schema import extract_function_name
-from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ASK_USER_FUNCTION_NAME,
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     NOTIFY_USER_FUNCTION_NAME,
 )
+from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
+from app.domain.services.runtime.normalizers import (
+    normalize_url_value,
+    normalize_file_path_list,
+    normalize_execution_response,
+)
+from app.domain.services.tools import BaseTool
+from app.domain.services.workspace_runtime.policies import (
+    build_loop_break_payload as _build_loop_break_payload,
+    build_tool_feedback_content as _build_tool_feedback_content,
+    analyze_text_intent as _analyze_text_intent,
+    build_log_text_preview as _build_log_text_preview,
+    build_step_candidate_text as _build_step_candidate_text,
+    build_browser_preferred_function_names as _build_browser_preferred_function_names,
+    normalize_execution_payload as _normalize_execution_payload,
+)
+from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
+    normalize_attachments,
+    safe_parse_json,
+)
+from .convergence.judge import ConvergenceJudge
+from .execution_context import build_execution_context
+from .execution_state import ExecutionState
+from .iteration_context import build_iteration_context
+from .policy_engine.engine import ToolPolicyEngine
 from .tool_effects import build_interrupt_payload, extract_interrupt_request
 from .tool_events import (
     ToolEventDispatcher,
@@ -58,8 +52,10 @@ from .tool_events import (
     build_tool_call_lifecycle,
     build_tool_feedback_message,
 )
+from .tool_schema import extract_function_name
 
 logger = logging.getLogger(__name__)
+
 
 def has_available_file_context(
         *,
@@ -161,6 +157,20 @@ def _has_pending_research_candidate_urls(execution_state: ExecutionState) -> boo
             continue
         return True
     return False
+
+
+def _should_prefer_fetch_page_for_research(execution_state: ExecutionState) -> bool:
+    """判断 research 多工具候选中是否应优先执行 fetch_page。
+
+    search_web 返回的 snippet 是研究链路的一等证据；只有摘要证据不足且仍有未读取候选链接时，
+    才在同轮多工具调用中偏向 fetch_page，避免无条件进入页面抓取。
+    """
+    if bool(execution_state.research_snippet_sufficient):
+        return False
+    search_quality = dict(execution_state.last_search_evidence_quality or {})
+    need_fetch = bool(search_quality.get("need_fetch"))
+    return need_fetch and _has_pending_research_candidate_urls(execution_state)
+
 
 def _tool_call_priority(
         function_name: str,
@@ -304,13 +314,45 @@ def _build_tool_feedback_content_with_runtime_progress(
     if len(research_progress) == 0:
         return feedback_content
     parsed_feedback["research_progress"] = research_progress
+    research_diagnosis = dict(execution_state.runtime_recent_action.get("research_diagnosis") or {})
+    if research_diagnosis:
+        parsed_feedback["research_diagnosis"] = research_diagnosis
+    search_evidence_quality = dict(execution_state.last_search_evidence_quality or {})
+    if search_evidence_quality:
+        parsed_feedback["search_evidence_quality"] = search_evidence_quality
+    if execution_state.research_recommended_fetch_urls:
+        parsed_feedback["recommended_fetch_urls"] = list(execution_state.research_recommended_fetch_urls[:3])
+    search_evidence_summaries = _build_search_evidence_feedback_summaries(execution_state)
+    if search_evidence_summaries:
+        parsed_feedback["search_evidence_summaries"] = search_evidence_summaries
     missing_signals = list(research_progress.get("missing_signals") or [])
     if missing_signals:
         parsed_feedback["next_action_hint"] = (
-            "请优先补齐缺失信息后再继续检索："
-            + "；".join([str(item) for item in missing_signals[:2] if str(item).strip()])
+                "请优先补齐缺失信息后再继续检索："
+                + "；".join([str(item) for item in missing_signals[:2] if str(item).strip()])
         )
     return json.dumps(parsed_feedback, ensure_ascii=False)
+
+
+def _build_search_evidence_feedback_summaries(execution_state: ExecutionState) -> List[Dict[str, str]]:
+    """构造给下一轮模型消费的搜索摘要证据，避免模型忽略 search_web snippet。"""
+    summaries: List[Dict[str, str]] = []
+    for item in list(execution_state.research_search_evidence_items or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        if not url and not snippet:
+            continue
+        summaries.append(
+            {
+                "title": title[:100],
+                "url": url[:240],
+                "snippet": snippet[:320],
+            }
+        )
+    return summaries
 
 
 async def execute_step_with_prompt(
@@ -327,7 +369,13 @@ async def execute_step_with_prompt(
         artifact_paths: Optional[List[str]] = None,
         has_available_file_context: bool = False,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
-    """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。"""
+    """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。
+
+    实现语义：
+    - 这是 planner-react 单步执行的主编排函数；
+    - 内部只负责驱动 LLM、policy engine、tool events、收敛判断，不直接承载约束细节；
+    - 所有执行前约束都下沉到 `ToolPolicyEngine -> ConstraintEngine`，所有状态写回都下沉到 effects 域。
+    """
     started_at = now_perf()
     # P3 重构：统一事件投递入口，tools 主流程不再内联事件分发细节。
     event_dispatcher = ToolEventDispatcher(
@@ -366,6 +414,17 @@ async def execute_step_with_prompt(
             step=step,
             user_message=user_message,
         ),
+    )
+    log_runtime(
+        logger,
+        logging.INFO,
+        "执行上下文构建完成",
+        step_id=str(step.id or ""),
+        task_mode=task_mode,
+        available_tool_count=len(available_tools),
+        blocked_tool_count=len(execution_context.blocked_function_names),
+        requested_max_tool_iterations=execution_context.requested_max_tool_iterations,
+        max_tool_iterations=execution_context.effective_max_tool_iterations,
     )
 
     if task_mode == "human_wait" and ASK_USER_FUNCTION_NAME not in available_function_names:
@@ -415,7 +474,8 @@ async def execute_step_with_prompt(
         has_summary = bool(str(parsed_execution.get("summary") or "").strip())
         has_delivery_text = bool(str(parsed_execution.get("delivery_text") or "").strip())
         has_explicit_success = isinstance(parsed, dict) and "success" in parsed
-        inferred_success = bool(parsed.get("success")) if has_explicit_success else bool(has_summary or has_delivery_text)
+        inferred_success = bool(parsed.get("success")) if has_explicit_success else bool(
+            has_summary or has_delivery_text)
         log_runtime(
             logger,
             logging.INFO,
@@ -495,7 +555,7 @@ async def execute_step_with_prompt(
                 ("fetch_page",)
                 if execution_context.research_route_enabled
                    and not execution_state.research_fetch_completed
-                   and _has_pending_research_candidate_urls(execution_state)
+                   and _should_prefer_fetch_page_for_research(execution_state)
                 else _build_browser_preferred_function_names(
                     task_mode=task_mode,
                     available_function_names=execution_context.available_function_names,
@@ -518,23 +578,54 @@ async def execute_step_with_prompt(
         )
         if lifecycle is None:
             continue
-        rewrite_decision = policy_engine.evaluate_rewrite(
-            lifecycle=lifecycle,
+        requested_function_name = str(lifecycle.function_name or "")
+        matched_tool = _resolve_tool_by_function_name(function_name=lifecycle.function_name,
+                                                      runtime_tools=runtime_tools)
+        policy_result = await policy_engine.evaluate_tool_call(
+            step=step,
+            task_mode=task_mode,
+            function_name=lifecycle.function_name,
+            normalized_function_name=lifecycle.normalized_function_name,
+            function_args=lifecycle.function_args,
+            matched_tool=matched_tool,
+            runtime_tools=runtime_tools,
+            browser_route_state_key=iteration_context.browser_route_state_key,
+            iteration_blocked_function_names=iteration_context.iteration_blocked_function_names,
             execution_context=execution_context,
             execution_state=execution_state,
-            step=step,
+            started_at=started_at,
         )
-        lifecycle = rewrite_decision.lifecycle
-        rewrite_reason = rewrite_decision.reason
+        log_runtime(
+            logger,
+            logging.INFO,
+            "工具策略结果已回传主循环",
+            step_id=str(step.id or ""),
+            iteration=index,
+            function_name=str(lifecycle.function_name or ""),
+            requested_function_name=requested_function_name,
+            final_function_name=str(policy_result.final_function_name or ""),
+            loop_break_reason=str(policy_result.loop_break_reason or ""),
+            tool_elapsed_ms=policy_result.tool_cost_ms,
+        )
+        lifecycle.function_name = str(policy_result.final_function_name or lifecycle.function_name or "")
+        lifecycle.normalized_function_name = str(
+            policy_result.final_normalized_function_name or lifecycle.normalized_function_name or ""
+        ).strip().lower()
+        lifecycle.function_args = dict(policy_result.executed_function_args or policy_result.final_function_args or lifecycle.function_args or {})
+        matched_tool = policy_result.final_matched_tool
+        lifecycle.tool_name = str(
+            policy_result.final_tool_name or (matched_tool.name if matched_tool is not None else ""))
+
+        selected_tool_call = {
+            **dict(selected_tool_call),
+            "function": {
+                **dict(selected_tool_call.get("function") or {}),
+                "name": lifecycle.function_name,
+                "arguments": json.dumps(lifecycle.function_args, ensure_ascii=False),
+            },
+        }
+        rewrite_reason = str(policy_result.rewrite_reason or "")
         if rewrite_reason:
-            selected_tool_call = {
-                **dict(selected_tool_call),
-                "function": {
-                    **dict(selected_tool_call.get("function") or {}),
-                    "name": lifecycle.function_name,
-                    "arguments": json.dumps(lifecycle.function_args, ensure_ascii=False),
-                },
-            }
             log_runtime(
                 logger,
                 logging.INFO,
@@ -542,9 +633,8 @@ async def execute_step_with_prompt(
                 step_id=str(step.id or ""),
                 iteration=index,
                 rewrite_reason=rewrite_reason,
-                **dict(rewrite_decision.metadata or {}),
+                **dict(policy_result.rewrite_metadata or {}),
             )
-
         messages.append(
             _build_assistant_tool_call_message(
                 execution_state.llm_message,
@@ -552,12 +642,6 @@ async def execute_step_with_prompt(
             )
         )
 
-        tool_fingerprint = _build_tool_fingerprint(lifecycle.normalized_function_name, lifecycle.function_args)
-        if tool_fingerprint == execution_state.last_tool_fingerprint:
-            execution_state.same_tool_repeat_count += 1
-        else:
-            execution_state.same_tool_repeat_count = 1
-            execution_state.last_tool_fingerprint = tool_fingerprint
         log_runtime(
             logger,
             logging.INFO,
@@ -566,6 +650,8 @@ async def execute_step_with_prompt(
             iteration=index,
             tool_call_id=lifecycle.tool_call_id,
             function_name=lifecycle.function_name,
+            requested_function_name=requested_function_name,
+            executed_function_name=lifecycle.function_name,
             task_mode=task_mode,
             same_tool_repeat_count=execution_state.same_tool_repeat_count,
             arg_keys=sorted(lifecycle.function_args.keys()),
@@ -577,23 +663,8 @@ async def execute_step_with_prompt(
             rewrite_reason=rewrite_reason,
         )
 
-        matched_tool = _resolve_tool_by_function_name(function_name=lifecycle.function_name, runtime_tools=runtime_tools)
         bind_tool_name(lifecycle, matched_tool)
         await event_dispatcher.emit(build_calling_event(lifecycle))
-        policy_result = await policy_engine.evaluate_tool_call(
-            step=step,
-            task_mode=task_mode,
-            function_name=lifecycle.function_name,
-            normalized_function_name=lifecycle.normalized_function_name,
-            function_args=lifecycle.function_args,
-            matched_tool=matched_tool,
-            tool_name=lifecycle.tool_name,
-            browser_route_state_key=iteration_context.browser_route_state_key,
-            iteration_blocked_function_names=iteration_context.iteration_blocked_function_names,
-            execution_context=execution_context,
-            execution_state=execution_state,
-            started_at=started_at,
-        )
         tool_result = policy_result.tool_result
         loop_break_reason = policy_result.loop_break_reason
         tool_cost_ms = policy_result.tool_cost_ms
@@ -607,6 +678,8 @@ async def execute_step_with_prompt(
             step_id=str(step.id or ""),
             tool_call_id=lifecycle.tool_call_id,
             function_name=lifecycle.function_name,
+            requested_function_name=requested_function_name,
+            executed_function_name=lifecycle.function_name,
             tool_name=lifecycle.tool_name,
             success=bool(tool_result.success),
             has_interrupt=bool(interrupt_request),

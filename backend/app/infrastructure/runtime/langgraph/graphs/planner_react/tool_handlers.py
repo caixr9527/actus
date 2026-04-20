@@ -3,163 +3,76 @@
 """P3 重构：工具调用执行与专用分支处理。"""
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from app.domain.models import BrowserPageType, Step, ToolResult
+from app.domain.models import Step, ToolResult
+from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.policies import (
-    build_browser_high_level_retry_block_message as _build_browser_high_level_retry_block_message,
-    build_listing_click_target_block_message as _build_listing_click_target_block_message,
-    build_search_fingerprint as _build_search_fingerprint,
     build_tool_fingerprint as _build_tool_fingerprint,
-    coerce_optional_int as _coerce_optional_int,
-    is_browser_high_level_temporarily_blocked as _is_browser_high_level_temporarily_blocked,
 )
-from .execution_context import ExecutionContext
-from .execution_state import ExecutionState
-from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
-from app.domain.services.runtime.contracts.langgraph_settings import (
-    FETCH_REPEAT_LIMIT,
-    REPEAT_TOOL_LIMIT,
-    SEARCH_REPEAT_LIMIT,
-)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_argument_normalizers import normalize_tool_execution_args
 
 
 @dataclass(slots=True)
 class ToolExecutionDecision:
+    """executor 域输出。
+
+    业务含义：
+    - `tool_result` 是一次真实工具调用后的原始执行结果；
+    - `tool_cost_ms` 记录工具侧耗时；
+    - `loop_break_reason` 仅用于 executor 直接识别出的快速收敛场景，例如瞬时传输错误。
+    """
     tool_result: ToolResult
     tool_cost_ms: int = 0
     loop_break_reason: str = ""
+    executed_function_args: Dict[str, Any] = field(default_factory=dict)
 
 
 async def execute_tool_with_policy(
-    *,
-    logger: logging.Logger,
-    step: Step,
-    function_name: str,
-    normalized_function_name: str,
-    function_args: Dict[str, Any],
-    matched_tool: BaseTool,
-    tool_name: str,
-    browser_route_state_key: str,
-    ctx: ExecutionContext,
-    state: ExecutionState,
-    started_at: float,
+        *,
+        logger: logging.Logger,
+        step: Step,
+        function_name: str,
+        normalized_function_name: str,
+        function_args: Dict[str, Any],
+        matched_tool: BaseTool,
+        tool_name: str,
+        started_at: float,
 ) -> ToolExecutionDecision:
-    # P3 重构：列表页点击命中约束保持原有优先级，避免错误元素点击。
-    if (
-        ctx.browser_route_enabled
-        and normalized_function_name == "browser_click"
-        and state.browser_page_type in {
-            BrowserPageType.LISTING.value,
-            BrowserPageType.SEARCH_RESULTS.value,
-        }
-        and state.browser_link_match_ready
-    ):
-        requested_index = _coerce_optional_int(function_args.get("index"))
-        coordinate_x = function_args.get("coordinate_x")
-        coordinate_y = function_args.get("coordinate_y")
-        if (
-            coordinate_x is not None
-            or coordinate_y is not None
-            or requested_index is None
-            or state.last_browser_route_index is None
-            or requested_index != state.last_browser_route_index
-        ):
-            log_runtime(
-                logger,
-                logging.INFO,
-                "列表页点击目标与已匹配结果不一致，已拦截",
-                step_id=str(step.id or ""),
-                function_name=function_name,
-                requested_index=requested_index,
-                matched_index=state.last_browser_route_index,
-                has_coordinate_x=coordinate_x is not None,
-                has_coordinate_y=coordinate_y is not None,
-            )
-            return ToolExecutionDecision(
-                loop_break_reason="browser_click_target_blocked",
-                tool_result=ToolResult(
-                    success=False,
-                    message=_build_listing_click_target_block_message(
-                        last_browser_route_index=state.last_browser_route_index,
-                        last_browser_route_url=state.last_browser_route_url,
-                        last_browser_route_selector=state.last_browser_route_selector,
-                    ),
-                ),
-            )
-        return await _invoke_tool(
-            logger=logger,
-            step=step,
-            function_name=function_name,
-            matched_tool=matched_tool,
-            function_args=function_args,
-            tool_name=tool_name,
-            started_at=started_at,
-        )
+    """执行真实工具调用，并做 executor 域内的少量后处理。
 
-    if ctx.browser_route_enabled and _is_browser_high_level_temporarily_blocked(
-        function_name=normalized_function_name,
+    当前职责：
+    - 对 `search_web` query 做 research 主查询规范化收口，但不做关键词化改写；
+    - 将 research 链路的瞬时传输错误统一转换为可收敛失败信号；
+    - 不处理约束判断，不写执行状态。
+    """
+    normalized_function_args = normalize_tool_execution_args(
+        normalized_function_name=normalized_function_name,
         function_args=function_args,
-        browser_route_state_key=browser_route_state_key,
-        failed_high_level_keys=state.failed_browser_high_level_keys,
-    ):
-        log_runtime(
-            logger,
-            logging.INFO,
-            "浏览器高阶能力在当前页面状态下暂时封禁",
-            step_id=str(step.id or ""),
-            function_name=function_name,
-            browser_route_state_key=browser_route_state_key,
-        )
-        return ToolExecutionDecision(
-            loop_break_reason="browser_high_level_retry_blocked",
-            tool_result=ToolResult(
-                success=False,
-                message=_build_browser_high_level_retry_block_message(
-                    function_name=function_name,
-                    function_args=function_args,
-                ),
-            ),
-        )
-
+    )
+    log_runtime(
+        logger,
+        logging.INFO,
+        "开始执行真实工具调用",
+        step_id=str(step.id or ""),
+        function_name=function_name,
+        tool_name=tool_name,
+        arg_keys=sorted(dict(normalized_function_args or {}).keys()),
+    )
     if normalized_function_name == "search_web":
-        # P3-一次性收口：search_web 查询保持自然语言原貌，不做关键词化切分改写。
-        normalized_search_query = _normalize_search_query(function_args.get("query"))
-        if normalized_search_query:
-            function_args = {
-                **dict(function_args or {}),
-                "query": normalized_search_query,
-            }
-        search_fingerprint = _build_search_fingerprint(function_args)
-        state.search_repeat_counter[search_fingerprint] = state.search_repeat_counter.get(search_fingerprint, 0) + 1
-        if state.search_repeat_counter[search_fingerprint] > SEARCH_REPEAT_LIMIT:
-            log_runtime(
-                logger,
-                logging.WARNING,
-                "重复搜索已收敛",
-                step_id=str(step.id or ""),
-                function_name=function_name,
-                search_repeat_count=state.search_repeat_counter[search_fingerprint],
-            )
-            return ToolExecutionDecision(
-                loop_break_reason="search_repeat",
-                tool_result=ToolResult(
-                    success=False,
-                    message="同一搜索查询已重复多次，请改写查询、缩小范围，或改用 fetch_page / 其他工具继续。",
-                ),
-            )
         invoked = await _invoke_tool(
             logger=logger,
             step=step,
             function_name=function_name,
             matched_tool=matched_tool,
-            function_args=function_args,
+            function_args=normalized_function_args,
             tool_name=tool_name,
             started_at=started_at,
         )
-        if (not bool(invoked.tool_result.success)) and _is_transient_research_transport_error(invoked.tool_result.message):
+        if (not bool(invoked.tool_result.success)) and _is_transient_research_transport_error(
+                invoked.tool_result.message):
             return ToolExecutionDecision(
                 tool_cost_ms=invoked.tool_cost_ms,
                 loop_break_reason="research_route_transport_error",
@@ -167,40 +80,22 @@ async def execute_tool_with_policy(
                     success=False,
                     message="检索链路出现瞬时网络抖动（如连接中断），当前步骤已停止重试。请稍后重试或切换其他路径。",
                 ),
+                executed_function_args=dict(normalized_function_args or {}),
             )
         return invoked
 
     if normalized_function_name == "fetch_page":
-        fetch_fingerprint = _build_fetch_fingerprint(function_args)
-        if fetch_fingerprint:
-            state.fetch_repeat_counter[fetch_fingerprint] = state.fetch_repeat_counter.get(fetch_fingerprint, 0) + 1
-        if fetch_fingerprint and state.fetch_repeat_counter[fetch_fingerprint] > FETCH_REPEAT_LIMIT:
-            log_runtime(
-                logger,
-                logging.WARNING,
-                "重复抓取同一页面已收敛",
-                step_id=str(step.id or ""),
-                function_name=function_name,
-                fetch_repeat_count=state.fetch_repeat_counter[fetch_fingerprint],
-                fetch_url=fetch_fingerprint,
-            )
-            return ToolExecutionDecision(
-                loop_break_reason="research_route_fingerprint_repeat",
-                tool_result=ToolResult(
-                    success=False,
-                    message="同一页面 URL 已重复抓取多次，请切换其他候选链接或结束当前步骤。",
-                ),
-            )
         invoked = await _invoke_tool(
             logger=logger,
             step=step,
             function_name=function_name,
             matched_tool=matched_tool,
-            function_args=function_args,
+            function_args=normalized_function_args,
             tool_name=tool_name,
             started_at=started_at,
         )
-        if (not bool(invoked.tool_result.success)) and _is_transient_research_transport_error(invoked.tool_result.message):
+        if (not bool(invoked.tool_result.success)) and _is_transient_research_transport_error(
+                invoked.tool_result.message):
             return ToolExecutionDecision(
                 tool_cost_ms=invoked.tool_cost_ms,
                 loop_break_reason="research_route_transport_error",
@@ -208,70 +103,58 @@ async def execute_tool_with_policy(
                     success=False,
                     message="页面抓取链路出现瞬时网络抖动（如连接中断），当前步骤已停止重试。请稍后重试或改用其他来源。",
                 ),
+                executed_function_args=dict(normalized_function_args or {}),
             )
         return invoked
-
-    if state.same_tool_repeat_count > REPEAT_TOOL_LIMIT:
-        log_runtime(
-            logger,
-            logging.WARNING,
-            "重复工具调用已收敛",
-            step_id=str(step.id or ""),
-            function_name=function_name,
-            same_tool_repeat_count=state.same_tool_repeat_count,
-        )
-        # P3-一次性收口：如果此前已经有同工具成功结果，直接用该结果收口，避免“已成功却被判失败”。
-        repeated_success_result = _build_repeat_success_fallback_result(
-            function_name=normalized_function_name,
-            function_args=function_args,
-            current_tool_fingerprint=state.last_tool_fingerprint,
-            last_successful_tool_call=state.last_successful_tool_call,
-            last_successful_tool_fingerprint=state.last_successful_tool_fingerprint,
-        )
-        if repeated_success_result is not None:
-            return ToolExecutionDecision(
-                loop_break_reason="repeat_tool_call_success_fallback",
-                tool_result=repeated_success_result,
-            )
-        return ToolExecutionDecision(
-            loop_break_reason="repeat_tool_call",
-            tool_result=ToolResult(
-                success=False,
-                message="检测到同一工具与相近参数被重复调用，请改用其他工具、调整参数，或结束当前步骤。",
-            ),
-        )
 
     return await _invoke_tool(
         logger=logger,
         step=step,
         function_name=function_name,
         matched_tool=matched_tool,
-        function_args=function_args,
+        function_args=normalized_function_args,
         tool_name=tool_name,
         started_at=started_at,
     )
 
 
 async def _invoke_tool(
-    *,
-    logger: logging.Logger,
-    step: Step,
-    function_name: str,
-    matched_tool: BaseTool,
-    function_args: Dict[str, Any],
-    tool_name: str,
-    started_at: float,
+        *,
+        logger: logging.Logger,
+        step: Step,
+        function_name: str,
+        matched_tool: BaseTool,
+        function_args: Dict[str, Any],
+        tool_name: str,
+        started_at: float,
 ) -> ToolExecutionDecision:
+    """调用底层工具实现，并把异常统一转换为 `ToolExecutionDecision`。"""
     tool_started_at = now_perf()
     try:
         tool_result = await matched_tool.invoke(function_name, **function_args)
         tool_cost_ms = elapsed_ms(tool_started_at)
         if not isinstance(tool_result, ToolResult):
             tool_result = ToolResult(success=True, data=tool_result)
-        return ToolExecutionDecision(tool_result=tool_result, tool_cost_ms=tool_cost_ms)
+        log_runtime(
+            logger,
+            logging.INFO,
+            "真实工具调用成功返回",
+            step_id=str(step.id or ""),
+            function_name=function_name,
+            tool_name=tool_name,
+            success=bool(tool_result.success),
+            tool_elapsed_ms=tool_cost_ms,
+            response_keys=sorted(tool_result.data.keys()) if isinstance(tool_result.data, dict) else [],
+        )
+        return ToolExecutionDecision(
+            tool_result=tool_result,
+            tool_cost_ms=tool_cost_ms,
+            executed_function_args=dict(function_args or {}),
+        )
     except Exception as e:
         tool_cost_ms = elapsed_ms(tool_started_at)
-        if _is_transient_research_transport_error(f"{e.__class__.__name__}: {e}") and function_name in {"search_web", "fetch_page"}:
+        if _is_transient_research_transport_error(f"{e.__class__.__name__}: {e}") and function_name in {"search_web",
+                                                                                                        "fetch_page"}:
             warning_message = (
                 "检索链路瞬时错误，已触发快速收敛"
                 if function_name == "search_web"
@@ -297,6 +180,7 @@ async def _invoke_tool(
                 loop_break_reason="research_route_transport_error",
                 tool_cost_ms=tool_cost_ms,
                 tool_result=ToolResult(success=False, message=transient_message),
+                executed_function_args=dict(function_args or {}),
             )
 
         log_runtime(
@@ -314,11 +198,8 @@ async def _invoke_tool(
         return ToolExecutionDecision(
             tool_cost_ms=tool_cost_ms,
             tool_result=ToolResult(success=False, message=f"调用工具失败: {function_name}"),
+            executed_function_args=dict(function_args or {}),
         )
-
-
-def _build_fetch_fingerprint(function_args: Dict[str, Any]) -> str:
-    return str(function_args.get("url") or "").strip().lower()
 
 
 def _is_transient_research_transport_error(raw_error: Any) -> bool:
@@ -339,19 +220,15 @@ def _is_transient_research_transport_error(raw_error: Any) -> bool:
     return any(marker in message for marker in transient_markers)
 
 
-def _normalize_search_query(raw_query: Any) -> str:
-    """统一规整 search_web 查询，仅做空白规范化，不改写语义。"""
-    return str(raw_query or "").strip()
-
-
-def _build_repeat_success_fallback_result(
-    *,
-    function_name: str,
-    function_args: Dict[str, Any],
-    current_tool_fingerprint: str,
-    last_successful_tool_call: Dict[str, Any],
-    last_successful_tool_fingerprint: str,
+def build_repeat_success_fallback_result(
+        *,
+        function_name: str,
+        function_args: Dict[str, Any],
+        current_tool_fingerprint: str,
+        last_successful_tool_call: Dict[str, Any],
+        last_successful_tool_fingerprint: str,
 ) -> Optional[ToolResult]:
+    """重复调用命中时，若与最近成功只读调用完全一致，则复用成功结果收敛。"""
     last_call = dict(last_successful_tool_call or {})
     last_function_name = str(last_call.get("function_name") or "").strip().lower()
     if not last_function_name or last_function_name != str(function_name or "").strip().lower():
@@ -366,10 +243,8 @@ def _build_repeat_success_fallback_result(
         function_name=str(function_name or "").strip().lower(),
         function_args=dict(function_args or {}),
     )
-    # P3-一次性收口：只有“同工具+同参数”才能复用成功结果，避免跨参数误收敛。
     if observed_fingerprint != expected_fingerprint:
         return None
-    # 仅兜底可重复读取类函数，避免把写操作错误复用为成功。
     if last_function_name not in {"read_file", "list_files", "find_files", "search_in_file", "fetch_page"}:
         return None
     return ToolResult(

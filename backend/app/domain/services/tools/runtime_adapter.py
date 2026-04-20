@@ -25,6 +25,7 @@ from app.domain.models import (
     SearchToolContent,
     FileToolContent,
     ShellToolContent,
+    ToolDiagnosticContent,
     ToolEvent,
     ToolEventStatus,
     ToolResult,
@@ -150,6 +151,36 @@ class ToolRuntimeAdapter:
         if not isinstance(fetched_page, FetchedPage):
             raise TypeError("fetch_page 的结果必须是 FetchedPage")
         return FetchPageToolContent.from_fetched_page(fetched_page)
+
+    @staticmethod
+    def _build_tool_diagnostic_content(event: ToolEvent) -> ToolDiagnosticContent:
+        """构建 search/fetch 的通用诊断卡片。
+
+        使用场景：
+        - 执行约束层 block 生成的虚拟失败结果；
+        - effects 层生成的 research 诊断降级结果；
+        - search/fetch 未命中真实结构化结果类型时的展示兜底。
+        """
+        function_result = event.function_result
+        if function_result is None:
+            return ToolDiagnosticContent()
+
+        result_data = function_result.data if isinstance(function_result.data, dict) else {}
+        research_diagnosis = result_data.get("research_diagnosis") if isinstance(result_data, dict) else None
+        if isinstance(research_diagnosis, dict):
+            return ToolDiagnosticContent(
+                message=str(function_result.message or "").strip(),
+                reason_code=str(research_diagnosis.get("code") or "").strip(),
+                diagnostic_type="research_diagnosis",
+                details=dict(research_diagnosis),
+            )
+
+        return ToolDiagnosticContent(
+            message=str(function_result.message or "").strip(),
+            reason_code=str(result_data.get("reason_code") or "").strip(),
+            diagnostic_type="tool_result_fallback",
+            details=dict(result_data),
+        )
 
     @staticmethod
     def _build_browser_content(event: ToolEvent, screenshot: str) -> BrowserToolContent:
@@ -304,10 +335,26 @@ class ToolRuntimeAdapter:
         if event.tool_name == "search":
             function_name = str(event.function_name or "").strip().lower()
             if function_name == "search_web":
-                event.tool_content = self._build_search_results_content(event)
+                function_result = event.function_result
+                if (
+                        function_result is not None
+                        and bool(function_result.success)
+                        and isinstance(function_result.data, SearchResults)
+                ):
+                    event.tool_content = self._build_search_results_content(event)
+                else:
+                    event.tool_content = self._build_tool_diagnostic_content(event)
                 return True
             if function_name == "fetch_page":
-                event.tool_content = self._build_fetch_page_content(event)
+                function_result = event.function_result
+                if (
+                        function_result is not None
+                        and bool(function_result.success)
+                        and isinstance(function_result.data, FetchedPage)
+                ):
+                    event.tool_content = self._build_fetch_page_content(event)
+                else:
+                    event.tool_content = self._build_tool_diagnostic_content(event)
                 return True
             return False
 

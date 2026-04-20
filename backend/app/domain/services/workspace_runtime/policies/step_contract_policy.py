@@ -16,7 +16,7 @@ from app.domain.models import (
     StepTaskModeHint,
 )
 from app.domain.services.runtime.normalizers import normalize_controlled_value
-from .task_mode_policy import analyze_text_intent, build_step_candidate_text
+from .task_mode_policy import analyze_text_intent, build_step_candidate_text, has_environment_write_intent
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def _compile_single_step_contract(
 
     candidate_text = build_step_candidate_text(compiled_step)
     signals = analyze_text_intent(candidate_text)
-    step_requests_write_action = bool(signals.get("has_write_action_signal"))
+    step_requests_environment_write_action = has_environment_write_intent(signals)
     _ = user_message  # P3-一次性收口：保留函数签名，当前编译策略仅依赖步骤语义。
 
     task_mode = normalize_controlled_value(getattr(compiled_step, "task_mode_hint", None), StepTaskModeHint) or ""
@@ -120,7 +120,7 @@ def _compile_single_step_contract(
         return compiled_step, issues, corrected_count
 
     # P3-一次性收口：如果步骤明确写副作用，但策略禁止文件产出，按可执行语义纠偏。
-    if artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value and step_requests_write_action:
+    if artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value and step_requests_environment_write_action:
         if task_mode in {
             StepTaskModeHint.FILE_PROCESSING.value,
             StepTaskModeHint.CODING.value,
@@ -131,6 +131,16 @@ def _compile_single_step_contract(
             if output_mode in {"", StepOutputMode.NONE.value}:
                 compiled_step.output_mode = StepOutputMode.FILE
                 corrected_count += 1
+
+    # P3-一次性收口：只要步骤语义明确包含创建/写入/修改等写副作用，
+    # 就不能继续保留 file_processing/general 的只读执行假设，必须纠偏到 coding。
+    if step_requests_environment_write_action and task_mode in {
+        StepTaskModeHint.FILE_PROCESSING.value,
+        StepTaskModeHint.GENERAL.value,
+        "",
+    }:
+        compiled_step.task_mode_hint = StepTaskModeHint.CODING
+        corrected_count += 1
 
     # P3-一次性收口：output_mode=file 与 forbid_file_output 互斥时统一纠偏到 allow。
     output_mode = normalize_controlled_value(getattr(compiled_step, "output_mode", None), StepOutputMode) or ""

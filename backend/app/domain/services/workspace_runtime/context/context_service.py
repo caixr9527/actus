@@ -348,6 +348,9 @@ class RuntimeContextService:
                 "candidate_links": self._collect_candidate_links(
                     workspace_snapshot=workspace_snapshot,
                 ),
+                "search_evidence_summaries": self._collect_search_evidence_summaries(
+                    workspace_snapshot=workspace_snapshot,
+                ),
                 "read_page_summaries": self._collect_fetch_page_summaries(
                     workspace_snapshot=workspace_snapshot,
                 ),
@@ -903,6 +906,21 @@ class RuntimeContextService:
     ) -> List[Dict[str, str]]:
         workspace_links = list(self._get_workspace_environment_summary(workspace_snapshot).get("candidate_links") or [])
         return [item for item in workspace_links if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
+
+    def _collect_search_evidence_summaries(
+            self,
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+    ) -> List[Dict[str, str]]:
+        return [
+            {
+                "title": self._truncate_text(item.get("title"), max_chars=80),
+                "snippet": self._truncate_text(item.get("snippet"), max_chars=220),
+                "url": self._truncate_text(item.get("url"), max_chars=200),
+            }
+            for item in self._collect_candidate_links(workspace_snapshot=workspace_snapshot)
+            if isinstance(item, dict)
+        ]
 
     def _collect_fetch_page_summaries(
             self,

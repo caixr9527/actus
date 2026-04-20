@@ -124,6 +124,21 @@ class FetchPageToolContent(BaseModel):
         return cls(**page.model_dump())
 
 
+class ToolDiagnosticContent(BaseModel):
+    """工具诊断卡片内容。
+
+    业务含义：
+    - 承载约束阻断、执行后诊断降级、以及未命中结构化结果合同的工具返回；
+    - 避免把策略型失败结果误解析为真实 `search_web` / `fetch_page` 成功结果；
+    - 仅作为展示层通用诊断载荷，不代表真实工具产物。
+    """
+
+    message: str = ""
+    reason_code: str = ""
+    diagnostic_type: str = ""
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
 class ShellToolContent(BaseModel):
     """Shell工具扩展内容"""
     console: Any
@@ -148,6 +163,7 @@ ToolContent = Union[
     BrowserToolContent,
     SearchToolContent,
     FetchPageToolContent,
+    ToolDiagnosticContent,
     ShellToolContent,
     MCPToolContent,
     FileToolContent,

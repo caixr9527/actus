@@ -47,11 +47,35 @@ def normalize_intent_text(value: str) -> str:
 def classify_file_access_intent(value: str) -> str:
     """把文件访问语义分成三态，供执行期精确治理。"""
     signals = analyze_text_intent(value)
-    if bool(signals.get("has_write_action_signal")):
+    if has_environment_write_intent(signals):
         return "write_intent"
     if bool(signals.get("has_read_action_signal")):
         return "read_only_intent"
     return "unknown"
+
+
+def has_environment_write_target_signal(signals: Dict[str, Any]) -> bool:
+    """判断文本是否命中了真实环境副作用载体。"""
+    return any(
+        (
+            bool(signals.get("has_absolute_path")),
+            bool(signals.get("has_file_signal")),
+            bool(signals.get("has_shell_command")),
+            bool(signals.get("has_code_block")),
+            bool(signals.get("has_coding_signal")),
+            bool(signals.get("has_tool_reference")),
+        )
+    )
+
+
+def has_environment_write_intent(value_or_signals: str | Dict[str, Any]) -> bool:
+    """统一判断“工程写副作用”，避免把纯语义编辑误判成 coding。"""
+    signals = (
+        value_or_signals
+        if isinstance(value_or_signals, dict)
+        else analyze_text_intent(str(value_or_signals or ""))
+    )
+    return bool(signals.get("has_write_action_signal")) and has_environment_write_target_signal(signals)
 
 
 def has_explicit_wait_semantics(value: str) -> bool:
@@ -232,6 +256,10 @@ def classify_task_mode_from_signals(signals: Dict[str, Any]) -> str:
         scores["web_reading"] += 2
         scores["research"] += 2
     if signals["has_shell_command"] or signals["has_code_block"] or signals["has_coding_signal"]:
+        scores["coding"] += 3
+    if has_environment_write_intent(signals):
+        # P3-一次性收口：创建/写入/修改/执行类任务属于可变更环境操作，
+        # 不能继续按只读 file_processing 处理，否则执行约束层会误伤 shell/write 能力。
         scores["coding"] += 3
     if signals["has_absolute_path"] or signals["has_file_signal"]:
         scores["file_processing"] += 3

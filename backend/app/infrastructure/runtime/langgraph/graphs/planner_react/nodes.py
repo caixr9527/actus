@@ -46,11 +46,25 @@ from app.domain.services.prompts import (
     SYSTEM_PROMPT,
     UPDATE_PLAN_PROMPT,
 )
-from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime import SkillGraphRuntime
-from app.domain.services.workspace_runtime.policies import (
-    collect_step_contract_hard_issues,
-    compile_step_contracts,
+from app.domain.services.runtime.contracts.langgraph_settings import (
+    ATTACHMENT_DELIVERY_ALLOW_PATTERN,
+    ATTACHMENT_DELIVERY_DENY_PATTERN,
+    CONVERSATION_SUMMARY_MAX_PARTS,
+    MEMORY_CANDIDATE_MIN_CONFIDENCE,
+    MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    MESSAGE_WINDOW_MAX_ITEMS,
+    MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
+    REPLAN_META_VALIDATION_ALLOW_PATTERN,
+    REPLAN_META_VALIDATION_DENY_PATTERN,
+    REPLAN_META_VALIDATION_STEP_PATTERN,
+    STEP_EXECUTION_TIMEOUT_SECONDS,
+)
+from app.domain.services.runtime.contracts.runtime_logging import (
+    describe_llm_runtime,
+    elapsed_ms,
+    log_runtime,
+    now_perf
 )
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import (
@@ -76,6 +90,15 @@ from app.domain.services.runtime.normalizers import (
     truncate_text,
 )
 from app.domain.services.tools import BaseTool
+from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.policies import (
+    collect_step_contract_hard_issues,
+    compile_step_contracts,
+    infer_entry_strategy,
+    requests_plan_only,
+    classify_confirmed_user_task_mode,
+    classify_step_task_mode,
+)
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     format_attachments_for_prompt,
     normalize_attachments,
@@ -89,29 +112,11 @@ from .parsers import (
     extract_write_file_paths_from_tool_events,
     merge_attachment_paths,
 )
-from app.domain.services.runtime.contracts.runtime_logging import describe_llm_runtime, elapsed_ms, log_runtime, now_perf
-from app.domain.services.runtime.contracts.langgraph_settings import (
-    ATTACHMENT_DELIVERY_ALLOW_PATTERN,
-    ATTACHMENT_DELIVERY_DENY_PATTERN,
-    CONVERSATION_SUMMARY_MAX_PARTS,
-    MEMORY_CANDIDATE_MIN_CONFIDENCE,
-    MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-    MESSAGE_WINDOW_MAX_ITEMS,
-    MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
-    REPLAN_META_VALIDATION_ALLOW_PATTERN,
-    REPLAN_META_VALIDATION_DENY_PATTERN,
-    REPLAN_META_VALIDATION_STEP_PATTERN,
-    STEP_EXECUTION_TIMEOUT_SECONDS,
-)
+from .replan import ReplanMergeEngine
 from .tools import (
-    classify_confirmed_user_task_mode,
-    classify_step_task_mode,
     execute_step_with_prompt,
     has_available_file_context,
-    infer_entry_strategy,
-    requests_plan_only,
 )
-from .replan import ReplanMergeEngine
 
 logger = logging.getLogger(__name__)
 _REPLAN_MERGE_ENGINE = ReplanMergeEngine(
@@ -119,6 +124,8 @@ _REPLAN_MERGE_ENGINE = ReplanMergeEngine(
     replan_meta_validation_allow_pattern=REPLAN_META_VALIDATION_ALLOW_PATTERN,
     replan_meta_validation_deny_pattern=REPLAN_META_VALIDATION_DENY_PATTERN,
 )
+
+
 def _get_control_metadata(state: PlannerReActLangGraphState) -> Dict[str, Any]:
     return get_graph_control(state.get("graph_metadata"))
 
@@ -167,6 +174,7 @@ def _infer_step_attachment_delivery_preference(
     if ATTACHMENT_DELIVERY_ALLOW_PATTERN.search(normalized_message):
         return True
     return None
+
 
 # 状态与交付 helper：负责工作记忆默认结构，以及“轻 summary / 重交付正文”分轨。
 def _ensure_working_memory(state: PlannerReActLangGraphState) -> Dict[str, Any]:
@@ -242,6 +250,54 @@ def _merge_confirmed_facts(
     return _normalize_confirmed_fact_map(merged_facts)
 
 
+def _build_post_wait_execute_step(
+        *,
+        original_user_message: str,
+        resumed_message: str,
+        waiting_step: Optional[Step],
+) -> Step:
+    """为“只等待用户补充信息”的计划补一条真实执行步骤，避免恢复后掉回 replan。"""
+    execution_message = str(original_user_message or "").strip()
+    normalized_resume_message = str(resumed_message or "").strip()
+    title = execution_message[:40] if execution_message else "根据用户补充信息继续执行"
+    description = execution_message or "根据用户最新补充的信息继续执行原始任务"
+    waiting_step_mode = normalize_controlled_value(
+        getattr(waiting_step, "task_mode_hint", None),
+        StepTaskModeHint,
+    )
+    task_mode = _infer_post_wait_task_mode(
+        original_user_message=execution_message,
+        resumed_message=normalized_resume_message,
+        waiting_step_mode=waiting_step_mode,
+    )
+    return Step(
+        title=title,
+        description=description,
+        task_mode_hint=task_mode,
+        output_mode="inline",
+        artifact_policy="default",
+        delivery_role="final",
+        delivery_context_state=_resolve_direct_delivery_context_state(task_mode),
+        status=ExecutionStatus.PENDING,
+    )
+
+
+def _infer_post_wait_task_mode(
+        *,
+        original_user_message: str,
+        resumed_message: str,
+        waiting_step_mode: Optional[str],
+) -> str:
+    """恢复后补出的真实执行步骤应继承原任务语义，而不是沿用 human_wait。"""
+    if waiting_step_mode and waiting_step_mode != StepTaskModeHint.HUMAN_WAIT.value:
+        return waiting_step_mode
+    candidate_message = str(original_user_message or "").strip() or str(resumed_message or "").strip()
+    inferred_mode = classify_confirmed_user_task_mode(candidate_message)
+    if inferred_mode == StepTaskModeHint.HUMAN_WAIT.value:
+        return StepTaskModeHint.GENERAL.value
+    return inferred_mode or StepTaskModeHint.GENERAL.value
+
+
 def _build_step_execution_text(step: Step, *, working_memory: Dict[str, Any]) -> str:
     """
     description-only 主干：执行提示词只基于原始 description，
@@ -259,9 +315,9 @@ def _build_step_execution_text(step: Step, *, working_memory: Dict[str, Any]) ->
     if len(fact_lines) == 0:
         return step_description
     return (
-        f"{step_description}\n\n"
-        f"已确认用户输入（仅作当前步骤执行上下文，不改写原步骤描述）:\n"
-        + "\n".join(fact_lines)
+            f"{step_description}\n\n"
+            f"已确认用户输入（仅作当前步骤执行上下文，不改写原步骤描述）:\n"
+            + "\n".join(fact_lines)
     ).strip()
 
 
@@ -603,9 +659,9 @@ def _should_skip_summary_llm_for_final_delivery(
     output_mode = normalize_controlled_value(getattr(last_executed_step, "output_mode", None), StepOutputMode)
     delivery_role = normalize_controlled_value(getattr(last_executed_step, "delivery_role", None), StepDeliveryRole)
     return (
-        step_status == ExecutionStatus.COMPLETED.value
-        and output_mode == StepOutputMode.INLINE.value
-        and delivery_role == StepDeliveryRole.FINAL.value
+            step_status == ExecutionStatus.COMPLETED.value
+            and output_mode == StepOutputMode.INLINE.value
+            and delivery_role == StepDeliveryRole.FINAL.value
     )
 
 
@@ -887,7 +943,8 @@ def _collect_successful_tool_event_evidence(state: PlannerReActLangGraphState) -
     for event in reversed(list(state.get("emitted_events") or [])):
         if not isinstance(event, ToolEvent):
             continue
-        status_value = str(getattr(getattr(event, "status", ""), "value", getattr(event, "status", "")) or "").strip().lower()
+        status_value = str(
+            getattr(getattr(event, "status", ""), "value", getattr(event, "status", "")) or "").strip().lower()
         if status_value != "called":
             continue
         function_result = getattr(event, "function_result", None)
@@ -2764,7 +2821,8 @@ async def wait_for_human_node(
     )
     await emit_live_events(completed_event)
     next_step = plan.get_next_step()
-    next_user_message = resumed_message
+    original_user_message = str(state.get("user_message") or "").strip()
+    next_user_message = original_user_message or resumed_message
     working_memory = _ensure_working_memory(state)
     merged_confirmed_facts = _merge_confirmed_facts(
         memory_facts=_normalize_confirmed_fact_map(working_memory.get("confirmed_facts")),
@@ -2775,6 +2833,14 @@ async def wait_for_human_node(
     if str(waiting_step.id or "").strip() == "direct-wait-confirm":
         # synthetic confirm 只负责授权继续执行，后续节点仍应保留原始请求作为当前任务。
         next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
+    elif next_step is None and merged_confirmed_facts:
+        generated_next_step = _build_post_wait_execute_step(
+            original_user_message=original_user_message,
+            resumed_message=resumed_message,
+            waiting_step=waiting_step,
+        )
+        plan.steps.append(generated_next_step)
+        next_step = generated_next_step
     working_memory = _merge_step_outcome_into_working_memory(
         working_memory,
         step=waiting_step,
@@ -2910,7 +2976,8 @@ async def replan_node(
             if not isinstance(raw_item, dict):
                 criteria_missing_count += 1
                 continue
-            step_description = str(candidate_steps[index].description or "").strip() if index < len(candidate_steps) else ""
+            step_description = str(candidate_steps[index].description or "").strip() if index < len(
+                candidate_steps) else ""
             normalized_criteria, criteria_metrics = normalize_success_criteria(
                 raw_item.get("success_criteria"),
                 fallback_description=step_description,
