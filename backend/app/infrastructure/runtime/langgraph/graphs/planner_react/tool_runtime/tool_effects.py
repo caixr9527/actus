@@ -29,20 +29,24 @@ from app.domain.services.workspace_runtime.policies import (
     build_recent_failed_action as _build_recent_failed_action,
     extract_browser_tool_state as _extract_browser_tool_state,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_diagnosis import build_research_diagnosis
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_diagnosis import evaluate_fetch_result_quality
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_snippet_policy import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
+    build_research_diagnosis,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
+    evaluate_fetch_result_quality,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_snippet_policy import (
     evaluate_search_snippet_sufficiency,
     extract_search_evidence_items,
 )
-from .constraint_engine.reason_codes import (
+from ..constraint_engine.reason_codes import (
     REASON_BROWSER_CLICK_TARGET_BLOCKED,
     REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED,
     REASON_RESEARCH_ROUTE_CROSS_DOMAIN_FETCH_LIMIT,
     REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE,
 )
-from .execution_context import ExecutionContext
-from .execution_state import ExecutionState
+from ..execution.execution_context import ExecutionContext
+from ..execution.execution_state import ExecutionState
 
 
 @dataclass(slots=True)

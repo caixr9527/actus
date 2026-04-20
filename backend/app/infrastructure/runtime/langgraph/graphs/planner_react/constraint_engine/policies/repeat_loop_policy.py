@@ -18,7 +18,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_REPEAT_TOOL_CALL
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_FINGERPRINT_REPEAT
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_SEARCH_REPEAT
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_argument_normalizers import normalize_tool_execution_args
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
+    normalize_tool_execution_args,
+)
 
 
 def evaluate_repeat_loop_policy(constraint_input: ConstraintInput) -> Optional[ConstraintDecision]:

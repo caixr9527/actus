@@ -12,4 +12,3 @@ def extract_function_name(tool_schema: Dict[str, Any]) -> str:
     if not isinstance(function, dict):
         return ""
     return str(function.get("name") or "").strip().lower()
-

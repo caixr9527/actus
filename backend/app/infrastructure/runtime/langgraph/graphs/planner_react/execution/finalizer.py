@@ -18,7 +18,7 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
-from .convergence.judge import ConvergenceJudge
+from ..convergence.judge import ConvergenceJudge
 
 
 @dataclass(slots=True)

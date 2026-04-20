@@ -14,7 +14,7 @@ from app.domain.services.workspace_runtime.policies import (
 )
 from .execution_context import ExecutionContext
 from .execution_state import ExecutionState
-from .tool_schema import extract_function_name
+from ..tool_runtime.tool_schema import extract_function_name
 
 
 @dataclass(slots=True)

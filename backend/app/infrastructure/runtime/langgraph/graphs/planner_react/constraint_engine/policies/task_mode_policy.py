@@ -107,6 +107,7 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
         return None
 
     downstream_owned_blocked_names = set()
+    downstream_owned_blocked_names.update(ctx.read_only_file_blocked_function_names or set())
     downstream_owned_blocked_names.update(ctx.artifact_policy_blocked_function_names or set())
     downstream_owned_blocked_names.update(ctx.final_delivery_search_blocked_function_names or set())
     downstream_owned_blocked_names.update(ctx.final_delivery_shell_blocked_function_names or set())

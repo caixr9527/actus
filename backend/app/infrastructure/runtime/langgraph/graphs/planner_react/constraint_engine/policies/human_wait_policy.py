@@ -12,7 +12,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintToolResultPayload
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_ASK_USER_NOT_ALLOWED
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_HUMAN_WAIT_NON_INTERRUPT_TOOL_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_context import step_allows_user_wait
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import (
+    step_allows_user_wait,
+)
 
 
 def evaluate_human_wait_policy(constraint_input: ConstraintInput) -> Optional[ConstraintDecision]:

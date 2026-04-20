@@ -12,7 +12,9 @@ from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.policies import (
     build_tool_fingerprint as _build_tool_fingerprint,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_argument_normalizers import normalize_tool_execution_args
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
+    normalize_tool_execution_args,
+)
 
 
 @dataclass(slots=True)

@@ -25,7 +25,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_CONSTRAINT_ENGINE_ERROR
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_FETCH_REQUIRED
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_REWRITE_CHAIN_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_resolution import resolve_matched_tool
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_resolution import (
+    resolve_matched_tool,
+)
 
 
 @dataclass(slots=True)

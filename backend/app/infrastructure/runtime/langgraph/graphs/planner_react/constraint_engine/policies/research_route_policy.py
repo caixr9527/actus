@@ -19,8 +19,12 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_FETCH_REQUIRED
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_SEARCH_REQUIRED
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_intent_policy import is_explicit_single_page_fetch_intent
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_url_extractor import extract_explicit_url_from_research_context
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_intent_policy import (
+    is_explicit_single_page_fetch_intent,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_url_extractor import (
+    extract_explicit_url_from_research_context,
+)
 
 _SEARCH_QUERY_CJK_KEYWORD_STACK_PATTERN = re.compile(
     r"^[\u4e00-\u9fffA-Za-z0-9]{1,8}(?:\s+[\u4e00-\u9fffA-Za-z0-9]{1,8}){4,}$"

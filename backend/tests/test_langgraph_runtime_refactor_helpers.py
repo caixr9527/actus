@@ -12,32 +12,32 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 from app.domain.models import Step, ToolResult
-from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_context import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import (
     ExecutionContext,
     build_execution_context,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_state import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import (
     ExecutionState,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.finalizer import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.finalizer import (
     finalize_max_iterations,
     finalize_no_tool_call,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import (
     build_loop_break_result,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_diagnosis import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
     build_research_diagnosis,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_query_builder import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_query_builder import (
     build_research_query,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_effects import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import (
     apply_tool_preinvoke_effects,
     apply_rewrite_effects,
     apply_tool_result_effects,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_handlers import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_handlers import (
     execute_tool_with_policy,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
@@ -76,7 +76,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
     REASON_CONSTRAINT_ENGINE_ERROR,
     REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_events import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
     ToolEventDispatcher,
     bind_tool_name,
     build_called_event,
@@ -84,7 +84,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_events impor
     build_tool_call_lifecycle,
     build_tool_feedback_message,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tools import execute_step_with_prompt
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
+    execute_step_with_prompt,
+)
 from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_failure_key,
     build_browser_route_state_key,

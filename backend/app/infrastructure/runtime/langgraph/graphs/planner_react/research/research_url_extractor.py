@@ -9,7 +9,7 @@ from app.domain.services.runtime.normalizers import normalize_url_value
 from app.domain.services.workspace_runtime.policies import (
     build_step_candidate_text as _build_step_candidate_text,
 )
-from .execution_context import ExecutionContext
+from ..execution.execution_context import ExecutionContext
 
 _URL_PATTERN = re.compile(r"https?://[^\s)\]>\"']+", re.IGNORECASE)
 

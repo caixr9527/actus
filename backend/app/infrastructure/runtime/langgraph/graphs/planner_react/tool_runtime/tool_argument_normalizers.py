@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_query_builder import build_research_query
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_query_builder import (
+    build_research_query,
+)
 
 
 def normalize_tool_execution_args(

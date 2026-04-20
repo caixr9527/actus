@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 from app.domain.models import SearchResults, Step
 from app.domain.services.runtime.normalizers import extract_url_domain
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research_intent_policy import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_intent_policy import (
     is_explicit_single_page_fetch_intent,
 )
 
