@@ -12,11 +12,11 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import saf
 
 
 def build_loop_break_result(
-    *,
-    loop_break_reason: str,
-    step: Step,
-    tool_result: Optional[Any] = None,
-    runtime_recent_action: Optional[Dict[str, Any]] = None,
+        *,
+        loop_break_reason: str,
+        step: Step,
+        tool_result: Optional[Any] = None,
+        runtime_recent_action: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if loop_break_reason == "repeat_tool_call_success_fallback":
         payload = _normalize_repeat_success_payload(tool_result)
@@ -99,7 +99,8 @@ def build_loop_break_result(
 
 def _append_research_progress_hint(*, runtime_recent_action: Optional[Dict[str, Any]], next_hint: str) -> str:
     research_progress = dict((runtime_recent_action or {}).get("research_progress") or {})
-    missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
+    missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if
+                       str(item).strip()]
     if bool(research_progress.get("is_low_recall")):
         next_hint = next_hint + " 建议先用单主题自然语言短句检索，必要时逐轮仅增加一个筛选条件。"
     if len(missing_signals) == 0:

@@ -7,16 +7,16 @@ from pydantic import BaseModel, Field
 
 from app.domain.external import LLM
 from app.domain.services.prompts import EXECUTION_PROMPT
-from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
-    format_attachments_for_prompt,
-    normalize_attachments,
-    safe_parse_json,
-)
 from app.domain.services.runtime.normalizers import normalize_execution_response
 from app.domain.services.runtime.skill_graph_registry import (
     SkillDefinition,
     SkillGraphRegistry,
     SkillRuntimePolicy,
+)
+from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
+    format_attachments_for_prompt,
+    normalize_attachments,
+    safe_parse_json,
 )
 
 try:

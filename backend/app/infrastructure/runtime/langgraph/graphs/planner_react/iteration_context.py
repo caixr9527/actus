@@ -5,6 +5,8 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
+from app.domain.services.runtime.contracts.langgraph_settings import ASK_USER_FUNCTION_NAME, \
+    BROWSER_ATOMIC_FUNCTION_NAMES
 from app.domain.services.workspace_runtime.policies import (
     build_browser_atomic_allowlist as _build_browser_atomic_allowlist,
     build_browser_route_state_key as _build_browser_route_state_key,
@@ -13,7 +15,6 @@ from app.domain.services.workspace_runtime.policies import (
 from .execution_context import ExecutionContext
 from .execution_state import ExecutionState
 from .tool_schema import extract_function_name
-from app.domain.services.runtime.contracts.langgraph_settings import ASK_USER_FUNCTION_NAME, BROWSER_ATOMIC_FUNCTION_NAMES
 
 
 @dataclass(slots=True)
@@ -25,10 +26,10 @@ class IterationContext:
 
 
 def build_iteration_context(
-    *,
-    task_mode: str,
-    execution_context: ExecutionContext,
-    execution_state: ExecutionState,
+        *,
+        task_mode: str,
+        execution_context: ExecutionContext,
+        execution_state: ExecutionState,
 ) -> IterationContext:
     # P3 重构：将“单轮状态派生 + 白名单裁剪”集中在一个构建点，主流程只做调度。
     browser_route_state_key = _build_browser_route_state_key(
@@ -56,8 +57,8 @@ def build_iteration_context(
         )
         for function_name in BROWSER_ATOMIC_FUNCTION_NAMES:
             if (
-                function_name in execution_context.available_function_names
-                and function_name not in allowed_atomic_browser_functions
+                    function_name in execution_context.available_function_names
+                    and function_name not in allowed_atomic_browser_functions
             ):
                 iteration_blocked_function_names.add(function_name)
             elif function_name in allowed_atomic_browser_functions:
@@ -77,10 +78,10 @@ def build_iteration_context(
 
 
 def _filter_available_tools(
-    available_tools: List[Dict[str, Any]],
-    *,
-    disallowed_function_names: Optional[Set[str]] = None,
-    allow_ask_user: bool,
+        available_tools: List[Dict[str, Any]],
+        *,
+        disallowed_function_names: Optional[Set[str]] = None,
+        allow_ask_user: bool,
 ) -> List[Dict[str, Any]]:
     filtered_tools: List[Dict[str, Any]] = []
     blocked_names = set(disallowed_function_names or set())

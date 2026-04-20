@@ -46,8 +46,8 @@ def is_explicit_single_page_fetch_intent(step: Step, *, explicit_url: str = "") 
 
     # 兜底：网页读取信号存在且非搜索/综合语义，可视为单页读取。
     return (
-        bool(signals.get("has_web_reading_signal"))
-        and (not bool(signals.get("has_search_signal")))
-        and (not bool(signals.get("has_synthesis_signal")))
-        and (not bool(signals.get("has_comparison_signal")))
+            bool(signals.get("has_web_reading_signal"))
+            and (not bool(signals.get("has_search_signal")))
+            and (not bool(signals.get("has_synthesis_signal")))
+            and (not bool(signals.get("has_comparison_signal")))
     )

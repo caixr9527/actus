@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.domain.models import ToolEvent, ToolEventStatus, ToolResult
-from app.domain.services.tools import BaseTool
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.services.tools import BaseTool
 
 
 @dataclass(slots=True)
@@ -24,9 +24,9 @@ class ToolCallLifecycle:
 
 
 def build_tool_call_lifecycle(
-    *,
-    selected_tool_call: Dict[str, Any],
-    parse_tool_call_args: Callable[[Any], Dict[str, Any]],
+        *,
+        selected_tool_call: Dict[str, Any],
+        parse_tool_call_args: Callable[[Any], Dict[str, Any]],
 ) -> Optional[ToolCallLifecycle]:
     function = selected_tool_call.get("function")
     if not isinstance(function, dict):
@@ -72,10 +72,10 @@ def build_called_event(lifecycle: ToolCallLifecycle, tool_result: ToolResult) ->
 
 
 def build_tool_feedback_message(
-    *,
-    lifecycle: ToolCallLifecycle,
-    tool_result: ToolResult,
-    feedback_content_builder: Callable[[str, ToolResult], str],
+        *,
+        lifecycle: ToolCallLifecycle,
+        tool_result: ToolResult,
+        feedback_content_builder: Callable[[str, ToolResult], str],
 ) -> Dict[str, Any]:
     return {
         "role": "tool",
@@ -88,10 +88,10 @@ def build_tool_feedback_message(
 
 class ToolEventDispatcher:
     def __init__(
-        self,
-        *,
-        logger: logging.Logger,
-        on_tool_event: Optional[Callable[[ToolEvent], Optional[Awaitable[None]]]],
+            self,
+            *,
+            logger: logging.Logger,
+            on_tool_event: Optional[Callable[[ToolEvent], Optional[Awaitable[None]]]],
     ) -> None:
         self._logger = logger
         self._on_tool_event = on_tool_event

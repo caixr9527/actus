@@ -4,7 +4,7 @@
 
 import re
 import uuid
-from typing import Any, Dict, List
+from typing import Any, List
 
 from app.domain.models import (
     Step,
@@ -18,10 +18,11 @@ from app.domain.models import (
     ExecutionStatus,
     build_step_objective_key,
 )
-from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_success_criteria
 from app.domain.services.runtime.contracts.langgraph_settings import (
     EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
 )
+from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_success_criteria
+
 _EXPLICIT_INTERMEDIATE_PREVIEW_PATTERN = re.compile(
     r"((草稿|预览|候选|初稿|先看|给我看看|过目).{0,8}(确认|反馈|意见)?)"
     r"|((先|先给).{0,8}(我|用户)?.{0,6}(看|确认|预览))"

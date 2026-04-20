@@ -6,17 +6,17 @@ from typing import Dict, Optional
 
 from app.domain.models import Step, ToolResult
 from app.domain.services.workspace_runtime.policies import build_loop_break_payload as _build_loop_break_payload
-from ...execution_state import ExecutionState
-from ...loop_breaks import build_loop_break_result
-from ...tool_effects import reached_tool_failure_limit
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution_state import ExecutionState
+from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import build_loop_break_result
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_effects import reached_tool_failure_limit
 
 
 def run_convergence_plugin(
-    *,
-    loop_break_reason: str,
-    step: Step,
-    tool_result: ToolResult,
-    execution_state: ExecutionState,
+        *,
+        loop_break_reason: str,
+        step: Step,
+        tool_result: ToolResult,
+        execution_state: ExecutionState,
 ) -> Optional[Dict[str, object]]:
     """判断是否应当结束当前步骤循环。"""
     loop_break_payload = build_loop_break_result(
@@ -35,4 +35,3 @@ def run_convergence_plugin(
             runtime_recent_action=execution_state.runtime_recent_action,
         )
     return None
-

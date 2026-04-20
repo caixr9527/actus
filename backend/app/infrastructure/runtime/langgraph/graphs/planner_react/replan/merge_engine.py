@@ -16,11 +16,11 @@ class ReplanMergeEngine:
     """封装 replan 步骤过滤、语义去重与计划合并。"""
 
     def __init__(
-        self,
-        *,
-        replan_meta_validation_step_pattern: re.Pattern[str],
-        replan_meta_validation_allow_pattern: re.Pattern[str],
-        replan_meta_validation_deny_pattern: re.Pattern[str],
+            self,
+            *,
+            replan_meta_validation_step_pattern: re.Pattern[str],
+            replan_meta_validation_allow_pattern: re.Pattern[str],
+            replan_meta_validation_deny_pattern: re.Pattern[str],
     ) -> None:
         self._replan_meta_validation_step_pattern = replan_meta_validation_step_pattern
         self._replan_meta_validation_allow_pattern = replan_meta_validation_allow_pattern

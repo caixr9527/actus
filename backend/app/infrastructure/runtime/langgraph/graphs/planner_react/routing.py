@@ -6,9 +6,9 @@ import logging
 from typing import Literal
 
 from app.domain.models import ExecutionStatus, StepDeliveryRole, StepOutputMode
-from app.domain.services.runtime.normalizers import normalize_controlled_value
-from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState, get_graph_control
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState, get_graph_control
+from app.domain.services.runtime.normalizers import normalize_controlled_value
 
 logger = logging.getLogger(__name__)
 
@@ -109,13 +109,14 @@ def _is_completed_inline_final_step(state: PlannerReActLangGraphState) -> bool:
         StepDeliveryRole,
     )
     return (
-        last_step_status == ExecutionStatus.COMPLETED.value
-        and output_mode == StepOutputMode.INLINE.value
-        and delivery_role == StepDeliveryRole.FINAL.value
+            last_step_status == ExecutionStatus.COMPLETED.value
+            and output_mode == StepOutputMode.INLINE.value
+            and delivery_role == StepDeliveryRole.FINAL.value
     )
 
 
-def route_after_plan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:
+def route_after_plan(state: PlannerReActLangGraphState) -> Literal[
+    "guard_step_reuse", "summarize", "consolidate_memory"]:
     """规划阶段后的分支路由。"""
     plan = state.get("plan")
     control = get_graph_control(state.get("graph_metadata"))
@@ -168,7 +169,8 @@ def route_after_execute(
     if last_step_status == ExecutionStatus.FAILED.value:
         plan = state.get("plan")
         has_next_step = bool(plan is not None and plan.get_next_step() is not None)
-        if has_next_step and not bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
+        if has_next_step and not bool(
+                get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
             log_runtime(
                 logger,
                 logging.INFO,
@@ -197,6 +199,7 @@ def route_after_wait(
     return _route_after_completed_step(state)
 
 
-def route_after_replan(state: PlannerReActLangGraphState) -> Literal["guard_step_reuse", "summarize", "consolidate_memory"]:
+def route_after_replan(state: PlannerReActLangGraphState) -> Literal[
+    "guard_step_reuse", "summarize", "consolidate_memory"]:
     """重规划阶段后的分支路由，与规划后逻辑保持一致。"""
     return route_after_plan(state)

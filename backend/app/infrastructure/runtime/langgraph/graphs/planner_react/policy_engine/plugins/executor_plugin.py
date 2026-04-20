@@ -7,24 +7,20 @@ from typing import Dict
 
 from app.domain.models import Step
 from app.domain.services.tools import BaseTool
-from ...execution_context import ExecutionContext
-from ...execution_state import ExecutionState
-from ...tool_handlers import ToolExecutionDecision, execute_tool_with_policy
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_handlers import ToolExecutionDecision
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_handlers import execute_tool_with_policy
 
 
 async def run_executor_plugin(
-    *,
-    logger: logging.Logger,
-    step: Step,
-    function_name: str,
-    normalized_function_name: str,
-    function_args: Dict[str, object],
-    matched_tool: BaseTool,
-    tool_name: str,
-    browser_route_state_key: str,
-    execution_context: ExecutionContext,
-    execution_state: ExecutionState,
-    started_at: float,
+        *,
+        logger: logging.Logger,
+        step: Step,
+        function_name: str,
+        normalized_function_name: str,
+        function_args: Dict[str, object],
+        matched_tool: BaseTool,
+        tool_name: str,
+        started_at: float,
 ) -> ToolExecutionDecision:
     """执行工具并返回执行决策。"""
     return await execute_tool_with_policy(
@@ -35,8 +31,5 @@ async def run_executor_plugin(
         function_args=function_args,
         matched_tool=matched_tool,
         tool_name=tool_name,
-        browser_route_state_key=browser_route_state_key,
-        ctx=execution_context,
-        state=execution_state,
         started_at=started_at,
     )

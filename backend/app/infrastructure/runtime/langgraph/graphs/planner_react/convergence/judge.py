@@ -22,16 +22,16 @@ class ConvergenceJudge:
     """基于关键事实的早停判定，避免已达成目标仍空转。"""
 
     def evaluate_file_processing_progress(
-        self,
-        *,
-        step: Step,
-        task_mode: str,
-        recent_function_name: str,
-        function_args: Dict[str, Any],
-        tool_result_data: Any,
-        tool_result_success: bool,
-        step_file_context: Dict[str, Any],
-        runtime_recent_action: Optional[Dict[str, Any]],
+            self,
+            *,
+            step: Step,
+            task_mode: str,
+            recent_function_name: str,
+            function_args: Dict[str, Any],
+            tool_result_data: Any,
+            tool_result_success: bool,
+            step_file_context: Dict[str, Any],
+            runtime_recent_action: Optional[Dict[str, Any]],
     ) -> ConvergenceEvaluationResult:
         """在文件处理任务中判定“已满足事实，直接收敛成功”。"""
         if task_mode != "file_processing":
@@ -71,11 +71,11 @@ class ConvergenceJudge:
 
     @staticmethod
     def build_max_iteration_convergence_payload(
-        *,
-        step: Step,
-        task_mode: str,
-        runtime_recent_action: Optional[Dict[str, Any]],
-        step_file_context: Dict[str, Any],
+            *,
+            step: Step,
+            task_mode: str,
+            runtime_recent_action: Optional[Dict[str, Any]],
+            step_file_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """在达到最大轮次时，优先尝试按事实收敛，避免误判失败。"""
         if task_mode != "file_processing":
@@ -102,11 +102,11 @@ class ConvergenceJudge:
 
     @staticmethod
     def _accumulate_file_context(
-        *,
-        context: Dict[str, Any],
-        function_name: str,
-        function_args: Dict[str, Any],
-        tool_result_data: Any,
+            *,
+            context: Dict[str, Any],
+            function_name: str,
+            function_args: Dict[str, Any],
+            tool_result_data: Any,
     ) -> None:
         called_functions = set(context.get("called_functions") or set())
         normalized_function_name = str(function_name or "").strip().lower()
@@ -184,9 +184,9 @@ class ConvergenceJudge:
         delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
         artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
         return (
-            output_mode == StepOutputMode.INLINE.value
-            and delivery_role == StepDeliveryRole.FINAL.value
-            and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+                output_mode == StepOutputMode.INLINE.value
+                and delivery_role == StepDeliveryRole.FINAL.value
+                and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
         )
 
     @staticmethod

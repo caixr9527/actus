@@ -13,14 +13,6 @@ from app.domain.models import (
     StepOutputMode,
     StepTaskModeHint,
 )
-from app.domain.services.runtime.normalizers import normalize_controlled_value
-from app.domain.services.workspace_runtime.policies import (
-    analyze_text_intent as _analyze_text_intent,
-    build_browser_capability_gap_allowlist as _build_browser_capability_gap_allowlist,
-    build_step_candidate_text as _build_step_candidate_text,
-    build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
-    classify_file_access_intent as _classify_file_access_intent,
-)
 from app.domain.services.runtime.contracts.langgraph_settings import (
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
@@ -28,6 +20,14 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     READ_ONLY_FILE_FUNCTION_NAMES,
     SEARCH_FUNCTION_NAMES,
     TASK_MODE_MAX_TOOL_ITERATIONS,
+)
+from app.domain.services.runtime.normalizers import normalize_controlled_value
+from app.domain.services.workspace_runtime.policies import (
+    analyze_text_intent as _analyze_text_intent,
+    build_browser_capability_gap_allowlist as _build_browser_capability_gap_allowlist,
+    build_step_candidate_text as _build_step_candidate_text,
+    build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
+    classify_file_access_intent as _classify_file_access_intent,
 )
 
 
@@ -70,17 +70,17 @@ def step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
 
 
 def build_execution_context(
-    *,
-    step: Step,
-    task_mode: str,
-    max_tool_iterations: int,
-    user_content: Optional[List[Dict[str, Any]]],
-    has_available_file_context: bool,
-    available_tools: List[Dict[str, Any]],
-    available_function_names: Set[str],
-    user_message_text: str = "",
-    read_only_intent_text: str = "",
-    file_output_intent_text: str = "",
+        *,
+        step: Step,
+        task_mode: str,
+        max_tool_iterations: int,
+        user_content: Optional[List[Dict[str, Any]]],
+        has_available_file_context: bool,
+        available_tools: List[Dict[str, Any]],
+        available_function_names: Set[str],
+        user_message_text: str = "",
+        read_only_intent_text: str = "",
+        file_output_intent_text: str = "",
 ) -> ExecutionContext:
     normalized_user_content = list(user_content or [])
     if len(normalized_user_content) == 0:
@@ -88,8 +88,8 @@ def build_execution_context(
         normalized_user_content = [{"type": "text", "text": prompt_text}]
 
     browser_route_enabled = (
-        task_mode in {"web_reading", "browser_interaction"}
-        and any(function_name in available_function_names for function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES)
+            task_mode in {"web_reading", "browser_interaction"}
+            and any(function_name in available_function_names for function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES)
     )
     blocked_function_names = _build_task_mode_disallowed_names(
         list(available_function_names),
@@ -206,8 +206,8 @@ def build_execution_context(
     )
     allow_ask_user = task_mode == "human_wait" or step_allows_user_wait(step, {})
     research_route_enabled = (
-        task_mode in {"research", "web_reading"}
-        and {"search_web", "fetch_page"}.issubset(available_function_names)
+            task_mode in {"research", "web_reading"}
+            and {"search_web", "fetch_page"}.issubset(available_function_names)
     )
     research_has_explicit_url = research_route_enabled and _step_or_user_content_has_url(
         step,
@@ -240,7 +240,8 @@ def build_execution_context(
 
 def _step_forbids_file_output(step: Step) -> bool:
     """结构化产物策略优先决定是否禁止当前步骤产出文件。"""
-    return normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy) == "forbid_file_output"
+    return normalize_controlled_value(getattr(step, "artifact_policy", None),
+                                      StepArtifactPolicy) == "forbid_file_output"
 
 
 def _step_explicitly_requests_file_output(*, step: Step, file_output_intent_text: str) -> bool:
@@ -282,9 +283,9 @@ def _step_final_delivery_context_ready(step: Step, *, task_mode: str) -> bool:
 
 def _step_is_final_inline_delivery_ready(step: Step, *, task_mode: str) -> bool:
     return (
-        _step_outputs_inline_result(step)
-        and _step_owns_final_delivery(step)
-        and _step_final_delivery_context_ready(step, task_mode=task_mode)
+            _step_outputs_inline_result(step)
+            and _step_owns_final_delivery(step)
+            and _step_final_delivery_context_ready(step, task_mode=task_mode)
     )
 
 

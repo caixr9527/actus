@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from app.domain.models import Step
+from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime
 from app.domain.services.runtime.normalizers import normalize_execution_response
 from app.domain.services.workspace_runtime.policies import (
     build_human_wait_missing_interrupt_payload as _build_human_wait_missing_interrupt_payload,
@@ -17,7 +18,6 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
-from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime
 from .convergence.judge import ConvergenceJudge
 
 
@@ -29,15 +29,15 @@ class NoToolCallFinalizationResult:
 
 
 def finalize_no_tool_call(
-    *,
-    logger: logging.Logger,
-    step: Step,
-    task_mode: str,
-    llm_message: Dict[str, Any],
-    llm_cost_ms: int,
-    started_at: float,
-    iteration: int,
-    runtime_recent_action: Optional[Dict[str, Any]] = None,
+        *,
+        logger: logging.Logger,
+        step: Step,
+        task_mode: str,
+        llm_message: Dict[str, Any],
+        llm_cost_ms: int,
+        started_at: float,
+        iteration: int,
+        runtime_recent_action: Optional[Dict[str, Any]] = None,
 ) -> NoToolCallFinalizationResult:
     parsed = safe_parse_json(llm_message.get("content"))
     parsed_execution = normalize_execution_response(parsed)
@@ -108,16 +108,16 @@ def finalize_no_tool_call(
 
 
 def finalize_max_iterations(
-    *,
-    logger: logging.Logger,
-    step: Step,
-    task_mode: str,
-    llm_message: Dict[str, Any],
-    started_at: float,
-    requested_max_tool_iterations: int,
-    iteration_count: int,
-    runtime_recent_action: Optional[Dict[str, Any]] = None,
-    step_file_context: Optional[Dict[str, Any]] = None,
+        *,
+        logger: logging.Logger,
+        step: Step,
+        task_mode: str,
+        llm_message: Dict[str, Any],
+        started_at: float,
+        requested_max_tool_iterations: int,
+        iteration_count: int,
+        runtime_recent_action: Optional[Dict[str, Any]] = None,
+        step_file_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     parsed = safe_parse_json(llm_message.get("content"))
     if task_mode == "human_wait":
@@ -179,24 +179,25 @@ def finalize_max_iterations(
 
 
 def _build_max_iteration_next_hint(
-    *,
-    task_mode: str,
-    runtime_recent_action: Optional[Dict[str, Any]],
+        *,
+        task_mode: str,
+        runtime_recent_action: Optional[Dict[str, Any]],
 ) -> str:
     default_hint = "请缩小步骤范围、改用更合适工具，或让模型直接给出当前可确认的结果。"
     if task_mode not in {"research", "web_reading"}:
         return default_hint
     recent_action = dict(runtime_recent_action or {})
     research_progress = dict(recent_action.get("research_progress") or {})
-    missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if str(item).strip()]
+    missing_signals = [str(item).strip() for item in list(research_progress.get("missing_signals") or []) if
+                       str(item).strip()]
     if len(missing_signals) == 0:
         return default_hint
     extra_hint = ""
     if bool(research_progress.get("is_low_recall")):
         extra_hint = " 请先用单主题自然语言短句检索，必要时逐轮仅增加一个筛选条件。"
     return (
-        "请先补齐研究缺口后再继续："
-        + "；".join(missing_signals[:2])
-        + "。若当前证据已足够，请直接基于已抓取内容输出结果。"
-        + extra_hint
+            "请先补齐研究缺口后再继续："
+            + "；".join(missing_signals[:2])
+            + "。若当前证据已足够，请直接基于已抓取内容输出结果。"
+            + extra_hint
     )
