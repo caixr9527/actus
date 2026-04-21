@@ -103,6 +103,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                         },
                     ],
                     "conversation_summary": "历史对话摘要",
+                    "final_message": "上一轮最终摘要",
                     "working_memory": {
                         "goal": "验证状态契约",
                         "constraints": ["保持兼容"],
@@ -207,6 +208,8 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["message_window"][1]["attachment_paths"] == ["/tmp/final.md"]
     assert state["message_window"][-1]["message"] == "你好"
     assert state["conversation_summary"] == "历史对话摘要"
+    assert state["previous_final_message"] == "上一轮最终摘要"
+    assert state["final_message"] == ""
     assert state["working_memory"]["goal"] == "验证状态契约"
     assert state["task_mode"] == StepTaskModeHint.RESEARCH.value
     assert state["environment_digest"]["task_mode"] == StepTaskModeHint.RESEARCH.value
@@ -250,6 +253,41 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
     assert runtime_metadata["graph_state_contract"]["graph_state"]["workspace_id"] == "workspace-1"
+
+
+def test_graph_state_contract_should_keep_previous_final_message_for_followup_anchor() -> None:
+    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-1")
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        status=WorkflowRunStatus.COMPLETED,
+        runtime_metadata={
+            "graph_state_contract": {
+                "schema_version": GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
+                "graph_state": {
+                    "message_window": [],
+                    "conversation_summary": "",
+                    "final_message": "上一轮给出的是重庆旅游攻略简版",
+                    "metadata": {},
+                },
+            }
+        },
+    )
+
+    state = GraphStateContractMapper.build_initial_state(
+        session=session,
+        run=run,
+        completed_run_summaries=[],
+        recent_attempt_summaries=[],
+        session_context_snapshot=None,
+        user_message="不够详细，需要详细点4天3夜的攻略",
+        workspace_id="workspace-1",
+        thread_id="thread-1",
+    )
+
+    assert state["previous_final_message"] == "上一轮给出的是重庆旅游攻略简版"
+    assert state["final_message"] == ""
+    assert state["message_window"][-1]["message"] == "不够详细，需要详细点4天3夜的攻略"
 
 
 def test_graph_state_contract_should_reopen_cancelled_plan_for_explicit_command() -> None:

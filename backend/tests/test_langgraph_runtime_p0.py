@@ -75,6 +75,22 @@ class _DirectAnswerLLM:
         }
 
 
+class _CaptureDirectAnswerPromptLLM:
+    def __init__(self) -> None:
+        self.messages = None
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.messages = messages
+        return {
+            "content": json.dumps(
+                {
+                    "message": "已结合历史上下文作答。",
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _InlineDeliveryLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         return {
@@ -763,6 +779,24 @@ def test_entry_router_node_should_route_direct_answer_for_greeting() -> None:
     assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
 
 
+def test_entry_router_node_should_keep_followup_on_original_direct_answer_route() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "不够详细，需要详细点4天3夜的攻略",
+                "graph_metadata": {},
+                "conversation_summary": "上一轮已讨论重庆旅游攻略",
+                "message_window": [
+                    {"role": "user", "message": "给我一份重庆的旅游攻略"},
+                    {"role": "assistant", "message": "这里是一份重庆旅游攻略"},
+                ],
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
+
+
 def test_entry_router_node_should_route_direct_wait_for_preconfirm_request() -> None:
     state = asyncio.run(
         entry_router_node(
@@ -985,6 +1019,7 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
                 "graph_metadata": {},
             },
             _DirectAnswerLLM(),
+            runtime_context_service=_TEST_RUNTIME_CONTEXT_SERVICE,
         )
     )
 
@@ -993,6 +1028,99 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
     assert state["plan"].language == "zh"
     assert state["final_message"] == "你好，我在。"
     assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
+
+
+def test_direct_answer_node_should_append_history_context_to_prompt() -> None:
+    llm = _CaptureDirectAnswerPromptLLM()
+
+    state = asyncio.run(
+        direct_answer_node(
+            {
+                "user_message": "不够详细，需要详细点4天3夜的攻略",
+                "graph_metadata": {},
+                "conversation_summary": "上一轮已讨论重庆旅游攻略",
+                "final_message": "重庆旅游攻略简版",
+                "message_window": [
+                    {"role": "user", "message": "给我一份重庆的旅游攻略"},
+                    {"role": "assistant", "message": "这里是一份重庆旅游攻略"},
+                ],
+                "recent_run_briefs": [
+                    {
+                        "run_id": "run-1",
+                        "title": "重庆旅游攻略",
+                        "goal": "给出重庆旅游攻略",
+                        "status": "completed",
+                    }
+                ],
+            },
+            llm,
+            runtime_context_service=_TEST_RUNTIME_CONTEXT_SERVICE,
+        )
+    )
+
+    assert state["final_message"] == "已结合历史上下文作答。"
+    assert llm.messages is not None
+    user_prompt = llm.messages[1]["content"]
+    assert "已知上下文" in user_prompt
+    assert "重庆旅游攻略" in user_prompt
+    assert "recent_messages" in user_prompt
+    assert "topic_anchor" in user_prompt
+    assert "conversation_summary" in user_prompt
+    assert "回答详略必须与用户当前意图匹配" in user_prompt
+    assert "必须给出足够完整、结构化、可直接使用的回答" in user_prompt
+
+
+def test_runtime_context_service_should_build_direct_answer_topic_anchor_from_recent_run_brief() -> None:
+    context_packet = _TEST_RUNTIME_CONTEXT_SERVICE.build_packet(
+        stage="direct_answer",
+        state={
+            "user_message": "不够详细，需要详细点4天3夜的攻略",
+            "message_window": [
+                {"role": "user", "message": "不够详细，需要详细点4天3夜的攻略"},
+            ],
+            "conversation_summary": "",
+            "final_message": "",
+            "recent_run_briefs": [
+                {
+                    "run_id": "run-1",
+                    "title": "重庆旅游攻略",
+                    "goal": "给出重庆旅游攻略",
+                    "status": "completed",
+                    "final_answer_summary": "重庆攻略涵盖解放碑、洪崖洞、长江索道和火锅安排。",
+                    "final_answer_text_excerpt": "重庆旅游可以安排 3 到 4 天，核心体验山城交通和夜景。",
+                }
+            ],
+        },
+        task_mode="general",
+    )
+
+    stable_background = dict(context_packet.get("stable_background") or {})
+    topic_anchor = dict(stable_background.get("topic_anchor") or {})
+    assert topic_anchor["source"] == "recent_run_brief"
+    assert "重庆旅游攻略" in topic_anchor["text"]
+    assert "洪崖洞" in topic_anchor["text"]
+
+
+def test_runtime_context_service_should_fallback_to_previous_final_message_for_topic_anchor() -> None:
+    context_packet = _TEST_RUNTIME_CONTEXT_SERVICE.build_packet(
+        stage="direct_answer",
+        state={
+            "user_message": "不够详细，需要详细点4天3夜的攻略",
+            "message_window": [
+                {"role": "user", "message": "不够详细，需要详细点4天3夜的攻略"},
+            ],
+            "conversation_summary": "",
+            "previous_final_message": "上一轮给出的是重庆旅游攻略简版，包含解放碑、洪崖洞和长江索道。",
+            "final_message": "",
+            "recent_run_briefs": [],
+        },
+        task_mode="general",
+    )
+
+    stable_background = dict(context_packet.get("stable_background") or {})
+    topic_anchor = dict(stable_background.get("topic_anchor") or {})
+    assert topic_anchor["source"] == "previous_final_message"
+    assert "重庆旅游攻略简版" in topic_anchor["text"]
 
 
 def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:

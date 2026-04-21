@@ -764,10 +764,120 @@ class RuntimeContextService:
                 ),
                 "selected_artifacts": normalize_file_path_list(state.get("selected_artifacts"))[:_ARTIFACT_LIMIT],
             }
+        if policy.stable_background.include_topic_anchor:
+            topic_anchor = self._build_topic_anchor(state=state)
+            if topic_anchor:
+                background["topic_anchor"] = topic_anchor
         return {
             key: value
             for key, value in background.items()
             if self._has_visible_value(value)
+        }
+
+    def _build_topic_anchor(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:
+        """为 direct_answer 生成显式主题锚点，避免追问时主题漂移。"""
+        conversation_summary = self._truncate_text(
+            state.get("conversation_summary"),
+            max_chars=_SUMMARY_MAX_CHARS,
+        )
+        if conversation_summary:
+            return {
+                "source": "conversation_summary",
+                "text": conversation_summary,
+            }
+
+        run_brief_anchor = self._build_topic_anchor_from_recent_run_brief(state=state)
+        if run_brief_anchor:
+            return run_brief_anchor
+
+        message_window_anchor = self._build_topic_anchor_from_recent_messages(state=state)
+        if message_window_anchor:
+            return message_window_anchor
+
+        previous_final_message = self._truncate_text(
+            state.get("previous_final_message"),
+            max_chars=_FINAL_MESSAGE_MAX_CHARS,
+        )
+        if previous_final_message:
+            return {
+                "source": "previous_final_message",
+                "text": previous_final_message,
+            }
+
+        final_message = self._truncate_text(
+            state.get("final_message"),
+            max_chars=_FINAL_MESSAGE_MAX_CHARS,
+        )
+        if final_message:
+            return {
+                "source": "final_message",
+                "text": final_message,
+            }
+        return {}
+
+    def _build_topic_anchor_from_recent_run_brief(
+            self,
+            *,
+            state: PlannerReActLangGraphState,
+    ) -> Dict[str, Any]:
+        for item in list(state.get("recent_run_briefs") or []):
+            if not isinstance(item, dict):
+                continue
+            title = self._truncate_text(item.get("title"), max_chars=80)
+            goal = self._truncate_text(item.get("goal"), max_chars=120)
+            summary = self._truncate_text(
+                item.get("final_answer_summary") or item.get("final_answer_text_excerpt"),
+                max_chars=200,
+            )
+            parts = [value for value in (title, goal, summary) if value]
+            if not parts:
+                continue
+            return {
+                "source": "recent_run_brief",
+                "text": " | ".join(parts[:3]),
+            }
+        return {}
+
+    def _build_topic_anchor_from_recent_messages(
+            self,
+            *,
+            state: PlannerReActLangGraphState,
+    ) -> Dict[str, Any]:
+        normalized_messages = self._build_recent_messages(state=state)
+        if not normalized_messages:
+            return {}
+
+        last_assistant_index = -1
+        for index in range(len(normalized_messages) - 1, -1, -1):
+            if str(normalized_messages[index].get("role") or "").strip() == "assistant":
+                last_assistant_index = index
+                break
+        if last_assistant_index < 0:
+            return {}
+
+        assistant_message = self._truncate_text(
+            normalized_messages[last_assistant_index].get("message"),
+            max_chars=160,
+        )
+        user_message = ""
+        for index in range(last_assistant_index - 1, -1, -1):
+            if str(normalized_messages[index].get("role") or "").strip() == "user":
+                user_message = self._truncate_text(
+                    normalized_messages[index].get("message"),
+                    max_chars=120,
+                )
+                break
+
+        parts = []
+        if user_message:
+            parts.append(f"用户主题: {user_message}")
+        if assistant_message:
+            parts.append(f"最近回复: {assistant_message}")
+        if not parts:
+            return {}
+        return {
+            "source": "message_window",
+            "text": " | ".join(parts),
         }
 
     def _read_state_digest(

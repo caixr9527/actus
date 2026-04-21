@@ -27,6 +27,7 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     now_perf,
 )
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     classify_confirmed_user_task_mode,
     infer_entry_strategy,
@@ -35,6 +36,7 @@ from app.domain.services.workspace_runtime.policies import (
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import safe_parse_json
 from ..language_checker import build_direct_path_copy, infer_working_language_from_message
 from ..live_events import emit_live_events
+from .prompt_context_helpers import _append_prompt_context_to_prompt
 from .control_state import (
     clear_plan_only_control_state as _clear_plan_only_control_state,
     get_control_metadata as _get_control_metadata,
@@ -44,6 +46,25 @@ from .state_reducer import _reduce_state_with_events
 from .wait_helpers import _resolve_direct_delivery_context_state
 
 logger = logging.getLogger(__name__)
+
+
+def _count_recent_messages(state: PlannerReActLangGraphState) -> int:
+    return len(list(state.get("message_window") or []))
+
+
+def _count_prior_turn_messages(state: PlannerReActLangGraphState) -> int:
+    """只统计当前轮之前的消息，避免把当前用户输入误记成“已有历史”。"""
+    normalized_messages = list(state.get("message_window") or [])
+    current_user_message = str(state.get("user_message") or "").strip()
+    if not normalized_messages:
+        return 0
+    if current_user_message and str(normalized_messages[-1].get("message") or "").strip() == current_user_message:
+        return max(len(normalized_messages) - 1, 0)
+    return len(normalized_messages)
+
+
+def _has_prior_turn_context(state: PlannerReActLangGraphState) -> bool:
+    return _count_prior_turn_messages(state) > 0
 
 
 def _build_direct_plan_title(user_message: str, fallback: str) -> str:
@@ -57,6 +78,10 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
     control = _get_control_metadata(state)
     user_message = str(state.get("user_message") or "")
     plan = state.get("plan")
+    recent_message_count = _count_recent_messages(state)
+    prior_turn_message_count = _count_prior_turn_messages(state)
+    has_prior_turn_context = _has_prior_turn_context(state)
+    has_recent_run_brief = len(list(state.get("recent_run_briefs") or [])) > 0
     control["entry_strategy"] = infer_entry_strategy(
         user_message=user_message,
         has_input_parts=bool(list(state.get("input_parts") or [])),
@@ -75,6 +100,11 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
         state=state,
         entry_strategy=str(control.get("entry_strategy") or ""),
         plan_only=bool(control.get("plan_only")),
+        recent_message_count=recent_message_count,
+        prior_turn_message_count=prior_turn_message_count,
+        has_prior_turn_context=has_prior_turn_context,
+        has_conversation_summary=bool(str(state.get("conversation_summary") or "").strip()),
+        has_recent_run_brief=has_recent_run_brief,
     )
     return {
         **state,
@@ -84,13 +114,23 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
 async def direct_answer_node(
         state: PlannerReActLangGraphState,
         llm: LLM,
+        runtime_context_service: RuntimeContextService,
 ) -> PlannerReActLangGraphState:
     """直接回答类任务跳过 Planner 和工具循环。"""
     started_at = now_perf()
     user_message = str(state.get("user_message") or "").strip()
     language = infer_working_language_from_message(user_message)
     direct_copy = build_direct_path_copy(language)
-    prompt = DIRECT_ANSWER_PROMPT.format(message=user_message)
+    # direct_answer 只需要历史对话锚点，不读取 workspace snapshot，避免直答路径引入环境 I/O。
+    direct_context_packet = runtime_context_service.build_packet(
+        stage="direct_answer",
+        state=state,
+        task_mode="general",
+    )
+    prompt = _append_prompt_context_to_prompt(
+        DIRECT_ANSWER_PROMPT.format(message=user_message),
+        direct_context_packet,
+    )
     llm_runtime = describe_llm_runtime(llm)
     llm_started_at = now_perf()
     llm_message = await llm.invoke(
@@ -119,6 +159,11 @@ async def direct_answer_node(
     control = _get_control_metadata(state)
     control["entry_strategy"] = "direct_answer"
     control["skip_replan_when_plan_finished"] = True
+    stable_background = dict(direct_context_packet.get("stable_background") or {})
+    topic_anchor = dict(stable_background.get("topic_anchor") or {})
+    topic_anchor_source = str(topic_anchor.get("source") or "").strip()
+    topic_anchor_text = str(topic_anchor.get("text") or "").strip()
+    prior_turn_message_count = _count_prior_turn_messages(state)
     log_runtime(
         logger,
         logging.INFO,
@@ -129,6 +174,16 @@ async def direct_answer_node(
         max_tokens=llm_runtime["max_tokens"],
         llm_elapsed_ms=elapsed_ms(llm_started_at),
         elapsed_ms=elapsed_ms(started_at),
+        direct_answer_context_has_conversation_summary=bool(
+            str(stable_background.get("conversation_summary") or "").strip()
+        ),
+        direct_answer_context_has_recent_run_brief=bool(list(stable_background.get("recent_run_briefs") or [])),
+        direct_answer_context_has_prior_turn_context=prior_turn_message_count > 0,
+        direct_answer_context_prior_turn_message_count=prior_turn_message_count,
+        direct_answer_context_recent_message_count=len(list(stable_background.get("recent_messages") or [])),
+        direct_answer_context_recent_run_brief_count=len(list(stable_background.get("recent_run_briefs") or [])),
+        direct_answer_context_topic_anchor_source=topic_anchor_source or "none",
+        direct_answer_context_topic_anchor_preview=topic_anchor_text[:160],
     )
     return _reduce_state_with_events(
         state,

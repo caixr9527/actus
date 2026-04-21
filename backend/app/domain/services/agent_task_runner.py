@@ -453,6 +453,7 @@ class AgentTaskRunner(TaskRunner):
     async def invoke(self, task: Task) -> None:
         active_request_id: Optional[str] = None
         terminal_session_status: Optional[SessionStatus] = None
+        pending_requests_rejected = False
         try:
             # 记录任务开始执行的日志
             logger.info(f"开始执行任务: {task.id}")
@@ -527,28 +528,31 @@ class AgentTaskRunner(TaskRunner):
                             increment_unread=True,
                         )
                     elif isinstance(event, WaitEvent):
-                        # 等待事件：事件历史 + 状态切换为WAITING，并立即结束本轮消费。
+                        # 等待事件：先投影 WAITING，但必须继续消费到 run_engine 自然结束，
+                        # 否则会打断 graph state / summary / snapshot 的收尾写入。
                         await self._put_and_add_event(
                             task=task,
                             event=event,
                             status=SessionStatus.WAITING,
                         )
                         terminal_session_status = SessionStatus.WAITING
-                        await self._emit_request_finished(
-                            task=task,
-                            request_id=active_request_id,
-                            terminal_event_type="wait",
-                        )
-                        await self._reject_pending_requests(
-                            task=task,
-                            message="当前任务进入等待状态，请使用 resume 恢复执行",
-                            error_key=error_keys.SESSION_RESUME_REQUIRED,
-                        )
-                        active_request_id = None
-                        return
+                        if active_request_id is not None:
+                            await self._emit_request_finished(
+                                task=task,
+                                request_id=active_request_id,
+                                terminal_event_type="wait",
+                            )
+                            active_request_id = None
+                        if not pending_requests_rejected:
+                            await self._reject_pending_requests(
+                                task=task,
+                                message="当前任务进入等待状态，请使用 resume 恢复执行",
+                                error_key=error_keys.SESSION_RESUME_REQUIRED,
+                            )
+                            pending_requests_rejected = True
                     elif isinstance(event, DoneEvent):
-                        # Done事件优先走原子提交：
-                        # 当输入队列已空时，和COMPLETED状态一并落库，避免事件/状态分叉。
+                        # Done 事件先完成本轮终态投影，但不能立即 break；
+                        # run_engine 还需要继续完成 finally 中的状态合同与上下文投影收尾。
                         has_more_input = not await task.input_stream.is_empty()
                         done_status = None if has_more_input else SessionStatus.COMPLETED
                         await self._put_and_add_event(
@@ -557,15 +561,16 @@ class AgentTaskRunner(TaskRunner):
                             status=done_status,
                         )
                         terminal_session_status = done_status
-                        await self._emit_request_finished(
-                            task=task,
-                            request_id=active_request_id,
-                            terminal_event_type="done",
-                        )
-                        active_request_id = None
-                        break
+                        if active_request_id is not None:
+                            await self._emit_request_finished(
+                                task=task,
+                                request_id=active_request_id,
+                                terminal_event_type="done",
+                            )
+                            active_request_id = None
                     elif isinstance(event, ErrorEvent):
-                        # 错误事件必须直接收敛为 failed，并把列表摘要同步成失败原因。
+                        # 错误事件必须收敛 failed，但同样不能提前 break，
+                        # 否则 run_engine 的失败收尾与状态回写会被截断。
                         await self._put_and_add_event(
                             task=task,
                             event=event,
@@ -574,17 +579,19 @@ class AgentTaskRunner(TaskRunner):
                             status=SessionStatus.FAILED,
                         )
                         terminal_session_status = SessionStatus.FAILED
-                        await self._emit_request_finished(
-                            task=task,
-                            request_id=active_request_id,
-                            terminal_event_type="error",
-                        )
-                        await self._reject_pending_requests(
-                            task=task,
-                            message="当前任务执行失败，排队请求已终止，请重新发起",
-                        )
-                        active_request_id = None
-                        break
+                        if active_request_id is not None:
+                            await self._emit_request_finished(
+                                task=task,
+                                request_id=active_request_id,
+                                terminal_event_type="error",
+                            )
+                            active_request_id = None
+                        if not pending_requests_rejected:
+                            await self._reject_pending_requests(
+                                task=task,
+                                message="当前任务执行失败，排队请求已终止，请重新发起",
+                            )
+                            pending_requests_rejected = True
                     else:
                         # 其他事件：仅记录事件历史。
                         await self._put_and_add_event(task=task, event=event)

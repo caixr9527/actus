@@ -21,6 +21,8 @@ class StableBackgroundPolicy:
     include_completed_steps: bool = False
     include_plan_snapshot: bool = False
     include_summary_focus: bool = False
+    # direct_answer 需要显式主题锚点，避免模型只看到弱历史时自行漂移主题。
+    include_topic_anchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,20 @@ def _build_execute_policy(
     )
 
 _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
+    (
+        "direct_answer",
+        StepTaskModeHint.GENERAL.value,
+    ): ContextPolicy(
+        include_working_memory_digest=True,
+        include_stable_background=True,
+        stable_background=StableBackgroundPolicy(
+            include_conversation_summary=True,
+            include_recent_messages=True,
+            include_recent_run_briefs=True,
+            include_summary_focus=True,
+            include_topic_anchor=True,
+        ),
+    ),
     (
         "planner",
         StepTaskModeHint.GENERAL.value,

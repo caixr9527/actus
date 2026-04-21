@@ -81,7 +81,11 @@ def build_planner_react_langgraph_graph(
         return await entry_router_node(state)
 
     async def _direct_answer(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await direct_answer_node(state, stage_llm_map["router"])
+        return await direct_answer_node(
+            state,
+            stage_llm_map["router"],
+            runtime_context_service=runtime_context_service,
+        )
 
     async def _direct_wait(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await direct_wait_node(state)

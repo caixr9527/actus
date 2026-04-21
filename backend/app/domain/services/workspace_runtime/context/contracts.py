@@ -4,7 +4,7 @@
 
 from typing import Any, Dict, List, Literal, TypedDict
 
-PromptStage = Literal["planner", "execute", "replan", "summary"]
+PromptStage = Literal["planner", "execute", "replan", "summary", "direct_answer"]
 
 
 class PendingConfirmationPacket(TypedDict, total=False):

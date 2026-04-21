@@ -39,7 +39,6 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     NUMBERED_LIST_PATTERN,
 )
 
-
 def normalize_intent_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 

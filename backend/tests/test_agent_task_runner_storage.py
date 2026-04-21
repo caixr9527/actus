@@ -22,6 +22,7 @@ from app.domain.models import (
     StepEvent,
     ToolEvent,
     ToolEventStatus,
+    WaitEvent,
     Workspace,
     WorkflowRun,
     WorkflowRunStatus,
@@ -775,6 +776,111 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
     assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "boom")]
     assert session_repo.updated_status == SessionStatus.FAILED
     assert session_repo.updated_statuses == [SessionStatus.FAILED]
+
+
+def test_invoke_should_continue_consuming_stream_after_done_event() -> None:
+    runner = _new_runner()
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    continuation_markers: list[str] = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(
+            request_id=f"req-{message_event.message}",
+            payload=message_event,
+        )
+
+    async def _run_flow(_message):
+        yield DoneEvent()
+        continuation_markers.append("done-stream-drained")
+
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
+        if status is not None:
+            session_repo.updated_status = status
+            session_repo.updated_statuses.append(status)
+
+    async def _emit_request_started(*, task, request_id):
+        return None
+
+    async def _emit_request_finished(*, task, request_id, terminal_event_type):
+        return None
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._emit_request_started = _emit_request_started
+    runner._emit_request_finished = _emit_request_finished
+
+    asyncio.run(runner.invoke(task))
+
+    assert continuation_markers == ["done-stream-drained"]
+    assert session_repo.updated_status == SessionStatus.COMPLETED
+
+
+def test_invoke_should_continue_consuming_stream_after_wait_event() -> None:
+    runner = _new_runner()
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    continuation_markers: list[str] = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(
+            request_id=f"req-{message_event.message}",
+            payload=message_event,
+        )
+
+    async def _run_flow(_message):
+        yield WaitEvent()
+        continuation_markers.append("wait-stream-drained")
+
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
+        if status is not None:
+            session_repo.updated_status = status
+            session_repo.updated_statuses.append(status)
+
+    async def _emit_request_started(*, task, request_id):
+        return None
+
+    async def _emit_request_finished(*, task, request_id, terminal_event_type):
+        return None
+
+    async def _reject_pending_requests(*, task, message, error_key=None):
+        return None
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._emit_request_started = _emit_request_started
+    runner._emit_request_finished = _emit_request_finished
+    runner._reject_pending_requests = _reject_pending_requests
+
+    asyncio.run(runner.invoke(task))
+
+    assert continuation_markers == ["wait-stream-drained"]
+    assert session_repo.updated_status == SessionStatus.WAITING
+    assert session_repo.updated_statuses == [SessionStatus.WAITING]
 
 
 def test_invoke_should_project_latest_message_when_exception_falls_back_to_error_event() -> None:

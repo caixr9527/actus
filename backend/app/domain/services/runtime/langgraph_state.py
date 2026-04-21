@@ -223,6 +223,8 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     message_window: List[Dict[str, Any]]
     """当前线程的压缩对话摘要；用于跨多轮保留核心上下文。"""
     conversation_summary: str
+    """上一轮最终结果摘要；仅作为跨轮追问的历史锚点，不代表当前运行结果。"""
+    previous_final_message: str
     """当前运行的工作记忆；用于沉淀 goal、事实、偏好、开放问题等可变上下文。"""
     working_memory: Dict[str, Any]
     """当前阶段采用的真实任务模式；作为上下文工程与执行路由的主索引字段。"""
@@ -284,6 +286,7 @@ class GraphStateContractMapper:
         "input_parts",
         "message_window",
         "conversation_summary",
+        "previous_final_message",
         "working_memory",
         "task_mode",
         "environment_digest",
@@ -867,6 +870,7 @@ class GraphStateContractMapper:
         conversation_summary = cls._normalize_text(graph_state_from_metadata.get("conversation_summary"))
         if not conversation_summary and session_context_snapshot is not None:
             conversation_summary = cls._normalize_text(session_context_snapshot.summary_text)
+        previous_final_message = cls._normalize_text(graph_state_from_metadata.get("final_message"))
 
         graph_metadata = cls._normalize_graph_metadata(graph_state_from_metadata.get("metadata"))
         if plan_resumed_from_cancelled:
@@ -892,6 +896,7 @@ class GraphStateContractMapper:
                 input_parts=cls._normalize_input_parts(input_parts),
             ),
             "conversation_summary": conversation_summary,
+            "previous_final_message": previous_final_message,
             "working_memory": cls._normalize_dict_memory(graph_state_from_metadata.get("working_memory")),
             "task_mode": cls._normalize_task_mode(graph_state_from_metadata.get("task_mode")),
             "environment_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("environment_digest")),
@@ -1070,6 +1075,7 @@ class GraphStateContractMapper:
         normalized_state["input_parts"] = cls._normalize_input_parts(raw.get("input_parts"))
         normalized_state["message_window"] = cls._normalize_message_window(raw.get("message_window"))
         normalized_state["conversation_summary"] = cls._normalize_text(raw.get("conversation_summary"))
+        normalized_state["previous_final_message"] = cls._normalize_text(raw.get("previous_final_message"))
         normalized_state["working_memory"] = cls._normalize_dict_memory(raw.get("working_memory"))
         normalized_state["task_mode"] = cls._normalize_task_mode(raw.get("task_mode"))
         normalized_state["environment_digest"] = cls._normalize_runtime_digest(raw.get("environment_digest"))
