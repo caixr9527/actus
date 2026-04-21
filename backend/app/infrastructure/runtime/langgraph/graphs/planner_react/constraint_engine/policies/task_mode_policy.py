@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from app.domain.models import BrowserPageType
@@ -16,27 +17,56 @@ from app.domain.services.workspace_runtime.policies import (
     coerce_optional_int as _coerce_optional_int,
     is_browser_high_level_temporarily_blocked as _is_browser_high_level_temporarily_blocked,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintDecision
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintInput
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintToolResultPayload
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_BROWSER_CLICK_TARGET_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_BROWSER_ROUTE_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_FILE_PROCESSING_SHELL_EXPLICIT_REQUIRED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_GENERAL_INLINE_FILE_CONTEXT_REQUIRED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_INVALID_TOOL
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_FILE_CONTEXT_REQUIRED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_TASK_MODE_TOOL_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_WEB_READING_FILE_TOOL_BLOCKED
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence import (
+    WebReadingConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
+    get_page_reading_contract_state,
+)
+from ..contracts import ConstraintDecision, ConstraintInput, ConstraintToolResultPayload
+from ..reason_codes import (
+    REASON_BROWSER_CLICK_TARGET_BLOCKED,
+    REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED,
+    REASON_BROWSER_ROUTE_BLOCKED,
+    REASON_FILE_PROCESSING_SHELL_EXPLICIT_REQUIRED,
+    REASON_GENERAL_INLINE_FILE_CONTEXT_REQUIRED,
+    REASON_INVALID_TOOL,
+    REASON_RESEARCH_FILE_CONTEXT_REQUIRED,
+    REASON_TASK_MODE_TOOL_BLOCKED,
+    REASON_WEB_READING_FILE_TOOL_BLOCKED,
+)
+
+_GENERAL_PAGE_EVIDENCE_PRESENTATION_PATTERN = re.compile(
+    r"(整理|总结|归纳|概括|提炼|梳理|列出|筛选|汇总|展示|说明|要点|链接)",
+    re.IGNORECASE,
+)
 
 
 def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[ConstraintDecision]:
+    """处理 task_mode 的前置工具约束。
+
+    这里只处理任务模式、自身页面证据和浏览器路由相关限制；
+    更具体的最终交付/产物/human_wait 原因码交给各自策略处理，避免职责重叠。
+    """
     normalized_function_name = str(constraint_input.normalized_function_name or "").strip().lower()
     function_name = str(constraint_input.function_name or "").strip()
     task_mode = str(constraint_input.task_mode or "").strip().lower()
     blocked_names = set(constraint_input.iteration_blocked_function_names or set())
     ctx = constraint_input.execution_context
     state = constraint_input.execution_state
+    page_contract_state = get_page_reading_contract_state(
+        runtime_recent_action=state.runtime_recent_action,
+        execution_state=state,
+    )
+    web_reading_progress_state = (
+        WebReadingConvergenceJudge.get_completion_progress(
+            step=constraint_input.step,
+            runtime_recent_action=state.runtime_recent_action,
+            execution_state=state,
+        )
+        if task_mode == "web_reading"
+        else {}
+    )
 
     if constraint_input.matched_tool is None:
         return ConstraintDecision(
@@ -104,6 +134,27 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
             )
 
     if normalized_function_name not in blocked_names:
+        if (
+                task_mode == "general"
+                and normalized_function_name in {"search_web", "fetch_page"}
+                and _general_step_should_reuse_page_evidence(
+                    constraint_input=constraint_input,
+                    page_contract_state=page_contract_state,
+                )
+        ):
+            return _hard_block(
+                REASON_TASK_MODE_TOOL_BLOCKED,
+                "当前整理步骤已经具备可用网页证据，请直接基于已有页面/摘要信息完成，不要重新发起搜索或抓取。",
+            )
+        if (
+                task_mode == "web_reading"
+                and normalized_function_name == "fetch_page"
+                and bool(dict(web_reading_progress_state.get("progress") or {}).get("contract_satisfied"))
+        ):
+            return _hard_block(
+                REASON_TASK_MODE_TOOL_BLOCKED,
+                "当前网页阅读步骤已经具备强页面证据，请直接基于已有页面内容完成，不要继续重复抓取。",
+            )
         return None
 
     downstream_owned_blocked_names = set()
@@ -172,3 +223,23 @@ def _soft_block(*, reason_code: str, message: str) -> ConstraintDecision:
         tool_result_payload=ConstraintToolResultPayload(success=False, message=message),
         message_for_model=message,
     )
+
+
+def _general_step_should_reuse_page_evidence(
+        *,
+        constraint_input: ConstraintInput,
+        page_contract_state: dict[str, object],
+) -> bool:
+    if not bool(page_contract_state.get("has_any_evidence")):
+        return False
+    step = constraint_input.step
+    step_text = " ".join(
+        [
+            str(getattr(step, "title", "") or ""),
+            str(getattr(step, "description", "") or ""),
+            " ".join([str(item or "") for item in list(getattr(step, "success_criteria", []) or [])]),
+        ]
+    ).strip()
+    if not step_text:
+        return False
+    return bool(_GENERAL_PAGE_EVIDENCE_PRESENTATION_PATTERN.search(step_text))

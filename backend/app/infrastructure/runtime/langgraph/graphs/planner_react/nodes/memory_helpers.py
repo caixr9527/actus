@@ -17,7 +17,6 @@ from app.domain.models import (
     LongTermMemorySearchMode,
     LongTermMemorySearchQuery,
     Step,
-    StepOutcome,
     ToolEvent,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import (

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.domain.services.runtime.normalizers import normalize_url_value
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import (
@@ -64,7 +64,10 @@ def build_research_diagnosis(*, state: ExecutionState) -> Dict[str, Any]:
 
 def evaluate_fetch_result_quality(*, fetched_result: Any, fallback_url: str = "") -> Dict[str, Any]:
     """判断 fetch_page 的成功结果是否真的有信息增量。"""
-    data = fetched_result if isinstance(fetched_result, dict) else {}
+    data = normalize_fetched_page_result(
+        fetched_result=fetched_result,
+        fallback_url=fallback_url,
+    )
     final_url = normalize_url_value(
         data.get("final_url") or data.get("url") or fallback_url,
     )
@@ -87,6 +90,52 @@ def evaluate_fetch_result_quality(*, fetched_result: Any, fallback_url: str = ""
     }
 
 
+def normalize_fetched_page_result(*, fetched_result: Any, fallback_url: str = "") -> Dict[str, Any]:
+    """统一归一化 fetch_page 成功结果，兼容对象态与字典态输入。"""
+    if isinstance(fetched_result, dict):
+        return dict(fetched_result)
+    return {
+        "url": _extract_object_value(fetched_result, "url", fallback_url),
+        "final_url": _extract_object_value(fetched_result, "final_url"),
+        "title": _extract_object_value(fetched_result, "title"),
+        "content": _extract_object_value(fetched_result, "content"),
+        "excerpt": _extract_object_value(fetched_result, "excerpt"),
+        "content_length": _extract_object_value(fetched_result, "content_length"),
+    }
+
+
+def get_page_reading_contract_state(
+        *,
+        runtime_recent_action: Optional[Dict[str, Any]],
+        execution_state: Optional[ExecutionState] = None,
+) -> Dict[str, Any]:
+    """统一页面证据合同，供 route/convergence/finalizer 共享。"""
+    recent_action = dict(runtime_recent_action or {})
+    evidence_items = [
+        item for item in list(recent_action.get("web_reading_evidence_summaries") or [])
+        if isinstance(item, dict)
+    ]
+    if len(evidence_items) == 0 and execution_state is not None:
+        evidence_items = [
+            item for item in list(execution_state.web_reading_evidence_items or [])
+            if isinstance(item, dict)
+        ]
+    strong_evidence_items = [
+        item for item in evidence_items
+        if str(item.get("quality") or "").strip().lower() == "strong"
+    ]
+    explicit_url_state = dict(recent_action.get("explicit_url_read_state") or {})
+    degraded = bool(explicit_url_state.get("degraded"))
+    return {
+        "has_any_evidence": len(evidence_items) > 0,
+        "evidence_items": evidence_items,
+        "has_strong_evidence": len(strong_evidence_items) > 0,
+        "strong_evidence_items": strong_evidence_items,
+        "degraded": degraded,
+        "explicit_url_state": explicit_url_state,
+    }
+
+
 def _build_low_value_reason(*, title_low_value: bool, content_low_value: bool) -> str:
     reasons: list[str] = []
     if title_low_value:
@@ -94,3 +143,10 @@ def _build_low_value_reason(*, title_low_value: bool, content_low_value: bool) -
     if content_low_value:
         reasons.append("正文长度不足")
     return "；".join(reasons)
+
+
+def _extract_object_value(source: Any, key: str, default: Any = "") -> Any:
+    if source is None or not hasattr(source, key):
+        return default
+    value = getattr(source, key, default)
+    return default if value is None else value

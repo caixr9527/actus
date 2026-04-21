@@ -19,6 +19,7 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     FILE_FUNCTION_NAMES,
     READ_ONLY_FILE_FUNCTION_NAMES,
     SEARCH_FUNCTION_NAMES,
+    TASK_MODE_ALLOWED_PREFIXES,
     TASK_MODE_MAX_TOOL_ITERATIONS,
 )
 from app.domain.services.runtime.normalizers import normalize_controlled_value
@@ -28,6 +29,9 @@ from app.domain.services.workspace_runtime.policies import (
     build_step_candidate_text as _build_step_candidate_text,
     build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
     classify_file_access_intent as _classify_file_access_intent,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
+    GeneralConvergenceJudge,
 )
 
 
@@ -86,6 +90,12 @@ def build_execution_context(
     if len(normalized_user_content) == 0:
         prompt_text = str(step.description or "").strip()
         normalized_user_content = [{"type": "text", "text": prompt_text}]
+    is_general_synthesis_step = (
+        task_mode == "general" and GeneralConvergenceJudge._is_synthesis_step(step)
+    )
+    is_general_file_observation_step = (
+        task_mode == "general" and GeneralConvergenceJudge._is_file_observation_step(step)
+    )
 
     browser_route_enabled = (
             task_mode in {"web_reading", "browser_interaction"}
@@ -115,8 +125,25 @@ def build_execution_context(
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
-    if task_mode == "general" and _step_outputs_inline_result(step) and not has_available_file_context:
+    if (
+            task_mode == "general"
+            and _step_outputs_inline_result(step)
+            and not has_available_file_context
+            and not is_general_file_observation_step
+    ):
         general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
+        blocked_function_names.update(general_inline_blocked_function_names)
+    elif is_general_synthesis_step:
+        # 执行收敛收口：纯整理型 general 步骤优先消费已有上下文，不应退回文件工具。
+        general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
+        blocked_function_names.update(general_inline_blocked_function_names)
+    if (
+            task_mode == "general"
+            and is_general_synthesis_step
+            and not _step_explicitly_requests_shell_execution(step, normalized_user_content)
+    ):
+        # P3-CASE3 收口：整理型 general 步骤默认禁止 shell 漂移，避免为“汇总/总结”去等待或执行命令。
+        general_inline_blocked_function_names.update(_collect_shell_function_names(available_function_names))
         blocked_function_names.update(general_inline_blocked_function_names)
     if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
         # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
@@ -126,7 +153,7 @@ def build_execution_context(
         # P3-1A 收敛修复：最终交付正文阶段禁止继续检索/执行命令。
         final_delivery_search_blocked_function_names.update(SEARCH_FUNCTION_NAMES)
         blocked_function_names.update(final_delivery_search_blocked_function_names)
-        final_delivery_shell_blocked_function_names.add("shell_execute")
+        final_delivery_shell_blocked_function_names.update(_collect_shell_function_names(available_function_names))
         blocked_function_names.update(final_delivery_shell_blocked_function_names)
         # P3-一次性收口：最终 inline 交付默认禁止写文件，除非用户明确要求文件交付。
         if not _step_explicitly_requests_file_output(
@@ -331,6 +358,18 @@ def _step_explicitly_requests_shell_execution(step: Step, user_content: Optional
         "terminal command",
     )
     return any(marker in normalized_text for marker in explicit_markers)
+
+
+def _collect_shell_function_names(available_function_names: Set[str]) -> Set[str]:
+    shell_prefixes = tuple(TASK_MODE_ALLOWED_PREFIXES.get("general") or ())
+    matched_names: Set[str] = set()
+    for function_name in set(available_function_names or set()):
+        normalized_name = str(function_name or "").strip().lower()
+        if not normalized_name:
+            continue
+        if any(normalized_name.startswith(prefix) for prefix in shell_prefixes):
+            matched_names.add(normalized_name)
+    return matched_names
 
 
 def _step_requests_read_only_file_access(

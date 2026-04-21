@@ -31,6 +31,7 @@ REASON_RESEARCH_ROUTE_SEARCH_REQUIRED = "research_route_search_required"
 REASON_RESEARCH_ROUTE_FETCH_REQUIRED = "research_route_fetch_required"
 REASON_RESEARCH_ROUTE_CROSS_DOMAIN_FETCH_LIMIT = "research_route_cross_domain_fetch_limit"
 REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE = "research_search_to_fetch_rewrite"
+REASON_WEB_READING_LOW_VALUE_FETCH_REPEAT = "web_reading_low_value_fetch_repeat"
 
 # repeat loop
 REASON_SEARCH_REPEAT = "search_repeat"

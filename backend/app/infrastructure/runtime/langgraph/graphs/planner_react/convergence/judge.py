@@ -3,10 +3,28 @@
 """P3 解耦：步骤收敛判定器。"""
 
 from dataclasses import dataclass
+import re
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step, StepArtifactPolicy, StepDeliveryRole, StepOutputMode
 from app.domain.services.runtime.normalizers import normalize_controlled_value
+
+_SIMPLE_FILE_ACTION_PATTERN = re.compile(
+    r"(创建|写入|读取|读出|列出|保存|生成文件|create|write|read|list|save)",
+    re.IGNORECASE,
+)
+_FILE_TARGET_PATTERN = re.compile(
+    r"(文件|目录|file|directory|folder|/[^\s，。；;]+|\b[\w.-]+\.(?:txt|md|json|csv|yaml|yml|log|py|js|ts|tsx|html|css)\b)",
+    re.IGNORECASE,
+)
+_COMPLEX_CODING_TASK_PATTERN = re.compile(
+    r"(实现|开发|修复|重构|测试|运行测试|编译|构建|接口|服务|组件|模块|算法|依赖|install|implement|develop|fix|refactor|test|build|compile)",
+    re.IGNORECASE,
+)
+_RAW_CONTENT_RETURN_PATTERN = re.compile(
+    r"(原样返回|原样输出|直接返回|直接输出|返回内容|输出内容|显示内容|原文返回|raw\s+content|return\s+content|print\s+content)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -34,9 +52,11 @@ class ConvergenceJudge:
             runtime_recent_action: Optional[Dict[str, Any]],
     ) -> ConvergenceEvaluationResult:
         """在文件处理任务中判定“已满足事实，直接收敛成功”。"""
-        if task_mode != "file_processing":
+        if task_mode not in {"file_processing", "coding"}:
             return ConvergenceEvaluationResult(should_break=False)
         if not tool_result_success:
+            return ConvergenceEvaluationResult(should_break=False)
+        if task_mode == "coding" and not self._is_simple_coding_file_task(step):
             return ConvergenceEvaluationResult(should_break=False)
 
         self._accumulate_file_context(
@@ -46,10 +66,22 @@ class ConvergenceJudge:
             tool_result_data=tool_result_data,
         )
 
-        if not self._is_file_processing_inline_final_step(step):
+        if not self._step_allows_file_fact_convergence(step):
             return ConvergenceEvaluationResult(should_break=False)
         if not self._has_minimal_file_progress(step_file_context):
             return ConvergenceEvaluationResult(should_break=False)
+        raw_content_payload = self._build_raw_file_content_payload_if_applicable(
+            step=step,
+            recent_function_name=recent_function_name,
+            tool_result_data=tool_result_data,
+            runtime_recent_action=runtime_recent_action,
+        )
+        if raw_content_payload is not None:
+            return ConvergenceEvaluationResult(
+                should_break=True,
+                payload=raw_content_payload,
+                reason_code="file_processing_raw_content_ready",
+            )
 
         summary = self._build_file_processing_convergence_summary(step=step, context=step_file_context)
         payload = {
@@ -78,9 +110,11 @@ class ConvergenceJudge:
             step_file_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """在达到最大轮次时，优先尝试按事实收敛，避免误判失败。"""
-        if task_mode != "file_processing":
+        if task_mode not in {"file_processing", "coding"}:
             return None
-        if not ConvergenceJudge._is_file_processing_inline_final_step(step):
+        if task_mode == "coding" and not ConvergenceJudge._is_simple_coding_file_task(step):
+            return None
+        if not ConvergenceJudge._step_allows_file_fact_convergence(step):
             return None
         if not ConvergenceJudge._has_minimal_file_progress(step_file_context):
             return None
@@ -155,6 +189,9 @@ class ConvergenceJudge:
                 if filepath not in written_files:
                     written_files.append(filepath)
                 context["written_files"] = written_files[:8]
+            content = str(function_args.get("content") or "").strip()
+            if content:
+                context["last_written_content_length"] = len(content)
         elif normalized_function_name == "check_file_exists":
             filepath = str(function_args.get("file_path") or function_args.get("filepath") or "").strip()
             if filepath:
@@ -164,6 +201,8 @@ class ConvergenceJudge:
     def _has_minimal_file_progress(context: Dict[str, Any]) -> bool:
         # P3-一次性收口：收敛判定基于“事实信号”而非固定函数组合，避免场景化补丁。
         called_functions = set(context.get("called_functions") or set())
+        has_written_file = bool(list(context.get("written_files") or []))
+        has_read_file = bool(str(context.get("last_read_file") or "").strip())
         has_observation = bool(
             str(context.get("last_dir_path") or "").strip()
             or list(context.get("listed_files") or [])
@@ -172,14 +211,14 @@ class ConvergenceJudge:
             or bool({"list_files", "find_files", "check_file_exists"}.intersection(called_functions))
         )
         has_delivery_evidence = bool(
-            str(context.get("last_read_file") or "").strip()
-            or list(context.get("written_files") or [])
+            has_read_file
+            or has_written_file
             or bool({"read_file", "write_file", "replace_in_file"}.intersection(called_functions))
         )
-        return has_observation and has_delivery_evidence
+        return (has_observation and has_delivery_evidence) or has_read_file or has_written_file
 
     @staticmethod
-    def _is_file_processing_inline_final_step(step: Step) -> bool:
+    def _is_inline_non_file_required_step(step: Step) -> bool:
         output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
         delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
         artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
@@ -190,6 +229,38 @@ class ConvergenceJudge:
         )
 
     @staticmethod
+    def _step_allows_file_fact_convergence(step: Step) -> bool:
+        """文件事实收敛既覆盖最终 inline，也覆盖 output=none 的中间执行步骤。"""
+        if ConvergenceJudge._is_inline_non_file_required_step(step):
+            return True
+        output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+        delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
+        return (
+                output_mode == StepOutputMode.NONE.value
+                and delivery_role in {"", StepDeliveryRole.NONE.value}
+        )
+
+    @staticmethod
+    def _is_simple_coding_file_task(step: Step) -> bool:
+        """只让简单文件读写类 coding 任务走确定性早停，避免复杂编码任务过早收敛。"""
+        candidate_text = " ".join(
+            [
+                str(getattr(step, "title", "") or ""),
+                str(getattr(step, "description", "") or ""),
+                " ".join([str(item or "") for item in list(getattr(step, "success_criteria", []) or [])]),
+            ]
+        ).strip()
+        if not candidate_text:
+            return False
+        is_simple_file_task = bool(
+            _SIMPLE_FILE_ACTION_PATTERN.search(candidate_text)
+            and _FILE_TARGET_PATTERN.search(candidate_text)
+        )
+        if _COMPLEX_CODING_TASK_PATTERN.search(candidate_text) and not is_simple_file_task:
+            return False
+        return is_simple_file_task
+
+    @staticmethod
     def _build_file_processing_convergence_summary(*, step: Step, context: Dict[str, Any]) -> str:
         called_functions = sorted(set(context.get("called_functions") or set()))
         listed_files = list(context.get("listed_files") or [])
@@ -197,6 +268,7 @@ class ConvergenceJudge:
         last_dir_path = str(context.get("last_dir_path") or "").strip()
         last_read_file = str(context.get("last_read_file") or "").strip()
         last_read_content_length = int(context.get("last_read_content_length") or 0)
+        last_written_content_length = int(context.get("last_written_content_length") or 0)
         last_checked_file = str(context.get("last_checked_file") or "").strip()
 
         lines: List[str] = [f"步骤已按工具事实完成并收敛成功：{step.description}。"]
@@ -212,6 +284,46 @@ class ConvergenceJudge:
             lines.append(f"已读取文件：{last_read_file}")
         if last_read_content_length > 0:
             lines.append(f"读取内容长度：{last_read_content_length} 字符")
+        if last_written_content_length > 0:
+            lines.append(f"写入内容长度：{last_written_content_length} 字符")
         if called_functions:
             lines.append("已执行工具：" + "、".join(called_functions[:6]))
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_raw_file_content_payload_if_applicable(
+            *,
+            step: Step,
+            recent_function_name: str,
+            tool_result_data: Any,
+            runtime_recent_action: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """显式要求“原样返回文件内容”时，直接把 read_file 正文作为交付结果。"""
+        if str(recent_function_name or "").strip().lower() != "read_file":
+            return None
+        candidate_text = " ".join(
+            [
+                str(getattr(step, "title", "") or ""),
+                str(getattr(step, "description", "") or ""),
+                " ".join([str(item or "") for item in list(getattr(step, "success_criteria", []) or [])]),
+            ]
+        ).strip()
+        if not candidate_text or not _RAW_CONTENT_RETURN_PATTERN.search(candidate_text):
+            return None
+        if not isinstance(tool_result_data, dict):
+            return None
+        content = str(tool_result_data.get("content") or "")
+        filepath = str(tool_result_data.get("filepath") or "").strip()
+        if not content:
+            return None
+        return {
+            "success": True,
+            "summary": f"已读取并原样返回文件内容：{filepath or step.description}",
+            "result": content,
+            "delivery_text": content,
+            "attachments": [],
+            "blockers": [],
+            "open_questions": [],
+            "next_hint": "",
+            "runtime_recent_action": runtime_recent_action or {},
+        }

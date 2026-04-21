@@ -192,6 +192,38 @@ class RuntimeContextService:
         recent_search_queries = normalize_text_list(raw.get("recent_search_queries"))
         if recent_search_queries:
             normalized["recent_search_queries"] = recent_search_queries
+        search_evidence_summaries = self._normalize_search_evidence_items(raw.get("search_evidence_summaries"))
+        if search_evidence_summaries:
+            normalized["search_evidence_summaries"] = search_evidence_summaries
+        web_reading_evidence_summaries = self._normalize_web_reading_evidence_items(
+            raw.get("web_reading_evidence_summaries")
+        )
+        if web_reading_evidence_summaries:
+            normalized["web_reading_evidence_summaries"] = web_reading_evidence_summaries
+        explicit_url_read_state = raw.get("explicit_url_read_state")
+        if isinstance(explicit_url_read_state, dict) and explicit_url_read_state:
+            normalized["explicit_url_read_state"] = dict(explicit_url_read_state)
+        research_convergence = raw.get("research_convergence")
+        if isinstance(research_convergence, dict) and research_convergence:
+            normalized["research_convergence"] = dict(research_convergence)
+        web_reading_convergence = raw.get("web_reading_convergence")
+        if isinstance(web_reading_convergence, dict) and web_reading_convergence:
+            normalized["web_reading_convergence"] = dict(web_reading_convergence)
+        research_progress = raw.get("research_progress")
+        if isinstance(research_progress, dict) and research_progress:
+            # 只保留可读、低体量字段，供后续步骤知道已有 snippet 证据，避免再次强制抓页。
+            normalized["research_progress"] = {
+                "candidate_url_count": int(research_progress.get("candidate_url_count") or 0),
+                "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
+                "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
+                "latest_query": str(research_progress.get("latest_query") or "").strip(),
+                "search_evidence_summaries": self._normalize_search_evidence_items(
+                    research_progress.get("search_evidence_summaries")
+                ),
+                "web_reading_evidence_summaries": self._normalize_web_reading_evidence_items(
+                    research_progress.get("web_reading_evidence_summaries")
+                ),
+            }
         return normalized
 
     def merge_runtime_recent_action(
@@ -462,11 +494,15 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             task_mode: str,
     ) -> Dict[str, Any]:
-        # recent_action 只读取同模式沉淀结果，不能在这里跨模式扫描历史事件。
+        # recent_action 的失败/阻断只读同模式，research/web_reading 证据允许向后投影给下一阶段消费。
         same_mode_digest = self._read_state_digest(
             state=state,
             field_name="recent_action_digest",
             expected_task_mode=task_mode,
+        )
+        cross_mode_digest = self._read_state_digest_payload(
+            state=state,
+            field_name="recent_action_digest",
         )
         digest: Dict[str, Any] = {}
         if isinstance(same_mode_digest.get("last_failed_action"), dict):
@@ -475,12 +511,113 @@ class RuntimeContextService:
             digest["last_blocked_tool_call"] = dict(same_mode_digest.get("last_blocked_tool_call") or {})
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             digest["recent_search_queries"] = normalize_text_list(same_mode_digest.get("recent_search_queries"))
+        digest.update(
+            self._project_cross_step_evidence(
+                task_mode=task_mode,
+                source_digest=cross_mode_digest,
+            )
+        )
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
             digest["last_user_wait_reason"] = str(
                 self._build_pending_confirmation(state=state).get("prompt") or "").strip()
         if same_mode_digest.get("last_no_progress_reason"):
             digest["last_no_progress_reason"] = str(same_mode_digest.get("last_no_progress_reason") or "").strip()
         return self._clean_dict(digest)
+
+    def _project_cross_step_evidence(
+            self,
+            *,
+            task_mode: str,
+            source_digest: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """把上一阶段可复用证据投影给下一阶段，不投影失败/阻断等反馈语义。"""
+        if not isinstance(source_digest, dict) or not source_digest:
+            return {}
+        normalized_task_mode = str(task_mode or "").strip().lower()
+        projected: Dict[str, Any] = {}
+        if normalized_task_mode in {StepTaskModeHint.WEB_READING.value, StepTaskModeHint.GENERAL.value}:
+            research_progress = dict(source_digest.get("research_progress") or {})
+            search_evidence = self._normalize_search_evidence_items(source_digest.get("search_evidence_summaries"))
+            search_evidence.extend(
+                self._normalize_search_evidence_items(research_progress.get("search_evidence_summaries"))
+            )
+            search_evidence = self._dedupe_evidence_items(search_evidence, key_names=("url", "snippet"))[:5]
+            if search_evidence:
+                projected["search_evidence_summaries"] = search_evidence
+                projected["research_progress"] = {
+                    "candidate_url_count": int(research_progress.get("candidate_url_count") or len(search_evidence)),
+                    "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
+                    "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
+                    "latest_query": str(research_progress.get("latest_query") or "").strip(),
+                    "search_evidence_summaries": search_evidence,
+                }
+            web_evidence = self._normalize_web_reading_evidence_items(
+                source_digest.get("web_reading_evidence_summaries")
+            )
+            web_evidence.extend(
+                self._normalize_web_reading_evidence_items(research_progress.get("web_reading_evidence_summaries"))
+            )
+            web_evidence = self._dedupe_evidence_items(web_evidence, key_names=("url", "summary"))[:6]
+            if web_evidence:
+                projected["web_reading_evidence_summaries"] = web_evidence
+                projected.setdefault("research_progress", {})["web_reading_evidence_summaries"] = web_evidence
+            explicit_url_state = source_digest.get("explicit_url_read_state") or research_progress.get(
+                "explicit_url_read_state"
+            )
+            if isinstance(explicit_url_state, dict) and explicit_url_state:
+                projected["explicit_url_read_state"] = dict(explicit_url_state)
+        return projected
+
+    def _normalize_search_evidence_items(self, raw_items: Any) -> List[Dict[str, str]]:
+        """归一化低体量 search snippet 证据，供 Prompt 和执行初始态复用。"""
+        items: List[Dict[str, str]] = []
+        for item in list(raw_items or []):
+            if not isinstance(item, dict):
+                continue
+            title = self._truncate_text(item.get("title"), max_chars=100)
+            url = self._truncate_text(item.get("url"), max_chars=240)
+            snippet = self._truncate_text(item.get("snippet"), max_chars=320)
+            if not url and not snippet:
+                continue
+            items.append({"title": title, "url": url, "snippet": snippet})
+        return items[:5]
+
+    def _normalize_web_reading_evidence_items(self, raw_items: Any) -> List[Dict[str, Any]]:
+        """归一化页面证据，保留完成合同需要的 url/summary/quality/link_count。"""
+        items: List[Dict[str, Any]] = []
+        for item in list(raw_items or []):
+            if not isinstance(item, dict):
+                continue
+            summary = self._truncate_text(item.get("summary"), max_chars=420)
+            url = self._truncate_text(item.get("url"), max_chars=240)
+            if not summary and not url:
+                continue
+            items.append(
+                {
+                    "function_name": str(item.get("function_name") or "").strip(),
+                    "url": url,
+                    "title": self._truncate_text(item.get("title"), max_chars=100),
+                    "summary": summary,
+                    "content_length": int(item.get("content_length") or 0),
+                    "link_count": int(item.get("link_count") or 0),
+                    "quality": str(item.get("quality") or "").strip(),
+                }
+            )
+        return items[:6]
+
+    @staticmethod
+    def _dedupe_evidence_items(items: List[Dict[str, Any]], *, key_names: tuple[str, ...]) -> List[Dict[str, Any]]:
+        deduped: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for item in items:
+            key = "|".join([str(item.get(key_name) or "").strip() for key_name in key_names]).strip("|")
+            if not key:
+                key = str(item).strip()
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(item)
+        return deduped
 
     def _build_working_memory_digest(
             self,

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 from app.domain.models import Step, ToolResult
+from app.domain.models.search import FetchedPage
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import (
     ExecutionContext,
     build_execution_context,
@@ -28,6 +29,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks impor
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
     build_research_diagnosis,
+    evaluate_fetch_result_quality,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_query_builder import (
     build_research_query,
@@ -37,11 +39,23 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool
     apply_rewrite_effects,
     apply_tool_result_effects,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
+    normalize_tool_execution_args,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_handlers import (
     execute_tool_with_policy,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
     ConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
+    GeneralConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.research_convergence import (
+    ResearchConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.web_reading_convergence import (
+    WebReadingConvergenceJudge,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import (
     ConstraintDecision,
@@ -87,6 +101,10 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
     execute_step_with_prompt,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.delivery_helpers import (
+    _resolve_summary_attachment_refs,
+)
+from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_failure_key,
     build_browser_route_state_key,
@@ -125,6 +143,58 @@ def test_finalize_no_tool_call_should_retry_empty_payload_and_block_human_wait()
     assert wait_result.payload is not None
     assert wait_result.payload.get("success") is False
     assert isinstance(wait_result.payload.get("blockers"), list)
+
+
+def test_finalize_no_tool_call_should_retry_web_reading_without_contract_evidence() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="读取页面正文并概括重点")
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=step,
+        task_mode="web_reading",
+        llm_message={"content": '{"success": true, "summary": "已完成页面阅读", "delivery_text": "已完成"}'},
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=0,
+        runtime_recent_action={
+            "research_progress": {
+                "search_evidence_summaries": [
+                    {"title": "A", "url": "https://example.com", "snippet": "only snippet"}
+                ]
+            }
+        },
+    )
+
+    assert result.action == "retry"
+
+
+def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="读取页面正文并概括重点")
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=step,
+        task_mode="web_reading",
+        llm_message={"content": '{"success": true, "summary": "已完成页面阅读", "delivery_text": "已完成"}'},
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=0,
+        runtime_recent_action={
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://example.com",
+                    "summary": "页面正文包含核心要点",
+                    "quality": "strong",
+                }
+            ]
+        },
+    )
+
+    assert result.action == "return"
+    assert result.payload is not None
+    assert result.payload["success"] is True
 
 
 def test_constraint_engine_default_snapshot_should_fill_required_keys() -> None:
@@ -1183,6 +1253,37 @@ def test_finalize_max_iterations_should_include_query_rewrite_hint_for_low_recal
     assert "单主题自然语言短句" in str(payload.get("next_hint") or "")
 
 
+def test_finalize_max_iterations_should_converge_research_when_snippets_available() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="调研 LangGraph human-in-the-loop 常见实现模式")
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=6,
+        iteration_count=6,
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "search_evidence_summaries": [
+                    {
+                        "title": "LangGraph human-in-the-loop",
+                        "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                        "snippet": "LangGraph 支持通过 interrupt、resume 和人工审批节点实现 human-in-the-loop。",
+                    }
+                ]
+            },
+        },
+    )
+
+    assert payload["success"] is True
+    assert "search_web snippet" in str(payload["delivery_text"])
+    assert "https://docs.langchain.com/langgraph-platform/human-in-the-loop" in str(payload["delivery_text"])
+
+
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="检索网页并读取正文")
@@ -1919,6 +2020,38 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
     assert "读取内容长度" in delivery_text
 
 
+def test_convergence_judge_should_return_raw_file_content_when_step_requires_verbatim_output() -> None:
+    judge = ConvergenceJudge()
+    step = Step(
+        id="file-raw",
+        description="读取 /home/ubuntu/workspace/p3-case1/hello.txt 的内容并原样返回",
+        task_mode_hint="file_processing",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="forbid_file_output",
+    )
+
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="file_processing",
+        recent_function_name="read_file",
+        function_args={"filepath": "/home/ubuntu/workspace/p3-case1/hello.txt"},
+        tool_result_data={
+            "filepath": "/home/ubuntu/workspace/p3-case1/hello.txt",
+            "content": "P3_WORKSPACE_OK",
+        },
+        tool_result_success=True,
+        step_file_context={},
+        runtime_recent_action={},
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "file_processing_raw_content_ready"
+    assert result.payload is not None
+    assert result.payload["delivery_text"] == "P3_WORKSPACE_OK"
+    assert result.payload["result"] == "P3_WORKSPACE_OK"
+
+
 def test_convergence_judge_should_break_when_find_files_and_read_file_facts_ready() -> None:
     judge = ConvergenceJudge()
     step = Step(
@@ -1960,6 +2093,805 @@ def test_convergence_judge_should_break_when_find_files_and_read_file_facts_read
     )
     assert result.should_break is True
     assert "目录文件" in str((result.payload or {}).get("delivery_text") or "")
+
+
+def test_convergence_judge_should_break_when_coding_write_file_succeeds() -> None:
+    judge = ConvergenceJudge()
+    step = Step(
+        id="coding-write",
+        description="创建 result.md，内容为 VERSION_1，但不作为附件返回",
+        task_mode_hint="coding",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="forbid_file_output",
+    )
+
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="coding",
+        recent_function_name="write_file",
+        function_args={
+            "filepath": "/home/ubuntu/workspace/p3-case5/result.md",
+            "content": "VERSION_1",
+        },
+        tool_result_data={
+            "filepath": "/home/ubuntu/workspace/p3-case5/result.md",
+            "bytes_written": 9,
+        },
+        tool_result_success=True,
+        step_file_context={},
+        runtime_recent_action={},
+    )
+
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.payload["success"] is True
+    assert "已写入文件" in str(result.payload["delivery_text"])
+    assert result.payload["attachments"] == []
+
+
+def test_convergence_judge_should_break_when_file_processing_none_step_has_verified_file() -> None:
+    judge = ConvergenceJudge()
+    step = Step(
+        id="file-none",
+        description="在指定目录创建 hello.txt 并写入内容",
+        task_mode_hint="file_processing",
+        output_mode="none",
+        delivery_role="none",
+        artifact_policy="allow_file_output",
+    )
+
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="file_processing",
+        recent_function_name="write_file",
+        function_args={
+            "filepath": "/home/ubuntu/workspace/p3-case1/hello.txt",
+            "content": "P3_WORKSPACE_OK",
+        },
+        tool_result_data={
+            "filepath": "/home/ubuntu/workspace/p3-case1/hello.txt",
+            "bytes_written": 15,
+        },
+        tool_result_success=True,
+        step_file_context={},
+        runtime_recent_action={},
+    )
+
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.payload["success"] is True
+
+
+def test_convergence_judge_should_not_break_complex_coding_after_single_write() -> None:
+    judge = ConvergenceJudge()
+    step = Step(
+        id="coding-complex",
+        description="实现搜索服务重构并补齐测试",
+        task_mode_hint="coding",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    result = judge.evaluate_file_processing_progress(
+        step=step,
+        task_mode="coding",
+        recent_function_name="write_file",
+        function_args={
+            "filepath": "/home/ubuntu/workspace/app/search.py",
+            "content": "print('partial')",
+        },
+        tool_result_data={"filepath": "/home/ubuntu/workspace/app/search.py"},
+        tool_result_success=True,
+        step_file_context={},
+        runtime_recent_action={},
+    )
+
+    assert result.should_break is False
+
+
+def test_research_convergence_should_break_when_snippet_sufficient() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "LangGraph HITL",
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "snippet": "LangGraph 支持通过 interrupt 和 resume 将人工输入接入执行流。",
+            }
+        ],
+        runtime_recent_action={"research_diagnosis": {"code": "search_snippet_sufficient"}},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="调研 LangGraph human-in-the-loop 常见实现模式"),
+        task_mode="research",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.payload["success"] is True
+    assert result.reason_code == "research_snippet_evidence_ready"
+    assert "来源链接" in str(result.payload["delivery_text"])
+    assert len(result.payload["facts_learned"]) >= 1
+
+
+def test_research_convergence_should_not_break_for_web_reading_task_mode() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "LangGraph HITL",
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "snippet": "LangGraph 支持通过 interrupt 和 resume 将人工输入接入执行流。",
+            }
+        ],
+        runtime_recent_action={"research_diagnosis": {"code": "search_snippet_sufficient"}},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取重点页面并提取正文要点"),
+        task_mode="web_reading",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_general_convergence_should_break_when_search_and_page_evidence_exist() -> None:
+    judge = GeneralConvergenceJudge()
+    step = Step(
+        description="整理所有检索和读取的信息，输出最终计划",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=step,
+        task_mode="general",
+        runtime_recent_action={
+            "research_progress": {
+                "search_evidence_summaries": [
+                    {
+                        "title": "景点摘要",
+                        "url": "https://example.com/a",
+                        "snippet": "已拿到景点、交通和住宿摘要。",
+                    }
+                ]
+            },
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://example.com/a",
+                    "title": "景点详情",
+                    "summary": "页面正文已包含开放时间和交通方式。",
+                    "link_count": 3,
+                }
+            ],
+        },
+        iteration=2,
+    )
+
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.reason_code == "general_final_delivery_ready"
+    assert "可用依据" in str(result.payload["delivery_text"])
+
+
+def test_general_convergence_should_not_break_when_structured_delivery_contract_not_met() -> None:
+    judge = GeneralConvergenceJudge()
+    step = Step(
+        description="整理为 5 条要点，并且每条都附上来源链接",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=step,
+        task_mode="general",
+        runtime_recent_action={
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://example.com/a",
+                    "title": "单一来源",
+                    "summary": "这里只读取到一个页面摘要。",
+                    "link_count": 1,
+                    "quality": "strong",
+                }
+            ]
+        },
+        iteration=1,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_general_convergence_should_break_when_file_observation_facts_exist() -> None:
+    judge = GeneralConvergenceJudge()
+    step = Step(
+        description="获取当前目录状态并列出所有文件名称",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=step,
+        task_mode="general",
+        runtime_recent_action={
+            "last_successful_tool_call": {
+                "function_name": "list_files",
+                "data": {
+                    "dir_path": "/home/ubuntu/workspace/p3-case1",
+                    "files": [{"name": "hello.txt"}, {"name": "notes.md"}],
+                },
+            }
+        },
+        iteration=1,
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "general_file_observation_ready"
+    assert result.payload is not None
+    assert "hello.txt" in str(result.payload["delivery_text"])
+
+
+def test_general_convergence_should_keep_file_observation_snapshot_after_other_success() -> None:
+    judge = GeneralConvergenceJudge()
+    step = Step(
+        description="获取当前目录状态并列出所有文件名称",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=step,
+        task_mode="general",
+        runtime_recent_action={
+            "file_observation_snapshot": {
+                "function_name": "list_files",
+                "dir_path": "/home/ubuntu/workspace/p3-case1",
+                "files": [{"name": "hello.txt"}, {"name": "notes.md"}],
+            },
+            "last_successful_tool_call": {
+                "function_name": "read_file",
+                "data": {
+                    "filepath": "/home/ubuntu/workspace/p3-case1/hello.txt",
+                    "content": "P3_WORKSPACE_OK",
+                },
+            },
+        },
+        iteration=2,
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "general_file_observation_ready"
+    assert result.payload is not None
+    assert "hello.txt" in str(result.payload["delivery_text"])
+
+
+def test_build_execution_context_should_keep_file_tools_for_general_file_observation_step() -> None:
+    step = Step(
+        description="获取当前目录状态并列出所有文件名称",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=4,
+        user_content=[{"type": "text", "text": "获取当前目录状态并列出所有文件名称"}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={"list_files", "find_files", "read_file", "search_web"},
+        user_message_text="获取当前目录状态并列出所有文件名称",
+    )
+
+    assert "list_files" not in context.general_inline_blocked_function_names
+    assert "find_files" not in context.general_inline_blocked_function_names
+    assert "list_files" not in context.blocked_function_names
+    assert "find_files" not in context.blocked_function_names
+
+
+def test_general_convergence_should_not_break_non_synthesis_general_without_file_observation() -> None:
+    judge = GeneralConvergenceJudge()
+    step = Step(
+        description="继续实现搜索服务并补齐测试",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=step,
+        task_mode="general",
+        runtime_recent_action={
+            "research_progress": {
+                "search_evidence_summaries": [
+                    {"title": "A", "url": "https://example.com", "snippet": "some snippet"}
+                ]
+            }
+        },
+        iteration=1,
+    )
+
+    assert result.should_break is False
+
+
+def test_web_reading_convergence_should_break_when_browser_evidence_ready() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        web_reading_evidence_items=[
+            {
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "title": "LangGraph HITL",
+                "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                "content_length": 48,
+                "link_count": 3,
+                "quality": "strong",
+            }
+        ],
+        runtime_recent_action={},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取显式 URL 页面并概括要点"),
+        task_mode="web_reading",
+        recent_function_name="browser_extract_main_content",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.reason_code == "web_reading_page_evidence_ready"
+    assert "页面证据" in str(result.payload["delivery_text"])
+
+
+def test_web_reading_convergence_should_not_break_when_only_weak_browser_evidence_exists() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        web_reading_evidence_items=[
+            {
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "title": "LangGraph HITL",
+                "summary": "已读取页面结构和候选链接。",
+                "content_length": 0,
+                "link_count": 5,
+                "quality": "weak",
+            }
+        ],
+        runtime_recent_action={},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取显式 URL 页面并概括要点"),
+        task_mode="web_reading",
+        recent_function_name="browser_read_current_page_structured",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_web_reading_convergence_should_not_break_when_multi_page_requirement_not_met() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        web_reading_evidence_items=[
+            {
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "title": "LangGraph HITL",
+                "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                "content_length": 180,
+                "link_count": 3,
+                "quality": "strong",
+            }
+        ],
+        runtime_recent_action={},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="至少读取 2 个来源页面正文并附上来源链接"),
+        task_mode="web_reading",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_web_reading_completion_progress_should_record_remaining_page_count() -> None:
+    state = ExecutionState(
+        web_reading_evidence_items=[
+            {
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "title": "LangGraph HITL",
+                "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                "content_length": 180,
+                "link_count": 3,
+                "quality": "strong",
+            }
+        ],
+        runtime_recent_action={},
+    )
+
+    progress_state = WebReadingConvergenceJudge.get_completion_progress(
+        step=Step(description="至少读取 3 个页面，并附上来源链接"),
+        runtime_recent_action=state.runtime_recent_action,
+        execution_state=state,
+    )
+
+    progress = dict(progress_state["progress"])
+    assert progress["current_page_count"] == 1
+    assert progress["required_page_count"] == 3
+    assert progress["remaining_page_count"] == 2
+    assert progress["contract_satisfied"] is False
+
+
+def test_runtime_context_service_should_project_research_evidence_into_web_reading_digest() -> None:
+    context_service = RuntimeContextService()
+    state = {
+        "working_memory": {"goal": "读取页面正文"},
+        "recent_action_digest": {
+            "task_mode": "research",
+            "payload": {
+                "research_progress": {
+                    "candidate_url_count": 2,
+                    "fetched_url_count": 0,
+                    "fetch_success_count": 0,
+                    "latest_query": "LangGraph human in the loop 官方文档",
+                    "search_evidence_summaries": [
+                        {
+                            "title": "LangGraph 文档",
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                            "snippet": "文档说明了 interrupt 与 resume 的使用方式。",
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+    packet = context_service.build_packet(
+        stage="execute",
+        state=state,  # type: ignore[arg-type]
+        task_mode="web_reading",
+    )
+
+    assert packet["recent_action_digest"]["research_progress"]["candidate_url_count"] == 2
+    assert packet["recent_action_digest"]["search_evidence_summaries"][0]["url"] == (
+        "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"
+    )
+
+
+def test_execute_step_with_prompt_should_seed_initial_recent_action_into_execution_state() -> None:
+    execution_state = ExecutionState(
+        runtime_recent_action={
+            "research_progress": {
+                "search_evidence_summaries": [
+                    {
+                        "title": "LangGraph 文档",
+                        "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                        "snippet": "文档说明了 interrupt 与 resume。",
+                    }
+                ]
+            },
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                    "summary": "页面正文包含 interrupt、resume。",
+                    "quality": "strong",
+                }
+            ],
+        }
+    )
+
+    from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
+        _seed_execution_state_from_initial_recent_action,
+    )
+
+    _seed_execution_state_from_initial_recent_action(execution_state)
+
+    assert execution_state.research_search_ready is True
+    assert execution_state.research_fetch_completed is True
+    assert execution_state.research_candidate_urls == [
+        "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"
+    ]
+    assert len(execution_state.web_reading_evidence_items) == 1
+
+
+def test_web_reading_convergence_should_break_when_explicit_url_degraded() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        explicit_url_degraded=True,
+        runtime_recent_action={
+            "explicit_url_read_state": {
+                "failed_urls": ["https://docs.langchain.com/langgraph-platform/human-in-the-loop"],
+                "degraded": True,
+                "browser_evidence_ready": True,
+            }
+        },
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取显式 URL 页面并概括要点"),
+        task_mode="web_reading",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.payload is not None
+    assert result.reason_code == "explicit_url_fetch_degraded"
+    assert "停止重复读取" in str(result.payload["delivery_text"])
+    assert "浏览器已打开页面" in str(result.payload["delivery_text"])
+
+
+def test_evaluate_task_mode_policy_should_block_general_search_when_page_evidence_exists() -> None:
+    step = Step(
+        description="基于页面内容概括核心要点并展示给我",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+    )
+    decision = evaluate_task_mode_policy(
+        ConstraintInput(
+            step=step,
+            task_mode="general",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": "LangGraph human in the loop"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"search_web", "fetch_page"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                general_inline_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                final_delivery_search_blocked_function_names=set(),
+                final_delivery_shell_blocked_function_names=set(),
+                final_inline_file_output_blocked_function_names=set(),
+                requested_max_tool_iterations=4,
+                effective_max_tool_iterations=4,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=False,
+            ),
+            execution_state=ExecutionState(
+                runtime_recent_action={
+                    "web_reading_evidence_summaries": [
+                        {
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                            "summary": "页面正文已经包含 interrupt、resume 与审批流程说明。",
+                            "quality": "strong",
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+
+    assert decision is not None
+    assert decision.reason_code == "task_mode_tool_blocked"
+    assert "已有页面/摘要信息" in str(decision.message_for_model or "")
+
+
+def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_evidence_exists() -> None:
+    step = Step(description="读取页面正文并概括要点", task_mode_hint="web_reading")
+    decision = evaluate_task_mode_policy(
+        ConstraintInput(
+            step=step,
+            task_mode="web_reading",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"fetch_page"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                general_inline_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                final_delivery_search_blocked_function_names=set(),
+                final_delivery_shell_blocked_function_names=set(),
+                final_inline_file_output_blocked_function_names=set(),
+                requested_max_tool_iterations=4,
+                effective_max_tool_iterations=4,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=True,
+            ),
+            execution_state=ExecutionState(
+                runtime_recent_action={
+                    "web_reading_evidence_summaries": [
+                        {
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                            "summary": "页面正文已经包含 interrupt、resume 与审批流程说明。",
+                            "quality": "strong",
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+
+    assert decision is not None
+    assert decision.reason_code == "task_mode_tool_blocked"
+    assert "强页面证据" in str(decision.message_for_model or "")
+
+
+def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_not_met() -> None:
+    step = Step(
+        description="至少读取 3 个来源页面正文并附上来源链接",
+        task_mode_hint="web_reading",
+    )
+    decision = evaluate_task_mode_policy(
+        ConstraintInput(
+            step=step,
+            task_mode="web_reading",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"fetch_page", "search_web"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                general_inline_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                final_delivery_search_blocked_function_names=set(),
+                final_delivery_shell_blocked_function_names=set(),
+                final_inline_file_output_blocked_function_names=set(),
+                requested_max_tool_iterations=6,
+                effective_max_tool_iterations=6,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=False,
+            ),
+            execution_state=ExecutionState(
+                runtime_recent_action={
+                    "web_reading_evidence_summaries": [
+                        {
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                            "summary": "页面正文已经包含 interrupt、resume 与审批流程说明。",
+                            "quality": "strong",
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+
+    assert decision is None
+
+
+def test_build_execution_context_should_block_shell_for_general_synthesis_step() -> None:
+    step = Step(
+        description="整理所有信息并输出最终结论",
+        task_mode_hint="general",
+        output_mode="inline",
+        delivery_role="final",
+        artifact_policy="default",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=4,
+        user_content=[{"type": "text", "text": "整理所有信息并输出最终结论"}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={"shell_wait_process", "shell_execute", "search_web"},
+        user_message_text="整理所有信息并输出最终结论",
+    )
+
+    assert "shell_wait_process" in context.general_inline_blocked_function_names
+    assert "shell_wait_process" in context.blocked_function_names
+
+
+def test_resolve_summary_attachment_refs_should_filter_runtime_temp_files() -> None:
+    state = {
+        "working_memory": {
+            "final_delivery_payload": {
+                "text": "done",
+                "sections": [],
+                "source_refs": [
+                    "/workspace/final.md",
+                    "/workspace/temp_response.json",
+                    "/workspace/final_output.txt",
+                ],
+            }
+        }
+    }
+
+    class _FakeRuntimeContextService:
+        async def list_workspace_artifact_paths(self) -> List[str]:
+            return [
+                "/workspace/final.md",
+                "/workspace/temp_response.json",
+                "/workspace/final_output.txt",
+                "/workspace/directory_info.txt",
+            ]
+
+    result = asyncio.run(
+        _resolve_summary_attachment_refs(
+            state,  # type: ignore[arg-type]
+            [
+                "/workspace/final.md",
+                "/workspace/temp_response.json",
+                "/workspace/final_output.txt",
+                "/workspace/directory_info.txt",
+            ],
+            runtime_context_service=_FakeRuntimeContextService(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert result == ["/workspace/final.md"]
+
+
+def test_normalize_tool_execution_args_should_force_overwrite_for_write_file() -> None:
+    normalized_args = normalize_tool_execution_args(
+        normalized_function_name="write_file",
+        function_args={
+            "filepath": "/home/ubuntu/workspace/p3-case5/result.md",
+            "content": "VERSION_2",
+            "append": True,
+        },
+        intent_text="将 /home/ubuntu/workspace/p3-case5/result.md 覆盖为 VERSION_2",
+    )
+
+    assert normalized_args["append"] is False
+
+
+def test_normalize_tool_execution_args_should_keep_append_for_append_intent() -> None:
+    normalized_args = normalize_tool_execution_args(
+        normalized_function_name="write_file",
+        function_args={
+            "filepath": "/home/ubuntu/workspace/p3-case5/result.md",
+            "content": "\nVERSION_2",
+            "append": False,
+        },
+        intent_text="向 /home/ubuntu/workspace/p3-case5/result.md 追加一行 VERSION_2",
+    )
+
+    assert normalized_args["append"] is True
 
 
 class _FakeNoToolLLM:
@@ -2740,6 +3672,24 @@ def test_build_research_diagnosis_should_mark_search_snippet_insufficient() -> N
     assert diagnosis["code"] == "search_snippet_insufficient"
 
 
+def test_evaluate_fetch_result_quality_should_support_fetched_page_model() -> None:
+    fetched_page = FetchedPage(
+        url="https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+        final_url="https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+        title="Human-in-the-loop",
+        content="这是一段足够长的正文内容。" * 20,
+        excerpt="这是一段足够长的正文内容。",
+        content_length=280,
+    )
+
+    quality = evaluate_fetch_result_quality(fetched_result=fetched_page)
+
+    assert quality["url"] == "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"
+    assert quality["title"] == "Human-in-the-loop"
+    assert quality["content_length"] > 120
+    assert quality["is_useful"] is True
+
+
 def test_apply_tool_result_effects_should_convert_low_value_fetch_into_research_diagnosis_failure() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="读取页面正文")
@@ -2791,6 +3741,200 @@ def test_apply_tool_result_effects_should_convert_low_value_fetch_into_research_
     diagnosis = dict(execution_state.runtime_recent_action.get("research_diagnosis") or {})
     assert diagnosis["code"] == "fetch_low_value"
     assert "有效信息" in str(effects_result.tool_result.message or "")
+
+
+def test_apply_tool_result_effects_should_mark_web_reading_low_value_fetch_url() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="读取页面正文")
+    step.task_mode_hint = "web_reading"
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取页面"}],
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    for _ in range(2):
+        apply_tool_result_effects(
+            logger=logger,
+            step=step,
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://example.com/a"},
+            tool_result=ToolResult(
+                success=True,
+                data={
+                    "url": "https://example.com/a",
+                    "final_url": "https://example.com/a",
+                    "title": "首页",
+                    "content": "太短了",
+                },
+            ),
+            loop_break_reason="",
+            browser_route_state_key="",
+            execution_context=execution_context,
+            execution_state=execution_state,
+        )
+
+    assert "https://example.com/a" in execution_state.web_reading_low_value_urls
+    assert "https://example.com/a" in execution_state.web_reading_low_value_url_keys
+    assert execution_state.web_reading_low_value_repeat_counter["https://example.com/a"] == 2
+
+
+def test_apply_tool_result_effects_should_sync_web_reading_contract_state_without_research_route() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="读取页面正文")
+    step.task_mode_hint = "web_reading"
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取页面"}],
+        available_tools=[],
+        available_function_names={"fetch_page"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    effects_result = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://example.com/page"},
+        tool_result=ToolResult(
+            success=True,
+            data={
+                "url": "https://example.com/page",
+                "final_url": "https://example.com/page",
+                "title": "页面",
+                "content": "太短了",
+            },
+        ),
+        loop_break_reason="",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+    )
+
+    assert effects_result.tool_result.success is False
+    assert "web_reading_evidence_summaries" in execution_state.runtime_recent_action
+    assert execution_state.web_reading_low_value_repeat_counter["https://example.com/page"] == 1
+
+
+def test_apply_tool_result_effects_should_store_file_observation_snapshot() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="列出目录文件")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "列出目录文件"}],
+        available_tools=[],
+        available_function_names={"list_files"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        general_inline_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        final_delivery_search_blocked_function_names=set(),
+        final_delivery_shell_blocked_function_names=set(),
+        final_inline_file_output_blocked_function_names=set(),
+        requested_max_tool_iterations=3,
+        effective_max_tool_iterations=3,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    execution_state = ExecutionState()
+
+    apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="list_files",
+        normalized_function_name="list_files",
+        function_args={"dir_path": "/home/ubuntu/workspace/p3-case1"},
+        tool_result=ToolResult(
+            success=True,
+            data={
+                "dir_path": "/home/ubuntu/workspace/p3-case1",
+                "files": [{"name": "hello.txt"}, {"name": "notes.md"}],
+            },
+        ),
+        loop_break_reason="",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+    )
+
+    snapshot = dict(execution_state.runtime_recent_action.get("file_observation_snapshot") or {})
+    assert snapshot["function_name"] == "list_files"
+    assert snapshot["dir_path"] == "/home/ubuntu/workspace/p3-case1"
+    assert len(list(snapshot["files"])) == 2
+
+
+def test_evaluate_repeat_loop_policy_should_block_web_reading_low_value_fetch_repeat() -> None:
+    state = ExecutionState()
+    state.web_reading_low_value_url_keys.add("https://example.com/page")
+    decision = evaluate_repeat_loop_policy(
+        ConstraintInput(
+            step=Step(description="读取页面正文"),
+            task_mode="web_reading",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://example.com/page?from=bing"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"fetch_page"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                general_inline_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                final_delivery_search_blocked_function_names=set(),
+                final_delivery_shell_blocked_function_names=set(),
+                final_inline_file_output_blocked_function_names=set(),
+                requested_max_tool_iterations=3,
+                effective_max_tool_iterations=3,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=False,
+            ),
+            execution_state=state,
+        )
+    )
+    assert decision is not None
+    assert decision.reason_code == "web_reading_low_value_fetch_repeat"
 
 
 def test_runtime_logging_should_render_requested_and_executed_function_names() -> None:

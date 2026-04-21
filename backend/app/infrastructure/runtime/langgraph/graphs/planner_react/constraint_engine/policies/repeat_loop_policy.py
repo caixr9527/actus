@@ -10,25 +10,29 @@ from app.domain.services.runtime.contracts.langgraph_settings import REPEAT_TOOL
 from app.domain.services.runtime.normalizers import normalize_url_value
 from app.domain.services.workspace_runtime.policies import (
     build_search_fingerprint as _build_search_fingerprint,
+    build_step_candidate_text as _build_step_candidate_text,
     build_tool_fingerprint as _build_tool_fingerprint,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintDecision
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintInput
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintToolResultPayload
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_REPEAT_TOOL_CALL
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_FINGERPRINT_REPEAT
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_SEARCH_REPEAT
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
     normalize_tool_execution_args,
+)
+from ..contracts import ConstraintDecision, ConstraintInput, ConstraintToolResultPayload
+from ..reason_codes import (
+    REASON_REPEAT_TOOL_CALL,
+    REASON_RESEARCH_ROUTE_FINGERPRINT_REPEAT,
+    REASON_SEARCH_REPEAT,
+    REASON_WEB_READING_LOW_VALUE_FETCH_REPEAT,
 )
 
 
 def evaluate_repeat_loop_policy(constraint_input: ConstraintInput) -> Optional[ConstraintDecision]:
+    """限制同一工具或同类 research 操作在单步骤内反复空转。"""
     normalized_function_name = str(constraint_input.normalized_function_name or "").strip().lower()
     state = constraint_input.execution_state
     normalized_function_args = normalize_tool_execution_args(
         normalized_function_name=normalized_function_name,
         function_args=dict(constraint_input.function_args or {}),
+        intent_text=_build_step_candidate_text(constraint_input.step),
     )
 
     if normalized_function_name == "search_web":
@@ -44,6 +48,15 @@ def evaluate_repeat_loop_policy(constraint_input: ConstraintInput) -> Optional[C
 
     if normalized_function_name == "fetch_page":
         current_url_fingerprint = normalize_url_value(normalized_function_args.get("url"), drop_query=True)
+        if (
+                str(constraint_input.task_mode or "").strip().lower() == "web_reading"
+                and current_url_fingerprint
+                and current_url_fingerprint in set(constraint_input.execution_state.web_reading_low_value_url_keys or set())
+        ):
+            return _hard_block(
+                reason_code=REASON_WEB_READING_LOW_VALUE_FETCH_REPEAT,
+                message="该页面 URL 已多次抓取且正文价值不足，请切换其他候选链接、改用浏览器正文提取，或结束当前步骤。",
+            )
         current_repeat = int(state.fetch_repeat_counter.get(current_url_fingerprint, 0)) + 1
         if current_url_fingerprint and current_repeat > _resolve_fetch_repeat_limit(constraint_input):
             return _hard_block(
@@ -109,6 +122,7 @@ def _predict_same_tool_repeat_count(constraint_input: ConstraintInput) -> int:
     normalized_function_args = normalize_tool_execution_args(
         normalized_function_name=normalized_function_name,
         function_args=dict(constraint_input.function_args or {}),
+        intent_text=_build_step_candidate_text(constraint_input.step),
     )
     current_tool_fingerprint = _build_tool_fingerprint(
         normalized_function_name,

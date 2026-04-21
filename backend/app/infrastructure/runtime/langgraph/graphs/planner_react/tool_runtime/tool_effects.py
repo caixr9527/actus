@@ -6,7 +6,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from app.domain.models import SearchResults, Step, ToolResult
+from app.domain.models import (
+    BrowserActionableElementsResult,
+    BrowserMainContentResult,
+    BrowserPageStructuredResult,
+    SearchResults,
+    Step,
+    ToolResult,
+)
 from app.domain.services.runtime.contracts.langgraph_settings import (
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     BROWSER_NO_PROGRESS_LIMIT,
@@ -153,6 +160,16 @@ def apply_tool_result_effects(
             # P3-一次性收口：重复成功兜底保留标准化反馈文本，避免后续“成功但无可交付内容”。
             "feedback_content": _build_tool_feedback_content(function_name, tool_result),
         }
+        # P3-一次性收口：把最近成功工具调用同步到 runtime_recent_action，
+        # 供 general/final 收敛与总结节点在同一事实源上读取成功证据。
+        execution_state.runtime_recent_action["last_successful_tool_call"] = dict(
+            execution_state.last_successful_tool_call
+        )
+        _update_file_observation_snapshot(
+            execution_state=execution_state,
+            function_name=str(function_name or "").strip().lower(),
+            tool_result=tool_result,
+        )
         execution_state.last_successful_tool_fingerprint = _build_tool_fingerprint(
             str(normalized_function_name or "").strip().lower(),
             dict(function_args or {}),
@@ -210,6 +227,11 @@ def apply_tool_result_effects(
                 failed_url_key = _normalize_fetch_dedupe_key(function_args.get("url"))
                 if failed_url_key:
                     execution_state.research_failed_fetch_url_keys.add(failed_url_key)
+                if execution_context.research_has_explicit_url:
+                    _mark_explicit_url_fetch_failure(
+                        execution_state=execution_state,
+                        url=function_args.get("url"),
+                    )
         if (
                 normalized_function_name in BROWSER_HIGH_LEVEL_FUNCTION_NAMES
                 and effective_block_reason != REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED
@@ -276,18 +298,34 @@ def apply_tool_result_effects(
                 domain,
                 max_items=RESEARCH_PROGRESS_MAX_TRACK_ITEMS,
             )
-    elif execution_context.research_route_enabled and normalized_function_name == "fetch_page" and bool(
-            tool_result.success):
+    elif normalized_function_name == "fetch_page" and bool(tool_result.success):
         execution_state.last_fetch_quality = evaluate_fetch_result_quality(
             fetched_result=tool_result.data,
             fallback_url=str(function_args.get("url") or ""),
         )
         if not bool(execution_state.last_fetch_quality.get("is_useful")):
-            failed_url_key = _normalize_fetch_dedupe_key(function_args.get("url"))
-            if failed_url_key:
-                execution_state.research_failed_fetch_url_keys.add(failed_url_key)
-            execution_state.runtime_recent_action["research_diagnosis"] = build_research_diagnosis(
-                state=execution_state,
+            if execution_context.research_route_enabled:
+                failed_url_key = _normalize_fetch_dedupe_key(function_args.get("url"))
+                if failed_url_key:
+                    execution_state.research_failed_fetch_url_keys.add(failed_url_key)
+            if execution_context.research_has_explicit_url:
+                _mark_explicit_url_fetch_failure(
+                    execution_state=execution_state,
+                    url=function_args.get("url"),
+                )
+            if str(getattr(step, "task_mode_hint", "") or "").strip().lower() == "web_reading":
+                _mark_web_reading_low_value_fetch(
+                    execution_state=execution_state,
+                    url=function_args.get("url"),
+                )
+            if execution_context.research_route_enabled:
+                execution_state.consecutive_fetch_failure_count += 1
+                execution_state.runtime_recent_action["research_diagnosis"] = build_research_diagnosis(
+                    state=execution_state,
+                )
+            _sync_web_reading_runtime_state(
+                execution_state=execution_state,
+                include_explicit_url_state=execution_context.research_has_explicit_url,
             )
             log_runtime(
                 logger,
@@ -295,7 +333,7 @@ def apply_tool_result_effects(
                 "页面抓取成功但正文价值不足",
                 step_id=str(step.id or ""),
                 function_name=function_name,
-                diagnosis_code=str(execution_state.runtime_recent_action["research_diagnosis"].get("code") or ""),
+                diagnosis_code=str(dict(execution_state.runtime_recent_action.get("research_diagnosis") or {}).get("code") or ""),
                 low_value_reason=str(execution_state.last_fetch_quality.get("low_value_reason") or ""),
                 content_length=int(execution_state.last_fetch_quality.get("content_length") or 0),
             )
@@ -303,22 +341,36 @@ def apply_tool_result_effects(
                 tool_result=ToolResult(
                     success=False,
                     message="页面已读取，但正文价值不足，未拿到可用于当前研究步骤的有效信息。",
-                    data={
-                        "research_diagnosis": dict(execution_state.runtime_recent_action["research_diagnosis"]),
-                    },
+                    data=(
+                        {
+                            "research_diagnosis": dict(
+                                execution_state.runtime_recent_action.get("research_diagnosis") or {}
+                            ),
+                        }
+                        if execution_context.research_route_enabled
+                        else {}
+                    ),
                 ),
                 loop_break_reason=loop_break_reason,
             )
-        execution_state.research_fetch_completed = True
-        execution_state.research_fetch_success_count += 1
-        execution_state.consecutive_fetch_failure_count = 0
-        execution_state.research_cross_domain_repeat_blocks = 0
+        if execution_context.research_route_enabled:
+            execution_state.research_fetch_completed = True
+            execution_state.research_fetch_success_count += 1
+            execution_state.consecutive_fetch_failure_count = 0
+            execution_state.research_cross_domain_repeat_blocks = 0
         fetched_url = _extract_fetched_page_url(tool_result)
         # 抓取成功后，若此前误入失败黑名单，立即清理对应 key。
         successful_url_key = _normalize_fetch_dedupe_key(fetched_url or function_args.get("url"))
-        if successful_url_key and successful_url_key in execution_state.research_failed_fetch_url_keys:
+        if execution_context.research_route_enabled and successful_url_key and successful_url_key in execution_state.research_failed_fetch_url_keys:
             execution_state.research_failed_fetch_url_keys.discard(successful_url_key)
-        if fetched_url:
+        if successful_url_key:
+            execution_state.web_reading_low_value_url_keys.discard(successful_url_key)
+            execution_state.web_reading_low_value_repeat_counter.pop(successful_url_key, None)
+            execution_state.web_reading_low_value_urls = [
+                url for url in list(execution_state.web_reading_low_value_urls or [])
+                if _normalize_fetch_dedupe_key(url) != successful_url_key
+            ]
+        if execution_context.research_route_enabled and fetched_url:
             _append_unique_text(
                 execution_state.research_fetched_urls,
                 fetched_url,
@@ -331,7 +383,18 @@ def apply_tool_result_effects(
                     domain,
                     max_items=RESEARCH_PROGRESS_MAX_TRACK_ITEMS,
                 )
-        execution_state.research_coverage_score = _estimate_research_coverage_score(execution_state)
+        if execution_context.research_route_enabled:
+            execution_state.research_coverage_score = _estimate_research_coverage_score(execution_state)
+        _append_web_reading_evidence(
+            execution_state=execution_state,
+            function_name=normalized_function_name,
+            tool_result=tool_result,
+            fallback_url=str(function_args.get("url") or ""),
+        )
+        _sync_web_reading_runtime_state(
+            execution_state=execution_state,
+            include_explicit_url_state=execution_context.research_has_explicit_url,
+        )
     if execution_context.research_route_enabled:
         execution_state.research_coverage_score = _estimate_research_coverage_score(execution_state)
         execution_state.runtime_recent_action["research_progress"] = _build_research_progress_snapshot(execution_state)
@@ -394,6 +457,22 @@ def apply_tool_result_effects(
             execution_state.browser_link_match_ready = True
         elif normalized_function_name == "browser_find_actionable_elements":
             execution_state.browser_actionables_ready = True
+        if normalized_function_name in {
+            "browser_read_current_page_structured",
+            "browser_extract_main_content",
+            "browser_find_actionable_elements",
+        }:
+            _append_web_reading_evidence(
+                execution_state=execution_state,
+                function_name=normalized_function_name,
+                tool_result=tool_result,
+                fallback_url=execution_state.last_browser_route_url,
+            )
+            if str(getattr(step, "task_mode_hint", "") or "").strip().lower() == "web_reading":
+                _sync_web_reading_runtime_state(
+                    execution_state=execution_state,
+                    include_explicit_url_state=execution_context.research_has_explicit_url,
+                )
 
     if normalized_function_name in BROWSER_PROGRESS_FUNCTIONS and bool(tool_result.success):
         browser_observation_fingerprint = _build_browser_observation_fingerprint(tool_result)
@@ -589,4 +668,264 @@ def _build_research_progress_snapshot(state: ExecutionState) -> Dict[str, Any]:
         "missing_signals": missing_signals,
         "latest_query": str(state.research_query_history[-1] if state.research_query_history else ""),
         "latest_fetched_url": str(state.research_fetched_urls[-1] if state.research_fetched_urls else ""),
+        # 搜索摘要证据是 research 收敛的一等输入，供 max-iteration 降级收敛与后续 summary 消费。
+        "search_evidence_summaries": _build_search_evidence_summaries(state),
+        # 页面读取证据供 web_reading/general 收敛消费，避免 browser 成功后继续抓取。
+        "web_reading_evidence_summaries": _build_web_reading_evidence_summaries(state),
+        "explicit_url_read_state": _build_explicit_url_read_state(state),
     }
+
+
+def _build_search_evidence_summaries(state: ExecutionState) -> List[Dict[str, str]]:
+    summaries: List[Dict[str, str]] = []
+    for item in list(state.research_search_evidence_items or [])[:5]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        if not url and not snippet:
+            continue
+        summaries.append(
+            {
+                "title": title[:100],
+                "url": url[:240],
+                "snippet": snippet[:320],
+            }
+        )
+    return summaries
+
+
+def _update_file_observation_snapshot(
+        *,
+        execution_state: ExecutionState,
+        function_name: str,
+        tool_result: ToolResult,
+) -> None:
+    """目录/文件观察事实单独沉淀，避免被后续其他成功工具覆盖。"""
+    normalized_function_name = str(function_name or "").strip().lower()
+    data = tool_result.data if isinstance(tool_result.data, dict) else {}
+    if normalized_function_name not in {"list_files", "find_files"} or not isinstance(data, dict):
+        return
+    snapshot = {
+        "function_name": normalized_function_name,
+        "dir_path": str(data.get("dir_path") or "").strip(),
+        "files": list(data.get("files") or []) if isinstance(data.get("files"), list) else [],
+    }
+    execution_state.file_observation_snapshot = snapshot
+    execution_state.runtime_recent_action["file_observation_snapshot"] = dict(snapshot)
+
+
+def _sync_web_reading_runtime_state(
+        *,
+        execution_state: ExecutionState,
+        include_explicit_url_state: bool,
+) -> None:
+    """同步 web_reading 完成合同依赖的数据源，不能依赖 research_route_enabled。"""
+    execution_state.runtime_recent_action["web_reading_evidence_summaries"] = _build_web_reading_evidence_summaries(
+        execution_state
+    )
+    if include_explicit_url_state:
+        execution_state.runtime_recent_action["explicit_url_read_state"] = _build_explicit_url_read_state(
+            execution_state
+        )
+
+
+def _append_web_reading_evidence(
+        *,
+        execution_state: ExecutionState,
+        function_name: str,
+        tool_result: ToolResult,
+        fallback_url: str = "",
+) -> None:
+    """把 fetch/browser 成功结果统一归并为页面阅读证据。"""
+    evidence = _extract_web_reading_evidence(
+        function_name=function_name,
+        tool_result=tool_result,
+        fallback_url=fallback_url,
+    )
+    if not evidence:
+        return
+    existing_keys = {
+        str(item.get("key") or "")
+        for item in list(execution_state.web_reading_evidence_items or [])
+        if isinstance(item, dict)
+    }
+    if str(evidence.get("key") or "") in existing_keys:
+        return
+    execution_state.web_reading_evidence_items.append(evidence)
+    execution_state.web_reading_evidence_items = execution_state.web_reading_evidence_items[:RESEARCH_PROGRESS_MAX_TRACK_ITEMS]
+    execution_state.runtime_recent_action["web_reading_evidence_summaries"] = _build_web_reading_evidence_summaries(
+        execution_state
+    )
+
+
+def _extract_web_reading_evidence(
+        *,
+        function_name: str,
+        tool_result: ToolResult,
+        fallback_url: str = "",
+) -> Dict[str, Any]:
+    data = tool_result.data
+    normalized_function_name = str(function_name or "").strip().lower()
+    if normalized_function_name == "fetch_page":
+        url = _extract_fetched_page_url(tool_result) or str(fallback_url or "").strip()
+        title = _extract_value(data, "title")
+        content = _extract_value(data, "content") or _extract_value(data, "text") or _extract_value(data, "markdown")
+        summary = content[:420]
+        if not summary:
+            return {}
+        return {
+            "key": f"fetch_page:{_normalize_fetch_dedupe_key(url) or title}",
+            "function_name": normalized_function_name,
+            "url": url,
+            "title": title,
+            "summary": summary,
+            "content_length": len(content),
+            "link_count": 0,
+            "quality": "strong",
+        }
+    if isinstance(data, BrowserPageStructuredResult):
+        summary = str(data.content_summary or data.main_content_preview or "").strip()
+        link_count = len(list(data.cards or [])) + len(list(data.actionable_elements or []))
+        if not summary and link_count <= 0:
+            return {}
+        return {
+            "key": f"{normalized_function_name}:{data.url}:{data.title}:{summary[:80]}",
+            "function_name": normalized_function_name,
+            "url": str(data.url or "").strip() or fallback_url,
+            "title": str(data.title or data.main_heading or "").strip(),
+            "summary": summary[:420] if summary else "已读取页面结构和候选链接。",
+            "content_length": len(summary),
+            "link_count": link_count,
+            "quality": "strong" if summary else "weak",
+        }
+    if isinstance(data, BrowserMainContentResult):
+        content = str(data.excerpt or data.content or "").strip()
+        if not content:
+            return {}
+        return {
+            "key": f"{normalized_function_name}:{data.url}:{data.title}:{content[:80]}",
+            "function_name": normalized_function_name,
+            "url": str(data.url or "").strip() or fallback_url,
+            "title": str(data.title or "").strip(),
+            "summary": content[:420],
+            "content_length": int(data.content_length or len(content)),
+            "link_count": 0,
+            "quality": "strong",
+        }
+    if isinstance(data, BrowserActionableElementsResult):
+        link_count = len(list(data.elements or []))
+        if link_count <= 0:
+            return {}
+        return {
+            "key": f"{normalized_function_name}:{data.url}:{data.title}:{link_count}",
+            "function_name": normalized_function_name,
+            "url": str(data.url or "").strip() or fallback_url,
+            "title": str(data.title or "").strip(),
+            "summary": "已读取页面可继续访问的候选链接/交互元素。",
+            "content_length": 0,
+            "link_count": link_count,
+            "quality": "weak",
+        }
+    if isinstance(data, dict):
+        url = str(data.get("url") or data.get("final_url") or fallback_url or "").strip()
+        title = str(data.get("title") or data.get("main_heading") or "").strip()
+        summary = str(
+            data.get("content_summary")
+            or data.get("main_content_summary")
+            or data.get("main_content_preview")
+            or data.get("excerpt")
+            or data.get("content")
+            or data.get("text")
+            or ""
+        ).strip()
+        actionables = data.get("actionable_elements")
+        cards = data.get("cards")
+        link_count = (len(actionables) if isinstance(actionables, list) else 0) + (
+            len(cards) if isinstance(cards, list) else 0
+        )
+        if not summary and link_count <= 0:
+            return {}
+        return {
+            "key": f"{normalized_function_name}:{url}:{title}:{summary[:80]}:{link_count}",
+            "function_name": normalized_function_name,
+            "url": url,
+            "title": title,
+            "summary": summary[:420] if summary else "已读取页面结构和候选链接。",
+            "content_length": int(data.get("content_length") or len(summary)),
+            "link_count": link_count,
+            "quality": "strong" if summary else "weak",
+        }
+    return {}
+
+
+def _build_web_reading_evidence_summaries(state: ExecutionState) -> List[Dict[str, Any]]:
+    summaries: List[Dict[str, Any]] = []
+    for item in list(state.web_reading_evidence_items or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        summaries.append(
+            {
+                "function_name": str(item.get("function_name") or ""),
+                "url": str(item.get("url") or "")[:240],
+                "title": str(item.get("title") or "")[:100],
+                "summary": str(item.get("summary") or "")[:420],
+                "content_length": int(item.get("content_length") or 0),
+                "link_count": int(item.get("link_count") or 0),
+                "quality": str(item.get("quality") or ""),
+            }
+        )
+    return summaries
+
+
+def _mark_explicit_url_fetch_failure(*, execution_state: ExecutionState, url: Any) -> None:
+    url_text = normalize_url_value(url)
+    url_key = _normalize_fetch_dedupe_key(url_text)
+    if url_key:
+        execution_state.explicit_url_failed_url_keys.add(url_key)
+    if url_text:
+        _append_unique_text(
+            execution_state.explicit_url_failed_urls,
+            url_text,
+            max_items=RESEARCH_PROGRESS_MAX_TRACK_ITEMS,
+        )
+    execution_state.explicit_url_low_value_count += 1
+    execution_state.explicit_url_degraded = execution_state.explicit_url_low_value_count >= 2
+    execution_state.runtime_recent_action["explicit_url_read_state"] = _build_explicit_url_read_state(execution_state)
+
+
+def _mark_web_reading_low_value_fetch(*, execution_state: ExecutionState, url: Any) -> None:
+    """记录 web_reading 中正文低价值的 URL，避免在同一页面上重复空转。"""
+    url_text = normalize_url_value(url)
+    url_key = _normalize_fetch_dedupe_key(url_text)
+    if not url_key:
+        return
+    next_repeat_count = int(execution_state.web_reading_low_value_repeat_counter.get(url_key, 0)) + 1
+    execution_state.web_reading_low_value_repeat_counter[url_key] = next_repeat_count
+    if url_text:
+        _append_unique_text(
+            execution_state.web_reading_low_value_urls,
+            url_text,
+            max_items=RESEARCH_PROGRESS_MAX_TRACK_ITEMS,
+        )
+    if next_repeat_count >= 2:
+        execution_state.web_reading_low_value_url_keys.add(url_key)
+
+
+def _build_explicit_url_read_state(state: ExecutionState) -> Dict[str, Any]:
+    return {
+        "failed_urls": list(state.explicit_url_failed_urls or [])[:6],
+        "failed_url_count": len(list(state.explicit_url_failed_urls or [])),
+        "low_value_count": int(state.explicit_url_low_value_count or 0),
+        "degraded": bool(state.explicit_url_degraded),
+        "browser_evidence_ready": len(list(state.web_reading_evidence_items or [])) > 0,
+    }
+
+
+def _extract_value(data: Any, key: str) -> str:
+    if isinstance(data, dict):
+        return str(data.get(key) or "").strip()
+    if hasattr(data, key):
+        return str(getattr(data, key, "") or "").strip()
+    return ""

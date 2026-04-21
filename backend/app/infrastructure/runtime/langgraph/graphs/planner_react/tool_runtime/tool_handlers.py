@@ -11,6 +11,7 @@ from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, lo
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.policies import (
     build_tool_fingerprint as _build_tool_fingerprint,
+    build_step_candidate_text as _build_step_candidate_text,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
     normalize_tool_execution_args,
@@ -53,6 +54,7 @@ async def execute_tool_with_policy(
     normalized_function_args = normalize_tool_execution_args(
         normalized_function_name=normalized_function_name,
         function_args=function_args,
+        intent_text=_build_step_candidate_text(step),
     )
     log_runtime(
         logger,

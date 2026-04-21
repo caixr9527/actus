@@ -42,8 +42,9 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     format_attachments_for_prompt,
     normalize_attachments,
 )
-
-from ..execution.tools import has_available_file_context
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
+    has_available_file_context,
+)
 from .confirmed_facts import _build_step_execution_text, _normalize_confirmed_fact_map
 from .control_state import replace_control_metadata
 from .delivery_helpers import (
@@ -80,6 +81,7 @@ class ExecuteStepPreparedInput:
     available_file_context_refs: List[str]
     available_file_context: bool
     execute_context_updates: Dict[str, Any]
+    initial_runtime_recent_action: Dict[str, Any]
     user_content: List[Dict[str, Any]]
 
 
@@ -112,7 +114,14 @@ class ExecuteStepInterruptTransition:
 
 @dataclass(frozen=True)
 class ExecuteStepCompletedTransition:
-    """completed 分支的结果落账与 state 写回结果。"""
+    """completed 分支的结果落账与 state 写回结果。
+
+    字段说明：
+    - `updates`: execute_step_node 最终写回 graph state 的增量；
+    - `events`: 当前步骤需要落账的 started/tool/completed 事件；
+    - `next_step_id`: 本轮完成后下一步的标识，供节点路由继续推进；
+    - 计数字段仅用于日志与测试断言，不参与业务判定。
+    """
 
     updates: Dict[str, Any]
     events: List[Any]
@@ -161,7 +170,16 @@ async def prepare_execute_step_input(
         task_mode: str,
         user_message: str,
 ) -> ExecuteStepPreparedInput:
-    """装配执行阶段输入，不处理 graph state 写回。"""
+    """装配执行阶段输入，不处理 graph state 写回。
+
+    这里统一负责三类输入：
+    - prompt 主体：用户消息、步骤描述、附件提示；
+    - 执行上下文：workspace/context service 输出的阶段上下文；
+    - 执行约束辅助信号：当前可用文件上下文、recent action 初始快照。
+
+    `initial_runtime_recent_action` 保留“执行前”上下文快照，
+    便于后续工具执行和完成写回在同一份基线之上累积结果，避免阶段信息丢失。
+    """
     plan = state.get("plan")
     language = getattr(plan, "language", None) or "zh"
     working_memory = _ensure_working_memory(state)
@@ -201,6 +219,9 @@ async def prepare_execute_step_input(
         runtime_context_service=runtime_context_service,
         context_packet=execute_context_packet,
     )
+    initial_runtime_recent_action = runtime_context_service.normalize_runtime_recent_action(
+        execute_context_packet.get("recent_action_digest")
+    )
     user_message_prompt = _append_prompt_context_to_prompt(user_message_prompt, execute_context_packet)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
     return ExecuteStepPreparedInput(
@@ -213,6 +234,7 @@ async def prepare_execute_step_input(
         available_file_context_refs=available_file_context_refs,
         available_file_context=available_file_context,
         execute_context_updates=execute_context_updates,
+        initial_runtime_recent_action=initial_runtime_recent_action,
         user_content=user_content,
     )
 

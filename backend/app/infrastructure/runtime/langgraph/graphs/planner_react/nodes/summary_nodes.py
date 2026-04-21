@@ -34,7 +34,10 @@ from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import safe_parse_json
+from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
+    normalize_attachments,
+    safe_parse_json,
+)
 from ..live_events import emit_live_events
 from .control_state import get_control_metadata as _get_control_metadata
 from .delivery_helpers import (
@@ -258,6 +261,15 @@ async def summarize_node(
             state,
             parsed.get("attachments"),
             runtime_context_service=runtime_context_service,
+        )
+        log_runtime(
+            logger,
+            logging.INFO,
+            "总结附件过滤完成",
+            state=state,
+            raw_attachment_count=len(normalize_attachments(parsed.get("attachments"))),
+            final_attachment_count=len(summary_attachment_refs),
+            final_attachment_paths=summary_attachment_refs,
         )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
 

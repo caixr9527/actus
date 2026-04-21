@@ -129,6 +129,7 @@ async def execute_step_node(
                     attachment_paths=prepared_execute_input.attachments,
                     artifact_paths=prepared_execute_input.available_file_context_refs,
                     has_available_file_context=prepared_execute_input.available_file_context,
+                    initial_runtime_recent_action=prepared_execute_input.initial_runtime_recent_action,
                 )
                 tool_cost_ms = elapsed_ms(tool_started_at)
 

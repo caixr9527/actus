@@ -7,18 +7,16 @@
 """
 
 import json
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.models import (
     ExecutionStatus,
-    File,
     Step,
-    StepDeliveryContextState,
     StepDeliveryRole,
     StepOutputMode,
     StepOutcome,
-    ToolEvent,
 )
 from app.domain.services.prompts import SUMMARIZE_PROMPT
 from app.domain.services.runtime.contracts.langgraph_settings import (
@@ -29,7 +27,6 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     append_unique_text,
-    build_delivery_text,
     is_attachment_filepath,
     normalize_controlled_value,
     normalize_delivery_payload,
@@ -44,6 +41,13 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import nor
 from ..parsers import merge_attachment_paths
 from .working_memory import _ensure_working_memory
 
+logger = logging.getLogger(__name__)
+
+_RUNTIME_TEMP_ATTACHMENT_NAME_PATTERN = re.compile(
+    r"(^|/)(temp_response\.json|response\.json|final_output\.txt|directory_info\.txt|.*\.tmp|.*\.log)$",
+    re.IGNORECASE,
+)
+
 
 def _truncate_text(value: Any, *, max_chars: int) -> str:
     return truncate_text(value, max_chars=max_chars)
@@ -54,6 +58,13 @@ def _infer_step_attachment_delivery_preference(
         user_message: str,
         normalized_execution: Dict[str, Any],
 ) -> Optional[bool]:
+    """推断本步骤结果是否更适合附件交付。
+
+    判定顺序：
+    1. 优先尊重执行结果里的显式字段；
+    2. 其次根据用户本轮消息做轻量推断；
+    3. 都没有时返回 `None`，交给后续 summary/final 阶段继续决策。
+    """
     # P3-CASE3 修复：常量在 settings，判定逻辑集中在 nodes。
     explicit_preference = normalize_optional_bool((normalized_execution or {}).get("deliver_result_as_attachment"))
     if explicit_preference is not None:
@@ -66,6 +77,7 @@ def _infer_step_attachment_delivery_preference(
     if ATTACHMENT_DELIVERY_ALLOW_PATTERN.search(normalized_message):
         return True
     return None
+
 
 def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
     """仅为显式 final 交付步骤保留重正文，避免中间内联步骤误覆盖最终正文。"""
@@ -95,6 +107,7 @@ def _build_step_delivery_payload(step: Optional[Step]) -> Dict[str, Any]:
         }
     )
 
+
 def _sanitize_step_delivery_text(step: Step, raw_delivery_text: Any) -> str:
     """只有显式 inline 交付步骤才允许保留 delivery_text。"""
     delivery_text = normalize_step_result_text(raw_delivery_text)
@@ -112,6 +125,7 @@ def _sanitize_step_delivery_text(step: Step, raw_delivery_text: Any) -> str:
         return ""
     return delivery_text
 
+
 def _is_intermediate_delivery_step(step: Optional[Step]) -> bool:
     """识别“预览/草稿”类中间交付步骤。"""
     if step is None:
@@ -119,6 +133,7 @@ def _is_intermediate_delivery_step(step: Optional[Step]) -> bool:
     return normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole) == (
         StepDeliveryRole.INTERMEDIATE.value
     )
+
 
 def _build_intermediate_round_summary_prompt(context_packet: Dict[str, Any]) -> str:
     """预览/草稿轮仍需进入 summary，但只允许输出轻量收尾。"""
@@ -133,12 +148,14 @@ def _build_intermediate_round_summary_prompt(context_packet: Dict[str, Any]) -> 
 - 如果存在历史最终正文载荷，也不要复用为本轮给用户的最终消息。
 """
 
+
 def _build_intermediate_round_summary_fallback(step: Optional[Step]) -> str:
     """给预览/草稿轮提供稳定的轻量收尾兜底文案。"""
     step_label = str(getattr(step, "title", None) or getattr(step, "description", None) or "").strip()
     if step_label:
         return f"已生成{step_label}，如需调整方向或补充要求，请直接告诉我。"
     return "已生成预览草稿，如需调整方向或补充要求，请直接告诉我。"
+
 
 def _is_completed_status(value: Any) -> bool:
     return normalize_controlled_value(value, ExecutionStatus) == ExecutionStatus.COMPLETED.value
@@ -179,6 +196,7 @@ def _is_successful_step_outcome(status: Any, outcome_raw: Any) -> bool:
     outcome = _hydrate_step_outcome(outcome_raw)
     return outcome is not None and bool(outcome.done)
 
+
 def _normalize_successful_outcome_artifacts(status: Any, outcome_raw: Any) -> List[str]:
     if not _is_successful_step_outcome(status, outcome_raw):
         return []
@@ -189,6 +207,7 @@ def _normalize_successful_outcome_artifacts(status: Any, outcome_raw: Any) -> Li
         outcome.produced_artifacts,
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
+
 
 def _collect_last_successful_step_artifacts(state: PlannerReActLangGraphState) -> List[str]:
     step_states = list(state.get("step_states") or [])
@@ -208,6 +227,7 @@ def _collect_last_successful_step_artifacts(state: PlannerReActLangGraphState) -
         if normalized:
             return normalized
     return []
+
 
 def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
     artifact_groups: List[List[str]] = []
@@ -236,6 +256,7 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
 
+
 def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> List[str]:
     """统一收口当前运行里可直接消费的文件路径，供执行器判断是否允许文件工具。"""
     return normalize_file_path_list(
@@ -250,6 +271,7 @@ def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> L
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
 
+
 def _resolve_final_delivery_source_refs(state: PlannerReActLangGraphState) -> List[str]:
     """最终重交付正文的附件来源以 final_delivery_payload 为真相源。"""
     working_memory = _ensure_working_memory(state)
@@ -258,6 +280,7 @@ def _resolve_final_delivery_source_refs(state: PlannerReActLangGraphState) -> Li
         delivery_payload.get("source_refs"),
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
+
 
 def _filter_attachment_refs_by_authoritative_paths(
         refs: List[str],
@@ -268,14 +291,15 @@ def _filter_attachment_refs_by_authoritative_paths(
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     if len(authoritative_paths) == 0:
-        return normalized_refs
+        return _filter_runtime_temp_attachment_refs(normalized_refs)
     allowed_paths = set(
         normalize_file_path_list(
             authoritative_paths,
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         )
     )
-    return [ref for ref in normalized_refs if ref in allowed_paths]
+    return _filter_runtime_temp_attachment_refs([ref for ref in normalized_refs if ref in allowed_paths])
+
 
 async def _resolve_summary_attachment_refs(
         state: PlannerReActLangGraphState,
@@ -305,9 +329,18 @@ async def _resolve_summary_attachment_refs(
             return resolved_explicit_refs
 
     if len(final_delivery_source_refs) > 0:
-        return final_delivery_source_refs
+        return _filter_runtime_temp_attachment_refs(final_delivery_source_refs)
 
     return []
+
+
+def _filter_runtime_temp_attachment_refs(refs: List[str]) -> List[str]:
+    """过滤运行时临时调试文件，避免被误交付到最终结果。"""
+    return [
+        ref for ref in normalize_file_path_list(refs, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
+        if not _RUNTIME_TEMP_ATTACHMENT_NAME_PATTERN.search(str(ref or "").strip())
+    ]
+
 
 def _resolve_attachment_delivery_preference_for_summary(
         *,
@@ -326,12 +359,14 @@ def _resolve_attachment_delivery_preference_for_summary(
         return None
     return normalize_optional_bool(delivery_controls.get("deliver_result_as_attachment"))
 
+
 def _should_skip_summary_llm_for_final_delivery(
         *,
         summarize_intermediate_round: bool,
         last_executed_step: Optional[Step],
         deterministic_delivery_text: str,
 ) -> bool:
+    """判断最终交付是否可跳过 summary LLM，直接复用确定性正文。"""
     if summarize_intermediate_round:
         return False
     if not deterministic_delivery_text:
@@ -346,6 +381,7 @@ def _should_skip_summary_llm_for_final_delivery(
             and output_mode == StepOutputMode.INLINE.value
             and delivery_role == StepDeliveryRole.FINAL.value
     )
+
 
 def _merge_step_outcome_into_working_memory(
         working_memory: Dict[str, Any],
@@ -399,6 +435,7 @@ def _merge_step_outcome_into_working_memory(
         updated_working_memory["final_delivery_payload"] = delivery_payload
     return updated_working_memory
 
+
 def _build_reused_step_outcome(
         source_outcome: StepOutcome,
         *,
@@ -422,6 +459,7 @@ def _build_reused_step_outcome(
         reused_from_run_id=reused_from_run_id,
         reused_from_step_id=reused_from_step_id,
     )
+
 
 def _find_reusable_step_outcome(
         state: PlannerReActLangGraphState,

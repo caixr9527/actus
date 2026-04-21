@@ -46,6 +46,17 @@ class ExecutionState:
     research_recommended_fetch_urls: List[str] = field(default_factory=list)
     last_search_evidence_quality: Dict[str, Any] = field(default_factory=dict)
     last_fetch_quality: Dict[str, Any] = field(default_factory=dict)
+    # 网页阅读证据池：fetch_page 与浏览器高阶工具都会归并到这里，供 web_reading 收敛统一消费。
+    web_reading_evidence_items: List[Dict[str, Any]] = field(default_factory=list)
+    # 显式 URL 读取降级状态：fetch 多次低价值/失败后停止重复抓取，避免 replan 放大。
+    explicit_url_failed_url_keys: Set[str] = field(default_factory=set)
+    explicit_url_failed_urls: List[str] = field(default_factory=list)
+    explicit_url_low_value_count: int = 0
+    explicit_url_degraded: bool = False
+    # 网页读取 URL 级低价值治理：避免同一 URL 在 fetch_page 上反复空转。
+    web_reading_low_value_url_keys: Set[str] = field(default_factory=set)
+    web_reading_low_value_urls: List[str] = field(default_factory=list)
+    web_reading_low_value_repeat_counter: Dict[str, int] = field(default_factory=dict)
     # 浏览器链路进展：记录当前页面类型以及结构化/正文/cards/actionables 等能力是否已就绪。
     browser_page_type: str = ""
     browser_structured_ready: bool = False
@@ -74,3 +85,5 @@ class ExecutionState:
     # P3-一次性收口：记录最近一次成功工具调用，供“重复调用但已有有效结果”收敛时兜底。
     last_successful_tool_call: Dict[str, Any] = field(default_factory=dict)
     last_successful_tool_fingerprint: str = ""
+    # 文件观察稳定快照：目录/文件列表类事实单独沉淀，避免被后续其他成功工具覆盖。
+    file_observation_snapshot: Dict[str, Any] = field(default_factory=dict)

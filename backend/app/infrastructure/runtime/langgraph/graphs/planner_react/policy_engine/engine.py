@@ -8,6 +8,9 @@ from typing import Any, Dict, List, Optional, Set
 
 from app.domain.models import Step, ToolResult
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.services.workspace_runtime.policies import (
+    build_step_candidate_text as _build_step_candidate_text,
+)
 from app.domain.services.tools import BaseTool
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import (
     ExecutionContext,
@@ -133,6 +136,7 @@ class ToolPolicyEngine:
         normalized_final_function_args = normalize_tool_execution_args(
             normalized_function_name=final_normalized_function_name,
             function_args=final_function_args,
+            intent_text=_build_step_candidate_text(step),
         )
         if engine_result.rewrite_applied:
             run_rewrite_effects_plugin(

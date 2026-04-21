@@ -18,11 +18,23 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
-from ..convergence.judge import ConvergenceJudge
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence import (
+    ConvergenceJudge,
+    GeneralConvergenceJudge,
+    ResearchConvergenceJudge,
+    WebReadingConvergenceJudge,
+)
 
 
 @dataclass(slots=True)
 class NoToolCallFinalizationResult:
+    """无工具调用场景的统一收口结果。
+
+    - `action=return` 表示当前轮可以直接收口；
+    - `action=retry` 表示当前轮结果不足，外层工具循环应继续尝试；
+    - `payload` 是最终返回给执行节点的标准化执行结果。
+    """
+
     action: str
     payload: Optional[Dict[str, Any]] = None
     parsed: Dict[str, Any] = field(default_factory=dict)
@@ -76,6 +88,21 @@ def finalize_no_tool_call(
             elapsed_ms=elapsed_ms(started_at),
         )
         return NoToolCallFinalizationResult(action="retry", parsed=parsed)
+    if inferred_success and not WebReadingConvergenceJudge.should_allow_model_only_success(
+            task_mode=task_mode,
+            runtime_recent_action=runtime_recent_action,
+    ):
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "网页阅读步骤未满足页面证据合同，拒绝无工具直接完成",
+            step_id=str(step.id or ""),
+            iteration=iteration,
+            task_mode=task_mode,
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return NoToolCallFinalizationResult(action="retry", parsed=parsed)
 
     log_runtime(
         logger,
@@ -119,6 +146,13 @@ def finalize_max_iterations(
         runtime_recent_action: Optional[Dict[str, Any]] = None,
         step_file_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """处理达到最大工具轮次后的统一收口。
+
+    处理顺序：
+    1. 先按 research/web_reading/general/common 四层收敛器尝试复用现有证据；
+    2. 全部失败后再返回明确未完成的 loop break 结果；
+    3. 本函数只决定“如何收口”，不负责继续发起新一轮工具调用。
+    """
     parsed = safe_parse_json(llm_message.get("content"))
     if task_mode == "human_wait":
         log_runtime(
@@ -148,6 +182,60 @@ def finalize_max_iterations(
         elapsed_ms=elapsed_ms(started_at),
     )
     # P3 解耦：先尝试按关键事实收敛，避免 file_processing final inline 在事实已满足时误判失败。
+    research_converged_payload = ResearchConvergenceJudge.build_max_iteration_convergence_payload(
+        step=step,
+        task_mode=task_mode,
+        runtime_recent_action=runtime_recent_action,
+    )
+    if research_converged_payload is not None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "达到最大工具轮次但研究摘要证据可用，按阶段性结果收敛",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            requested_max_tool_iterations=requested_max_tool_iterations,
+            iteration_count=iteration_count,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return research_converged_payload
+
+    web_reading_converged_payload = WebReadingConvergenceJudge.build_max_iteration_convergence_payload(
+        step=step,
+        task_mode=task_mode,
+        runtime_recent_action=runtime_recent_action,
+    )
+    if web_reading_converged_payload is not None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "达到最大工具轮次但网页阅读证据可用，按阶段性结果收敛",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            requested_max_tool_iterations=requested_max_tool_iterations,
+            iteration_count=iteration_count,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return web_reading_converged_payload
+
+    general_converged_payload = GeneralConvergenceJudge.build_max_iteration_convergence_payload(
+        step=step,
+        task_mode=task_mode,
+        runtime_recent_action=runtime_recent_action,
+    )
+    if general_converged_payload is not None:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "达到最大工具轮次但通用整理证据可用，按成功收敛",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            requested_max_tool_iterations=requested_max_tool_iterations,
+            iteration_count=iteration_count,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return general_converged_payload
+
     converged_payload = ConvergenceJudge.build_max_iteration_convergence_payload(
         step=step,
         task_mode=task_mode,
@@ -183,6 +271,7 @@ def _build_max_iteration_next_hint(
         task_mode: str,
         runtime_recent_action: Optional[Dict[str, Any]],
 ) -> str:
+    """为最大轮次收口补充下一轮操作建议。"""
     default_hint = "请缩小步骤范围、改用更合适工具，或让模型直接给出当前可确认的结果。"
     if task_mode not in {"research", "web_reading"}:
         return default_hint

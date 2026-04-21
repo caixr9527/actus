@@ -7,7 +7,7 @@
 
 import json
 import logging
-from typing import Any, Dict, List
+from typing import List
 
 from app.domain.external import LLM
 from app.domain.models import PlanEvent, PlanEventStatus, Step, StepTaskModeHint

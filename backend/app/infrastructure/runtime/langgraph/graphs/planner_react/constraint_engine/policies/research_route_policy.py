@@ -9,21 +9,20 @@ from typing import Any, Optional
 
 from app.domain.services.runtime.contracts.langgraph_settings import RESEARCH_CROSS_DOMAIN_REPEAT_BLOCK_LIMIT
 from app.domain.services.runtime.contracts.langgraph_settings import RESEARCH_MIN_DOMAIN_COUNT
-from app.domain.services.runtime.contracts.langgraph_settings import RESEARCH_MIN_FETCH_COUNT
 from app.domain.services.runtime.normalizers import extract_url_domain, normalize_url_value
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintDecision
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintInput
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintToolResultPayload
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_QUERY_STYLE_BLOCKED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_CROSS_DOMAIN_FETCH_LIMIT
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_FETCH_REQUIRED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_ROUTE_SEARCH_REQUIRED
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_intent_policy import (
     is_explicit_single_page_fetch_intent,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_url_extractor import (
     extract_explicit_url_from_research_context,
+)
+from ..contracts import ConstraintDecision, ConstraintInput, ConstraintToolResultPayload
+from ..reason_codes import (
+    REASON_RESEARCH_QUERY_STYLE_BLOCKED,
+    REASON_RESEARCH_ROUTE_CROSS_DOMAIN_FETCH_LIMIT,
+    REASON_RESEARCH_ROUTE_FETCH_REQUIRED,
+    REASON_RESEARCH_ROUTE_SEARCH_REQUIRED,
+    REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE,
 )
 
 _SEARCH_QUERY_CJK_KEYWORD_STACK_PATTERN = re.compile(
