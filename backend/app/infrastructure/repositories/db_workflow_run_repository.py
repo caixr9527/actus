@@ -26,8 +26,9 @@ from app.domain.models import (
     WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
-from app.domain.services.runtime.normalizers import normalize_step_outcome_payload
 from app.domain.repositories import WorkflowRunRepository
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.normalizers import normalize_step_outcome_payload
 from app.infrastructure.models import WorkflowRunModel, WorkflowRunEventModel, WorkflowRunStepModel
 
 
@@ -234,6 +235,8 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             run_id: Optional[str],
             event: BaseEvent,
     ) -> bool:
+        if not should_persist_event(event):
+            return False
         if not run_id:
             return False
 

@@ -36,6 +36,7 @@ import { sessionApi } from '@/lib/api/session'
 import { toast } from 'sonner'
 import { Loader2 } from 'lucide-react'
 import { useI18n } from '@/lib/i18n'
+import { MarkdownContent } from '@/components/markdown-content'
 
 export interface SessionDetailViewProps {
   sessionId: string
@@ -115,6 +116,8 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     resumeWaitingRun,
     continueCancelledRun,
     streaming,
+    plannerTextStream,
+    finalTextStream,
   } = useSessionDetail(sessionId, hasInitialMessage, isHydrated && isLoggedIn)
 
   const timeline = useMemo(() => eventsToTimeline(events, locale), [events, locale])
@@ -337,6 +340,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     hasError: Boolean(error),
     hasRunningStep,
   })
+  // 草稿流已经承担“正在生成”的可视反馈，避免与通用 thinking 占位重复展示。
+  const hasVisibleTextStreamDraft = Boolean(
+    plannerTextStream?.text.trim() || finalTextStream?.text.trim()
+  )
 
   useEffect(() => {
     if (!shouldAutoScrollToLatest({
@@ -548,7 +555,35 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                   />
                 ))}
 
-                {shouldShowThinking && (
+                {plannerTextStream && plannerTextStream.text.trim() && (
+                  <div className="mt-3 flex flex-col gap-2 w-full">
+                    <div className="flex items-center justify-between h-7">
+                      <div className="flex items-center justify-center gap-1 text-gray-500">
+                        <Loader2 className="size-4 animate-spin" />
+                        <span className="text-xs">{t('sessionDetail.thinking')}</span>
+                      </div>
+                    </div>
+                    <div className="max-w-none p-0 m-0 text-gray-500">
+                      <MarkdownContent content={plannerTextStream.text} className="text-gray-500" />
+                    </div>
+                  </div>
+                )}
+
+                {finalTextStream && finalTextStream.text.trim() && (
+                  <div className="mt-3 flex flex-col gap-2 w-full">
+                    <div className="flex items-center justify-between h-7">
+                      <div className="flex items-center justify-center gap-1 text-gray-500">
+                        <Loader2 className="size-4 animate-spin" />
+                        <span className="text-xs">{t('sessionDetail.thinking')}</span>
+                      </div>
+                    </div>
+                    <div className="max-w-none p-0 m-0 text-gray-700">
+                      <MarkdownContent content={finalTextStream.text} className="text-gray-700" />
+                    </div>
+                  </div>
+                )}
+
+                {shouldShowThinking && !hasVisibleTextStreamDraft && (
                   <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
                     <Loader2 className="size-4 animate-spin" />
                     <span>{t('sessionDetail.thinking')}</span>

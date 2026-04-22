@@ -11,6 +11,8 @@ from app.domain.models import (
     Step,
     StepEvent,
     StepEventStatus,
+    TextStreamChannel,
+    TextStreamDeltaEvent,
 )
 from app.infrastructure.repositories.db_session_repository import DBSessionRepository
 
@@ -129,3 +131,24 @@ def test_add_event_if_absent_should_fail_when_current_run_id_missing() -> None:
         asyncio.run(repository.add_event_if_absent(session_id="session-3", event=event))
 
     repository._workflow_run_repository.add_event_if_absent.assert_not_awaited()
+
+
+def test_add_event_if_absent_should_ignore_live_only_event() -> None:
+    record = SimpleNamespace(
+        id="session-4",
+        current_run_id="run-4",
+    )
+    repository, db_session = _build_repository(record=record, event_inserted=True)
+    event = TextStreamDeltaEvent(
+        id="evt-live-only-1",
+        stream_id="stream-1",
+        channel=TextStreamChannel.PLANNER_MESSAGE,
+        text="draft",
+        sequence=1,
+    )
+
+    inserted = asyncio.run(repository.add_event_if_absent(session_id="session-4", event=event))
+
+    assert inserted is False
+    repository._workflow_run_repository.add_event_if_absent.assert_not_awaited()
+    db_session.execute.assert_not_awaited()

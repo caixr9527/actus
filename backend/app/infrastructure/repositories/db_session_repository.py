@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import Session, SessionStatus, BaseEvent, File, PlanEvent, StepEvent
 from app.domain.repositories import SessionRepository
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.infrastructure.models import SessionModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 from app.infrastructure.storage.redis import get_redis_client
@@ -198,6 +199,8 @@ class DBSessionRepository(SessionRepository):
 
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
+        if not should_persist_event(event):
+            return
         # 事件历史以 workflow_run_events 为唯一写入真相源。
         record = await self._get_session_record_with_lock(session_id=session_id)
         run_id = self._require_current_run_id(record=record, session_id=session_id)
@@ -209,6 +212,8 @@ class DBSessionRepository(SessionRepository):
 
     async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
         """按事件ID幂等新增事件"""
+        if not should_persist_event(event):
+            return False
         record = await self._get_session_record_with_lock(session_id=session_id)
         run_id = self._require_current_run_id(record=record, session_id=session_id)
         return await self._workflow_run_repository.add_event_if_absent(
@@ -228,6 +233,8 @@ class DBSessionRepository(SessionRepository):
             status: Optional[SessionStatus] = None,
     ) -> bool:
         """按事件ID幂等新增事件，并在同一事务中更新会话投影"""
+        if not should_persist_event(event):
+            return False
         # Context: 事件幂等写入与会话投影更新需要跨多个字段保持一致。
         # Decision: 同一行锁事务内完成“事件写入 + 投影收敛”。
         # Trade-off: 锁持有时间略增，但可避免重放场景下历史与投影分叉。

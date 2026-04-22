@@ -17,6 +17,7 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     Step,
+    TextStreamChannel,
     TitleEvent,
 )
 from app.domain.services.prompts import DIRECT_ANSWER_PROMPT, SYSTEM_PROMPT
@@ -36,6 +37,7 @@ from app.domain.services.workspace_runtime.policies import (
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import safe_parse_json
 from ..language_checker import build_direct_path_copy, infer_working_language_from_message
 from ..live_events import emit_live_events
+from ..streaming import build_text_stream_events
 from .prompt_context_helpers import _append_prompt_context_to_prompt
 from .control_state import (
     clear_plan_only_control_state as _clear_plan_only_control_state,
@@ -151,11 +153,19 @@ async def direct_answer_node(
         steps=[],
         status=ExecutionStatus.COMPLETED,
     )
+    # direct_answer 的流式正文仍属于 final_message 通道。
+    # text_stream_* 只做临时展示，不进入 state 的 emitted_events。
+    direct_answer_stream_events = build_text_stream_events(
+        channel=TextStreamChannel.FINAL_MESSAGE,
+        text=final_message,
+        state=state,
+        stage="final",
+    )
     events: List[Any] = [
         TitleEvent(title=plan.title),
         MessageEvent(role="assistant", message=final_message, stage="final"),
     ]
-    await emit_live_events(*events)
+    await emit_live_events(*direct_answer_stream_events, *events)
     control = _get_control_metadata(state)
     control["entry_strategy"] = "direct_answer"
     control["skip_replan_when_plan_finished"] = True

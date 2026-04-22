@@ -11,7 +11,16 @@ from app.domain.models import (
     StepEventStatus,
     Step,
     StepOutcome,
+    TextStreamChannel,
+    TextStreamDeltaEvent,
+    TextStreamEndEvent,
+    TextStreamStartEvent,
     WaitEvent,
+)
+from app.domain.services.runtime.contracts.event_delivery_policy import (
+    EventDeliveryPolicy,
+    get_event_delivery_policy,
+    should_persist_event,
 )
 from app.interfaces.schemas.event import (
     BaseEventData,
@@ -59,6 +68,7 @@ def test_event_mapper_preserves_timestamp_json_shape() -> None:
     payload = sse_event.model_dump(mode="json")
 
     assert payload["data"]["created_at"] == int(created_at.timestamp())
+    assert payload["data"]["stage"] == "intermediate"
 
 
 def test_event_mapper_should_serialize_error_event_key_and_params() -> None:
@@ -77,6 +87,61 @@ def test_event_mapper_should_serialize_error_event_key_and_params() -> None:
     assert payload["data"]["error"] == "任务会话不存在"
     assert payload["data"]["error_key"] == "error.session.not_found"
     assert payload["data"]["error_params"] == {"session_id": "session-1"}
+
+
+def test_event_mapper_should_serialize_text_stream_events() -> None:
+    start_event = TextStreamStartEvent(
+        id="evt-ts-start",
+        created_at=datetime(2026, 3, 11, 12, 0, 5),
+        stream_id="stream-1",
+        channel=TextStreamChannel.PLANNER_MESSAGE,
+        run_id="run-1",
+        session_id="session-1",
+        stage="planner",
+    )
+    delta_event = TextStreamDeltaEvent(
+        id="evt-ts-delta",
+        created_at=datetime(2026, 3, 11, 12, 0, 6),
+        stream_id="stream-1",
+        channel=TextStreamChannel.PLANNER_MESSAGE,
+        text="正在生成计划说明",
+        sequence=1,
+    )
+    end_event = TextStreamEndEvent(
+        id="evt-ts-end",
+        created_at=datetime(2026, 3, 11, 12, 0, 7),
+        stream_id="stream-1",
+        channel=TextStreamChannel.PLANNER_MESSAGE,
+        full_text_length=8,
+        reason="completed",
+    )
+
+    start_payload = EventMapper.event_to_sse_event(start_event).model_dump(mode="json")
+    delta_payload = EventMapper.event_to_sse_event(delta_event).model_dump(mode="json")
+    end_payload = EventMapper.event_to_sse_event(end_event).model_dump(mode="json")
+
+    assert start_payload["event"] == "text_stream_start"
+    assert start_payload["data"]["stream_id"] == "stream-1"
+    assert start_payload["data"]["channel"] == "planner_message"
+    assert start_payload["data"]["stage"] == "planner"
+    assert delta_payload["event"] == "text_stream_delta"
+    assert delta_payload["data"]["text"] == "正在生成计划说明"
+    assert delta_payload["data"]["sequence"] == 1
+    assert end_payload["event"] == "text_stream_end"
+    assert end_payload["data"]["full_text_length"] == 8
+    assert end_payload["data"]["reason"] == "completed"
+
+
+def test_text_stream_events_should_be_live_only() -> None:
+    event = TextStreamDeltaEvent(
+        stream_id="stream-1",
+        channel=TextStreamChannel.FINAL_MESSAGE,
+        text="draft",
+        sequence=1,
+    )
+
+    assert get_event_delivery_policy(event) == EventDeliveryPolicy.LIVE_ONLY
+    assert should_persist_event(event) is False
 
 def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
     event = PlanEvent(

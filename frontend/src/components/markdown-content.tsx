@@ -97,6 +97,29 @@ const components: React.ComponentProps<typeof ReactMarkdown>['components'] = {
       {...props}
     />
   ),
+  table: ({ className, ...props }) => (
+    <div className="my-3 w-full overflow-x-auto">
+      <table className={cn('w-full border-collapse text-sm text-gray-700', className)} {...props} />
+    </div>
+  ),
+  thead: ({ className, ...props }) => (
+    <thead className={cn('bg-gray-50', className)} {...props} />
+  ),
+  tbody: ({ className, ...props }) => (
+    <tbody className={cn('divide-y divide-gray-200', className)} {...props} />
+  ),
+  tr: ({ className, ...props }) => (
+    <tr className={cn('border-b border-gray-200 last:border-b-0', className)} {...props} />
+  ),
+  th: ({ className, ...props }) => (
+    <th
+      className={cn('border border-gray-200 px-3 py-2 text-left font-semibold text-gray-900 whitespace-nowrap', className)}
+      {...props}
+    />
+  ),
+  td: ({ className, ...props }) => (
+    <td className={cn('border border-gray-200 px-3 py-2 align-top', className)} {...props} />
+  ),
   a: ({ className, href, children, ...props }) => {
     // 安全兜底：如果 href 包含 CJK 字符，说明 autolink 仍然误判，降级为纯文本
     if (href && /[\u4E00-\u9FFF\u3000-\u303F\uFF00-\uFFEF]/.test(href)) {

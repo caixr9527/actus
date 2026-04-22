@@ -192,6 +192,7 @@ export type CreateSessionParams = {
 export type ChatMessage = {
   role: "user" | "assistant" | "system";
   message: string;
+  stage?: "intermediate" | "final";
   attachments?: Array<{
     file_id: string;
     filename: string;
@@ -391,6 +392,40 @@ export type WaitEventData = {
   [key: string]: unknown;
 };
 
+export type TextStreamChannel = "planner_message" | "final_message";
+
+export type TextStreamStartEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  stream_id: string;
+  channel: TextStreamChannel;
+  run_id?: string | null;
+  session_id?: string | null;
+  stage: "planner" | "summary" | "final";
+  is_replay?: boolean;
+  [key: string]: unknown;
+};
+
+export type TextStreamDeltaEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  stream_id: string;
+  channel: TextStreamChannel;
+  text: string;
+  sequence: number;
+  [key: string]: unknown;
+};
+
+export type TextStreamEndEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  stream_id: string;
+  channel: TextStreamChannel;
+  full_text_length: number;
+  reason: "completed" | "cancelled" | "error";
+  [key: string]: unknown;
+};
+
 /**
  * SSE 事件类型
  */
@@ -402,7 +437,10 @@ export type SSEEventType =
   | "tool"
   | "wait"
   | "done"
-  | "error";
+  | "error"
+  | "text_stream_start"
+  | "text_stream_delta"
+  | "text_stream_end";
 
 /**
  * SSE 事件数据
@@ -415,6 +453,9 @@ export type SSEEventData =
   | { type: "tool"; data: ToolEvent }
   | { type: "wait"; data: WaitEventData }
   | { type: "done"; data: Record<string, unknown> }
+  | { type: "text_stream_start"; data: TextStreamStartEventData }
+  | { type: "text_stream_delta"; data: TextStreamDeltaEventData }
+  | { type: "text_stream_end"; data: TextStreamEndEventData }
   | {
       type: "error";
       data: {

@@ -3,7 +3,14 @@ import asyncio
 # 先初始化依赖模块，避免触发 app.application.service 的历史循环导入路径。
 from app.interfaces.dependencies.services import get_agent_service  # noqa: F401
 from app.application.service.agent_service import AgentService, OUTPUT_STREAM_BLOCK_MS
-from app.domain.models import SessionStatus, MessageEvent, DoneEvent, TaskStreamEventRecord
+from app.domain.models import (
+    SessionStatus,
+    MessageEvent,
+    DoneEvent,
+    TaskStreamEventRecord,
+    TextStreamChannel,
+    TextStreamDeltaEvent,
+)
 
 
 class _Session:
@@ -20,6 +27,7 @@ class _SessionRepo:
         self._session = session
         self.unread_count_updated = False
         self.unread_update_calls = 0
+        self.events_saved = []
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
@@ -29,6 +37,7 @@ class _SessionRepo:
         self.unread_update_calls += 1
 
     async def add_event_if_absent(self, session_id: str, event) -> bool:
+        self.events_saved.append(event)
         return True
 
 
@@ -41,6 +50,14 @@ class _UoW:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _GraphRuntime:
+    def __init__(self, task) -> None:
+        self._task = task
+
+    async def get_task(self, session):
+        return self._task
 
 
 class _OutputStream:
@@ -75,7 +92,7 @@ def test_chat_uses_blocking_output_stream_polling() -> None:
     _TaskFactory.task = _Task()
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(session_repo)
-    service._task_cls = _TaskFactory
+    service._graph_runtime = _GraphRuntime(_TaskFactory.task)
 
     async def _consume() -> None:
         async for _ in service.chat(session_id=session.id, user_id=session.user_id):
@@ -140,7 +157,7 @@ def test_chat_does_not_reset_cursor_after_empty_poll() -> None:
 
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(session_repo)
-    service._task_cls = _CursorTaskFactory
+    service._graph_runtime = _GraphRuntime(_CursorTaskFactory.task)
 
     async def _consume():
         events = []
@@ -165,7 +182,7 @@ def test_chat_should_reset_unread_count_only_once_for_stream_events() -> None:
 
     service = object.__new__(AgentService)
     service._uow_factory = lambda: _UoW(session_repo)
-    service._task_cls = _CursorTaskFactory
+    service._graph_runtime = _GraphRuntime(_CursorTaskFactory.task)
 
     async def _consume():
         async for _ in service.chat(session_id=session.id, user_id=session.user_id):
@@ -174,3 +191,59 @@ def test_chat_should_reset_unread_count_only_once_for_stream_events() -> None:
     asyncio.run(_consume())
 
     assert session_repo.unread_update_calls == 1
+
+
+class _LiveOnlyOutputStream:
+    def __init__(self, task: "_LiveOnlyTask") -> None:
+        self._task = task
+        self._calls = 0
+
+    async def get(self, start_id=None, block_ms=0):
+        self._calls += 1
+        if self._calls == 1:
+            event = TaskStreamEventRecord(
+                event=TextStreamDeltaEvent(
+                    stream_id="stream-1",
+                    channel=TextStreamChannel.PLANNER_MESSAGE,
+                    text="draft",
+                    sequence=1,
+                ),
+            )
+            return "evt-live-1", event.model_dump_json()
+        self._task.done = True
+        return "evt-done-1", TaskStreamEventRecord(event=DoneEvent()).model_dump_json()
+
+
+class _LiveOnlyTask:
+    def __init__(self) -> None:
+        self.done = False
+        self.output_stream = _LiveOnlyOutputStream(self)
+
+
+class _LiveOnlyTaskFactory:
+    task = _LiveOnlyTask()
+
+    @classmethod
+    def get(cls, task_id: str):
+        return cls.task
+
+
+def test_chat_should_not_repair_live_only_event_history() -> None:
+    session = _Session()
+    session_repo = _SessionRepo(session=session)
+    _LiveOnlyTaskFactory.task = _LiveOnlyTask()
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(session_repo)
+    service._graph_runtime = _GraphRuntime(_LiveOnlyTaskFactory.task)
+
+    async def _consume():
+        events = []
+        async for event in service.chat(session_id=session.id, user_id=session.user_id):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_consume())
+
+    assert [event.type for event in events] == ["text_stream_delta", "done"]
+    assert [event.type for event in session_repo.events_saved] == ["done"]

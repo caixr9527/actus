@@ -20,6 +20,8 @@ from app.domain.models import (
     SessionStatus,
     Step,
     StepEvent,
+    TextStreamChannel,
+    TextStreamDeltaEvent,
     ToolEvent,
     ToolEventStatus,
     WaitEvent,
@@ -1227,3 +1229,58 @@ def test_pop_event_should_parse_continue_cancelled_task_input_without_touching_e
     assert runtime_input is not None
     assert isinstance(runtime_input.payload, ContinueCancelledTaskInput)
     assert session_repo.called is False
+
+
+def test_put_and_add_event_should_stream_live_only_event_without_persisting_history() -> None:
+    runner = _new_runner()
+    runner._session_id = "session-1"
+
+    class _OutputStream:
+        def __init__(self) -> None:
+            self.records: list[str] = []
+
+        async def put(self, payload: str) -> str:
+            self.records.append(payload)
+            return "stream-record-1"
+
+        async def delete_message(self, event_id: str) -> None:
+            raise AssertionError("live_only 事件不应触发补偿删除")
+
+    class _Task:
+        def __init__(self) -> None:
+            self.output_stream = _OutputStream()
+
+    class _SessionRepo:
+        def __init__(self) -> None:
+            self.persist_calls = 0
+
+        async def add_event_with_snapshot_if_absent(self, session_id: str, event, **kwargs) -> bool:
+            self.persist_calls += 1
+            return True
+
+    session_repo = _SessionRepo()
+
+    class _UoW:
+        def __init__(self) -> None:
+            self.session = session_repo
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    runner._uow_factory = lambda: _UoW()
+    task = _Task()
+    event = TextStreamDeltaEvent(
+        id="evt-live-1",
+        stream_id="stream-1",
+        channel=TextStreamChannel.PLANNER_MESSAGE,
+        text="draft",
+        sequence=1,
+    )
+
+    asyncio.run(runner._put_and_add_event(task=task, event=event))
+
+    assert len(task.output_stream.records) == 1
+    assert session_repo.persist_calls == 0

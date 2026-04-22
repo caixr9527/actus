@@ -5,6 +5,7 @@ from app.domain.models import (
     ExecutionStatus,
     MessageEvent,
     Plan,
+    PlanEvent,
     SearchResultItem,
     SearchResults,
     Step,
@@ -14,6 +15,9 @@ from app.domain.models import (
     StepOutcome,
     StepOutputMode,
     StepTaskModeHint,
+    TextStreamDeltaEvent,
+    TextStreamEndEvent,
+    TextStreamStartEvent,
     ToolEventStatus,
     ToolResult,
 )
@@ -1030,6 +1034,40 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
     assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
 
 
+def test_direct_answer_node_should_emit_final_message_stream_before_final_message_event() -> None:
+    captured_events = []
+
+    async def _sink(event):
+        captured_events.append(event)
+
+    token = bind_live_event_sink(_sink)
+    try:
+        state = asyncio.run(
+            direct_answer_node(
+                {
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "thread_id": "thread-1",
+                    "user_message": "你好",
+                    "graph_metadata": {},
+                    "message_window": [],
+                },
+                _DirectAnswerLLM(),
+                runtime_context_service=_TEST_RUNTIME_CONTEXT_SERVICE,
+            )
+        )
+    finally:
+        unbind_live_event_sink(token)
+
+    assert isinstance(captured_events[0], TextStreamStartEvent)
+    assert isinstance(captured_events[1], TextStreamDeltaEvent)
+    assert isinstance(captured_events[2], TextStreamEndEvent)
+    assert isinstance(captured_events[-1], MessageEvent)
+    assert captured_events[-1].stage == "final"
+    assert captured_events[-1].message == "你好，我在。"
+    assert [event.type for event in state["emitted_events"]] == ["title", "message"]
+
+
 def test_direct_answer_node_should_append_history_context_to_prompt() -> None:
     llm = _CaptureDirectAnswerPromptLLM()
 
@@ -1433,6 +1471,57 @@ def test_create_or_reuse_plan_node_should_stop_after_planning_for_plan_only_requ
     assert state["current_step_id"] is None
     assert state["final_message"] == "好的，我将先给出执行步骤，不直接开始执行。"
     assert route_after_plan(state) == "consolidate_memory"
+
+
+def test_create_or_reuse_plan_node_should_emit_planner_message_stream_before_plan_events() -> None:
+    captured_events = []
+
+    async def _sink(event):
+        captured_events.append(event)
+
+    token = bind_live_event_sink(_sink)
+    try:
+        state = asyncio.run(
+            create_or_reuse_plan_node(
+                {
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "user_message": "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。",
+                    "graph_metadata": {"control": {"plan_only": True}},
+                    "working_memory": {},
+                    "recent_run_briefs": [],
+                    "recent_attempt_briefs": [],
+                    "session_open_questions": [],
+                    "session_blockers": [],
+                    "selected_artifacts": [],
+                    "historical_artifact_paths": [],
+                    "input_parts": [],
+                    "message_window": [],
+                    "retrieved_memories": [],
+                    "pending_memory_writes": [],
+                    "current_step_id": None,
+                    "execution_count": 0,
+                    "max_execution_steps": 20,
+                    "last_executed_step": None,
+                    "pending_interrupt": {},
+                    "emitted_events": [],
+                    "final_message": "",
+                    "thread_id": "thread-1",
+                    "conversation_summary": "",
+                },
+                _PlanOnlyPlannerLLM(),
+            )
+        )
+    finally:
+        unbind_live_event_sink(token)
+
+    assert isinstance(captured_events[0], TextStreamStartEvent)
+    assert isinstance(captured_events[1], TextStreamDeltaEvent)
+    assert isinstance(captured_events[2], TextStreamEndEvent)
+    assert captured_events[0].stream_id == "run-1:planner_message"
+    assert isinstance(captured_events[-2], PlanEvent)
+    assert isinstance(captured_events[-1], MessageEvent)
+    assert [event.type for event in state["emitted_events"]] == ["title", "plan", "message"]
 
 
 def test_execute_step_with_prompt_should_block_browser_for_research_task() -> None:

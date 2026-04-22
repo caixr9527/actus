@@ -43,6 +43,7 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.runtime.cancellation import (
@@ -195,6 +196,8 @@ class AgentService:
         1. 覆盖“Redis已写成功，但DB写入/补偿未完成”的崩溃窗口。
         2. 使用事件ID做幂等保护，避免重复消费导致事件历史重复。
         """
+        if not should_persist_event(event):
+            return
         try:
             async with self._uow_factory() as uow:
                 await uow.session.add_event_if_absent(session_id=session_id, event=event)
@@ -539,7 +542,8 @@ class AgentService:
                 logger.debug(f"会话{session_id},输出队列中已发现事件: {type(event).__name__}")
 
                 # 消费输出流时做一次幂等补写，用于修复“消息入流成功但DB历史缺失”的情况。
-                await self._repair_output_event_history(session_id=session_id, event=event)
+                if should_persist_event(event):
+                    await self._repair_output_event_history(session_id=session_id, event=event)
 
                 # 首条事件到达时重置一次未读数，后续事件不再重复写入。
                 if unread_reset_pending:

@@ -10,6 +10,10 @@ from app.domain.models import (
     Step,
     StepOutcome,
     StepTaskModeHint,
+    MessageEvent,
+    TextStreamDeltaEvent,
+    TextStreamEndEvent,
+    TextStreamStartEvent,
     ToolResult,
     ToolEvent,
     ToolEventStatus,
@@ -21,6 +25,7 @@ from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.tools import BaseTool, MessageTool
 from app.domain.services.tools.base import tool
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
+from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
 from app.infrastructure.runtime.langgraph.graphs.planner_react.graph import (
     build_planner_react_langgraph_graph as _build_planner_react_langgraph_graph,
 )
@@ -1814,6 +1819,127 @@ def test_summarize_should_skip_llm_when_final_delivery_text_ready() -> None:
     assert message_event.type == "message"
     assert message_event.stage == "final"
     assert message_event.message == "这是确定性的最终正文，应该直接返回给用户。"
+
+
+def test_summarize_should_emit_final_message_stream_before_final_message_event() -> None:
+    llm = _FailIfSummaryLLMCalled()
+    captured_events = []
+    final_step = Step(
+        id="step-final",
+        title="输出最终结果",
+        description="输出最终结果",
+        output_mode="inline",
+        delivery_role="final",
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="步骤完成",
+            delivery_text="这是确定性的最终正文，应该直接返回给用户。",
+        ),
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": final_step,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证 final_message 流式输出",
+            "user_preferences": {},
+            "facts_in_session": [],
+            "final_delivery_payload": {
+                "text": "这是确定性的最终正文，应该直接返回给用户。",
+                "sections": [],
+                "source_refs": [],
+            },
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "轻量摘要",
+    }
+
+    async def _sink(event):
+        captured_events.append(event)
+
+    token = bind_live_event_sink(_sink)
+    try:
+        summarized_state = asyncio.run(summarize_node(state, llm))
+    finally:
+        unbind_live_event_sink(token)
+
+    assert isinstance(captured_events[0], TextStreamStartEvent)
+    assert isinstance(captured_events[1], TextStreamDeltaEvent)
+    assert isinstance(captured_events[2], TextStreamEndEvent)
+    assert isinstance(captured_events[-2], MessageEvent)
+    assert captured_events[-2].stage == "final"
+    assert captured_events[-2].message == "这是确定性的最终正文，应该直接返回给用户。"
+    assert [event.type for event in summarized_state["emitted_events"]] == ["message", "plan"]
+
+
+def test_summarize_should_emit_final_message_stream_for_direct_wait_summary_error() -> None:
+    llm = _FailIfCalledSummaryLLM()
+    captured_events = []
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "继续",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "direct-wait-confirm",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证 direct_wait 错误总结流式输出",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {
+            "control": {
+                "entry_strategy": "direct_wait",
+                "direct_wait_original_task_executed": False,
+            }
+        },
+        "emitted_events": [],
+        "final_message": "",
+    }
+
+    async def _sink(event):
+        captured_events.append(event)
+
+    token = bind_live_event_sink(_sink)
+    try:
+        summarized_state = asyncio.run(summarize_node(state, llm))
+    finally:
+        unbind_live_event_sink(token)
+
+    assert isinstance(captured_events[0], TextStreamStartEvent)
+    assert isinstance(captured_events[1], TextStreamDeltaEvent)
+    assert isinstance(captured_events[2], TextStreamEndEvent)
+    assert any(getattr(event, "type", "") == "error" for event in captured_events)
+    assert any(
+        getattr(event, "type", "") == "message"
+        and getattr(event, "stage", "") == "final"
+        for event in captured_events
+    )
+    assert [event.type for event in summarized_state["emitted_events"]] == ["error", "message"]
 
 
 def test_summarize_should_not_build_summary_context_when_skipping_llm(monkeypatch) -> None:

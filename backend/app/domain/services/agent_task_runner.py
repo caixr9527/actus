@@ -49,6 +49,7 @@ from app.domain.models import (
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.cancellation import (
     build_cancelled_runtime_events,
 )
@@ -205,6 +206,8 @@ class AgentTaskRunner(TaskRunner):
                 task=task,
                 record=TaskStreamEventRecord(event=event),
             )
+            if not should_persist_event(event):
+                return
             # 注意：不要原地修改传入 event.id。
             # LangGraphRunEngine 会对同一事件对象做 live + final replay 去重，
             # 若这里直接改写 id，可能导致 replay 阶段去重失效并重复落库。
@@ -308,7 +311,8 @@ class AgentTaskRunner(TaskRunner):
             # 如果之前发生“入流成功但写库失败/进程中断”，这里会按event_id幂等补齐。
             try:
                 async with self._uow_factory() as uow:
-                    await uow.session.add_event_if_absent(self._session_id, event)
+                    if should_persist_event(event):
+                        await uow.session.add_event_if_absent(self._session_id, event)
             except Exception as e:
                 # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
                 logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")

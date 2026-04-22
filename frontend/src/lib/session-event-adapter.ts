@@ -21,6 +21,9 @@ const KNOWN_SSE_EVENT_TYPES: ReadonlySet<SSEEventType> = new Set<SSEEventType>([
   'wait',
   'done',
   'error',
+  'text_stream_start',
+  'text_stream_delta',
+  'text_stream_end',
 ])
 
 function isKnownSSEEventType(type: unknown): type is SSEEventType {

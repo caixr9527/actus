@@ -16,6 +16,7 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     PlanEventStatus,
+    TextStreamChannel,
     TitleEvent,
 )
 from app.domain.services.prompts import (
@@ -42,6 +43,7 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
 )
 from ..live_events import emit_live_events
 from ..parsers import build_fallback_plan_title, build_step_from_payload
+from ..streaming import build_text_stream_events
 from .control_state import (
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
@@ -242,7 +244,15 @@ async def create_or_reuse_plan_node(
             TitleEvent(title=title),
             MessageEvent(role="assistant", message=planner_message),
         ]
-        await _resolve_emit_live_events()(*planner_events)
+        # planner_message 流事件只做临时展示，不进入 state 的 emitted_events。
+        # 后续 MessageEvent 仍是历史落账和前端 timeline 的唯一真相源。
+        planner_stream_events = build_text_stream_events(
+            channel=TextStreamChannel.PLANNER_MESSAGE,
+            text=planner_message,
+            state=state,
+            stage="planner",
+        )
+        await _resolve_emit_live_events()(*planner_stream_events, *planner_events)
         return _reduce_state_with_events(
             state,
             updates={
@@ -336,7 +346,15 @@ async def create_or_reuse_plan_node(
         PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
         MessageEvent(role="assistant", message=planner_message),
     ]
-    await _resolve_emit_live_events()(*planner_events)
+    # planner_message 使用回放式 text_stream 提前展示；
+    # PlanEvent/MessageEvent 仍保持原有顺序和最终真相源语义。
+    planner_stream_events = build_text_stream_events(
+        channel=TextStreamChannel.PLANNER_MESSAGE,
+        text=planner_message,
+        state=state,
+        stage="planner",
+    )
+    await _resolve_emit_live_events()(*planner_stream_events, *planner_events)
     return _reduce_state_with_events(
         state,
         updates={

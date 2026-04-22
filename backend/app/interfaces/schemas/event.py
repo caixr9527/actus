@@ -21,6 +21,7 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     StepEvent,
+    TextStreamChannel,
 )
 from app.domain.services.runtime.normalizers import normalize_event_payload
 
@@ -85,6 +86,7 @@ class MessageEventData(BaseEventData):
     role: Literal["user", "assistant"] = "assistant"
     message: str = ""
     attachments: List[File] = Field(default_factory=list)
+    stage: Literal["intermediate", "final"] = "intermediate"
 
 
 class MessageSSEEvent(BaseSSEEvent):
@@ -100,6 +102,7 @@ class MessageSSEEvent(BaseSSEEvent):
                 role=event.role,
                 message=event.message,
                 attachments=event.attachments,
+                stage=event.stage,
             )
         )
 
@@ -261,6 +264,56 @@ class WaitSSEEvent(BaseSSEEvent):
         )
 
 
+class TextStreamStartEventData(BaseEventData):
+    """文本流开始事件数据。"""
+
+    stream_id: str
+    channel: TextStreamChannel
+    run_id: Optional[str] = None
+    session_id: Optional[str] = None
+    stage: Literal["planner", "summary", "final"]
+    is_replay: bool = True
+
+
+class TextStreamStartSSEEvent(BaseSSEEvent):
+    """文本流开始 SSE 事件。"""
+
+    event: Literal["text_stream_start"] = "text_stream_start"
+    data: TextStreamStartEventData
+
+
+class TextStreamDeltaEventData(BaseEventData):
+    """文本流增量事件数据。"""
+
+    stream_id: str
+    channel: TextStreamChannel
+    text: str = ""
+    sequence: int = 0
+
+
+class TextStreamDeltaSSEEvent(BaseSSEEvent):
+    """文本流增量 SSE 事件。"""
+
+    event: Literal["text_stream_delta"] = "text_stream_delta"
+    data: TextStreamDeltaEventData
+
+
+class TextStreamEndEventData(BaseEventData):
+    """文本流结束事件数据。"""
+
+    stream_id: str
+    channel: TextStreamChannel
+    full_text_length: int = 0
+    reason: Literal["completed", "cancelled", "error"] = "completed"
+
+
+class TextStreamEndSSEEvent(BaseSSEEvent):
+    """文本流结束 SSE 事件。"""
+
+    event: Literal["text_stream_end"] = "text_stream_end"
+    data: TextStreamEndEventData
+
+
 class ErrorEventData(BaseEventData):
     """错误事件数据"""
     error: str
@@ -284,6 +337,9 @@ AgentSSEEvent = Union[
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,
+    TextStreamStartSSEEvent,
+    TextStreamDeltaSSEEvent,
+    TextStreamEndSSEEvent,
 ]
 
 

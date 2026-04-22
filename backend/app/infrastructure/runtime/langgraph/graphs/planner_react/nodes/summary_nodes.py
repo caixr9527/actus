@@ -19,6 +19,7 @@ from app.domain.models import (
     PlanEvent,
     PlanEventStatus,
     StepTaskModeHint,
+    TextStreamChannel,
 )
 from app.domain.services.prompts import SUMMARIZE_PROMPT
 from app.domain.services.runtime.contracts.runtime_logging import (
@@ -38,6 +39,7 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     safe_parse_json,
 )
 from ..live_events import emit_live_events
+from ..streaming import build_text_stream_events
 from .control_state import get_control_metadata as _get_control_metadata
 from .delivery_helpers import (
     _build_intermediate_round_summary_fallback,
@@ -86,11 +88,17 @@ async def summarize_node(
         error_message = "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
         plan.status = ExecutionStatus.FAILED
         plan.error = error_message
+        final_stream_events = build_text_stream_events(
+            channel=TextStreamChannel.FINAL_MESSAGE,
+            text=error_message,
+            state=state,
+            stage="final",
+        )
         final_events: List[Any] = [
             ErrorEvent(error=error_message, error_key="direct_wait_unexecuted"),
             MessageEvent(role="assistant", message=error_message, stage="final"),
         ]
-        await _resolve_emit_live_events()(*final_events)
+        await _resolve_emit_live_events()(*final_stream_events, *final_events)
         log_runtime(
             logger,
             logging.WARNING,
@@ -223,22 +231,31 @@ async def summarize_node(
             final_attachment_paths=summary_attachment_refs,
         )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
+    final_delivery_message = (
+        summary_message
+        if summarize_intermediate_round
+        else (
+            deterministic_delivery_text
+            if deterministic_delivery_text
+            else build_delivery_text(
+                working_memory.get("final_delivery_payload"),
+                fallback=summary_message,
+            )
+        )
+    )
+    # final_message 流事件只做临时展示，不进入 state 的 emitted_events。
+    # 最终 MessageEvent(stage="final") 仍是历史落账和前端 timeline 的唯一真相源。
+    final_stream_events = build_text_stream_events(
+        channel=TextStreamChannel.FINAL_MESSAGE,
+        text=final_delivery_message,
+        state=state,
+        stage="final",
+    )
 
     final_events: List[Any] = [
         MessageEvent(
             role="assistant",
-            message=(
-                summary_message
-                if summarize_intermediate_round
-                else (
-                    deterministic_delivery_text
-                    if deterministic_delivery_text
-                    else build_delivery_text(
-                        working_memory.get("final_delivery_payload"),
-                        fallback=summary_message,
-                    )
-                )
-            ),
+            message=final_delivery_message,
             attachments=summary_attachment_paths,
             stage="final",
         )
@@ -247,7 +264,7 @@ async def summarize_node(
     plan.status = ExecutionStatus.COMPLETED
     final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
 
-    await _resolve_emit_live_events()(*final_events)
+    await _resolve_emit_live_events()(*final_stream_events, *final_events)
     log_runtime(
         logger,
         logging.INFO,

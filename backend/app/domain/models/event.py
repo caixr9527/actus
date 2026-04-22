@@ -47,6 +47,13 @@ class ToolEventStatus(str, Enum):
     CALLED = "called"
 
 
+class TextStreamChannel(str, Enum):
+    """文本流通道类型。"""
+
+    PLANNER_MESSAGE = "planner_message"
+    FINAL_MESSAGE = "final_message"
+
+
 class BaseEvent(BaseModel):
     """基础事件模型"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -215,6 +222,38 @@ class DoneEvent(BaseEvent):
     type: Literal["done"] = "done"
 
 
+class TextStreamStartEvent(BaseEvent):
+    """文本流开始事件，仅用于当前连接的临时展示。"""
+
+    type: Literal["text_stream_start"] = "text_stream_start"
+    stream_id: str
+    channel: TextStreamChannel
+    run_id: Optional[str] = None
+    session_id: Optional[str] = None
+    stage: Literal["planner", "summary", "final"]
+    is_replay: bool = True
+
+
+class TextStreamDeltaEvent(BaseEvent):
+    """文本流增量事件，仅用于当前连接的临时展示。"""
+
+    type: Literal["text_stream_delta"] = "text_stream_delta"
+    stream_id: str
+    channel: TextStreamChannel
+    text: str = ""
+    sequence: int = 0
+
+
+class TextStreamEndEvent(BaseEvent):
+    """文本流结束事件，仅用于当前连接的临时展示。"""
+
+    type: Literal["text_stream_end"] = "text_stream_end"
+    stream_id: str
+    channel: TextStreamChannel
+    full_text_length: int = 0
+    reason: Literal["completed", "cancelled", "error"] = "completed"
+
+
 Event = Annotated[
     Union[
         PlanEvent,
@@ -224,7 +263,10 @@ Event = Annotated[
         ToolEvent,
         WaitEvent,
         ErrorEvent,
-        DoneEvent
+        DoneEvent,
+        TextStreamStartEvent,
+        TextStreamDeltaEvent,
+        TextStreamEndEvent,
     ],
     Field(discriminator="type")
 ]

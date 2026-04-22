@@ -12,6 +12,17 @@ import {
   reduceSessionRuntimeStateOnEvent,
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '@/lib/session-detail-runtime'
+import {
+  getLatestActiveStreamByChannel,
+  isTextStreamEvent,
+  reduceTextStreamState,
+  type ActiveTextStream,
+  type TextStreamState,
+} from '@/lib/session-text-stream-state'
+import {
+  advanceDisplayedTextStreams,
+  syncDisplayedTextStreams,
+} from '@/lib/session-text-stream-playback'
 import type { ListModelItem, SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
 import { useI18n } from '@/lib/i18n'
 
@@ -32,6 +43,8 @@ export type UseSessionDetailResult = {
   resumeWaitingRun: (resumeValue: unknown) => Promise<void>
   continueCancelledRun: () => Promise<void>
   streaming: boolean
+  plannerTextStream: ActiveTextStream | null
+  finalTextStream: ActiveTextStream | null
 }
 
 const EMPTY_STREAM_RECONNECT_DELAY = 500
@@ -108,6 +121,8 @@ export function useSessionDetail(
   const [modelUpdating, setModelUpdating] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [streaming, setStreaming] = useState(false)
+  const [textStreams, setTextStreams] = useState<TextStreamState>({})
+  const [displayedTextStreams, setDisplayedTextStreams] = useState<TextStreamState>({})
   const [skipEmptyStream, setSkipEmptyStream] = useState(initialSkipEmptyStream || false)
   const emptyStreamCleanupRef = useRef<(() => void) | null>(null)
   const messageStreamCleanupRef = useRef<(() => void) | null>(null)
@@ -159,17 +174,30 @@ export function useSessionDetail(
     emptyStreamRetryCountRef.current = 0
     isSendMessageRef.current = false
     setStreamingState(false)
+    setTextStreams({})
+    setDisplayedTextStreams({})
   }, [setStreamingState, stopEmptyStream, stopMessageStream])
 
   const replaceEvents = useCallback((nextEvents: SSEEventData[]) => {
-    seenEventIdsRef.current = collectSessionEventIds(nextEvents)
-    setEvents(nextEvents)
+    // 快照替换时必须同步重建草稿流状态，避免事件列表与前端播放层状态漂移，
+    // 否则会出现刷新后残留旧草稿、或正式消息已落地但草稿仍继续显示的问题。
+    // text_stream_* 是 live-only 临时展示事件，即使异常出现在快照中也不能进入主事件列表。
+    const persistentEvents = nextEvents.filter((event) => !isTextStreamEvent(event))
+    const rebuiltTextStreams = persistentEvents.reduce<TextStreamState>(
+      (state, event) => reduceTextStreamState(state, event),
+      {},
+    )
+    seenEventIdsRef.current = collectSessionEventIds(persistentEvents)
+    setEvents(persistentEvents)
+    setTextStreams(rebuiltTextStreams)
+    setDisplayedTextStreams(rebuiltTextStreams)
   }, [])
 
   const appendEvent = useCallback((ev: SSEEventData) => {
     const evToAppend = unwrapNestedEvent(ev)
+    const isTemporaryTextStreamEvent = isTextStreamEvent(evToAppend)
     const eventId = getSessionEventId(evToAppend)
-    if (eventId) {
+    if (eventId && !isTemporaryTextStreamEvent) {
       if (seenEventIdsRef.current.has(eventId)) {
         return
       }
@@ -177,7 +205,16 @@ export function useSessionDetail(
       lastEventIdRef.current = eventId
     }
 
-    setEvents((prev) => [...prev, evToAppend])
+    if (!isTemporaryTextStreamEvent) {
+      setEvents((prev) => [...prev, evToAppend])
+    }
+    setTextStreams((prev) => reduceTextStreamState(prev, evToAppend))
+    // 正式 message/done/error 到达时，需要同步清理前端正在播放的草稿流，
+    // 不能只等 textStreams -> displayedTextStreams 的 effect 下一拍再收敛，
+    // 否则界面会短暂同时出现“草稿消息 + 正式消息”的重复展示。
+    if (evToAppend.type === 'message' || evToAppend.type === 'done' || evToAppend.type === 'error') {
+      setDisplayedTextStreams((prev) => reduceTextStreamState(prev, evToAppend))
+    }
 
     // 更新会话标题（通过统一事件分发表驱动）
     visitSessionEvent(evToAppend, {
@@ -204,6 +241,28 @@ export function useSessionDetail(
       })
     }
   }, [setStreamingState])
+
+  const plannerTextStream = getLatestActiveStreamByChannel(displayedTextStreams, 'planner_message')
+  const finalTextStream = getLatestActiveStreamByChannel(displayedTextStreams, 'final_message')
+
+  useEffect(() => {
+    setDisplayedTextStreams((prev) => syncDisplayedTextStreams(prev, textStreams))
+  }, [textStreams])
+
+  useEffect(() => {
+    if (Object.keys(textStreams).length === 0) {
+      setDisplayedTextStreams({})
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setDisplayedTextStreams((prev) => advanceDisplayedTextStreams(prev, textStreams))
+    }, 24)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [textStreams])
 
   const startEmptyStream = useCallback((expectedEpoch?: number) => {
     const streamSessionId = sessionId
@@ -634,5 +693,7 @@ export function useSessionDetail(
     resumeWaitingRun,
     continueCancelledRun,
     streaming,
+    plannerTextStream,
+    finalTextStream,
   }
 }
