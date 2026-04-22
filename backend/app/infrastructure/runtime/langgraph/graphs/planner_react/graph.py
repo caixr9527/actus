@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.domain.external import LLM
 from app.domain.repositories import LongTermMemoryRepository
+from app.domain.services.memory_consolidation import MemoryConsolidationService
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
@@ -49,6 +50,7 @@ def build_planner_react_langgraph_graph(
         max_tool_iterations: int = 5,
         checkpointer: Optional[Any] = None,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
+        memory_consolidation_service: Optional[MemoryConsolidationService] = None,
         *,
         runtime_context_service: RuntimeContextService,
 ) -> Any:
@@ -127,6 +129,7 @@ def build_planner_react_langgraph_graph(
         return await consolidate_memory_node(
             state,
             long_term_memory_repository=long_term_memory_repository,
+            memory_consolidation_service=memory_consolidation_service,
         )
 
     graph = StateGraph(PlannerReActLangGraphState)

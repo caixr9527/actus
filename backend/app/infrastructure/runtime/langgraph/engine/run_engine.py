@@ -28,6 +28,7 @@ from app.domain.models import (
     WorkflowRunStatus,
 )
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.memory_consolidation import MemoryConsolidationService
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
@@ -61,7 +62,9 @@ from app.infrastructure.runtime.langgraph.graphs import (
     unbind_live_event_sink,
 )
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
+from app.infrastructure.external.llm import OllamaLLMFactory
 from app.infrastructure.utils import BaseUtils
+from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +152,7 @@ class LangGraphRunEngine(RunEngine):
             if uow_factory is not None
             else None
         )
+        self._memory_consolidation_service = self._build_memory_consolidation_service()
         self._workspace_manager = (
             WorkspaceManager(uow_factory=uow_factory)
             if uow_factory is not None
@@ -161,6 +165,7 @@ class LangGraphRunEngine(RunEngine):
             max_tool_iterations=max_tool_iterations,
             checkpointer=self._checkpointer,
             long_term_memory_repository=self._long_term_memory_repository,
+            memory_consolidation_service=self._memory_consolidation_service,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -177,11 +182,13 @@ class LangGraphRunEngine(RunEngine):
             max_tool_iterations: Optional[int],
             checkpointer: Any,
             long_term_memory_repository: Any,
+            memory_consolidation_service: MemoryConsolidationService,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
             "checkpointer": checkpointer,
             "long_term_memory_repository": long_term_memory_repository,
+            "memory_consolidation_service": memory_consolidation_service,
         }
         if runtime_tools is not None or max_tool_iterations is not None:
             graph_kwargs["runtime_tools"] = runtime_tools
@@ -198,8 +205,24 @@ class LangGraphRunEngine(RunEngine):
             stage_llm_models=describe_stage_llms(stage_llms),
             has_checkpointer=checkpointer is not None,
             has_repository=long_term_memory_repository is not None,
+            has_memory_consolidation_service=memory_consolidation_service is not None,
         )
         return build_planner_react_langgraph_graph(**graph_kwargs)
+
+    @staticmethod
+    def _build_memory_consolidation_service() -> MemoryConsolidationService:
+        """按通用 Ollama 配置构建记忆沉淀服务；未配置模型时回退规则模式。"""
+        settings = get_settings()
+        ollama_settings = settings.ollama
+        model_name = str(ollama_settings.model or "").strip()
+        if not model_name:
+            return MemoryConsolidationService()
+        provider = OllamaLLMFactory().create_memory_consolidation_provider(
+            base_url=ollama_settings.base_url,
+            model=model_name,
+            timeout_seconds=ollama_settings.timeout_seconds,
+        )
+        return MemoryConsolidationService(provider=provider)
 
     async def _build_input_parts(
             self,
@@ -366,6 +389,37 @@ class LangGraphRunEngine(RunEngine):
             "final_answer_text_excerpt": str(summary.final_answer_text or "").strip()[:200],
         }
 
+    @staticmethod
+    def _resolve_final_answer_summary(*, final_message: str) -> str:
+        """解析单次运行的轻量最终摘要，避免把重交付正文当成会话主题摘要。
+
+        `summary_node` 收口后，`final_message` 的业务语义应是轻量最终摘要；
+        direct_answer 等无独立轻摘要的路径只能退化为当前回答的短摘录。
+        """
+        return str(final_message or "").strip()[:500]
+
+    @staticmethod
+    def _resolve_session_summary_text(
+            *,
+            conversation_summary: str,
+            summaries: List[WorkflowRunSummary],
+    ) -> str:
+        """解析会话级主题摘要，优先使用 Memory Consolidation 产出的 conversation_summary。
+
+        `recent_run_briefs` 仍保留每轮摘要和正文摘录，但它们只是历史简报，
+        不能在存在真实会话摘要时反向污染 `summary_text`。
+        """
+        normalized_conversation_summary = str(conversation_summary or "").strip()
+        if normalized_conversation_summary:
+            return normalized_conversation_summary
+
+        summary_text_parts = [
+            str(item.final_answer_summary or item.final_answer_text or item.title or "").strip()[:200]
+            for item in list(summaries or [])
+            if str(item.final_answer_summary or item.final_answer_text or item.title or "").strip()
+        ]
+        return " | ".join(summary_text_parts[:3])
+
     @classmethod
     def _resolve_run_status_for_projection(
             cls,
@@ -444,7 +498,7 @@ class LangGraphRunEngine(RunEngine):
             goal=str(getattr(plan, "goal", "") or (state.get("working_memory") or {}).get("goal") or ""),
             # 标题：优先取自计划对象，其次取自最终消息前 80 字符，最后兜底
             title=str(getattr(plan, "title", "") or final_message[:80] or "未命名运行"),
-            final_answer_summary=final_message[:500],
+            final_answer_summary=cls._resolve_final_answer_summary(final_message=final_message),
             final_answer_text=final_delivery_text or final_message,
             status=run_status,
             completed_steps=completed_steps,
@@ -466,23 +520,20 @@ class LangGraphRunEngine(RunEngine):
             session_id: str,
             user_id: Optional[str],
             summaries: List[WorkflowRunSummary],
+            conversation_summary: str = "",
     ) -> SessionContextSnapshot:
         recent_summaries = list(summaries or [])[:SESSION_CONTEXT_SUMMARY_LIMIT]
-
-        # 提取非空的摘要文本或标题，用于构建简短的上下文概览
-        summary_text_parts = [
-            str(item.final_answer_summary or item.final_answer_text or item.title or "").strip()[:200]
-            for item in recent_summaries
-            if str(item.final_answer_summary or item.final_answer_text or item.title or "").strip()
-        ]
 
         return SessionContextSnapshot(
             session_id=session_id,
             user_id=user_id,
             # 设置最近一次运行的 ID，若无运行记录则为 None
             last_run_id=recent_summaries[0].run_id if recent_summaries else None,
-            # 将前三个摘要片段拼接成简要文本
-            summary_text=" | ".join(summary_text_parts[:3]),
+            # 会话主题摘要优先来自 Memory Consolidation，不再默认拼接最终交付正文。
+            summary_text=cls._resolve_session_summary_text(
+                conversation_summary=conversation_summary,
+                summaries=recent_summaries,
+            ),
             # 构建详细的近期运行简报列表
             recent_run_briefs=[
                 cls._build_context_brief(item)
@@ -529,6 +580,7 @@ class LangGraphRunEngine(RunEngine):
             session_id=run.session_id,
             user_id=run.user_id,
             summaries=recent_summaries,
+            conversation_summary=str(state.get("conversation_summary") or "").strip(),
         )
         await uow.session_context_snapshot.upsert(snapshot)
 

@@ -355,6 +355,7 @@ httpx==0.28.1 \
     #   langgraph-sdk
     #   langsmith
     #   mcp
+    #   ollama
     #   openai
 httpx-sse==0.4.3 \
     --hash=sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc \
@@ -610,6 +611,10 @@ numpy==2.4.4 \
     --hash=sha256:f9e75681b59ddaa5e659898085ae0eaea229d054f2ac0c7e563a62205a700121 \
     --hash=sha256:fbc356aae7adf9e6336d336b9c8111d390a05df88f1805573ebb0807bd06fd1d
     # via pgvector
+ollama==0.6.1 \
+    --hash=sha256:478c67546836430034b415ed64fa890fd3d1ff91781a9d548b3325274e69d7c6 \
+    --hash=sha256:fc4c984b345735c5486faeee67d8a265214a31cbb828167782dc642ce0a2bf8c
+    # via backend
 openai==2.7.2 \
     --hash=sha256:082ef61163074d8efad0035dd08934cf5e3afd37254f70fc9165dd6a8c67dcbd \
     --hash=sha256:116f522f4427f8a0a59b51655a356da85ce092f3ed6abeca65f03c8be6e073d9
@@ -802,6 +807,7 @@ pydantic==2.12.4 \
     #   langgraph
     #   langsmith
     #   mcp
+    #   ollama
     #   openai
     #   pydantic-settings
 pydantic-core==2.41.5 \

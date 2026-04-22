@@ -8,10 +8,18 @@
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
+
+
+class OllamaSettings(BaseModel):
+    """通用 Ollama 连接配置，供所有需要本地 Ollama 的运行时能力复用。"""
+
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen3:4b"
+    timeout_seconds: float = 30.0
 
 
 class Settings(BaseSettings):
@@ -89,6 +97,7 @@ class Settings(BaseSettings):
     agent_runtime_executor_model_name: Optional[str] = None
     agent_runtime_replan_model_name: Optional[str] = None
     agent_runtime_summary_model_name: Optional[str] = None
+    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     embedding_base_url: str = "https://api.openai.com/v1"
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
@@ -97,6 +106,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_nested_delimiter="__",
         extra="ignore",
     )
 

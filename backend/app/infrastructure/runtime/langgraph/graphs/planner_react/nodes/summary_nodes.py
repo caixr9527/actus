@@ -29,7 +29,6 @@ from app.domain.services.runtime.contracts.runtime_logging import (
 )
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
-    append_unique_text,
     build_delivery_text,
     normalize_controlled_value,
 )
@@ -47,19 +46,6 @@ from .delivery_helpers import (
     _resolve_attachment_delivery_preference_for_summary,
     _resolve_summary_attachment_refs,
     _should_skip_summary_llm_for_final_delivery,
-)
-from .memory_helpers import (
-    _build_memory_candidates,
-    _build_model_memory_candidates,
-    _build_outcome_memory_candidate,
-    _collect_summary_evidence_texts,
-    _filter_model_memory_candidates_by_evidence,
-    _filter_preferences_by_evidence,
-    _filter_summary_facts_by_evidence,
-    _memory_item_has_execution_evidence,
-    _merge_memory_candidates,
-    _normalize_memory_fact_items,
-    _normalize_memory_preferences,
 )
 from .prompt_context_helpers import (
     _build_prompt_context_packet_async,
@@ -208,41 +194,6 @@ async def summarize_node(
             )
             or ""
         ).strip()
-    extracted_facts = _normalize_memory_fact_items(parsed.get("facts_in_session"))
-    extracted_preferences = _normalize_memory_preferences(parsed.get("user_preferences"))
-    model_memory_candidates = _build_model_memory_candidates(
-        state=state,
-        raw_candidates=parsed.get("memory_candidates"),
-    )
-    summary_evidence_texts = _collect_summary_evidence_texts(
-        state=state,
-        last_executed_step=last_executed_step,
-    )
-    extracted_facts = _filter_summary_facts_by_evidence(extracted_facts, summary_evidence_texts)
-    extracted_preferences, dropped_extracted_preferences = _filter_preferences_by_evidence(
-        extracted_preferences,
-        summary_evidence_texts,
-    )
-    existing_preferences, dropped_existing_preferences = _filter_preferences_by_evidence(
-        dict(working_memory.get("user_preferences") or {}),
-        summary_evidence_texts,
-    )
-    working_memory["user_preferences"] = existing_preferences
-    model_memory_candidates, dropped_model_memory_candidates = _filter_model_memory_candidates_by_evidence(
-        model_memory_candidates,
-        summary_evidence_texts,
-    )
-    if dropped_model_memory_candidates > 0 or dropped_extracted_preferences > 0 or dropped_existing_preferences > 0:
-        log_runtime(
-            logger,
-            logging.INFO,
-            "总结记忆已按执行证据过滤",
-            state=state,
-            dropped_memory_candidate_count=dropped_model_memory_candidates,
-            dropped_extracted_preference_count=dropped_extracted_preferences,
-            dropped_existing_preference_count=dropped_existing_preferences,
-            evidence_count=len(summary_evidence_texts),
-        )
     attachment_delivery_preference = _resolve_attachment_delivery_preference_for_summary(
         state=state,
         last_executed_step=last_executed_step,
@@ -297,53 +248,12 @@ async def summarize_node(
     final_events.append(PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.COMPLETED))
 
     await _resolve_emit_live_events()(*final_events)
-    working_memory["facts_in_session"] = list(working_memory.get("facts_in_session") or [])
-    for fact in extracted_facts:
-        working_memory["facts_in_session"] = append_unique_text(
-            list(working_memory.get("facts_in_session") or []),
-            fact,
-        )
-    if extracted_preferences:
-        merged_preferences = dict(existing_preferences)
-        merged_preferences.update(extracted_preferences)
-        working_memory["user_preferences"] = merged_preferences
-
-    next_state_for_memory: PlannerReActLangGraphState = {
-        **state,
-        "working_memory": working_memory,
-        "final_message": summary_message,
-    }
-    memory_candidates = _build_memory_candidates(next_state_for_memory)
-    if len(memory_candidates) == 0:
-        outcome_candidate = _build_outcome_memory_candidate(
-            next_state_for_memory,
-            summary_message=summary_message,
-        )
-        outcome_text = str(
-            ((outcome_candidate or {}).get("content") or {}).get("text")
-            or (outcome_candidate or {}).get("summary")
-            or ""
-        ).strip()
-        if outcome_candidate is not None and _memory_item_has_execution_evidence(outcome_text, summary_evidence_texts):
-            memory_candidates = [outcome_candidate]
-        elif outcome_candidate is not None:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "任务结果候选缺少执行证据，已跳过入库",
-                state=state,
-                dropped_outcome_candidate=True,
-            )
-    memory_candidates = _merge_memory_candidates(memory_candidates, model_memory_candidates)
     log_runtime(
         logger,
         logging.INFO,
         "总结生成完成",
         state=state,
         attachment_count=len(summary_attachment_refs),
-        fact_count=len(extracted_facts),
-        preference_count=len(extracted_preferences),
-        memory_candidate_count=len(memory_candidates),
         llm_elapsed_ms=llm_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
     )
@@ -356,10 +266,6 @@ async def summarize_node(
             "final_message": summary_message,
             "working_memory": working_memory,
             "selected_artifacts": list(summary_attachment_refs),
-            "pending_memory_writes": _merge_memory_candidates(
-                list(state.get("pending_memory_writes") or []),
-                memory_candidates,
-            ),
         },
         events=final_events,
     )
