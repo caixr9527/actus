@@ -118,6 +118,52 @@ def test_langgraph_run_engine_should_inject_checkpointer_into_graph_builder(monk
     )
 
     assert captured["checkpointer"] is checkpointer
+    assert captured["memory_consolidation_service"] is not None
+
+
+def test_langgraph_run_engine_should_build_ollama_memory_consolidation_service_when_ollama_model_configured(monkeypatch) -> None:
+    captured = {}
+    captured_factory_config = {}
+    fake_provider = object()
+
+    def _fake_build_graph(**kwargs):
+        captured.update(kwargs)
+        return _FakeGraph()
+
+    class _FakeFactory:
+        def create_memory_consolidation_provider(self, **kwargs):
+            captured_factory_config.update(kwargs)
+            return fake_provider
+
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
+        _fake_build_graph,
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.engine.run_engine.get_settings",
+        lambda: SimpleNamespace(
+            ollama=SimpleNamespace(
+                base_url="http://ollama.test",
+                model="qwen2.5:3b",
+                timeout_seconds=2.5,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.engine.run_engine.OllamaLLMFactory",
+        _FakeFactory,
+    )
+    _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+    )
+
+    assert captured["memory_consolidation_service"] is not None
+    assert captured_factory_config == {
+        "base_url": "http://ollama.test",
+        "model": "qwen2.5:3b",
+        "timeout_seconds": 2.5,
+    }
 
 
 def test_langgraph_run_engine_should_require_complete_stage_llms() -> None:
@@ -754,12 +800,56 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
     synced_snapshot = session_context_snapshot_repo.upsert.await_args.args[0]
     assert synced_snapshot.session_id == "session-1"
     assert synced_snapshot.last_run_id == "run-1"
+    assert synced_snapshot.summary_text == "会话摘要"
     assert len(synced_snapshot.recent_run_briefs) == 1
     assert synced_snapshot.recent_run_briefs[0]["run_id"] == "run-1"
     assert synced_snapshot.recent_run_briefs[0]["status"] == WorkflowRunStatus.COMPLETED.value
     assert synced_snapshot.recent_run_briefs[0]["final_answer_text_excerpt"] == "这是最终交付正文。"
     assert synced_snapshot.artifact_paths == ["/tmp/final-output.md"]
     assert "artifacts" not in synced_snapshot.recent_run_briefs[0]
+
+
+def test_langgraph_run_engine_session_snapshot_should_prefer_conversation_summary() -> None:
+    long_delivery_text = "这是很长的最终交付正文，包含大量细节。" * 30
+    summary = WorkflowRunSummary(
+        run_id="run-1",
+        session_id="session-1",
+        status=WorkflowRunStatus.COMPLETED,
+        title="本轮运行",
+        final_answer_summary="轻量最终摘要",
+        final_answer_text=long_delivery_text,
+    )
+
+    snapshot = LangGraphRunEngine._build_session_context_snapshot_projection(
+        session_id="session-1",
+        user_id="user-1",
+        summaries=[summary],
+        conversation_summary="真实会话主题摘要",
+    )
+
+    assert snapshot.summary_text == "真实会话主题摘要"
+    assert snapshot.recent_run_briefs[0]["final_answer_summary"] == "轻量最终摘要"
+    assert snapshot.recent_run_briefs[0]["final_answer_text_excerpt"] == long_delivery_text[:200]
+
+
+def test_langgraph_run_engine_session_snapshot_should_fallback_to_recent_run_briefs_without_conversation_summary() -> None:
+    summary = WorkflowRunSummary(
+        run_id="run-1",
+        session_id="session-1",
+        status=WorkflowRunStatus.COMPLETED,
+        title="本轮运行",
+        final_answer_summary="轻量最终摘要",
+        final_answer_text="这是最终交付正文。",
+    )
+
+    snapshot = LangGraphRunEngine._build_session_context_snapshot_projection(
+        session_id="session-1",
+        user_id="user-1",
+        summaries=[summary],
+        conversation_summary="",
+    )
+
+    assert snapshot.summary_text == "轻量最终摘要"
 
 
 def test_langgraph_run_engine_invoke_should_not_sync_episodic_projection_for_waiting_state(monkeypatch) -> None:

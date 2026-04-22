@@ -1511,9 +1511,27 @@ def test_replan_node_should_use_summarized_prompt_inputs_instead_of_full_plan_js
     assert '"success_criteria"' not in context_prompt
 
 
-def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates() -> None:
+def test_summarize_should_not_generate_memory_candidates_and_consolidate_should_persist_existing_writes() -> None:
     repository = _FakeLongTermMemoryRepository()
     llm = _FakeLLM()
+    pending_memory_writes = [
+        {
+            "namespace": "user/user-1/profile",
+            "memory_type": "profile",
+            "summary": "用户偏好中文回复",
+            "content": {"language": "zh"},
+            "tags": ["language"],
+            "confidence": 0.9,
+        },
+        {
+            "namespace": "session/session-1/fact",
+            "memory_type": "fact",
+            "summary": "本会话只关注 backend",
+            "content": {"text": "本会话只关注 backend"},
+            "tags": ["backend"],
+            "confidence": 0.8,
+        },
+    ]
     state = {
         "session_id": "session-1",
         "user_id": "user-1",
@@ -1533,7 +1551,7 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
             "user_preferences": {"language": "zh"},
             "facts_in_session": ["本会话只关注 backend"],
         },
-        "pending_memory_writes": [],
+        "pending_memory_writes": pending_memory_writes,
         "message_window": [
             {"role": "user", "message": "帮我完成总结，并且后续请用中文回复", "attachment_paths": []},
         ],
@@ -1543,7 +1561,7 @@ def test_summarize_and_consolidate_should_generate_and_persist_memory_candidates
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert len(summarized_state["pending_memory_writes"]) == 2
+    assert summarized_state["pending_memory_writes"] == pending_memory_writes
     assert summarized_state["selected_artifacts"] == []
 
     consolidated_state = asyncio.run(
@@ -2533,7 +2551,7 @@ def test_consolidate_memory_should_govern_candidates_before_persisting() -> None
     assert consolidated_state["pending_memory_writes"] == []
 
 
-def test_summarize_should_generate_candidates_from_structured_extraction_when_working_memory_empty() -> None:
+def test_summarize_should_ignore_structured_memory_extraction_when_working_memory_empty() -> None:
     llm = _FakeStructuredMemoryLLM()
     state = {
         "session_id": "session-1",
@@ -2574,22 +2592,12 @@ def test_summarize_should_generate_candidates_from_structured_extraction_when_wo
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["working_memory"]["facts_in_session"] == [
-        "当前任务后续都只需要关注 backend"
-    ]
-    assert summarized_state["working_memory"]["user_preferences"] == {
-        "language": "zh",
-        "response_style": "concise",
-    }
-    assert len(summarized_state["pending_memory_writes"]) == 3
-    assert {item["memory_type"] for item in summarized_state["pending_memory_writes"]} == {
-        "profile",
-        "fact",
-        "instruction",
-    }
+    assert summarized_state["working_memory"]["facts_in_session"] == []
+    assert summarized_state["working_memory"]["user_preferences"] == {}
+    assert summarized_state["pending_memory_writes"] == []
 
 
-def test_summarize_should_drop_unverified_fact_and_memory_candidates() -> None:
+def test_summarize_should_ignore_memory_fields_even_when_model_returns_them() -> None:
     class _HallucinatedMemoryLLM:
         async def invoke(self, messages, tools, response_format):
             return {
@@ -2647,12 +2655,10 @@ def test_summarize_should_drop_unverified_fact_and_memory_candidates() -> None:
 
     assert summarized_state["working_memory"]["facts_in_session"] == []
     assert summarized_state["working_memory"]["user_preferences"] == {}
-    assert all(item.get("summary") != "项目已经迁移到 golang" for item in summarized_state["pending_memory_writes"])
-    assert all(item.get("memory_type") != "profile" for item in summarized_state["pending_memory_writes"])
     assert summarized_state["pending_memory_writes"] == []
 
 
-def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_memory_available() -> None:
+def test_summarize_should_not_fallback_to_task_outcome_memory_candidate() -> None:
     llm = _FakeLLM()
     state = {
         "session_id": "session-1",
@@ -2692,9 +2698,7 @@ def test_summarize_should_fallback_to_task_outcome_candidate_when_no_structured_
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert len(summarized_state["pending_memory_writes"]) == 1
-    assert summarized_state["pending_memory_writes"][0]["memory_type"] == "fact"
-    assert summarized_state["pending_memory_writes"][0]["tags"] == ["task_outcome"]
+    assert summarized_state["pending_memory_writes"] == []
 
 
 def test_summarize_should_not_fallback_to_last_step_artifacts_when_model_returns_empty_attachments() -> None:
@@ -3125,8 +3129,9 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
             "final_message": "最终总结",
         }
 
-    async def _consolidate(state, long_term_memory_repository=None):
+    async def _consolidate(state, long_term_memory_repository=None, memory_consolidation_service=None):
         assert long_term_memory_repository is repository
+        assert memory_consolidation_service is None
         return _append_trace(state, "consolidate")
 
     async def _finalize(state):
