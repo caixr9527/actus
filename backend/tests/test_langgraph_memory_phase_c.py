@@ -479,6 +479,43 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
     assert next_state["working_memory"]["user_preferences"] == {}
 
 
+def test_recall_memory_context_node_should_skip_long_term_memory_for_first_turn_without_history() -> None:
+    repository = _FakeLongTermMemoryRepository(
+        search_results=[
+            LongTermMemory(
+                id="mem-1",
+                namespace="user/user-1/fact",
+                memory_type="fact",
+                summary="不应在首轮召回",
+                content={"text": "不应在首轮召回"},
+            )
+        ]
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "thread_id": "thread-1",
+        "user_message": "给我设计一份周末出行计划",
+        "conversation_summary": "",
+        "message_window": [
+            {"role": "user", "message": "给我设计一份周末出行计划", "attachment_paths": []},
+        ],
+        "recent_run_briefs": [],
+        "working_memory": {},
+        "graph_metadata": {},
+    }
+
+    next_state = asyncio.run(
+        recall_memory_context_node(
+            state,
+            long_term_memory_repository=repository,
+        )
+    )
+
+    assert repository.search_calls == []
+    assert next_state["retrieved_memories"] == []
+
+
 def test_execute_step_node_should_not_write_string_none_when_no_executor_path_available() -> None:
     state = {
         "session_id": "session-1",

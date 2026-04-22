@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, List, TypeVar
 
@@ -164,7 +165,12 @@ class OllamaLLM(LLM):
             request_payload["format"] = ollama_format
 
         try:
-            response = await self._client.chat(**request_payload)
+            response = await asyncio.wait_for(
+                self._client.chat(**request_payload),
+                timeout=self._timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ServerError("调用 Ollama 模型超时") from exc
         except Exception as exc:
             raise ServerError("调用 Ollama 模型出错") from exc
 

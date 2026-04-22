@@ -23,6 +23,12 @@ class _FakeOllamaClient:
         return {"message": {"role": "assistant", "content": self.response_content}}
 
 
+class _SlowOllamaClient:
+    async def chat(self, **kwargs):
+        await asyncio.sleep(0.2)
+        return {"message": {"role": "assistant", "content": "late"}}
+
+
 def test_ollama_llm_should_invoke_chat_with_json_schema_format() -> None:
     client = _FakeOllamaClient(
         json.dumps(
@@ -124,5 +130,22 @@ def test_ollama_llm_should_reject_non_text_multiplexed_input() -> None:
         asyncio.run(
             llm.format_multiplexed_message(
                 [{"type": "image", "file_url": "https://example.com/a.png"}]
+            )
+        )
+
+
+def test_ollama_llm_should_fail_fast_on_timeout() -> None:
+    llm = OllamaLLM(
+        base_url="http://ollama.test",
+        model="qwen2.5:3b",
+        timeout_seconds=0.01,
+        client=_SlowOllamaClient(),
+    )
+
+    with pytest.raises(ServerError, match="调用 Ollama 模型超时"):
+        asyncio.run(
+            llm.invoke(
+                messages=[{"role": "user", "content": "hello"}],
+                tools=[],
             )
         )

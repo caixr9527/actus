@@ -24,6 +24,26 @@ from .working_memory import _ensure_working_memory
 logger = logging.getLogger(__name__)
 
 
+def _should_recall_long_term_memory(state: PlannerReActLangGraphState) -> bool:
+    """收紧长期记忆召回门槛，避免新会话首轮无历史时被旧记忆污染。"""
+    if len(list(state.get("retrieved_memories") or [])) > 0:
+        return True
+    if str(state.get("conversation_summary") or "").strip():
+        return True
+    if len(list(state.get("recent_run_briefs") or [])) > 0:
+        return True
+    message_window = list(state.get("message_window") or [])
+    current_user_message = str(state.get("user_message") or "").strip()
+    if len(message_window) > 1:
+        return True
+    if (
+        len(message_window) == 1
+        and str(message_window[-1].get("message") or "").strip() != current_user_message
+    ):
+        return True
+    return False
+
+
 async def recall_memory_context_node(
         state: PlannerReActLangGraphState,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
@@ -47,7 +67,8 @@ async def recall_memory_context_node(
 
     retrieved_memories = list(state.get("retrieved_memories") or [])
     recall_cost_ms = 0
-    if long_term_memory_repository is not None:
+    should_recall = _should_recall_long_term_memory(state)
+    if long_term_memory_repository is not None and should_recall:
         try:
             recall_started_at = now_perf()
             recalled_memories: List[LongTermMemory] = []
@@ -68,6 +89,15 @@ async def recall_memory_context_node(
                 recall_elapsed_ms=recall_cost_ms,
                 elapsed_ms=elapsed_ms(started_at),
             )
+    elif long_term_memory_repository is not None and not should_recall:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "跳过长期记忆召回",
+            state=state,
+            reason="首轮无历史上下文",
+            elapsed_ms=elapsed_ms(started_at),
+        )
     # P3-一次性收口：planner 前禁止把 profile 记忆回写到 working_memory，避免跨任务偏好污染计划。
 
     log_runtime(
@@ -75,6 +105,7 @@ async def recall_memory_context_node(
         logging.INFO,
         "记忆召回完成",
         state=state,
+        should_recall=should_recall,
         recalled_memory_count=len(retrieved_memories),
         open_question_count=len(list(working_memory.get("open_questions") or [])),
         preference_count=len(dict(working_memory.get("user_preferences") or {})),
