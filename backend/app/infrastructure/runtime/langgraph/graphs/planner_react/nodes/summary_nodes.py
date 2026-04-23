@@ -31,6 +31,7 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     log_runtime,
     now_perf,
 )
+from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
@@ -137,6 +138,32 @@ def _build_summary_message_fallback(
     if plan_title:
         return f"已完成{plan_title}。"
     return "任务已完成。"
+
+
+def _extract_step_draft_fact_text(*, state: PlannerReActLangGraphState, last_executed_step: Any) -> str:
+    """提取执行阶段沉淀的正文草稿，供 summary 模型异常时兜底。
+
+    只识别 `STEP_DRAFT_FACT_PREFIX` 标记的事实，避免把普通 facts_learned 误当最终正文。
+    """
+    candidate_facts: List[str] = []
+    step_outcome = getattr(last_executed_step, "outcome", None)
+    candidate_facts.extend([str(item or "") for item in list(getattr(step_outcome, "facts_learned", []) or [])])
+    for step_state in list(state.get("step_states") or []):
+        if not isinstance(step_state, dict):
+            continue
+        outcome = step_state.get("outcome")
+        if not isinstance(outcome, dict):
+            continue
+        candidate_facts.extend([str(item or "") for item in list(outcome.get("facts_learned") or [])])
+
+    for raw_fact in reversed(candidate_facts):
+        fact = str(raw_fact or "").strip()
+        if not fact.startswith(STEP_DRAFT_FACT_PREFIX):
+            continue
+        draft_text = fact[len(STEP_DRAFT_FACT_PREFIX):].strip()
+        if draft_text:
+            return draft_text
+    return ""
 
 
 async def summarize_node(
@@ -255,6 +282,10 @@ async def summarize_node(
             step_id=str(getattr(last_executed_step, "id", "") or ""),
         )
     else:
+        draft_fallback_text = _extract_step_draft_fact_text(
+            state=state,
+            last_executed_step=last_executed_step,
+        )
         summary_message = str(
             parsed.get("message")
             or _build_summary_message_fallback(
@@ -265,6 +296,7 @@ async def summarize_node(
         ).strip()
         final_answer_text = str(
             parsed.get("final_answer_text")
+            or draft_fallback_text
             or summary_message
             or ""
         ).strip()

@@ -29,6 +29,7 @@ from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, un
 from app.infrastructure.runtime.langgraph.graphs.planner_react.graph import (
     build_planner_react_langgraph_graph as _build_planner_react_langgraph_graph,
 )
+from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     consolidate_memory_node,
     direct_wait_node,
@@ -204,6 +205,11 @@ class _FakeLegacyFinalMessageOnlySummaryLLM:
                 ensure_ascii=False,
             )
         }
+
+
+class _FakeInvalidSummaryJsonLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {"content": '{"\\n  ":", ","\\n  ":"'}
 
 
 class _FakeSummaryAttachmentPathDisclosureLLM:
@@ -1932,6 +1938,67 @@ def test_summarize_should_not_use_legacy_final_message_as_final_answer_text() ->
     assert message_event.type == "message"
     assert message_event.stage == "final"
     assert message_event.message == "轻量总结"
+
+
+def test_summarize_should_fallback_to_step_draft_fact_when_summary_json_invalid() -> None:
+    llm = _FakeInvalidSummaryJsonLLM()
+    draft_text = "## LangChain Human-in-the-Loop 能力概述\n\n支持人工审核、编辑和拒绝工具调用。"
+    final_step = Step(
+        id="step-final",
+        title="整理网页结果",
+        description="整理网页结果",
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="已读取并分析文档",
+            facts_learned=[
+                "普通事实不应作为最终正文",
+                f"{STEP_DRAFT_FACT_PREFIX}{draft_text}",
+            ],
+        ),
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "阅读文档并总结",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": final_step,
+        "step_states": [
+            {
+                "step_id": "step-final",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已读取并分析文档",
+                    "facts_learned": [
+                        "普通事实不应作为最终正文",
+                        f"{STEP_DRAFT_FACT_PREFIX}{draft_text}",
+                    ],
+                    "blockers": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证 summary JSON 失败时使用正文草稿兜底",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["final_message"] == "已读取并分析文档"
+    assert summarized_state["final_answer_text"] == draft_text
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.message == draft_text
 
 
 def test_summarize_should_not_reuse_generic_step_summary_as_final_message() -> None:

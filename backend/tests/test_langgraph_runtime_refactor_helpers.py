@@ -24,6 +24,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.finaliz
     finalize_max_iterations,
     finalize_no_tool_call,
 )
+from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import (
     build_loop_break_result,
 )
@@ -196,6 +197,36 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -
     assert result.action == "return"
     assert result.payload is not None
     assert result.payload["success"] is True
+
+
+def test_finalize_no_tool_call_should_preserve_text_outside_json_as_draft_fact() -> None:
+    logger = logging.getLogger(__name__)
+    markdown_text = "## 能力概述\n\nHuman-in-the-Loop 支持人工审核工具调用。"
+    llm_message = {
+        "content": (
+            f"{markdown_text}\n\n"
+            "```json\n"
+            '{"success": true, "summary": "已完成阅读", "facts_learned": ["支持人工审核"]}'
+            "\n```"
+        )
+    }
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=Step(description="整理网页内容"),
+        task_mode="general",
+        llm_message=llm_message,
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=1,
+        runtime_recent_action={},
+    )
+
+    assert result.action == "return"
+    assert result.payload is not None
+    facts = [str(item) for item in list(result.payload.get("facts_learned") or [])]
+    assert "支持人工审核" in facts
+    assert any(item == f"{STEP_DRAFT_FACT_PREFIX}{markdown_text}" for item in facts)
 
 
 def test_build_execution_context_should_not_block_file_generating_organization_step() -> None:

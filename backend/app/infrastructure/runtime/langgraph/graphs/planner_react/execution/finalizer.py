@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from app.domain.models import Step
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime
+from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.runtime.normalizers import normalize_execution_response
 from app.domain.services.workspace_runtime.policies import (
     build_human_wait_missing_interrupt_payload as _build_human_wait_missing_interrupt_payload,
@@ -15,6 +16,7 @@ from app.domain.services.workspace_runtime.policies import (
     normalize_execution_payload as _normalize_execution_payload,
 )
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
+    extract_text_outside_json_blocks,
     normalize_attachments,
     safe_parse_json,
 )
@@ -24,7 +26,6 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence impor
     ResearchConvergenceJudge,
     WebReadingConvergenceJudge,
 )
-
 
 @dataclass(slots=True)
 class NoToolCallFinalizationResult:
@@ -51,7 +52,9 @@ def finalize_no_tool_call(
         iteration: int,
         runtime_recent_action: Optional[Dict[str, Any]] = None,
 ) -> NoToolCallFinalizationResult:
-    parsed = safe_parse_json(llm_message.get("content"))
+    raw_llm_content = str(llm_message.get("content") or "")
+    parsed = safe_parse_json(raw_llm_content)
+    extra_response_text = extract_text_outside_json_blocks(raw_llm_content)
     parsed_execution = normalize_execution_response(parsed)
     if task_mode == "human_wait":
         log_runtime(
@@ -121,20 +124,32 @@ def finalize_no_tool_call(
         llm_elapsed_ms=llm_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
     )
+    normalized_payload = _normalize_execution_payload(
+        {
+            **parsed,
+            "success": inferred_success,
+            "runtime_recent_action": runtime_recent_action or {},
+        },
+        default_summary=(
+            f"步骤执行完成：{step.description}"
+            if inferred_success
+            else f"步骤暂未完成：{step.description}"
+        ),
+    )
+    if inferred_success and extra_response_text:
+        # 执行模型有时会返回“正文 + JSON”。正文不是最终出口，但必须作为事实证据交给 summary。
+        facts_learned = [
+            str(item or "").strip()
+            for item in list(normalized_payload.get("facts_learned") or [])
+            if str(item or "").strip()
+        ]
+        draft_fact = f"{STEP_DRAFT_FACT_PREFIX}{extra_response_text}"
+        if draft_fact not in facts_learned:
+            facts_learned.append(draft_fact)
+        normalized_payload["facts_learned"] = facts_learned
     return NoToolCallFinalizationResult(
         action="return",
-        payload=_normalize_execution_payload(
-            {
-                **parsed,
-                "success": inferred_success,
-                "runtime_recent_action": runtime_recent_action or {},
-            },
-            default_summary=(
-                f"步骤执行完成：{step.description}"
-                if inferred_success
-                else f"步骤暂未完成：{step.description}"
-            ),
-        ),
+        payload=normalized_payload,
         parsed=parsed,
     )
 
