@@ -7,13 +7,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional, Set
 
-from app.domain.models import SearchResults, Step, ToolResult
-from app.domain.services.runtime.normalizers import normalize_execution_response
+from app.domain.models import FetchedPage, SearchResults, Step, ToolResult
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ASK_USER_FUNCTION_NAME,
     NOTIFY_USER_FUNCTION_NAME,
-    TOOL_RESULT_MAX_LIST_ITEMS,
 )
+from app.domain.services.runtime.normalizers import normalize_execution_response
 from .common import compact_tool_value, hash_payload, truncate_tool_text
 
 BLOCKED_TOOL_LOOP_BREAK_REASONS: Set[str] = {
@@ -152,7 +151,7 @@ def summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> D
                 or result_data.get("path")
                 or ""
             ).strip(),
-            "message": truncate_tool_text(tool_result.message, max_chars=200),
+            "message": tool_result.message,
         }
     if normalized_name == "read_file" and isinstance(result_data, dict):
         return {
@@ -162,7 +161,7 @@ def summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> D
                 or result_data.get("path")
                 or ""
             ).strip(),
-            "content": truncate_tool_text(result_data.get("content"), max_chars=1800),
+            "content": result_data.get("content"),
         }
     if normalized_name in {"list_files", "find_files"} and isinstance(result_data, dict):
         files = result_data.get("files") or result_data.get("results") or []
@@ -170,20 +169,49 @@ def summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> D
             files = []
         return {
             "dir_path": str(result_data.get("dir_path") or "").strip(),
-            "files": [truncate_tool_text(item, max_chars=200) for item in files[:TOOL_RESULT_MAX_LIST_ITEMS]],
+            "files": files,
         }
     if normalized_name == "search_web" and isinstance(result_data, SearchResults):
         return {
             "query": str(result_data.query or "").strip(),
             "results": [
                 {
-                    "title": truncate_tool_text(item.title, max_chars=120),
-                    "url": truncate_tool_text(item.url, max_chars=240),
-                    "snippet": truncate_tool_text(item.snippet, max_chars=200),
+                    "title": item.title,
+                    "url": item.url,
+                    "snippet": item.snippet,
                 }
-                for item in list(result_data.results or [])[:5]
+                for item in list(result_data.results or [])
             ],
         }
+    if normalized_name == "fetch_page":
+        # fetch_page 的正文已经由 sandbox 的 max_chars 控制；
+        # 执行 LLM 这里应直接消费完整页面结果，不再做二次截断。
+        if isinstance(result_data, FetchedPage):
+            return {
+                "url": str(result_data.url or "").strip(),
+                "final_url": str(result_data.final_url or "").strip(),
+                "status_code": int(result_data.status_code or 0),
+                "content_type": str(result_data.content_type or "").strip(),
+                "title": str(result_data.title or "").strip(),
+                "content": str(result_data.content or ""),
+                "excerpt": str(result_data.excerpt or ""),
+                "content_length": int(result_data.content_length or 0),
+                "truncated": bool(result_data.truncated),
+                "max_chars": result_data.max_chars,
+            }
+        if isinstance(result_data, dict):
+            return {
+                "url": str(result_data.get("url") or "").strip(),
+                "final_url": str(result_data.get("final_url") or "").strip(),
+                "status_code": int(result_data.get("status_code") or 0),
+                "content_type": str(result_data.get("content_type") or "").strip(),
+                "title": str(result_data.get("title") or "").strip(),
+                "content": str(result_data.get("content") or ""),
+                "excerpt": str(result_data.get("excerpt") or ""),
+                "content_length": int(result_data.get("content_length") or 0),
+                "truncated": bool(result_data.get("truncated", False)),
+                "max_chars": result_data.get("max_chars"),
+            }
     return {"data": compact_tool_value(result_data)}
 
 

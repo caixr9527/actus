@@ -109,6 +109,7 @@ from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_failure_key,
     build_browser_route_state_key,
     build_search_fingerprint,
+    build_tool_feedback_content,
     build_tool_fingerprint,
 )
 
@@ -218,6 +219,38 @@ def test_build_execution_context_should_not_block_file_generating_organization_s
 
     assert "search_web" not in execution_context.blocked_function_names
     assert "fetch_page" not in execution_context.blocked_function_names
+
+
+def test_build_tool_feedback_content_should_keep_full_fetch_page_content() -> None:
+    full_content = "A" * 5000
+    feedback_content = build_tool_feedback_content(
+        "fetch_page",
+        ToolResult(
+            success=True,
+            message="ok",
+            data=FetchedPage(
+                url="https://example.com/article",
+                final_url="https://example.com/article",
+                status_code=200,
+                content_type="text/markdown",
+                title="Example Article",
+                content=full_content,
+                excerpt="A" * 120,
+                content_length=len(full_content),
+                truncated=False,
+                max_chars=20000,
+            ),
+        ),
+    )
+
+    parsed_feedback = json.loads(feedback_content)
+    assert parsed_feedback["success"] is True
+    assert parsed_feedback["data"]["url"] == "https://example.com/article"
+    assert parsed_feedback["data"]["title"] == "Example Article"
+    assert parsed_feedback["data"]["content"] == full_content
+    assert len(parsed_feedback["data"]["content"]) == 5000
+    assert parsed_feedback["data"]["content_length"] == 5000
+    assert parsed_feedback["data"]["max_chars"] == 20000
 
 
 def test_constraint_engine_default_snapshot_should_fill_required_keys() -> None:
