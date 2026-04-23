@@ -1335,6 +1335,25 @@ def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -
     assert steps[0].output_mode == StepOutputMode.NONE
 
 
+def test_compile_step_contracts_should_flag_summary_only_step() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="整理 LangGraph human-in-the-loop 的常见实现模式，归纳为 5 条要点，并标注对应来源链接",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
+    )
+
+    assert corrected_count == 0
+    assert len(steps) == 1
+    assert any(item.issue_code == "summary_only_step_forbidden" for item in issues)
+
+
 def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enum() -> None:
     class _PlannerHumanWaitLLM:
         async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):

@@ -133,6 +133,7 @@ class WebReadingConvergenceJudge:
             execution_state=execution_state,
         )
         strong_evidence_items = list(contract_state.get("strong_evidence_items") or [])
+        explicit_url_state = dict(contract_state.get("explicit_url_state") or {})
         execution_state.runtime_recent_action["web_reading_progress"] = dict(
             contract_progress_state.get("progress") or {}
         )
@@ -164,6 +165,11 @@ class WebReadingConvergenceJudge:
                 ),
                 reason_code=reason_code,
             )
+
+        # 非显式 URL 的普通 web_reading，只有合同满足时才能成功收敛。
+        # 如果当前只是证据不足，不允许在 convergence 层误判成“页面证据满足”。
+        if not bool(explicit_url_state):
+            return WebReadingConvergenceResult(should_break=False)
 
         return WebReadingConvergenceResult(should_break=False)
 

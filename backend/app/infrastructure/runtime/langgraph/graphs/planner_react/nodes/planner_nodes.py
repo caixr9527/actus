@@ -49,6 +49,7 @@ from .control_state import (
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
 )
+from .plan_contract_helpers import filter_summary_only_step_issues
 from .state_reducer import _reduce_state_with_events
 from .working_memory import _ensure_working_memory
 
@@ -307,6 +308,10 @@ async def create_or_reuse_plan_node(
         user_message=user_message,
     )
     contract_issues.extend(collect_step_contract_hard_issues(steps=compiled_steps))
+    compiled_steps, contract_issues, dropped_summary_only_steps = filter_summary_only_step_issues(
+        compiled_steps,
+        contract_issues,
+    )
     if corrected_count > 0:
         log_runtime(
             logger,
@@ -314,6 +319,14 @@ async def create_or_reuse_plan_node(
             "计划步骤契约已自动纠偏",
             state=state,
             corrected_step_count=corrected_count,
+        )
+    if dropped_summary_only_steps > 0:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "计划已移除纯整理步骤",
+            state=state,
+            dropped_step_count=dropped_summary_only_steps,
         )
     if contract_issues:
         log_runtime(

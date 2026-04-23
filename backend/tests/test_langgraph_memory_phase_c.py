@@ -1672,6 +1672,68 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
     assert '"success_criteria"' not in llm.last_prompt
 
 
+def test_summarize_should_not_emit_false_success_when_last_step_failed() -> None:
+    llm = _CaptureSummaryPromptLLM()
+    failed_step = Step(
+        id="step-3",
+        title="整理 5 条要点",
+        description="整理 LangGraph human-in-the-loop 的常见实现模式，归纳为 5 条要点，并标注对应来源链接",
+        objective_key="objective-step-3",
+        success_criteria=["产出 5 条要点"],
+        status=ExecutionStatus.FAILED,
+        outcome=StepOutcome(
+            done=False,
+            summary="步骤执行失败：整理 5 条要点",
+            blockers=["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"],
+        ),
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
+        "plan": Plan(
+            title="LangGraph Human-in-the-Loop 实现模式调研",
+            goal="调研 LangGraph human-in-the-loop 常见实现模式，给出 5 条要点和来源链接",
+            language="zh",
+            message="开始执行",
+            steps=[failed_step],
+            status=ExecutionStatus.FAILED,
+        ),
+        "execution_count": 3,
+        "last_executed_step": failed_step,
+        "step_states": [
+            {
+                "step_id": "step-3",
+                "status": ExecutionStatus.FAILED.value,
+                "outcome": {
+                    "done": False,
+                    "summary": "步骤执行失败：整理 5 条要点",
+                    "blockers": ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "调研 LangGraph human-in-the-loop 常见实现模式，给出 5 条要点和来源链接",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert "未完整完成" in summarized_state["final_answer_text"]
+    assert "执行失败" in summarized_state["final_answer_text"]
+    assert "未完整完成" in summarized_state["final_message"]
+
+
 def test_summarize_should_use_unified_summary_prompt_for_preview_requests() -> None:
     llm = _CaptureSummaryPromptLLM()
     state = {

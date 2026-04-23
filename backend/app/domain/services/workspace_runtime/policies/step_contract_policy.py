@@ -1,9 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""步骤结构化契约编译策略。"""
+"""步骤结构化契约编译策略。
+
+本模块负责在 planner / replan 之后，对步骤做一次统一收紧：
+- 纠正常见的结构化字段冲突；
+- 拦截不符合“Step 纯执行化”的步骤语义；
+- 保证进入执行链的步骤只承载执行职责，不承载最终整理职责。
+"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -24,6 +31,18 @@ class StepContractCompilationIssue:
     step_id: str
     issue_code: str
     issue_message: str
+
+
+_SUMMARY_ONLY_STEP_PATTERN = re.compile(
+    r"(整理|总结|归纳|提炼|梳理|汇总|形成要点|输出要点|给出要点|撰写总结|组织成最终说明|最终说明|最终答复|最终回答|最终正文)"
+    r"|(\b(summarize|summary|final answer|final response|write[- ]?up|organize findings)\b)",
+    re.IGNORECASE,
+)
+_EXECUTION_EVIDENCE_STEP_PATTERN = re.compile(
+    r"(导出|保存|写入|生成文件|生成文档|输出文件|读取|检索|抓取|提取|收集|比对|分析|计算|执行|运行|查看|打开|获取)"
+    r"|(\b(export|save|write|generate file|read|search|fetch|extract|collect|compare|analyze|compute|execute|run|get)\b)",
+    re.IGNORECASE,
+)
 
 
 def compile_step_contracts(
@@ -63,6 +82,14 @@ def collect_step_contract_hard_issues(*, steps: List[Step]) -> List[StepContract
                     step_id=step_id,
                     issue_code="output_artifact_conflict",
                     issue_message="output_mode=file 与 artifact_policy=forbid_file_output 互斥。",
+                )
+            )
+        if _is_summary_only_step(step):
+            issues.append(
+                StepContractCompilationIssue(
+                    step_id=step_id,
+                    issue_code="summary_only_step_forbidden",
+                    issue_message="Step 纯执行化主链不允许规划仅承担整理/总结职责的步骤。",
                 )
             )
     return issues
@@ -139,3 +166,24 @@ def _normalize_step_contract_enum_fields(step: Step) -> Step:
     normalized_step.output_mode = StepOutputMode(raw_output_mode) if raw_output_mode else None
     normalized_step.artifact_policy = StepArtifactPolicy(raw_artifact_policy) if raw_artifact_policy else None
     return normalized_step
+
+
+def _is_summary_only_step(step: Step) -> bool:
+    """识别“只负责整理最终结果”的步骤。
+
+    约束说明：
+    - 该识别只拦截“纯整理/纯总结”步骤，不拦截正常执行型分析步骤；
+    - 如果步骤同时包含明显执行动作，例如检索、读取、导出、提取、生成文件等，
+      则视为执行步骤，不在这里误伤。
+    """
+    task_mode = normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint) or ""
+    if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
+        return False
+    candidate_text = build_step_candidate_text(step)
+    if not candidate_text:
+        return False
+    if not _SUMMARY_ONLY_STEP_PATTERN.search(candidate_text):
+        return False
+    if _EXECUTION_EVIDENCE_STEP_PATTERN.search(candidate_text):
+        return False
+    return True

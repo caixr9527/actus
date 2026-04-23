@@ -67,6 +67,35 @@ _GENERIC_STEP_SUMMARY_TEXTS = {
 }
 
 
+def _build_failure_final_answer_text(
+        *,
+        plan: Any,
+        last_executed_step: Any,
+) -> str:
+    """失败态最终正文兜底。
+
+    约束：
+    - 当最后一步失败或计划整体失败时，最终正文必须明确告知“未完整完成”；
+    - 不能继续输出“已完成调研/已整理结果”这类伪成功文案。
+    """
+    step_outcome = getattr(last_executed_step, "outcome", None)
+    step_label = str(
+        getattr(last_executed_step, "title", None)
+        or getattr(last_executed_step, "description", None)
+        or ""
+    ).strip()
+    blockers = list(getattr(step_outcome, "blockers", []) or [])
+    first_blocker = str(blockers[0] or "").strip() if len(blockers) > 0 else ""
+    if step_label and first_blocker:
+        return f"任务未完整完成。最后一步“{step_label}”执行失败，原因：{first_blocker}"
+    if step_label:
+        return f"任务未完整完成。最后一步“{step_label}”执行失败。"
+    plan_title = str(getattr(plan, "title", "") or "").strip()
+    if plan_title:
+        return f"任务未完整完成：{plan_title}"
+    return "任务未完整完成。"
+
+
 def _resolve_emit_live_events():
     """统一从 nodes 包级入口解析事件发送函数，保持聚合入口的可替换性。"""
     package_module = sys.modules.get(
@@ -204,19 +233,41 @@ async def summarize_node(
     )
     llm_cost_ms = elapsed_ms(llm_started_at)
     parsed: Dict[str, Any] = safe_parse_json(llm_message.get("content"))
-    summary_message = str(
-        parsed.get("message")
-        or _build_summary_message_fallback(
-            state=state,
+    has_failed_last_step = bool(
+        last_executed_step is not None
+        and str(getattr(last_executed_step, "status", "") or "") == ExecutionStatus.FAILED.value
+    )
+    has_failed_plan = str(getattr(plan, "status", "") or "") == ExecutionStatus.FAILED.value
+    if has_failed_last_step or has_failed_plan:
+        failure_text = _build_failure_final_answer_text(
+            plan=plan,
             last_executed_step=last_executed_step,
         )
-        or ""
-    ).strip()
-    final_answer_text = str(
-        parsed.get("final_answer_text")
-        or summary_message
-        or ""
-    ).strip()
+        summary_message = failure_text
+        final_answer_text = failure_text
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "总结阶段已按失败态收紧输出口径",
+            state=state,
+            failed_plan=has_failed_plan,
+            failed_last_step=has_failed_last_step,
+            step_id=str(getattr(last_executed_step, "id", "") or ""),
+        )
+    else:
+        summary_message = str(
+            parsed.get("message")
+            or _build_summary_message_fallback(
+                state=state,
+                last_executed_step=last_executed_step,
+            )
+            or ""
+        ).strip()
+        final_answer_text = str(
+            parsed.get("final_answer_text")
+            or summary_message
+            or ""
+        ).strip()
     attachment_delivery_preference = _resolve_attachment_delivery_preference_for_summary(
         state=state,
         last_executed_step=last_executed_step,

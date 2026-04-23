@@ -103,6 +103,10 @@ def build_execution_context(
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
+    if _step_is_general_summary_only(step=step, task_mode=task_mode):
+        # Step 纯执行化：general 的纯整理步骤不应继续发起 research/fetch 链路。
+        # 这类步骤只能消费已有上下文事实，由 summary 阶段统一组织最终正文。
+        blocked_function_names.update({"search_web", "fetch_page"})
     if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
         # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
         file_processing_shell_blocked_function_names.add("shell_execute")
@@ -258,6 +262,55 @@ def _step_requests_read_only_file_access(
 ) -> bool:
     candidate_text = str(read_only_intent_text or "").strip() or _build_step_candidate_text(step)
     return _classify_file_access_intent(candidate_text) == "read_only_intent"
+
+
+def _step_is_general_summary_only(*, step: Step, task_mode: str) -> bool:
+    """识别 general 模式下的纯整理步骤，用于执行期硬限制。
+
+    约束：
+    - 只拦截“基于已有信息整理/归纳/输出要点”的 general 步骤；
+    - 不拦截带有明确文件观察、编码、文件写入等执行语义的 general 步骤。
+    """
+    if str(task_mode or "").strip().lower() != "general":
+        return False
+    candidate_text = _build_step_candidate_text(step)
+    if not candidate_text:
+        return False
+    lowered = candidate_text.lower()
+    summary_markers = (
+        "整理",
+        "总结",
+        "归纳",
+        "提炼",
+        "梳理",
+        "汇总",
+        "要点",
+        "结论",
+        "summary",
+        "summarize",
+        "final answer",
+        "final response",
+    )
+    execution_markers = (
+        "目录",
+        "文件",
+        "创建",
+        "写入",
+        "修改",
+        "执行",
+        "运行",
+        "导出",
+        "保存",
+        "read_file",
+        "write_file",
+        "shell",
+        "code",
+    )
+    if not any(marker in lowered for marker in summary_markers):
+        return False
+    if any(marker in lowered for marker in execution_markers):
+        return False
+    return True
 
 
 def _step_or_user_content_has_url(

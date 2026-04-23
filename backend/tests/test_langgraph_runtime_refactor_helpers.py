@@ -2262,6 +2262,29 @@ def test_build_execution_context_should_keep_file_tools_for_general_file_observa
     assert "find_files" not in context.blocked_function_names
 
 
+def test_build_execution_context_should_block_research_tools_for_general_summary_only_step() -> None:
+    step = Step(
+        description="整理 LangGraph human-in-the-loop 的常见实现模式，归纳为 5 条要点，并标注对应来源链接",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page", "read_file"},
+        user_message_text="调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
+    )
+
+    assert "search_web" in context.blocked_function_names
+    assert "fetch_page" in context.blocked_function_names
+
+
 def test_general_convergence_should_not_break_non_synthesis_general_without_file_observation() -> None:
     judge = GeneralConvergenceJudge()
     step = Step(
@@ -2361,6 +2384,33 @@ def test_web_reading_convergence_should_not_break_when_multi_page_requirement_no
 
     result = judge.evaluate_after_iteration(
         step=Step(description="至少读取 2 个来源页面正文并附上来源链接"),
+        task_mode="web_reading",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_web_reading_convergence_should_not_break_on_insufficient_non_explicit_url_evidence() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        web_reading_evidence_items=[
+            {
+                "url": "https://example.com/a",
+                "title": "A",
+                "summary": "只拿到单页有限摘要。",
+                "content_length": 80,
+                "link_count": 1,
+                "quality": "strong",
+            }
+        ],
+        runtime_recent_action={},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取关键资料页面，获取具体实现细节和代码示例"),
         task_mode="web_reading",
         recent_function_name="fetch_page",
         execution_state=state,
