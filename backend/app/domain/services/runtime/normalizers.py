@@ -13,6 +13,10 @@ _LOW_VALUE_SUCCESS_CRITERIA_PATTERN = re.compile(
     r"^(完成任务|继续处理|执行步骤|按计划执行|处理完成|待处理|进行中|done|complete|continue|next step)$",
     re.IGNORECASE,
 )
+_USER_FACING_FINAL_SUMMARY_PREFIX_PATTERN = re.compile(
+    r"^(下面是|以下是|最终答案如下|最终结论如下|最终方案如下|已为你整理|给你整理了|给用户|输出给用户|回复用户|Here is|Here are|Final answer|Final response)",
+    re.IGNORECASE,
+)
 _SUCCESS_CRITERIA_MAX_ITEMS = 3
 _SUCCESS_CRITERIA_MIN_CHARS = 4
 
@@ -82,6 +86,26 @@ def normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
     if not normalized_value or normalized_value.lower() == "none":
         return normalize_string_value(fallback)
     return normalized_value
+
+
+def normalize_step_internal_summary(value: Any, *, fallback: str = "") -> str:
+    """收紧步骤级 summary，只保留内部轻量摘要语义。
+
+    目的：
+    - step.summary 供执行链路、replan、summary 上下文消费；
+    - 不允许它长成“最终用户交付正文”或成稿式开场。
+
+    这里不做复杂改写，只做最小收口：
+    - 去掉明显的最终答复式前缀；
+    - 压成单段轻摘要；
+    - 保留事实性、过程性描述。
+    """
+    normalized_value = normalize_step_result_text(value, fallback=fallback)
+    if not normalized_value:
+        return ""
+    compact_value = normalized_value.replace("\r", "\n").split("\n\n", 1)[0].split("\n", 1)[0].strip()
+    compact_value = _USER_FACING_FINAL_SUMMARY_PREFIX_PATTERN.sub("", compact_value).strip(" ：:，,")
+    return normalize_step_result_text(compact_value, fallback=fallback)
 
 
 def normalize_controlled_value(value: Any, enum_class: type[Enum]) -> str:
@@ -529,9 +553,9 @@ def normalize_execution_response(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
 
-    summary = normalize_step_result_text(
+    summary = normalize_step_internal_summary(
         raw.get("summary"),
-        fallback=normalize_step_result_text(raw.get("result")),
+        fallback=normalize_step_internal_summary(raw.get("result")),
     )
 
     return {

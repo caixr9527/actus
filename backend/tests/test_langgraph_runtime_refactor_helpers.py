@@ -197,6 +197,29 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -
     assert result.payload["success"] is True
 
 
+def test_build_execution_context_should_not_block_file_generating_organization_step() -> None:
+    step = Step(
+        description="整理已提取的事实并生成 Markdown 文件，供后续 summary 使用",
+        task_mode_hint="coding",
+        output_mode="file",
+        artifact_policy="allow_file_output",
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="coding",
+        max_tool_iterations=5,
+        user_content=[{"type": "text", "text": "整理事实并生成 markdown 文件"}],
+        has_available_file_context=True,
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page", "write_file"},
+        user_message_text="把中间整理结果导出成 markdown 文件",
+    )
+
+    assert "search_web" not in execution_context.blocked_function_names
+    assert "fetch_page" not in execution_context.blocked_function_names
+
+
 def test_constraint_engine_default_snapshot_should_fill_required_keys() -> None:
     snapshot = build_default_external_signals_snapshot({})
     assert snapshot["blocked_fingerprints"] == []

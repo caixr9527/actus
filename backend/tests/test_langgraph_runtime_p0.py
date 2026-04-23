@@ -1354,6 +1354,25 @@ def test_compile_step_contracts_should_flag_summary_only_step() -> None:
     assert any(item.issue_code == "summary_only_step_forbidden" for item in issues)
 
 
+def test_compile_step_contracts_should_allow_execution_side_organization_step() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="整理已收集的事实并生成 Markdown 文件，供后续 summary 使用",
+                task_mode_hint="coding",
+                output_mode="file",
+                artifact_policy="allow_file_output",
+            )
+        ],
+        user_message="调研后把中间整理结果导出成 markdown 文件",
+    )
+
+    assert corrected_count == 0
+    assert len(steps) == 1
+    assert issues == []
+
+
 def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enum() -> None:
     class _PlannerHumanWaitLLM:
         async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):

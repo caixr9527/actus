@@ -11,6 +11,7 @@ from app.domain.services.prompts.en.react import (
     EXECUTION_PROMPT as EN_EXECUTION_PROMPT,
     SUMMARIZE_PROMPT as EN_SUMMARIZE_PROMPT,
 )
+from app.domain.services.runtime.normalizers import normalize_execution_response
 from app.infrastructure.runtime.langgraph.graphs.planner_react.parsers import (
     build_step_from_payload,
 )
@@ -68,6 +69,18 @@ def test_build_step_from_payload_should_filter_low_value_success_criteria() -> N
     )
 
     assert step.success_criteria == ["至少给出3个候选并附来源链接"]
+
+
+def test_normalize_execution_response_should_shrink_user_facing_final_summary_prefix() -> None:
+    normalized = normalize_execution_response(
+        {
+            "success": True,
+            "summary": "以下是最终答案：LangGraph human-in-the-loop 常见实现模式共有 5 条要点。",
+            "facts_learned": ["LangGraph 支持 interrupt 机制"],
+        }
+    )
+
+    assert normalized["summary"] == "LangGraph human-in-the-loop 常见实现模式共有 5 条要点。"
 
 
 def test_build_step_from_payload_should_normalize_task_mode_hint() -> None:
