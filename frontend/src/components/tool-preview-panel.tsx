@@ -18,6 +18,7 @@ import { getBrowserPreviewData, isBrowserToolContent } from "@/lib/browser-tool-
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useI18n, type Translate } from "@/lib/i18n"
+import { MarkdownContent } from "@/components/markdown-content"
 import {
   Maximize2,
   Monitor,
@@ -227,7 +228,7 @@ function BrowserPreview({
                   <span>{preview.pageType}</span>
                 </div>
               )}
-              {browserContent?.main_content && (
+              {Boolean(browserContent?.main_content) && (
                 <div className="mt-1 text-xs text-gray-500">
                   {t("toolPreview.browserMainContentReady")}
                 </div>
@@ -358,13 +359,23 @@ function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
           <ScrollArea className="flex-1">
             <div className="p-4 flex flex-col gap-4">
               {excerpt && (
-                <div className="rounded-lg border border-gray-700/80 bg-white/5 p-3 text-sm text-gray-300 whitespace-pre-wrap break-words">
-                  {excerpt}
+                <div className="rounded-lg border border-gray-700/80 bg-white/5 p-3">
+                  <MarkdownContent
+                    content={excerpt}
+                    format="auto"
+                    tone="inverse"
+                    compact
+                    preserveLineBreaks
+                  />
                 </div>
               )}
-              <pre className="font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
-                {pageContent || t("toolPreview.fetchPage.waitingContent")}
-              </pre>
+              <MarkdownContent
+                content={pageContent || t("toolPreview.fetchPage.waitingContent")}
+                format="auto"
+                tone="inverse"
+                preserveLineBreaks
+                className="font-mono"
+              />
             </div>
           </ScrollArea>
         </div>

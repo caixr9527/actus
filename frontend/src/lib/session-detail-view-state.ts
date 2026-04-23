@@ -34,6 +34,17 @@ export function createSessionScopedRuntimeState(): SessionScopedRuntimeState {
   }
 }
 
+export function closeTaskPreviewStateOnSend<TFile = unknown, TTool = unknown>(
+  prev: SessionScopedDetailViewState<TFile, TTool>,
+): SessionScopedDetailViewState<TFile, TTool> {
+  return {
+    ...prev,
+    fileListOpen: false,
+    previewFile: null,
+    previewTool: null,
+  }
+}
+
 export function shouldAutoExpandStep(status: StepEvent['status']): boolean {
   return status === 'running'
 }
@@ -93,4 +104,24 @@ export function shouldAutoScrollToLatest(params: {
   const { hasAutoScrolled, timelineLength, shouldShowThinking } = params
   if (hasAutoScrolled) return false
   return timelineLength > 0 || shouldShowThinking
+}
+
+export function shouldHideWaitResumeCard(params: {
+  sessionStatus: SessionStatus | null | undefined
+  waitContextAvailable: boolean
+  waitResumePending: boolean
+}): boolean {
+  const { sessionStatus, waitContextAvailable, waitResumePending } = params
+  return sessionStatus === 'waiting' && waitContextAvailable && waitResumePending
+}
+
+export function shouldResetWaitResumePending(params: {
+  waitResumePending: boolean
+  sessionStatus: SessionStatus | null | undefined
+  streaming: boolean
+}): boolean {
+  const { waitResumePending, sessionStatus, streaming } = params
+  if (!waitResumePending) return false
+  if (sessionStatus !== 'waiting') return true
+  return !streaming
 }

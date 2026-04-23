@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils'
 import { buildResumeValueFromWaitPayload, type WaitEventContext } from '@/lib/wait-event'
 import { useI18n } from '@/lib/i18n'
 import type { WaitInputTextPayload } from '@/lib/api/types'
+import { MarkdownContent } from '@/components/markdown-content'
 
 export interface WaitResumeCardProps {
   className?: string
@@ -40,9 +41,26 @@ export function WaitResumeCard({
           <p className="text-xs font-semibold text-amber-900">
             {payload.title || t('sessionDetail.waitCardTitle')}
           </p>
-          <p className="mt-1 text-sm text-amber-950">{payload.prompt}</p>
+          <div className="mt-1">
+            <MarkdownContent
+              content={payload.prompt}
+              format="auto"
+              tone="amber"
+              compact
+              preserveLineBreaks
+            />
+          </div>
           {payload.details ? (
-            <p className="mt-1 text-xs leading-5 text-amber-800">{payload.details}</p>
+            <div className="mt-1">
+              <MarkdownContent
+                content={payload.details}
+                format="auto"
+                tone="amber"
+                compact
+                preserveLineBreaks
+                className="text-xs"
+              />
+            </div>
           ) : null}
         </div>
         {waitContext.suggestUserTakeover && onOpenTakeover ? (

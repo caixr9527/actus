@@ -19,10 +19,13 @@ import {
 import { buildStepViewState, findLatestWaitEventContext } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import {
+  closeTaskPreviewStateOnSend,
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
   shouldAutoCloseTaskPreview,
   shouldAutoScrollToLatest,
+  shouldHideWaitResumeCard,
+  shouldResetWaitResumePending,
   shouldShowSessionThinking,
   type SessionScopedDetailViewState,
 } from '@/lib/session-detail-view-state'
@@ -131,6 +134,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const [sessionUiState, setSessionUiState] = useState<SessionScopedDetailViewState<AttachmentFile, ToolEvent>>(
     () => createSessionScopedDetailViewState<AttachmentFile, ToolEvent>(),
   )
+  const [waitResumePending, setWaitResumePending] = useState(false)
   const sessionRuntimeRef = useRef(createSessionScopedRuntimeState())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const { fileListOpen, previewFile, previewTool, timelineExpanded, vncOpen } = sessionUiState
@@ -143,6 +147,15 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   }, [currentPath, isHydrated, isLoggedIn, router])
 
   const hasPreview = previewFile !== null || previewTool !== null
+  const mainContentWidthClass = hasPreview ? 'max-w-[1200px]' : 'max-w-[1080px]'
+  const effectiveWaitResumePending = useMemo(() => {
+    if (!waitResumePending) return false
+    return !shouldResetWaitResumePending({
+      waitResumePending,
+      sessionStatus: session?.status,
+      streaming,
+    })
+  }, [waitResumePending, session?.status, streaming])
   const showFullTimeline = timelineExpanded
   const visibleTimeline = useMemo(() => {
     if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
@@ -205,6 +218,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     async (message: string, uploadedFiles: FileInfo[]) => {
       try {
         const attachmentIds = uploadedFiles.map((f) => f.id)
+        setSessionUiState((prev) => closeTaskPreviewStateOnSend(prev))
         await sendMessage(message, attachmentIds)
       } catch (e) {
         toast.error(getApiErrorMessage(e, 'sessionDetail.sendFailed', t))
@@ -216,9 +230,11 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
   const handleResume = useCallback(
     async (resumeValue: unknown) => {
+      setWaitResumePending(true)
       try {
         await resumeWaitingRun(resumeValue)
       } catch (error) {
+        setWaitResumePending(false)
         toast.error(getApiErrorMessage(error, 'sessionDetail.sendFailed', t))
         throw error
       }
@@ -483,7 +499,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       <div className="flex flex-row h-screen w-full overflow-hidden">
         {/* 主内容区 */}
         <div className="flex flex-col flex-1 min-w-0 h-full overflow-hidden">
-          <div className={cn('flex flex-col h-full mx-auto w-full min-w-0 px-4', !hasPreview && 'max-w-[768px]')}>
+          <div className={cn('flex flex-col h-full mx-auto w-full min-w-0 px-4', mainContentWidthClass)}>
             <div className="flex-shrink-0">
               <SessionHeader
                 title={session.title}
@@ -599,11 +615,15 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                 className="mb-2"
                 stepView={stepView}
               />
-              {isWaitingForResume && waitContext ? (
+              {isWaitingForResume && waitContext && !shouldHideWaitResumeCard({
+                sessionStatus: session.status,
+                waitContextAvailable: Boolean(waitContext),
+                waitResumePending: effectiveWaitResumePending,
+              }) ? (
                 <WaitResumeCard
                   className="mb-2"
                   waitContext={waitContext}
-                  busy={streaming}
+                  busy={streaming || effectiveWaitResumePending}
                   onResume={handleResume}
                   onOpenTakeover={waitContext.suggestUserTakeover ? handleOpenVNC : undefined}
                 />

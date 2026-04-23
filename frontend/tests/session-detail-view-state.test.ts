@@ -2,12 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  closeTaskPreviewStateOnSend,
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
   resolveStepExpandedState,
   shouldAutoCloseTaskPreview,
   shouldAutoExpandStep,
   shouldAutoScrollToLatest,
+  shouldHideWaitResumeCard,
+  shouldResetWaitResumePending,
   shouldShowSessionThinking,
 } from '../src/lib/session-detail-view-state'
 
@@ -96,6 +99,24 @@ test('session scoped detail state factories should reset view state and runtime 
   })
 })
 
+test('closeTaskPreviewStateOnSend should close preview panel and file list', () => {
+  const next = closeTaskPreviewStateOnSend({
+    fileListOpen: true,
+    previewFile: { id: 'file-1' },
+    previewTool: { id: 'tool-1' },
+    timelineExpanded: true,
+    vncOpen: false,
+  })
+
+  assert.deepEqual(next, {
+    fileListOpen: false,
+    previewFile: null,
+    previewTool: null,
+    timelineExpanded: true,
+    vncOpen: false,
+  })
+})
+
 test('shouldShowSessionThinking should hide thinking while any step is running', () => {
   assert.equal(shouldShowSessionThinking({
     streaming: true,
@@ -123,4 +144,50 @@ test('shouldShowSessionThinking should hide thinking while any step is running',
     hasError: false,
     hasRunningStep: false,
   }), true)
+})
+
+test('shouldHideWaitResumeCard should hide wait card only during optimistic resume phase', () => {
+  assert.equal(shouldHideWaitResumeCard({
+    sessionStatus: 'waiting',
+    waitContextAvailable: true,
+    waitResumePending: true,
+  }), true)
+
+  assert.equal(shouldHideWaitResumeCard({
+    sessionStatus: 'running',
+    waitContextAvailable: true,
+    waitResumePending: true,
+  }), false)
+
+  assert.equal(shouldHideWaitResumeCard({
+    sessionStatus: 'waiting',
+    waitContextAvailable: false,
+    waitResumePending: true,
+  }), false)
+})
+
+test('shouldResetWaitResumePending should reset after leaving waiting or when waiting stream settles', () => {
+  assert.equal(shouldResetWaitResumePending({
+    waitResumePending: true,
+    sessionStatus: 'running',
+    streaming: true,
+  }), true)
+
+  assert.equal(shouldResetWaitResumePending({
+    waitResumePending: true,
+    sessionStatus: 'waiting',
+    streaming: false,
+  }), true)
+
+  assert.equal(shouldResetWaitResumePending({
+    waitResumePending: true,
+    sessionStatus: 'waiting',
+    streaming: true,
+  }), false)
+
+  assert.equal(shouldResetWaitResumePending({
+    waitResumePending: false,
+    sessionStatus: 'waiting',
+    streaming: false,
+  }), false)
 })
