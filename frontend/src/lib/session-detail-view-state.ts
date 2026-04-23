@@ -34,17 +34,6 @@ export function createSessionScopedRuntimeState(): SessionScopedRuntimeState {
   }
 }
 
-export function closeTaskPreviewStateOnSend<TFile = unknown, TTool = unknown>(
-  prev: SessionScopedDetailViewState<TFile, TTool>,
-): SessionScopedDetailViewState<TFile, TTool> {
-  return {
-    ...prev,
-    fileListOpen: false,
-    previewFile: null,
-    previewTool: null,
-  }
-}
-
 export function shouldAutoExpandStep(status: StepEvent['status']): boolean {
   return status === 'running'
 }

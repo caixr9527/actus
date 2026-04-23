@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  closeTaskPreviewStateOnSend,
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
   resolveStepExpandedState,
@@ -96,24 +95,6 @@ test('session scoped detail state factories should reset view state and runtime 
     previousToolCount: 0,
     hasAutoScrolled: false,
     previousSessionStatus: null,
-  })
-})
-
-test('closeTaskPreviewStateOnSend should close preview panel and file list', () => {
-  const next = closeTaskPreviewStateOnSend({
-    fileListOpen: true,
-    previewFile: { id: 'file-1' },
-    previewTool: { id: 'tool-1' },
-    timelineExpanded: true,
-    vncOpen: false,
-  })
-
-  assert.deepEqual(next, {
-    fileListOpen: false,
-    previewFile: null,
-    previewTool: null,
-    timelineExpanded: true,
-    vncOpen: false,
   })
 })
 

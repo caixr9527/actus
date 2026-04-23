@@ -11,6 +11,7 @@ import { ToolPreviewPanel } from '@/components/tool-preview-panel'
 import { VNCOverlay } from '@/components/vnc-overlay'
 import { WaitResumeCard } from '@/components/wait-resume-card'
 import { Button } from '@/components/ui/button'
+import { useSidebar } from '@/components/ui/sidebar'
 import { useSessionDetail } from '@/hooks/use-session-detail'
 import { getToolKind } from '@/components/tool-use/utils'
 import {
@@ -19,7 +20,6 @@ import {
 import { buildStepViewState, findLatestWaitEventContext } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import {
-  closeTaskPreviewStateOnSend,
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
   shouldAutoCloseTaskPreview,
@@ -98,6 +98,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const { locale, t } = useI18n()
   const { isHydrated, isLoggedIn } = useAuth()
   const isMobile = useIsMobile()
+  const { setOpen, setOpenMobile } = useSidebar()
   const currentPath = useMemo(() => {
     const query = searchParams.toString()
     return query ? `${pathname}?${query}` : pathname
@@ -162,6 +163,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     return timeline.slice(-TIMELINE_WINDOW_SIZE)
   }, [showFullTimeline, timeline])
   const hiddenTimelineCount = timeline.length - visibleTimeline.length
+  const collapseLeftSidebar = useCallback(() => {
+    setOpen(false)
+    setOpenMobile(false)
+  }, [setOpen, setOpenMobile])
 
   /**
    * 将 previewTool 解析为 timeline 中最新版本的工具对象。
@@ -205,6 +210,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
     sessionRuntimeRef.current.initialMessageSent = true
 
+    collapseLeftSidebar()
     sendMessage(initialMessage, initialAttachments || [])
       .then(() => {
         removeInitQueryParamFromUrl()
@@ -212,20 +218,20 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       .catch((e) => {
         toast.error(getApiErrorMessage(e, 'sessionDetail.sendInitialFailed', t))
       })
-  }, [initialMessage, initialAttachments, session, loading, streaming, sendMessage, t])
+  }, [collapseLeftSidebar, initialMessage, initialAttachments, session, loading, streaming, sendMessage, t])
 
   const handleSend = useCallback(
     async (message: string, uploadedFiles: FileInfo[]) => {
       try {
         const attachmentIds = uploadedFiles.map((f) => f.id)
-        setSessionUiState((prev) => closeTaskPreviewStateOnSend(prev))
+        collapseLeftSidebar()
         await sendMessage(message, attachmentIds)
       } catch (e) {
         toast.error(getApiErrorMessage(e, 'sessionDetail.sendFailed', t))
         throw e
       }
     },
-    [sendMessage, t]
+    [collapseLeftSidebar, sendMessage, t]
   )
 
   const handleResume = useCallback(
