@@ -20,10 +20,8 @@ from app.domain.models import (
     ExecutionStatus,
     Plan,
     Step,
-    StepDeliveryRole,
     StepEvent,
     StepOutcome,
-    StepOutputMode,
     ToolEvent,
 )
 from app.domain.services.prompts import EXECUTION_PROMPT
@@ -31,7 +29,6 @@ from app.domain.services.runtime.contracts.langgraph_settings import MESSAGE_WIN
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
-    normalize_controlled_value,
     normalize_execution_response,
     normalize_file_path_list,
     normalize_step_result_text,
@@ -51,7 +48,6 @@ from .delivery_helpers import (
     _collect_available_file_context_refs,
     _infer_step_attachment_delivery_preference,
     _merge_step_outcome_into_working_memory,
-    _sanitize_step_delivery_text,
 )
 from ..parsers import extract_write_file_paths_from_tool_events, merge_attachment_paths
 from .prompt_context_helpers import (
@@ -205,8 +201,6 @@ async def prepare_execute_step_input(
         attachments=format_attachments_for_prompt(attachments),
         language=language,
         step=step_execution_text,
-        delivery_role=str(getattr(step, "delivery_role", "") or "none"),
-        delivery_context_state=str(getattr(step, "delivery_context_state", "") or "none"),
     )
     execute_context_packet = await _build_prompt_context_packet_async(
         stage="execute",
@@ -245,7 +239,6 @@ def build_timeout_execution_message(*, step: Step, timeout_seconds: int) -> Dict
     return {
         "success": False,
         "summary": f"步骤执行超时：{step_label}",
-        "delivery_text": "",
         "attachments": [],
         "blockers": [f"当前步骤超过 {timeout_seconds} 秒未完成"],
         "next_hint": "请缩小当前步骤范围后重试",
@@ -258,7 +251,6 @@ def build_empty_execution_message(*, step: Step) -> Dict[str, Any]:
     return {
         "success": False,
         "summary": f"步骤执行失败：{step_label}",
-        "delivery_text": "",
         "attachments": [],
     }
 
@@ -362,17 +354,6 @@ async def build_execute_completed_transition(
         normalized_execution.get("summary"),
         fallback=f"步骤执行完成：{step_label}" if step_success else f"步骤执行失败：{step_label}",
     )
-    step_delivery_text = normalize_step_result_text(
-        _sanitize_step_delivery_text(step, normalized_execution.get("delivery_text")),
-        fallback=(
-            step_summary
-            if normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
-               == StepDeliveryRole.FINAL.value
-               and normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
-               == StepOutputMode.INLINE.value
-            else ""
-        ),
-    )
     step_deliver_result_as_attachment = _infer_step_attachment_delivery_preference(
         user_message=user_message,
         normalized_execution=normalized_execution,
@@ -386,7 +367,6 @@ async def build_execute_completed_transition(
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
-        delivery_text=step_delivery_text,
         produced_artifacts=step_attachment_paths,
         blockers=normalize_text_list(normalized_execution.get("blockers")),
         facts_learned=normalize_text_list(normalized_execution.get("facts_learned")),
@@ -423,7 +403,6 @@ async def build_execute_completed_transition(
             "plan": plan,
             "last_executed_step": step.model_copy(deep=True),
             "working_memory": updated_working_memory,
-            "final_message": step_summary,
             "pending_interrupt": {},
             "emitted_events": append_events(state.get("emitted_events"), *events),
         },
@@ -450,7 +429,8 @@ async def build_execute_completed_transition(
             "user_message": user_message,
             "working_memory": updated_working_memory,
             "graph_metadata": replace_control_metadata(state, updated_control),
-            "final_message": step_summary,
+            # Step 语义已收紧为执行摘要，不再覆盖最终正文；但 final_message 状态键仍需稳定保留。
+            "final_message": str(state.get("final_message") or ""),
             "selected_artifacts": list(state.get("selected_artifacts") or []),
             "pending_interrupt": {},
         },

@@ -16,8 +16,6 @@ from .event import Event
 from .plan import (
     ExecutionStatus,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutcome,
     StepOutputMode,
     StepTaskModeHint,
@@ -77,8 +75,6 @@ class WorkflowRunStepRecord(BaseModel):
     task_mode_hint: Optional[StepTaskModeHint] = None
     output_mode: Optional[StepOutputMode] = None
     artifact_policy: Optional[StepArtifactPolicy] = None
-    delivery_role: Optional[StepDeliveryRole] = None
-    delivery_context_state: Optional[StepDeliveryContextState] = None
     status: ExecutionStatus = ExecutionStatus.PENDING
     outcome: Optional[StepOutcome] = None
     error: Optional[str] = None

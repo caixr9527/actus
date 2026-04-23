@@ -199,7 +199,8 @@ async def wait_for_human_node(
                 "execution_count": int(state.get("execution_count", 0)) + 1,
                 "current_step_id": None,
                 "working_memory": working_memory,
-                "final_message": normalize_step_result_text(waiting_step.outcome.summary),
+                # 等待恢复结果只进入步骤摘要，不应覆盖最终正文；但状态合同要求 final_message 键稳定存在。
+                "final_message": str(state.get("final_message") or ""),
             },
             events=[cancelled_event],
         )
@@ -265,7 +266,8 @@ async def wait_for_human_node(
             "execution_count": int(state.get("execution_count", 0)) + 1,
             "current_step_id": next_step.id if next_step is not None else None,
             "working_memory": working_memory,
-            "final_message": normalize_step_result_text(waiting_step.outcome.summary),
+            # 等待恢复完成后继续后续步骤，不把当前等待步骤摘要提升为最终正文。
+            "final_message": str(state.get("final_message") or ""),
         },
         events=[completed_event],
     )

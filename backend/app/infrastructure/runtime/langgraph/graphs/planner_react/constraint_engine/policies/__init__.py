@@ -3,7 +3,6 @@
 """执行约束策略集合。"""
 
 from .artifact_policy import evaluate_artifact_policy
-from .final_delivery_policy import evaluate_final_delivery_policy
 from .human_wait_policy import evaluate_human_wait_policy
 from .repeat_loop_policy import evaluate_repeat_loop_policy
 from .research_route_policy import (
@@ -15,7 +14,6 @@ from .task_mode_policy import evaluate_task_mode_policy
 
 __all__ = [
     "evaluate_artifact_policy",
-    "evaluate_final_delivery_policy",
     "evaluate_human_wait_policy",
     "evaluate_repeat_loop_policy",
     "evaluate_research_route_policy",

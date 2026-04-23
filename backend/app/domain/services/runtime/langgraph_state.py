@@ -22,8 +22,6 @@ from app.domain.models import (
     Session,
     Step,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutcome,
     StepOutputMode,
     StepEvent,
@@ -62,8 +60,6 @@ class StepState(TypedDict, total=False):
     task_mode_hint: str
     output_mode: str
     artifact_policy: str
-    delivery_role: str
-    delivery_context_state: str
     status: str
     outcome: Optional["StepOutcomeState"]
 
@@ -267,8 +263,10 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     pending_interrupt: Dict[str, Any]
     """图内控制/投影元状态；用于路由控制和 run_status 投影。"""
     graph_metadata: GraphMetadataState
-    """当前运行最新的面向用户结果文本；用于投影、总结和消息窗口收敛。"""
+    """当前运行最新的轻量最终总结；用于会话摘要、记忆沉淀和运行摘要。"""
     final_message: str
+    """当前运行最新的最终正文；仅在 final/direct 输出阶段写入，作为用户可见正文真相源。"""
+    final_answer_text: str
     """当前 graph 已发射但尚未完成外部归并的事件序列；用于状态归并和流式事件去重。"""
     emitted_events: List[BaseEvent]
 
@@ -366,22 +364,18 @@ class GraphStateContractMapper:
 
     @classmethod
     def _normalize_step_control_state(cls, raw: Any) -> Dict[str, str]:
-        """统一规整步骤结构化语义，保证 plan、step_states、恢复链路使用同一套字段。"""
+        """统一规整步骤执行语义，保证 plan、step_states、恢复链路使用同一套字段。"""
         if isinstance(raw, Step):
             raw_values = {
                 "task_mode_hint": getattr(raw, "task_mode_hint", None),
                 "output_mode": getattr(raw, "output_mode", None),
                 "artifact_policy": getattr(raw, "artifact_policy", None),
-                "delivery_role": getattr(raw, "delivery_role", None),
-                "delivery_context_state": getattr(raw, "delivery_context_state", None),
             }
         elif isinstance(raw, dict):
             raw_values = {
                 "task_mode_hint": raw.get("task_mode_hint"),
                 "output_mode": raw.get("output_mode"),
                 "artifact_policy": raw.get("artifact_policy"),
-                "delivery_role": raw.get("delivery_role"),
-                "delivery_context_state": raw.get("delivery_context_state"),
             }
         else:
             return {}
@@ -390,11 +384,6 @@ class GraphStateContractMapper:
             "task_mode_hint": normalize_controlled_value(raw_values.get("task_mode_hint"), StepTaskModeHint),
             "output_mode": normalize_controlled_value(raw_values.get("output_mode"), StepOutputMode),
             "artifact_policy": normalize_controlled_value(raw_values.get("artifact_policy"), StepArtifactPolicy),
-            "delivery_role": normalize_controlled_value(raw_values.get("delivery_role"), StepDeliveryRole),
-            "delivery_context_state": normalize_controlled_value(
-                raw_values.get("delivery_context_state"),
-                StepDeliveryContextState,
-            ),
         }
         normalized_control: Dict[str, Any] = {
             key: value
@@ -870,7 +859,10 @@ class GraphStateContractMapper:
         conversation_summary = cls._normalize_text(graph_state_from_metadata.get("conversation_summary"))
         if not conversation_summary and session_context_snapshot is not None:
             conversation_summary = cls._normalize_text(session_context_snapshot.summary_text)
-        previous_final_message = cls._normalize_text(graph_state_from_metadata.get("final_message"))
+        previous_final_message = cls._normalize_text(
+            graph_state_from_metadata.get("final_answer_text")
+            or graph_state_from_metadata.get("final_message")
+        )
 
         graph_metadata = cls._normalize_graph_metadata(graph_state_from_metadata.get("metadata"))
         if plan_resumed_from_cancelled:
@@ -923,6 +915,7 @@ class GraphStateContractMapper:
             "graph_metadata": graph_metadata,
             "emitted_events": [],
             "final_message": "",
+            "final_answer_text": "",
         }
 
     @classmethod
@@ -1121,6 +1114,7 @@ class GraphStateContractMapper:
             raw.get("graph_metadata") if raw.get("graph_metadata") is not None else raw.get("metadata")
         )
         normalized_state["final_message"] = cls._normalize_text(raw.get("final_message"))
+        normalized_state["final_answer_text"] = cls._normalize_text(raw.get("final_answer_text"))
         normalized_state["emitted_events"] = list(raw.get("emitted_events") or [])
         return normalized_state
 
@@ -1191,6 +1185,9 @@ class GraphStateContractMapper:
                     "step_states": cls._to_json_safe(step_states),
                     "pending_interrupt": cls._to_json_safe(pending_interrupt),
                     "metadata": cls._to_json_safe(graph_metadata),
+                    "final_message": cls._normalize_text(state.get("final_message")),
+                    # 最终正文与轻量总结分轨，避免后续恢复态继续误把 summary 当正文。
+                    "final_answer_text": cls._normalize_text(state.get("final_answer_text")),
                 },
                 "audit": {
                     "event_count": len(events),

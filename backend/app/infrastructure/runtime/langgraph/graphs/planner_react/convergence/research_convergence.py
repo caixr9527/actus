@@ -149,35 +149,26 @@ class ResearchConvergenceJudge:
             label = title or url or f"来源{index}"
             evidence_lines.append(f"{index}. {label}：{snippet}" if snippet else f"{index}. {label}")
 
-        summary = f"已基于搜索摘要证据完成当前研究步骤：{step.description}"
+        # research 收敛只形成步骤级阶段结论，最终面向用户的正文仍由 summary 节点统一组织。
+        summary = f"当前研究步骤已基于搜索摘要证据完成：{step.description}"
         facts_learned = [
             line for line in evidence_lines
             if str(line).strip()
         ]
         facts_learned.extend([f"来源链接：{url}" for url in source_links[:5]])
-        delivery_parts = [summary]
-        if evidence_lines:
-            delivery_parts.append("可用摘要证据：")
-            delivery_parts.extend(evidence_lines)
-        if source_links:
-            delivery_parts.append("来源链接：")
-            delivery_parts.extend([f"- {url}" for url in source_links[:5]])
-        delivery_parts.append("说明：页面正文抓取不是当前步骤继续推进的必要条件，已优先消费 search_web snippet。")
         runtime_action = dict(runtime_recent_action or {})
         runtime_action["research_convergence"] = {
             "reason_code": reason_code,
             "source_link_count": len(source_links),
             "evidence_count": len(evidence_lines),
         }
-        delivery_text = "\n".join([item for item in delivery_parts if str(item).strip()])
         return {
             "success": True,
             "summary": summary,
-            "result": delivery_text,
-            "delivery_text": delivery_text,
+            "result": summary,
             "attachments": [],
             "blockers": [],
-            # 非 final 步骤的 delivery_text 会被节点层丢弃；facts_learned 是后续步骤可消费的证据载体。
+            # Phase C：步骤收敛只保留结构化证据，不再产出步骤级正文。
             "facts_learned": facts_learned[:10],
             "open_questions": [],
             "next_hint": "",

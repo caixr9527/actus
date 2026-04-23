@@ -512,10 +512,15 @@ async def execute_step_with_prompt(
         parsed = safe_parse_json(llm_message.get("content"))
         parsed_execution = normalize_execution_response(parsed)
         has_summary = bool(str(parsed_execution.get("summary") or "").strip())
-        has_delivery_text = bool(str(parsed_execution.get("delivery_text") or "").strip())
+        has_structured_progress = bool(
+            normalize_attachments(parsed.get("attachments"))
+            or list(parsed_execution.get("blockers") or [])
+            or list(parsed_execution.get("facts_learned") or [])
+            or list(parsed_execution.get("open_questions") or [])
+        )
         has_explicit_success = isinstance(parsed, dict) and "success" in parsed
         inferred_success = bool(parsed.get("success")) if has_explicit_success else bool(
-            has_summary or has_delivery_text)
+            has_summary or has_structured_progress)
         log_runtime(
             logger,
             logging.INFO,
@@ -525,7 +530,7 @@ async def execute_step_with_prompt(
             elapsed_ms=elapsed_ms(started_at),
             attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         )
-        if not inferred_success and not has_summary and not has_delivery_text:
+        if not inferred_success and not has_summary and not has_structured_progress:
             return _build_loop_break_payload(
                 step=step,
                 blocker="当前步骤无可用工具，且模型未返回可交付结果。",
@@ -838,7 +843,7 @@ async def execute_step_with_prompt(
             log_runtime(
                 logger,
                 logging.INFO,
-                "通用整理证据满足，提前收敛步骤",
+                "general 文件观察事实满足，提前收敛步骤",
                 step_id=str(step.id or ""),
                 task_mode=task_mode,
                 reason_code=general_convergence_result.reason_code,

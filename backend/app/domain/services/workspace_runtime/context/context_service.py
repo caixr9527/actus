@@ -9,8 +9,6 @@ from typing import Any, Dict, List, Optional
 from app.domain.models import (
     ExecutionStatus,
     Step,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutputMode,
     StepTaskModeHint,
     normalize_wait_payload,
@@ -18,7 +16,6 @@ from app.domain.models import (
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
-    normalize_delivery_payload,
     normalize_file_path_list,
     normalize_message_window_entry,
     normalize_step_result_text,
@@ -40,7 +37,6 @@ _MESSAGE_MAX_CHARS = 200
 _MEMORY_SUMMARY_MAX_CHARS = 160
 _MEMORY_CONTENT_MAX_CHARS = 240
 _STEP_SUMMARY_MAX_CHARS = 160
-_STEP_DELIVERY_MAX_CHARS = 200
 _FINAL_MESSAGE_MAX_CHARS = 240
 _DIGEST_TEXT_MAX_CHARS = 240
 
@@ -453,13 +449,13 @@ class RuntimeContextService:
                 last_step.outcome.summary if last_step.outcome is not None else ""
             )
             if last_step.outcome is not None:
-                digest["last_step_delivery_preview"] = self._truncate_text(
-                    last_step.outcome.delivery_text,
-                    max_chars=_STEP_DELIVERY_MAX_CHARS,
-                )
                 digest["last_step_blockers"] = [
                     self._truncate_text(item, max_chars=120)
                     for item in normalize_text_list(last_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
+                ]
+                digest["last_step_facts"] = [
+                    self._truncate_text(item, max_chars=120)
+                    for item in normalize_text_list(last_step.outcome.facts_learned)[:_OPEN_QUESTION_LIMIT]
                 ]
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             latest_fetch_summary = self._collect_fetch_page_summaries(
@@ -639,7 +635,7 @@ class RuntimeContextService:
             "user_preferences": dict(working_memory.get("user_preferences") or {}),
         }
         if stage == "summary":
-            digest["final_delivery_payload"] = self._build_summary_delivery_payload(state=state)
+            # Summary 只消费轻量工作记忆与结构化上下文，最终正文由 summary_node 统一组织。
             digest["execution_count"] = int(state.get("execution_count") or 0)
         return {
             key: value
@@ -762,6 +758,10 @@ class RuntimeContextService:
                     state.get("final_message"),
                     max_chars=_FINAL_MESSAGE_MAX_CHARS,
                 ),
+                "final_answer_text": self._truncate_text(
+                    state.get("final_answer_text"),
+                    max_chars=_FINAL_MESSAGE_MAX_CHARS,
+                ),
                 "selected_artifacts": normalize_file_path_list(state.get("selected_artifacts"))[:_ARTIFACT_LIMIT],
             }
         if policy.stable_background.include_topic_anchor:
@@ -805,12 +805,12 @@ class RuntimeContextService:
             }
 
         final_message = self._truncate_text(
-            state.get("final_message"),
+            state.get("final_answer_text") or state.get("final_message"),
             max_chars=_FINAL_MESSAGE_MAX_CHARS,
         )
         if final_message:
             return {
-                "source": "final_message",
+                "source": "final_answer_text" if state.get("final_answer_text") else "final_message",
                 "text": final_message,
             }
         return {}
@@ -989,26 +989,18 @@ class RuntimeContextService:
             "task_mode_hint": normalize_controlled_value(getattr(target_step, "task_mode_hint", None),
                                                          StepTaskModeHint),
             "output_mode": normalize_controlled_value(getattr(target_step, "output_mode", None), StepOutputMode),
-            "delivery_role": normalize_controlled_value(
-                getattr(target_step, "delivery_role", None),
-                StepDeliveryRole,
-            ),
-            "delivery_context_state": normalize_controlled_value(
-                getattr(target_step, "delivery_context_state", None),
-                StepDeliveryContextState,
-            ),
             "status": str(getattr(target_step, "status", "") or "").strip(),
         }
         if target_step.outcome is not None:
             current_step["result"] = {
                 "summary": normalize_step_result_text(target_step.outcome.summary),
-                "delivery_preview": self._truncate_text(
-                    target_step.outcome.delivery_text,
-                    max_chars=_STEP_DELIVERY_MAX_CHARS,
-                ),
                 "blockers": [
                     self._truncate_text(item, max_chars=120)
                     for item in normalize_text_list(target_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
+                ],
+                "facts_learned": [
+                    self._truncate_text(item, max_chars=120)
+                    for item in normalize_text_list(target_step.outcome.facts_learned)[:_OPEN_QUESTION_LIMIT]
                 ],
                 "open_questions": [
                     self._truncate_text(item, max_chars=120)
@@ -1064,10 +1056,10 @@ class RuntimeContextService:
                     "description": self._truncate_text(item.get("description"), max_chars=120),
                     "status": str(item.get("status") or "").strip(),
                     "summary": self._truncate_text(outcome.get("summary"), max_chars=_STEP_SUMMARY_MAX_CHARS),
-                    "delivery_preview": self._truncate_text(
-                        outcome.get("delivery_text"),
-                        max_chars=_STEP_DELIVERY_MAX_CHARS,
-                    ),
+                    "facts_learned": [
+                        self._truncate_text(item, max_chars=120)
+                        for item in normalize_text_list(outcome.get("facts_learned"))[:_OPEN_QUESTION_LIMIT]
+                    ],
                 }
             )
         return sanitized_completed_steps
@@ -1129,21 +1121,6 @@ class RuntimeContextService:
             "completed_step_summaries": completed_step_summaries[:5],
             "failed_step_summaries": failed_step_summaries[:3],
             "pending_step_titles": pending_step_titles[:5],
-        }
-
-    def _build_summary_delivery_payload(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:
-        working_memory = dict(state.get("working_memory") or {})
-        delivery_payload = normalize_delivery_payload(working_memory.get("final_delivery_payload"))
-        return {
-            "text": self._truncate_text(delivery_payload.get("text"), max_chars=1600),
-            "sections": [
-                {
-                    "title": self._truncate_text(item.get("title"), max_chars=80),
-                    "content": self._truncate_text(item.get("content"), max_chars=600),
-                }
-                for item in list(delivery_payload.get("sections") or [])[:6]
-            ],
-            "source_refs": normalize_file_path_list(delivery_payload.get("source_refs"))[:_ARTIFACT_LIMIT],
         }
 
     def _collect_candidate_links(

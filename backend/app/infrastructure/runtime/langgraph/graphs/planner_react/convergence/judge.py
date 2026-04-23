@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Dict, List, Optional
 
-from app.domain.models import Step, StepArtifactPolicy, StepDeliveryRole, StepOutputMode
+from app.domain.models import Step, StepArtifactPolicy, StepOutputMode
 from app.domain.services.runtime.normalizers import normalize_controlled_value
 
 _SIMPLE_FILE_ACTION_PATTERN = re.compile(
@@ -88,9 +88,9 @@ class ConvergenceJudge:
             "success": True,
             "summary": summary,
             "result": summary,
-            "delivery_text": summary,
             "attachments": [],
             "blockers": [],
+            "facts_learned": [summary],
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_recent_action or {},
@@ -126,9 +126,9 @@ class ConvergenceJudge:
             "success": True,
             "summary": summary,
             "result": summary,
-            "delivery_text": summary,
             "attachments": [],
             "blockers": [],
+            "facts_learned": [summary],
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_recent_action or {},
@@ -219,26 +219,15 @@ class ConvergenceJudge:
 
     @staticmethod
     def _is_inline_non_file_required_step(step: Step) -> bool:
-        output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
-        delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
-        artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
-        return (
-                output_mode == StepOutputMode.INLINE.value
-                and delivery_role == StepDeliveryRole.FINAL.value
-                and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
-        )
+        _ = step
+        return False
 
     @staticmethod
     def _step_allows_file_fact_convergence(step: Step) -> bool:
-        """文件事实收敛既覆盖最终 inline，也覆盖 output=none 的中间执行步骤。"""
-        if ConvergenceJudge._is_inline_non_file_required_step(step):
-            return True
+        """文件事实收敛只基于执行事实，不依赖任何已废弃的步骤交付角色语义。"""
         output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
-        delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole)
-        return (
-                output_mode == StepOutputMode.NONE.value
-                and delivery_role in {"", StepDeliveryRole.NONE.value}
-        )
+        artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
+        return output_mode in {"", StepOutputMode.NONE.value} and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
 
     @staticmethod
     def _is_simple_coding_file_task(step: Step) -> bool:
@@ -320,9 +309,12 @@ class ConvergenceJudge:
             "success": True,
             "summary": f"已读取并原样返回文件内容：{filepath or step.description}",
             "result": content,
-            "delivery_text": content,
             "attachments": [],
             "blockers": [],
+            "facts_learned": [
+                f"已读取文件：{filepath or step.description}",
+                f"已获取原始内容，长度 {len(content)} 字符",
+            ],
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_recent_action or {},

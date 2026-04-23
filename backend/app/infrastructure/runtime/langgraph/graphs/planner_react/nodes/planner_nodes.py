@@ -38,6 +38,7 @@ from app.domain.services.workspace_runtime.policies import (
     compile_step_contracts,
 )
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
+    extract_text_outside_json_blocks,
     format_attachments_for_prompt,
     safe_parse_json,
 )
@@ -211,7 +212,8 @@ async def create_or_reuse_plan_node(
         response_format={"type": "json_object"},
     )
     llm_cost_ms = elapsed_ms(llm_started_at)
-    parsed = safe_parse_json(llm_message.get("content"))
+    raw_llm_content = str(llm_message.get("content") or "")
+    parsed = safe_parse_json(raw_llm_content)
 
     title = str(parsed.get("title") or build_fallback_plan_title(user_message))
     language = str(parsed.get("language") or "zh")
@@ -221,6 +223,11 @@ async def create_or_reuse_plan_node(
     working_memory["goal"] = goal
     raw_steps = parsed.get("steps")
     if not isinstance(raw_steps, list) or raw_steps is None or len(raw_steps) == 0:
+        extra_direct_answer_text = extract_text_outside_json_blocks(raw_llm_content)
+        if extra_direct_answer_text:
+            # planner 无步骤分支本质是直接答复兜底；若模型违约把正文写在 JSON 外，
+            # 这里一次性并入 message，避免用户可见正文被静默截断。
+            planner_message = extra_direct_answer_text
         log_runtime(
             logger,
             logging.INFO,
@@ -229,6 +236,7 @@ async def create_or_reuse_plan_node(
             plan_title=title,
             language=language,
             message_length=len(planner_message),
+            extra_direct_answer_text_length=len(extra_direct_answer_text),
             llm_elapsed_ms=llm_cost_ms,
             elapsed_ms=elapsed_ms(started_at),
         )

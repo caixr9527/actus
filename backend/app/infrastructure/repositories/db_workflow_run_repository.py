@@ -138,12 +138,9 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                 task_mode_hint=step.task_mode_hint.value if step.task_mode_hint is not None else None,
                 output_mode=step.output_mode.value if step.output_mode is not None else None,
                 artifact_policy=step.artifact_policy.value if step.artifact_policy is not None else None,
-                delivery_role=step.delivery_role.value if step.delivery_role is not None else None,
-                delivery_context_state=(
-                    step.delivery_context_state.value
-                    if step.delivery_context_state is not None
-                    else None
-                ),
+                # 已废弃数据库物理壳：当前阶段不删列，但业务主链已停用，统一只写 None。
+                delivery_role=None,
+                delivery_context_state=None,
                 outcome=normalize_step_outcome_payload(step.outcome),
                 error=step.error,
             )
@@ -158,12 +155,9 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             step_record.task_mode_hint = step.task_mode_hint.value if step.task_mode_hint is not None else None
             step_record.output_mode = step.output_mode.value if step.output_mode is not None else None
             step_record.artifact_policy = step.artifact_policy.value if step.artifact_policy is not None else None
-            step_record.delivery_role = step.delivery_role.value if step.delivery_role is not None else None
-            step_record.delivery_context_state = (
-                step.delivery_context_state.value
-                if step.delivery_context_state is not None
-                else None
-            )
+            # 已废弃数据库物理壳：禁止从运行时状态回填旧交付语义，统一清空为 None。
+            step_record.delivery_role = None
+            step_record.delivery_context_state = None
             step_record.outcome = normalize_step_outcome_payload(step.outcome)
             step_record.error = step.error
 
@@ -290,12 +284,9 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
                     task_mode_hint=step.task_mode_hint.value if step.task_mode_hint is not None else None,
                     output_mode=step.output_mode.value if step.output_mode is not None else None,
                     artifact_policy=step.artifact_policy.value if step.artifact_policy is not None else None,
-                    delivery_role=step.delivery_role.value if step.delivery_role is not None else None,
-                    delivery_context_state=(
-                        step.delivery_context_state.value
-                        if step.delivery_context_state is not None
-                        else None
-                    ),
+                    # 已废弃数据库物理壳：replace plan 时同样只写 None。
+                    delivery_role=None,
+                    delivery_context_state=None,
                     outcome=normalize_step_outcome_payload(step.outcome),
                     error=step.error,
                 )

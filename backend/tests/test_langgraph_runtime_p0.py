@@ -713,6 +713,27 @@ class _PlanOnlyPlannerLLM:
         }
 
 
+class _NoStepPlannerWithExtraTextLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "content": (
+                "```json\n"
+                "{\n"
+                '  "message": "我会详细说明。",\n'
+                '  "language": "zh",\n'
+                '  "goal": "",\n'
+                '  "title": "",\n'
+                '  "steps": []\n'
+                "}\n"
+                "```\n\n"
+                "## 三个典型使用场景\n\n"
+                "1. 多阶段智能体工作流。\n"
+                "2. 多智能体协作。\n"
+                "3. 人机协作审批。"
+            )
+        }
+
+
 def test_entry_router_node_should_route_direct_answer_for_greeting() -> None:
     state = asyncio.run(
         entry_router_node(
@@ -736,6 +757,31 @@ def test_entry_router_node_should_keep_followup_on_original_direct_answer_route(
                 "message_window": [
                     {"role": "user", "message": "给我一份重庆的旅游攻略"},
                     {"role": "assistant", "message": "这里是一份重庆旅游攻略"},
+                ],
+            }
+        )
+    )
+
+    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
+
+
+def test_entry_router_node_should_route_followup_with_run_brief_to_direct_answer() -> None:
+    state = asyncio.run(
+        entry_router_node(
+            {
+                "user_message": "再详细一点，给我 3 个典型使用场景。",
+                "graph_metadata": {},
+                "conversation_summary": "上一轮解释了 LangGraph 的基本概念。",
+                "message_window": [
+                    {"role": "user", "message": "再详细一点，给我 3 个典型使用场景。"},
+                ],
+                "recent_run_briefs": [
+                    {
+                        "run_id": "run-1",
+                        "title": "LangGraph 简介",
+                        "goal": "解释 LangGraph 是什么",
+                        "status": "completed",
+                    }
                 ],
             }
         )
@@ -1453,6 +1499,47 @@ def test_create_or_reuse_plan_node_should_emit_planner_message_stream_before_pla
     assert isinstance(captured_events[-2], PlanEvent)
     assert isinstance(captured_events[-1], MessageEvent)
     assert [event.type for event in state["emitted_events"]] == ["title", "plan", "message"]
+
+
+def test_create_or_reuse_plan_node_should_preserve_extra_text_for_no_step_direct_answer() -> None:
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "session_id": "session-1",
+                "run_id": "run-1",
+                "user_message": "再详细一点，给我 3 个典型使用场景。",
+                "graph_metadata": {},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_paths": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _NoStepPlannerWithExtraTextLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert state["plan"].status == ExecutionStatus.COMPLETED
+    assert "三个典型使用场景" in state["final_message"]
+    assert "多阶段智能体工作流" in state["final_message"]
+    assert "我会详细说明" not in state["final_message"]
+    assert state["emitted_events"][-1].message == state["final_message"]
 
 
 def test_execute_step_with_prompt_should_block_browser_for_research_task() -> None:

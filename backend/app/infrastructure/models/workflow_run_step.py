@@ -27,8 +27,6 @@ from app.domain.models import (
     WorkflowRunStepRecord,
     ExecutionStatus,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutcome,
     StepOutputMode,
     StepTaskModeHint,
@@ -92,6 +90,10 @@ class WorkflowRunStepModel(Base):
     task_mode_hint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     output_mode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     artifact_policy: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # 已废弃数据库物理壳：
+    # - 这两个列只为兼容现有表结构而保留；
+    # - Phase C 起不再参与任何业务主链语义；
+    # - 仓库层统一只写 None，不再从领域对象回填。
     delivery_role: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     delivery_context_state: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     outcome: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
@@ -123,12 +125,9 @@ class WorkflowRunStepModel(Base):
             task_mode_hint=record.task_mode_hint.value if record.task_mode_hint is not None else None,
             output_mode=record.output_mode.value if record.output_mode is not None else None,
             artifact_policy=record.artifact_policy.value if record.artifact_policy is not None else None,
-            delivery_role=record.delivery_role.value if record.delivery_role is not None else None,
-            delivery_context_state=(
-                record.delivery_context_state.value
-                if record.delivery_context_state is not None
-                else None
-            ),
+            # 已废弃数据库物理壳：始终写 None，避免旧语义重新回流。
+            delivery_role=None,
+            delivery_context_state=None,
             # 步骤投影与 runtime 主链共用同一套 outcome 归一化，避免附件语义再次漂移。
             outcome=normalize_step_outcome_payload(record.outcome),
             error=record.error,
@@ -151,12 +150,6 @@ class WorkflowRunStepModel(Base):
             task_mode_hint=StepTaskModeHint(self.task_mode_hint) if self.task_mode_hint else None,
             output_mode=StepOutputMode(self.output_mode) if self.output_mode else None,
             artifact_policy=StepArtifactPolicy(self.artifact_policy) if self.artifact_policy else None,
-            delivery_role=StepDeliveryRole(self.delivery_role) if self.delivery_role else None,
-            delivery_context_state=(
-                StepDeliveryContextState(self.delivery_context_state)
-                if self.delivery_context_state
-                else None
-            ),
             outcome=StepOutcome.model_validate(normalized_outcome) if normalized_outcome is not None else None,
             error=self.error,
             updated_at=self.updated_at,

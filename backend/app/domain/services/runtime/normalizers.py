@@ -325,7 +325,6 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
         (
             "done",
             "summary",
-            "delivery_text",
             "produced_artifacts",
             "blockers",
             "facts_learned",
@@ -343,7 +342,6 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
     return {
         "done": bool(source.get("done", False)),
         "summary": normalize_step_result_text(source.get("summary")),
-        "delivery_text": normalize_string_value(source.get("delivery_text")),
         "produced_artifacts": normalize_file_path_list(source.get("produced_artifacts")),
         "blockers": normalize_text_list(source.get("blockers")),
         "facts_learned": normalize_text_list(source.get("facts_learned")),
@@ -363,8 +361,6 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
     from app.domain.models.plan import (
         ExecutionStatus,
         StepArtifactPolicy,
-        StepDeliveryContextState,
-        StepDeliveryRole,
         StepOutputMode,
         StepTaskModeHint,
     )
@@ -378,8 +374,6 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "task_mode_hint",
             "output_mode",
             "artifact_policy",
-            "delivery_role",
-            "delivery_context_state",
             "objective_key",
             "success_criteria",
             "status",
@@ -417,15 +411,6 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
     artifact_policy = normalize_controlled_value(source.get("artifact_policy"), StepArtifactPolicy)
     if artifact_policy:
         normalized_step["artifact_policy"] = artifact_policy
-    delivery_role = normalize_controlled_value(source.get("delivery_role"), StepDeliveryRole)
-    if delivery_role:
-        normalized_step["delivery_role"] = delivery_role
-    delivery_context_state = normalize_controlled_value(
-        source.get("delivery_context_state"),
-        StepDeliveryContextState,
-    )
-    if delivery_context_state:
-        normalized_step["delivery_context_state"] = delivery_context_state
 
     normalized_outcome = normalize_step_outcome_payload(source.get("outcome"))
     if normalized_outcome is not None:
@@ -534,7 +519,13 @@ def normalize_message_window_entry(
 
 
 def normalize_execution_response(raw: Any) -> Dict[str, Any]:
-    """统一规整执行阶段模型输出，拆分轻摘要、重正文与附件等结构化字段。"""
+    """统一规整执行阶段模型输出，只保留步骤执行需要的结构化字段。
+
+    Phase C 起：
+    - 执行阶段不再承载步骤级正文交付；
+    - `result` 仅作为旧输入兼容到 `summary` 的归一入口，不再作为独立输出真相源；
+    - 真正面向用户的正文只能由 summary_node 生成。
+    """
     if not isinstance(raw, dict):
         raw = {}
 
@@ -542,40 +533,14 @@ def normalize_execution_response(raw: Any) -> Dict[str, Any]:
         raw.get("summary"),
         fallback=normalize_step_result_text(raw.get("result")),
     )
-    delivery_text = normalize_string_value(raw.get("delivery_text"))
 
     return {
         "success": bool(raw.get("success", True)),
         "summary": summary,
         "result": summary,
-        "delivery_text": delivery_text,
         "attachments": normalize_file_path_list(raw.get("attachments")),
         "blockers": normalize_text_list(raw.get("blockers")),
         "facts_learned": normalize_text_list(raw.get("facts_learned")),
         "open_questions": normalize_text_list(raw.get("open_questions")),
         "next_hint": normalize_step_result_text(raw.get("next_hint")),
     }
-
-
-def build_delivery_text(raw: Any, *, fallback: str = "") -> str:
-    """从最终交付载荷构造用户可见正文；没有正文时回退到指定文本。"""
-    payload = normalize_delivery_payload(raw)
-    if payload["text"]:
-        return payload["text"]
-
-    section_texts: List[str] = []
-    for item in list(payload.get("sections") or []):
-        title = normalize_string_value(item.get("title"))
-        content = normalize_string_value(item.get("content"))
-        if title and content:
-            section_texts.append(f"## {title}\n{content}")
-            continue
-        if content:
-            section_texts.append(content)
-            continue
-        if title:
-            section_texts.append(title)
-    if section_texts:
-        return "\n\n".join(section_texts)
-
-    return normalize_string_value(fallback)

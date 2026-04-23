@@ -45,8 +45,6 @@ from .control_state import (
     replace_control_metadata as _replace_control_metadata,
 )
 from .state_reducer import _reduce_state_with_events
-from .wait_helpers import _resolve_direct_delivery_context_state
-
 logger = logging.getLogger(__name__)
 
 
@@ -84,10 +82,19 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
     prior_turn_message_count = _count_prior_turn_messages(state)
     has_prior_turn_context = _has_prior_turn_context(state)
     has_recent_run_brief = len(list(state.get("recent_run_briefs") or [])) > 0
+    # 追问类短消息需要一个明确历史锚点才允许走 direct_answer，避免无上下文时泛化回答。
+    has_contextual_followup_anchor = any(
+        (
+            has_prior_turn_context,
+            bool(str(state.get("conversation_summary") or "").strip()),
+            has_recent_run_brief,
+        )
+    )
     control["entry_strategy"] = infer_entry_strategy(
         user_message=user_message,
         has_input_parts=bool(list(state.get("input_parts") or [])),
         has_active_plan=bool(plan is not None and len(list(plan.steps or [])) > 0 and not plan.done),
+        has_contextual_followup_anchor=has_contextual_followup_anchor,
     )
     # “只给步骤，不执行”是当前 run 的显式用户意图，入口即写入控制态，供 planner 路由收口。
     if requests_plan_only(user_message):
@@ -107,6 +114,7 @@ async def entry_router_node(state: PlannerReActLangGraphState) -> PlannerReActLa
         has_prior_turn_context=has_prior_turn_context,
         has_conversation_summary=bool(str(state.get("conversation_summary") or "").strip()),
         has_recent_run_brief=has_recent_run_brief,
+        has_contextual_followup_anchor=has_contextual_followup_anchor,
     )
     return {
         **state,
@@ -201,6 +209,8 @@ async def direct_answer_node(
             "plan": plan,
             "current_step_id": None,
             "final_message": final_message,
+            # direct_answer 直接产生最终面向用户的正文，因此同步更新最终正文真相源。
+            "final_answer_text": final_message,
             "graph_metadata": _replace_control_metadata(state, control),
         },
         events=events,
@@ -219,7 +229,6 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
         task_mode_hint="human_wait",
         output_mode="none",
         artifact_policy="forbid_file_output",
-        delivery_role="none",
         status=ExecutionStatus.RUNNING,
     )
     step_execute = Step(
@@ -228,12 +237,9 @@ async def direct_wait_node(state: PlannerReActLangGraphState) -> PlannerReActLan
         # 第二步只表达“开始执行原任务”，不再把“先确认”语义写回步骤文本。
         description=direct_copy["direct_wait_execute_title"],
         task_mode_hint=execute_task_mode,
-        # direct_wait 的真实执行步骤本身就承担最终正文，不应再丢回轻摘要链路。
-        output_mode="inline",
+        # Step 只负责执行，最终正文统一由 summary_node 组织。
+        output_mode="none",
         artifact_policy="default",
-        delivery_role="final",
-        # direct_wait 的真实执行步骤可能仍需先搜索/读取页面；是否可直接交付由 readiness 决定。
-        delivery_context_state=_resolve_direct_delivery_context_state(execute_task_mode),
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(
@@ -287,12 +293,9 @@ async def direct_execute_node(state: PlannerReActLangGraphState) -> PlannerReAct
         title=direct_copy["direct_execute_step_title"],
         description=user_message,
         task_mode_hint=execute_task_mode,
-        # direct_execute 是单步执行路径，本步骤直接承担最终正文交付。
-        output_mode="inline",
+        # direct_execute 也只执行当前任务，最终正文统一由 summary_node 输出。
+        output_mode="none",
         artifact_policy="default",
-        delivery_role="final",
-        # 单步直达路径也可能要先检索/读取再输出最终正文，不能一律当成已准备好上下文。
-        delivery_context_state=_resolve_direct_delivery_context_state(execute_task_mode),
         status=ExecutionStatus.PENDING,
     )
     plan = Plan(

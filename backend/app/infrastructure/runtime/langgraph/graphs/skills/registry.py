@@ -70,8 +70,6 @@ async def _execute_step_skill_node(
         attachments=format_attachments_for_prompt(list(state.get("attachments") or [])),
         language=str(state.get("language") or "zh"),
         step=str(state.get("step_description") or ""),
-        delivery_role="none",
-        delivery_context_state="none",
     )
     llm_message = await llm.invoke(
         messages=[{"role": "user", "content": prompt}],

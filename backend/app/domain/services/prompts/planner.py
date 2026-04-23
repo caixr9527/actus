@@ -46,6 +46,7 @@ CREATE_PLAN_PROMPT = """
 - 答案为是 → 进入规划流程
 
 **能直接答就直接答，不要为了形式完整而过度规划。**
+**当你选择直接回答时，必须把完整用户可见正文写入 JSON 的 `message` 字段，`steps` 返回空数组，且不得在 JSON 之外追加任何正文。**
 
 ---
 
@@ -119,26 +120,19 @@ CREATE_PLAN_PROMPT = """
 
 **检索类任务优先规划为：先 `research` 搜索，再按需 `web_reading` 读取页面，不要默认规划为 `browser_interaction`。**
 
-## output_mode / artifact_policy / delivery_role / delivery_context_state 规范
+## output_mode / artifact_policy 规范
 
-| 场景 | output_mode | artifact_policy | delivery_role | delivery_context_state |
-|------|-------------|-----------------|---------------|------------------------|
-| 中间过程步骤，无需展示 | `none` | `forbid_file_output` | `none` | `none` |
-| 用户明确要求中间预览/候选结果 | `inline` | `default` | `intermediate` | `none` |
-| 最终重交付正文可直接基于现有上下文组织 | `inline` | `default` | `final` | `ready` |
-| 最终重交付正文由当前步骤负责，但仍需先检索/读取/操作 | `inline` | `default` | `final` | `needs_preparation` |
-| 用户明确要求导出文件 | `file` | `require_file_output` | `none` | `none` |
-| 允许文件产出，但当前步骤不强制必须写文件 | `file` | `allow_file_output` | `none` | `none` |
+| 场景 | output_mode | artifact_policy |
+|------|-------------|-----------------|
+| 普通执行步骤，无需文件产出 | `none` | `forbid_file_output` 或 `default` |
+| 用户明确要求导出文件 | `file` | `require_file_output` |
+| 允许文件产出，但当前步骤不强制必须写文件 | `file` | `allow_file_output` |
 
 **补充说明：**
-- `research` / `web_reading` / `human_wait` 步骤，若用户未明确要求文件产出，默认使用 `output_mode="none"` 与 `artifact_policy="forbid_file_output"`；但如果该步骤本身承担最终正文，且要在同一步中继续检索/读取后再交付，可以使用 `output_mode="inline" + delivery_role="final" + delivery_context_state="needs_preparation"`
+- `research` / `web_reading` / `human_wait` 步骤，若用户未明确要求文件产出，默认使用 `output_mode="none"` 与 `artifact_policy="forbid_file_output"`
 - 只有用户明确要求"保存到文件 / 导出文档 / 生成 markdown/json/csv"等文件产物时，相关步骤才允许使用 `output_mode="file"`
 - `web_reading` 步骤必须优先通过 `search_web`、`fetch_page` 或浏览器高阶读取工具完成，不要规划成依赖文件工具读取页面内容
-- `general` 步骤若 `output_mode="inline"` 且当前不依赖明确文件/附件/上一步产物上下文，应直接内联返回文本，不要再读写文件
-- `delivery_role="intermediate"` 只在用户明确要求“先看草稿/预览/候选结果”时使用；普通执行链路不要插入中间 AI 正文消息
-- `delivery_role="final"` 只用于“承担最终重交付正文”的步骤；同一条计划里通常最多只有一个 `final`
-- `delivery_context_state="ready"` 只用于“当前步骤应直接组织最终正文”的场景；这种步骤不要继续发起新的 `search_web` / `fetch_page`
-- `delivery_context_state="needs_preparation"` 只用于“当前步骤最终仍要交付正文，但还要先继续准备上下文”的场景
+- 步骤只负责执行，不负责最终正文整理；不要规划“先读取再在同一步中整理最终说明”这类步骤
 - runtime 会对 `research` 的无文件上下文读文件、`web_reading` 的文件读取，以及 `artifact_policy="forbid_file_output"` 下的文件写入做硬拦截；这里的约束重点是结构化字段与步骤语义，而不是额外的文本正则修补
 
 ---
@@ -159,7 +153,7 @@ CREATE_PLAN_PROMPT = """
 
 ```typescript
 interface CreatePlanResponse {{
-  /** 对用户消息的简短回复或计划说明，使用用户的语言 **/
+  /** 对用户消息的回复或计划说明，使用用户的语言；当 steps=[] 时，这里必须是完整用户可见正文 **/
   message: string;
   /** 根据用户消息确定的工作语言，ISO 639-1 格式 **/
   language: string;
@@ -171,14 +165,10 @@ interface CreatePlanResponse {{
     description: string;
     /** 执行模式，见枚举说明 **/
     task_mode_hint: string;
-    /** 产出模式：none | inline | file **/
+    /** 产出模式：none | file **/
     output_mode: string;
     /** 产物策略：default | forbid_file_output | allow_file_output | require_file_output **/
     artifact_policy: string;
-    /** 交付角色：none | intermediate | final **/
-    delivery_role: string;
-    /** 最终交付上下文状态：none | needs_preparation | ready **/
-    delivery_context_state: string;
     /** 可选。步骤完成判据，建议 1-3 条，必须可验证 **/
     success_criteria?: string[];
   }}>;
@@ -193,7 +183,7 @@ interface CreatePlanResponse {{
 用户消息：`"Python 中的列表和元组有什么区别？"`
 ```json
 {{
-  "message": "列表（list）可变、元组（tuple）不可变。列表支持增删改，元组创建后内容固定，通常用于保护数据或作为字典键。",
+  "message": "列表（list）可变、元组（tuple）不可变。列表支持增删改，适合需要动态调整内容的场景；元组创建后内容固定，适合表达不可变数据，也常用于作为字典键。",
   "language": "zh",
   "goal": "",
   "title": "",
@@ -215,8 +205,6 @@ interface CreatePlanResponse {{
       "task_mode_hint": "research",
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
-      "delivery_role": "none",
-      "delivery_context_state": "none",
       "success_criteria": ["至少检索到 5 个主流工具", "每个工具包含名称、定价与核心能力"]
     }},
     {{
@@ -225,19 +213,15 @@ interface CreatePlanResponse {{
       "task_mode_hint": "web_reading",
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
-      "delivery_role": "none",
-      "delivery_context_state": "none",
       "success_criteria": ["至少补充 3 个工具的官网或评测细节", "记录来源链接与发布时间"]
     }},
     {{
       "id": "3",
-      "description": "整理所有信息，生成包含工具名称、核心功能、优缺点、定价的对比分析内容，作为最终 Markdown 报告的正文草稿",
+      "description": "基于已收集的信息整理报告所需的对比维度，并确认导出内容结构",
       "task_mode_hint": "general",
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
-      "delivery_role": "none",
-      "delivery_context_state": "none",
-      "success_criteria": ["形成统一对比维度", "产出可直接用于最终报告的结构化结论"]
+      "success_criteria": ["形成统一对比维度", "明确报告将包含的字段与结构"]
     }},
     {{
       "id": "4",
@@ -245,8 +229,6 @@ interface CreatePlanResponse {{
       "task_mode_hint": "coding",
       "output_mode": "file",
       "artifact_policy": "require_file_output",
-      "delivery_role": "none",
-      "delivery_context_state": "none",
       "success_criteria": ["输出一个可下载的 Markdown 报告文件"]
     }}
   ]
@@ -332,26 +314,19 @@ UPDATE_PLAN_PROMPT = """
 | `coding` | 编写或执行代码 |
 | `human_wait` | 等待用户输入、确认或选择 |
 
-## output_mode / artifact_policy / delivery_role / delivery_context_state 规范
+## output_mode / artifact_policy 规范
 
-| 场景 | output_mode | artifact_policy | delivery_role | delivery_context_state |
-|------|-------------|-----------------|---------------|------------------------|
-| 中间过程步骤，无需展示 | `none` | `forbid_file_output` | `none` | `none` |
-| 用户明确要求中间预览/候选结果 | `inline` | `default` | `intermediate` | `none` |
-| 最终重交付正文可直接基于现有上下文组织 | `inline` | `default` | `final` | `ready` |
-| 最终重交付正文由当前步骤负责，但仍需先检索/读取/操作 | `inline` | `default` | `final` | `needs_preparation` |
-| 用户明确要求导出文件 | `file` | `require_file_output` | `none` | `none` |
-| 允许文件产出，但当前步骤不强制必须写文件 | `file` | `allow_file_output` | `none` | `none` |
+| 场景 | output_mode | artifact_policy |
+|------|-------------|-----------------|
+| 普通执行步骤，无需文件产出 | `none` | `forbid_file_output` 或 `default` |
+| 用户明确要求导出文件 | `file` | `require_file_output` |
+| 允许文件产出，但当前步骤不强制必须写文件 | `file` | `allow_file_output` |
 
 **补充说明：**
-- `research` / `web_reading` / `human_wait` 步骤，若用户未明确要求文件产出，默认使用 `output_mode="none"` 与 `artifact_policy="forbid_file_output"`；但如果该步骤本身承担最终正文，且要在同一步中继续检索/读取后再交付，可以使用 `output_mode="inline" + delivery_role="final" + delivery_context_state="needs_preparation"`
+- `research` / `web_reading` / `human_wait` 步骤，若用户未明确要求文件产出，默认使用 `output_mode="none"` 与 `artifact_policy="forbid_file_output"`
 - 只有用户明确要求"保存到文件 / 导出文档 / 生成 markdown/json/csv"等文件产物时，相关步骤才允许使用 `output_mode="file"`
 - `web_reading` 步骤必须优先通过 `search_web`、`fetch_page` 或浏览器高阶读取工具完成，不要规划成依赖文件工具读取页面内容
-- `general` 步骤若 `output_mode="inline"` 且当前不依赖明确文件/附件/上一步产物上下文，应直接内联返回文本，不要再读写文件
-- `delivery_role="intermediate"` 只在用户明确要求“先看草稿/预览/候选结果”时使用；普通执行链路不要插入中间 AI 正文消息
-- `delivery_role="final"` 只用于“承担最终重交付正文”的步骤；同一条计划里通常最多只有一个 `final`
-- `delivery_context_state="ready"` 只用于“当前步骤应直接组织最终正文”的场景；这种步骤不要继续发起新的 `search_web` / `fetch_page`
-- `delivery_context_state="needs_preparation"` 只用于“当前步骤最终仍要交付正文，但还要先继续准备上下文”的场景
+- 步骤只负责执行，不负责最终正文整理；不要规划“先读取再在同一步中整理最终说明”这类步骤
 - `success_criteria` 为可选字段；建议每步提供 1-3 条可验证完成判据，禁止“完成任务/继续处理”这类空泛语句
 - 若关键参数尚未在本轮被确认，`success_criteria` 也必须保持占位描述，不得写死具体值
 - runtime 会对 `research` 的无文件上下文读文件、`web_reading` 的文件读取，以及 `artifact_policy="forbid_file_output"` 下的文件写入做硬拦截；这里的约束重点是结构化字段与步骤语义，而不是额外的文本正则修补
@@ -372,14 +347,10 @@ interface UpdatePlanResponse {{
     description: string;
     /** 执行模式，见枚举说明 **/
     task_mode_hint: string;
-    /** 产出模式：none | inline | file **/
+    /** 产出模式：none | file **/
     output_mode: string;
     /** 产物策略：default | forbid_file_output | allow_file_output | require_file_output **/
     artifact_policy: string;
-    /** 交付角色：none | intermediate | final **/
-    delivery_role: string;
-    /** 最终交付上下文状态：none | needs_preparation | ready **/
-    delivery_context_state: string;
     /** 可选。步骤完成判据，建议 1-3 条，必须可验证 **/
     success_criteria?: string[];
   }}>;
@@ -404,19 +375,15 @@ interface UpdatePlanResponse {{
       "task_mode_hint": "human_wait",
       "output_mode": "none",
       "artifact_policy": "forbid_file_output",
-      "delivery_role": "none",
-      "delivery_context_state": "none",
       "success_criteria": ["收到用户明确选择结果"]
     }},
     {{
       "id": "2",
-      "description": "根据用户选择，继续读取课程详情页并在同一步中整理最终要交付给用户的课程详情说明",
+      "description": "根据用户选择，继续读取课程详情页并提取课程详情事实与来源",
       "task_mode_hint": "web_reading",
-      "output_mode": "inline",
-      "artifact_policy": "default",
-      "delivery_role": "final",
-      "delivery_context_state": "needs_preparation",
-      "success_criteria": ["输出课程详情说明并包含来源链接"]
+      "output_mode": "none",
+      "artifact_policy": "forbid_file_output",
+      "success_criteria": ["获取课程详情事实并记录来源链接"]
     }}
   ]
 }}

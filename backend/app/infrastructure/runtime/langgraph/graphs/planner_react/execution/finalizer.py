@@ -73,11 +73,16 @@ def finalize_no_tool_call(
         )
 
     has_summary = bool(str(parsed_execution.get("summary") or "").strip())
-    has_delivery_text = bool(str(parsed_execution.get("delivery_text") or "").strip())
+    has_structured_progress = bool(
+        normalize_attachments(parsed_execution.get("attachments"))
+        or list(parsed_execution.get("blockers") or [])
+        or list(parsed_execution.get("facts_learned") or [])
+        or list(parsed_execution.get("open_questions") or [])
+    )
     # P3-1A 收敛修复：无显式 success 字段时不再盲目按 True 处理，避免“空响应被判成功”。
     has_explicit_success = isinstance(parsed, dict) and "success" in parsed
-    inferred_success = bool(parsed.get("success")) if has_explicit_success else bool(has_summary or has_delivery_text)
-    if inferred_success and not has_summary and not has_delivery_text:
+    inferred_success = bool(parsed.get("success")) if has_explicit_success else bool(has_summary or has_structured_progress)
+    if inferred_success and not has_summary and not has_structured_progress:
         log_runtime(
             logger,
             logging.WARNING,
@@ -181,7 +186,7 @@ def finalize_max_iterations(
         attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         elapsed_ms=elapsed_ms(started_at),
     )
-    # P3 解耦：先尝试按关键事实收敛，避免 file_processing final inline 在事实已满足时误判失败。
+    # P3 解耦：先尝试按关键事实收敛，避免 file_processing 在事实已满足时误判失败。
     research_converged_payload = ResearchConvergenceJudge.build_max_iteration_convergence_payload(
         step=step,
         task_mode=task_mode,
@@ -227,7 +232,7 @@ def finalize_max_iterations(
         log_runtime(
             logger,
             logging.INFO,
-            "达到最大工具轮次但通用整理证据可用，按成功收敛",
+            "达到最大工具轮次但 general 文件观察事实可用，按成功收敛",
             step_id=str(step.id or ""),
             task_mode=task_mode,
             requested_max_tool_iterations=requested_max_tool_iterations,

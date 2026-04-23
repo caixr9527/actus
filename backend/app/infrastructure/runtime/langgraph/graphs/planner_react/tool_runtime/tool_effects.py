@@ -505,7 +505,6 @@ def build_interrupt_payload(
         "interrupt_request": interrupt_request,
         "summary": "",
         "result": "",
-        "delivery_text": "",
         "attachments": [],
         "runtime_recent_action": runtime_recent_action or {},
     }

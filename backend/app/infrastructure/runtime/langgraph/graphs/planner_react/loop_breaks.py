@@ -20,15 +20,13 @@ def build_loop_break_result(
 ) -> Optional[Dict[str, Any]]:
     if loop_break_reason == "repeat_tool_call_success_fallback":
         payload = _normalize_repeat_success_payload(tool_result)
-        delivery_text = str(payload.get("delivery_text") or "").strip()
-        summary_text = str(payload.get("summary") or "").strip() or delivery_text
+        summary_text = str(payload.get("summary") or "").strip()
         if not summary_text:
             summary_text = f"步骤执行完成：{step.description}"
         return {
             "success": True,
             "summary": summary_text,
             "result": summary_text,
-            "delivery_text": delivery_text,
             "attachments": list(payload.get("attachments") or []),
             "blockers": [],
             "next_hint": "",
@@ -110,20 +108,18 @@ def _append_research_progress_hint(*, runtime_recent_action: Optional[Dict[str, 
 
 def _normalize_repeat_success_payload(tool_result: Optional[Any]) -> Dict[str, Any]:
     if tool_result is None:
-        return {"summary": "", "delivery_text": "", "attachments": []}
+        return {"summary": "", "attachments": []}
     message_text = str(getattr(tool_result, "message", "") or "").strip()
     data = getattr(tool_result, "data", None)
     parsed_data = data if isinstance(data, dict) else {}
     feedback_content = str(parsed_data.get("feedback_content") or "").strip()
     parsed_feedback = safe_parse_json(feedback_content) if feedback_content else {}
     summary_from_feedback = str(parsed_feedback.get("message") or "").strip()
-    delivery_from_feedback = str(parsed_feedback.get("data", {}).get("content") or "").strip()
     attachments = []
     raw_attachments = parsed_feedback.get("attachments")
     if isinstance(raw_attachments, list):
         attachments = [str(item).strip() for item in raw_attachments if str(item).strip()]
     return {
         "summary": summary_from_feedback or message_text,
-        "delivery_text": delivery_from_feedback or "",
         "attachments": attachments,
     }

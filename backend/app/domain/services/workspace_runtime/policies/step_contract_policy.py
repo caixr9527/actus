@@ -10,8 +10,6 @@ from typing import List, Tuple
 from app.domain.models import (
     Step,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutputMode,
     StepTaskModeHint,
 )
@@ -58,8 +56,6 @@ def collect_step_contract_hard_issues(*, steps: List[Step]) -> List[StepContract
         step_id = str(getattr(step, "id", "") or "")
         output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) or ""
         artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy) or ""
-        delivery_role = normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole) or ""
-        task_mode = normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint) or ""
 
         if output_mode == StepOutputMode.FILE.value and artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value:
             issues.append(
@@ -67,14 +63,6 @@ def collect_step_contract_hard_issues(*, steps: List[Step]) -> List[StepContract
                     step_id=step_id,
                     issue_code="output_artifact_conflict",
                     issue_message="output_mode=file 与 artifact_policy=forbid_file_output 互斥。",
-                )
-            )
-        if task_mode == StepTaskModeHint.HUMAN_WAIT.value and delivery_role == StepDeliveryRole.FINAL.value:
-            issues.append(
-                StepContractCompilationIssue(
-                    step_id=step_id,
-                    issue_code="human_wait_final_conflict",
-                    issue_message="human_wait 步骤不能承担最终交付角色。",
                 )
             )
     return issues
@@ -97,25 +85,14 @@ def _compile_single_step_contract(
     task_mode = normalize_controlled_value(getattr(compiled_step, "task_mode_hint", None), StepTaskModeHint) or ""
     output_mode = normalize_controlled_value(getattr(compiled_step, "output_mode", None), StepOutputMode) or ""
     artifact_policy = normalize_controlled_value(getattr(compiled_step, "artifact_policy", None), StepArtifactPolicy) or ""
-    delivery_role = normalize_controlled_value(getattr(compiled_step, "delivery_role", None), StepDeliveryRole) or ""
-    delivery_context_state = normalize_controlled_value(
-        getattr(compiled_step, "delivery_context_state", None),
-        StepDeliveryContextState,
-    ) or ""
 
-    # P3-一次性收口：human_wait 步骤必须是纯等待，不允许附带文件产出或最终正文职责。
+    # P3-Step纯执行化：human_wait 步骤必须是纯等待，不允许附带文件产出。
     if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
         if output_mode != StepOutputMode.NONE.value:
             compiled_step.output_mode = StepOutputMode.NONE
             corrected_count += 1
         if artifact_policy != StepArtifactPolicy.FORBID_FILE_OUTPUT.value:
             compiled_step.artifact_policy = StepArtifactPolicy.FORBID_FILE_OUTPUT
-            corrected_count += 1
-        if delivery_role != StepDeliveryRole.NONE.value:
-            compiled_step.delivery_role = StepDeliveryRole.NONE
-            corrected_count += 1
-        if delivery_context_state != StepDeliveryContextState.NONE.value:
-            compiled_step.delivery_context_state = StepDeliveryContextState.NONE
             corrected_count += 1
         return compiled_step, issues, corrected_count
 
@@ -149,13 +126,6 @@ def _compile_single_step_contract(
         compiled_step.artifact_policy = StepArtifactPolicy.ALLOW_FILE_OUTPUT
         corrected_count += 1
 
-    # P3-一次性收口：最终正文步骤至少需要 inline 输出。
-    delivery_role = normalize_controlled_value(getattr(compiled_step, "delivery_role", None), StepDeliveryRole) or ""
-    output_mode = normalize_controlled_value(getattr(compiled_step, "output_mode", None), StepOutputMode) or ""
-    if delivery_role == StepDeliveryRole.FINAL.value and output_mode != StepOutputMode.INLINE.value:
-        compiled_step.output_mode = StepOutputMode.INLINE
-        corrected_count += 1
-
     return compiled_step, issues, corrected_count
 
 
@@ -165,18 +135,7 @@ def _normalize_step_contract_enum_fields(step: Step) -> Step:
     raw_task_mode_hint = normalize_controlled_value(getattr(normalized_step, "task_mode_hint", None), StepTaskModeHint)
     raw_output_mode = normalize_controlled_value(getattr(normalized_step, "output_mode", None), StepOutputMode)
     raw_artifact_policy = normalize_controlled_value(getattr(normalized_step, "artifact_policy", None), StepArtifactPolicy)
-    raw_delivery_role = normalize_controlled_value(getattr(normalized_step, "delivery_role", None), StepDeliveryRole)
-    raw_delivery_context_state = normalize_controlled_value(
-        getattr(normalized_step, "delivery_context_state", None),
-        StepDeliveryContextState,
-    )
     normalized_step.task_mode_hint = StepTaskModeHint(raw_task_mode_hint) if raw_task_mode_hint else None
     normalized_step.output_mode = StepOutputMode(raw_output_mode) if raw_output_mode else None
     normalized_step.artifact_policy = StepArtifactPolicy(raw_artifact_policy) if raw_artifact_policy else None
-    normalized_step.delivery_role = StepDeliveryRole(raw_delivery_role) if raw_delivery_role else None
-    normalized_step.delivery_context_state = (
-        StepDeliveryContextState(raw_delivery_context_state)
-        if raw_delivery_context_state
-        else None
-    )
     return normalized_step

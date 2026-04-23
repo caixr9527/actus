@@ -8,17 +8,13 @@ from typing import Any, Dict, List, Optional, Set
 from app.domain.models import (
     Step,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutputMode,
     StepTaskModeHint,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import (
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
-    FILE_FUNCTION_NAMES,
     READ_ONLY_FILE_FUNCTION_NAMES,
-    SEARCH_FUNCTION_NAMES,
     TASK_MODE_ALLOWED_PREFIXES,
     TASK_MODE_MAX_TOOL_ITERATIONS,
 )
@@ -30,10 +26,6 @@ from app.domain.services.workspace_runtime.policies import (
     build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
     classify_file_access_intent as _classify_file_access_intent,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
-    GeneralConvergenceJudge,
-)
-
 
 @dataclass(slots=True)
 class ExecutionContext:
@@ -44,12 +36,8 @@ class ExecutionContext:
     blocked_function_names: Set[str]
     read_only_file_blocked_function_names: Set[str]
     research_file_context_blocked_function_names: Set[str]
-    general_inline_blocked_function_names: Set[str]
     file_processing_shell_blocked_function_names: Set[str]
     artifact_policy_blocked_function_names: Set[str]
-    final_delivery_search_blocked_function_names: Set[str]
-    final_delivery_shell_blocked_function_names: Set[str]
-    final_inline_file_output_blocked_function_names: Set[str]
     requested_max_tool_iterations: int
     effective_max_tool_iterations: int
     allow_ask_user: bool
@@ -90,12 +78,6 @@ def build_execution_context(
     if len(normalized_user_content) == 0:
         prompt_text = str(step.description or "").strip()
         normalized_user_content = [{"type": "text", "text": prompt_text}]
-    is_general_synthesis_step = (
-        task_mode == "general" and GeneralConvergenceJudge._is_synthesis_step(step)
-    )
-    is_general_file_observation_step = (
-        task_mode == "general" and GeneralConvergenceJudge._is_file_observation_step(step)
-    )
 
     browser_route_enabled = (
             task_mode in {"web_reading", "browser_interaction"}
@@ -107,12 +89,8 @@ def build_execution_context(
     )
     research_file_context_blocked_function_names: Set[str] = set()
     read_only_file_blocked_function_names: Set[str] = set()
-    general_inline_blocked_function_names: Set[str] = set()
     file_processing_shell_blocked_function_names: Set[str] = set()
     artifact_policy_blocked_function_names: Set[str] = set()
-    final_delivery_search_blocked_function_names: Set[str] = set()
-    final_delivery_shell_blocked_function_names: Set[str] = set()
-    final_inline_file_output_blocked_function_names: Set[str] = set()
 
     # P3-1A 收敛修复：显式只读诉求下，禁止写文件/改文件/执行命令，避免“读请求写副作用”。
     if _step_requests_read_only_file_access(
@@ -125,43 +103,10 @@ def build_execution_context(
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
-    if (
-            task_mode == "general"
-            and _step_outputs_inline_result(step)
-            and not has_available_file_context
-            and not is_general_file_observation_step
-    ):
-        general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
-        blocked_function_names.update(general_inline_blocked_function_names)
-    elif is_general_synthesis_step:
-        # 执行收敛收口：纯整理型 general 步骤优先消费已有上下文，不应退回文件工具。
-        general_inline_blocked_function_names.update(FILE_FUNCTION_NAMES)
-        blocked_function_names.update(general_inline_blocked_function_names)
-    if (
-            task_mode == "general"
-            and is_general_synthesis_step
-            and not _step_explicitly_requests_shell_execution(step, normalized_user_content)
-    ):
-        # P3-CASE3 收口：整理型 general 步骤默认禁止 shell 漂移，避免为“汇总/总结”去等待或执行命令。
-        general_inline_blocked_function_names.update(_collect_shell_function_names(available_function_names))
-        blocked_function_names.update(general_inline_blocked_function_names)
     if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
         # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
         file_processing_shell_blocked_function_names.add("shell_execute")
         blocked_function_names.update(file_processing_shell_blocked_function_names)
-    if _step_is_final_inline_delivery_ready(step, task_mode=task_mode):
-        # P3-1A 收敛修复：最终交付正文阶段禁止继续检索/执行命令。
-        final_delivery_search_blocked_function_names.update(SEARCH_FUNCTION_NAMES)
-        blocked_function_names.update(final_delivery_search_blocked_function_names)
-        final_delivery_shell_blocked_function_names.update(_collect_shell_function_names(available_function_names))
-        blocked_function_names.update(final_delivery_shell_blocked_function_names)
-        # P3-一次性收口：最终 inline 交付默认禁止写文件，除非用户明确要求文件交付。
-        if not _step_explicitly_requests_file_output(
-                step=step,
-                file_output_intent_text=file_output_intent_text,
-        ):
-            final_inline_file_output_blocked_function_names.update({"write_file", "replace_in_file"})
-            blocked_function_names.update(final_inline_file_output_blocked_function_names)
     if _step_forbids_file_output(step):
         artifact_policy_blocked_function_names.update({"write_file", "replace_in_file"})
         blocked_function_names.update(artifact_policy_blocked_function_names)
@@ -186,13 +131,6 @@ def build_execution_context(
     blocked_function_names.difference_update(
         {
             function_name
-            for function_name in general_inline_blocked_function_names
-            if function_name not in available_function_names
-        }
-    )
-    blocked_function_names.difference_update(
-        {
-            function_name
             for function_name in file_processing_shell_blocked_function_names
             if function_name not in available_function_names
         }
@@ -201,27 +139,6 @@ def build_execution_context(
         {
             function_name
             for function_name in artifact_policy_blocked_function_names
-            if function_name not in available_function_names
-        }
-    )
-    blocked_function_names.difference_update(
-        {
-            function_name
-            for function_name in final_delivery_search_blocked_function_names
-            if function_name not in available_function_names
-        }
-    )
-    blocked_function_names.difference_update(
-        {
-            function_name
-            for function_name in final_delivery_shell_blocked_function_names
-            if function_name not in available_function_names
-        }
-    )
-    blocked_function_names.difference_update(
-        {
-            function_name
-            for function_name in final_inline_file_output_blocked_function_names
             if function_name not in available_function_names
         }
     )
@@ -250,12 +167,8 @@ def build_execution_context(
         blocked_function_names=blocked_function_names,
         read_only_file_blocked_function_names=read_only_file_blocked_function_names,
         research_file_context_blocked_function_names=research_file_context_blocked_function_names,
-        general_inline_blocked_function_names=general_inline_blocked_function_names,
         file_processing_shell_blocked_function_names=file_processing_shell_blocked_function_names,
         artifact_policy_blocked_function_names=artifact_policy_blocked_function_names,
-        final_delivery_search_blocked_function_names=final_delivery_search_blocked_function_names,
-        final_delivery_shell_blocked_function_names=final_delivery_shell_blocked_function_names,
-        final_inline_file_output_blocked_function_names=final_inline_file_output_blocked_function_names,
         requested_max_tool_iterations=requested_max_tool_iterations,
         effective_max_tool_iterations=effective_max_tool_iterations,
         allow_ask_user=allow_ask_user,
@@ -280,40 +193,6 @@ def _step_explicitly_requests_file_output(*, step: Step, file_output_intent_text
         return True
     candidate_text = str(file_output_intent_text or "").strip() or _build_step_candidate_text(step)
     return bool(EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(candidate_text))
-
-
-def _step_outputs_inline_result(step: Step) -> bool:
-    """读取步骤的结构化输出模式，避免展示类步骤继续绕回文件系统。"""
-    return normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) == "inline"
-
-
-def _step_owns_final_delivery(step: Step) -> bool:
-    """显式 final 交付步骤负责最终正文，不应再漂移回检索链路。"""
-    return normalize_controlled_value(getattr(step, "delivery_role", None), StepDeliveryRole) == "final"
-
-
-def _resolve_step_delivery_context_state(step: Step, *, task_mode: str) -> str:
-    delivery_context_state = normalize_controlled_value(
-        getattr(step, "delivery_context_state", None),
-        StepDeliveryContextState,
-    )
-    if delivery_context_state:
-        return delivery_context_state
-    # P3-一次性收口：未显式标注 delivery_context_state 时保持中性 none，
-    # 避免仅凭 task_mode=general 推断 ready，导致“最终步骤仍需补证据”场景被提前拦截检索。
-    return StepDeliveryContextState.NONE.value
-
-
-def _step_final_delivery_context_ready(step: Step, *, task_mode: str) -> bool:
-    return _resolve_step_delivery_context_state(step, task_mode=task_mode) == StepDeliveryContextState.READY.value
-
-
-def _step_is_final_inline_delivery_ready(step: Step, *, task_mode: str) -> bool:
-    return (
-            _step_outputs_inline_result(step)
-            and _step_owns_final_delivery(step)
-            and _step_final_delivery_context_ready(step, task_mode=task_mode)
-    )
 
 
 def _resolve_effective_max_tool_iterations(*, task_mode: str, requested_max_tool_iterations: int) -> int:

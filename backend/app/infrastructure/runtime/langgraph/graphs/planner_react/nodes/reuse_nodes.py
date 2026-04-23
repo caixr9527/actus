@@ -115,7 +115,8 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
             "current_step_id": next_step.id if next_step is not None else None,
             "working_memory": working_memory,
             "graph_metadata": _replace_control_metadata(state, control),
-            "final_message": normalize_step_result_text(step.outcome.summary),
+            # 复用命中只补执行事实，不应把复用摘要写成最终正文；保留 final_message 键的稳定状态合同。
+            "final_message": str(state.get("final_message") or ""),
             "selected_artifacts": list(state.get("selected_artifacts") or []),
             "pending_interrupt": {},
         },

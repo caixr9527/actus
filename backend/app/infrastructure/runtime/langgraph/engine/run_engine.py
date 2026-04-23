@@ -46,7 +46,6 @@ from app.domain.services.runtime.langgraph_state import (
     replace_graph_projection,
 )
 from app.domain.services.runtime.normalizers import (
-    build_delivery_text,
     normalize_file_path_list,
     normalize_ref_list,
     normalize_text_list,
@@ -482,9 +481,9 @@ class LangGraphRunEngine(RunEngine):
         open_questions.extend(
             [str(item) for item in list((state.get("working_memory") or {}).get("open_questions") or [])])
 
-        # final_message 是轻量摘要；重交付正文若存在，则单独来自 final_delivery_payload。
+        # final_message 是轻量摘要；final_answer_text 才是 summary/direct 阶段产出的最终正文真相源。
         final_message = str(state.get("final_message") or "").strip()
-        final_delivery_text = build_delivery_text((state.get("working_memory") or {}).get("final_delivery_payload"))
+        final_answer_text = str(state.get("final_answer_text") or "").strip() or final_message
 
         # 运行摘要状态必须从当前 graph state 真实语义推导，不能依赖外部事件是否已先落库。
         run_status = cls._resolve_run_status_for_projection(run=run, state=state)
@@ -499,7 +498,7 @@ class LangGraphRunEngine(RunEngine):
             # 标题：优先取自计划对象，其次取自最终消息前 80 字符，最后兜底
             title=str(getattr(plan, "title", "") or final_message[:80] or "未命名运行"),
             final_answer_summary=cls._resolve_final_answer_summary(final_message=final_message),
-            final_answer_text=final_delivery_text or final_message,
+            final_answer_text=final_answer_text,
             status=run_status,
             completed_steps=completed_steps,
             total_steps=len(getattr(plan, "steps", []) or []),

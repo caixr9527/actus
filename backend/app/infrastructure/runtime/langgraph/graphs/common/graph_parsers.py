@@ -40,6 +40,30 @@ def safe_parse_json(content: str | None) -> Dict[str, Any]:
     return {}
 
 
+def extract_text_outside_json_blocks(content: str | None) -> str:
+    """提取模型 JSON 合同外的自然语言正文，用于无步骤直答分支防止正文静默丢失。"""
+    if not content:
+        return ""
+
+    normalized_content = str(content or "")
+    without_fenced_json = re.sub(
+        r"```(?:json)?\s*[\s\S]*?```",
+        "",
+        normalized_content,
+        flags=re.IGNORECASE,
+    )
+    if without_fenced_json == normalized_content:
+        start_index = normalized_content.find("{")
+        end_index = normalized_content.rfind("}")
+        if start_index != -1 and end_index != -1 and end_index > start_index:
+            without_fenced_json = (
+                normalized_content[:start_index]
+                + normalized_content[end_index + 1:]
+            )
+
+    return re.sub(r"^\s*[-*_]{3,}\s*", "", without_fenced_json.strip()).strip()
+
+
 def normalize_attachments(raw_attachments: Any) -> List[str]:
     """模型 attachments 字段只接受可直接交付的文件路径。"""
     return normalize_file_path_list(raw_attachments)

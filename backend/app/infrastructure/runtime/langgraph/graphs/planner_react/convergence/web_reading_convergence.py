@@ -276,14 +276,8 @@ class WebReadingConvergenceJudge:
             suffix = f"；链接数 {link_count}" if link_count > 0 else ""
             evidence_lines.append(f"{index}. {label}：{summary}{suffix}" if summary else f"{index}. {label}{suffix}")
 
-        summary_text = f"已基于页面读取证据完成当前网页阅读步骤：{step.description}"
-        delivery_parts = [summary_text]
-        if evidence_lines:
-            delivery_parts.append("页面证据：")
-            delivery_parts.extend(evidence_lines)
-        if source_links:
-            delivery_parts.append("来源链接：")
-            delivery_parts.extend([f"- {url}" for url in source_links[:5]])
+        # web_reading 收敛只形成页面阅读阶段结果，不直接充当最终对用户的正文。
+        summary_text = f"当前网页阅读步骤已基于页面证据完成：{step.description}"
         runtime_action = dict(runtime_recent_action or {})
         runtime_action["web_reading_convergence"] = {
             "reason_code": reason_code,
@@ -294,8 +288,7 @@ class WebReadingConvergenceJudge:
         return {
             "success": True,
             "summary": summary_text,
-            "result": "\n".join(delivery_parts),
-            "delivery_text": "\n".join(delivery_parts),
+            "result": summary_text,
             "attachments": [],
             "blockers": [],
             "facts_learned": evidence_lines[:8] + [f"来源链接：{url}" for url in source_links[:5]],
@@ -329,15 +322,14 @@ class WebReadingConvergenceJudge:
         failed_url_text = "、".join(failed_urls[:3]) if failed_urls else "用户提供的显式 URL"
         browser_evidence_ready = bool(explicit_url_state.get("browser_evidence_ready"))
         summary = f"显式 URL 页面读取已降级：{failed_url_text}"
-        delivery_text = (
-            f"{summary}。\n"
-            "原因：fetch_page 未获得足够正文内容，且继续重复抓取不会增加有效信息。\n"
+        degraded_fact = (
+            f"{summary}。原因：fetch_page 未获得足够正文内容，且继续重复抓取不会增加有效信息。"
             + (
-                "补充说明：浏览器已打开页面并拿到部分结构信号，但未获得足够稳定的正文摘要，因此当前不能把该页面视为已完成阅读。\n"
+                " 浏览器已打开页面并拿到部分结构信号，但未获得足够稳定的正文摘要。"
                 if browser_evidence_ready
                 else ""
             )
-            + "当前步骤停止重复读取，后续只能基于已有可用信息或明确向用户说明页面读取失败。"
+            + " 当前步骤停止重复读取，后续只能基于已有可用信息或明确向用户说明页面读取失败。"
         )
         runtime_action = dict(runtime_recent_action or {})
         runtime_action["web_reading_convergence"] = {
@@ -347,11 +339,10 @@ class WebReadingConvergenceJudge:
         return {
             "success": True,
             "summary": summary,
-            "result": delivery_text,
-            "delivery_text": delivery_text,
+            "result": summary,
             "attachments": [],
             "blockers": [],
-            "facts_learned": [delivery_text],
+            "facts_learned": [degraded_fact],
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_action,

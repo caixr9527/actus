@@ -11,7 +11,6 @@ from typing import Any, Dict, Literal, Optional
 from app.domain.models import (
     ExecutionStatus,
     Step,
-    StepDeliveryContextState,
     StepOutcome,
     StepTaskModeHint,
     normalize_wait_payload,
@@ -45,10 +44,8 @@ def _build_post_wait_execute_step(
         title=title,
         description=description,
         task_mode_hint=task_mode,
-        output_mode="inline",
+        output_mode="none",
         artifact_policy="default",
-        delivery_role="final",
-        delivery_context_state=_resolve_direct_delivery_context_state(task_mode),
         status=ExecutionStatus.PENDING,
     )
 
@@ -66,13 +63,6 @@ def _infer_post_wait_task_mode(
     if inferred_mode == StepTaskModeHint.HUMAN_WAIT.value:
         return StepTaskModeHint.GENERAL.value
     return inferred_mode or StepTaskModeHint.GENERAL.value
-
-def _resolve_direct_delivery_context_state(task_mode: str) -> str:
-    """直达路径下，只有纯 general 任务才可直接组织最终正文，其余模式需先准备上下文。"""
-    normalized_task_mode = normalize_controlled_value(task_mode, StepTaskModeHint)
-    if normalized_task_mode == StepTaskModeHint.GENERAL.value:
-        return StepDeliveryContextState.READY.value
-    return StepDeliveryContextState.NEEDS_PREPARATION.value
 
 def _normalize_interrupt_request(raw: Any) -> Dict[str, Any]:
     return normalize_wait_payload(raw)

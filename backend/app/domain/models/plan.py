@@ -47,7 +47,6 @@ class StepOutputMode(str, Enum):
     """步骤结构化输出模式。"""
 
     NONE = "none"
-    INLINE = "inline"
     FILE = "file"
 
 
@@ -58,22 +57,6 @@ class StepArtifactPolicy(str, Enum):
     FORBID_FILE_OUTPUT = "forbid_file_output"
     ALLOW_FILE_OUTPUT = "allow_file_output"
     REQUIRE_FILE_OUTPUT = "require_file_output"
-
-
-class StepDeliveryRole(str, Enum):
-    """步骤结构化交付角色。"""
-
-    NONE = "none"
-    INTERMEDIATE = "intermediate"
-    FINAL = "final"
-
-
-class StepDeliveryContextState(str, Enum):
-    """最终交付上下文准备状态。"""
-
-    NONE = "none"
-    NEEDS_PREPARATION = "needs_preparation"
-    READY = "ready"
 
 
 class ExecutionStatus(str, Enum):
@@ -107,9 +90,9 @@ class StepOutcome(BaseModel):
     """
 
     done: bool = False
+    # 轻量执行摘要，只供 replan / reuse / context / summary 等系统链路消费。
+    # 它不是最终面向用户的正文，不应被直接当作最终回复落账。
     summary: str = ""
-    # 重交付正文只在明确需要时写入，避免和轻量 summary 混用。
-    delivery_text: str = ""
     produced_artifacts: List[str] = Field(default_factory=list)
     blockers: List[str] = Field(default_factory=list)
     facts_learned: List[str] = Field(default_factory=list)
@@ -127,9 +110,7 @@ class Step(BaseModel):
 
     业务含义：
     - 表示一条“可执行、可追踪、可持久化”的最小任务单元。
-    - 同时承载两类信息：
-      1) 执行语义：description、task_mode_hint、success_criteria
-      2) 交付语义：output_mode、artifact_policy、delivery_role、delivery_context_state
+    - 只承载执行语义与文件产物语义；最终正文整理统一由 summary_node 负责。
 
     主要赋值位置：
     - planner/replan 输出解析后构建 Step。
@@ -151,16 +132,10 @@ class Step(BaseModel):
     description: str = ""
     # 结构化步骤模式优先，文本规则只做兜底。
     task_mode_hint: Optional[StepTaskModeHint] = None
-    # 结构化输出模式，表示该步骤默认产出形态。
+    # 结构化输出模式；none 表示无文件产物要求，file 表示需要产出文件。
     output_mode: Optional[StepOutputMode] = None
     # 结构化产物策略，决定当前步骤是否允许或要求文件产出。
     artifact_policy: Optional[StepArtifactPolicy] = None
-    # 结构化交付角色，显式标记该步骤是否承担最终重交付正文。
-    delivery_role: Optional[StepDeliveryRole] = None
-    # 结构化交付上下文状态，仅在 final 步骤下有意义。
-    # needs_preparation 表示本步骤仍需先检索/读取/操作，再输出最终正文；
-    # ready 表示前序上下文已准备好，本步骤应直接组织最终正文。
-    delivery_context_state: Optional[StepDeliveryContextState] = None
     # 同语义步骤的稳定标识（用于步骤复用、重排去重与跨轮对齐）。
     objective_key: str = ""
     # 步骤成功判据（当前主要用于语义判定与去重签名；未来可扩展为执行收敛判定输入）。

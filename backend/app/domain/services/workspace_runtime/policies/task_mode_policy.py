@@ -14,6 +14,7 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     ACTION_PATTERN,
     CODING_PATTERN,
     COMPARISON_PATTERN,
+    CONTEXTUAL_FOLLOWUP_PATTERN,
     FILE_FUNCTION_NAMES,
     FILE_PATTERN,
     PHATIC_PATTERN,
@@ -112,6 +113,7 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
             "has_file_signal": False,
             "has_coding_signal": False,
             "has_action_signal": False,
+            "has_contextual_followup_signal": False,
             "has_write_action_signal": False,
             "has_tool_reference": False,
             "clause_count": 0,
@@ -146,6 +148,7 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
         "has_file_signal": bool(FILE_PATTERN.search(normalized_text)),
         "has_coding_signal": bool(CODING_PATTERN.search(normalized_text)),
         "has_action_signal": bool(ACTION_PATTERN.search(normalized_text)),
+        "has_contextual_followup_signal": bool(CONTEXTUAL_FOLLOWUP_PATTERN.search(normalized_text)),
         # P3-1A 收敛修复：统一识别“写入/改写/执行命令”等写副作用意图，供只读任务硬拦截复用。
         "has_write_action_signal": bool(
             WRITE_ACTION_PATTERN.search(normalized_text)
@@ -205,6 +208,7 @@ def infer_entry_strategy(
         user_message: str,
         has_input_parts: bool,
         has_active_plan: bool,
+        has_contextual_followup_anchor: bool = False,
 ) -> str:
     if has_active_plan:
         return "create_plan_or_reuse"
@@ -231,6 +235,19 @@ def infer_entry_strategy(
             return "recall_memory_context"
         return "direct_wait"
     if signals["is_phatic"] and not has_direct_execution_need:
+        return "direct_answer"
+    # 追问/展开类短消息在存在历史锚点时应继续走 direct_answer。
+    # 这里仍显式排除工具、文件、检索和复杂多步骤信号，避免把真实执行请求误降级成直答。
+    if (
+            has_contextual_followup_anchor
+            and signals["has_contextual_followup_signal"]
+            and not has_direct_execution_need
+            and not needs_planner
+            and not signals["needs_human_wait"]
+            and not signals["has_numbered_list"]
+            and signals["clause_count"] <= 2
+            and signals["char_count"] < 80
+    ):
         return "direct_answer"
     if needs_planner or is_structurally_multi_step:
         return "recall_memory_context"

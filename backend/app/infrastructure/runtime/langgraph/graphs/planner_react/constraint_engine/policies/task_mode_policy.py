@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""执行约束策略：task_mode 执行前约束。"""
+"""执行约束策略：task_mode 执行前约束。
+
+本模块只负责工具许可边界，不负责 general 步骤的展示型收敛。
+"""
 
 from __future__ import annotations
 
-import re
 from typing import Optional
 
 from app.domain.models import BrowserPageType
@@ -20,25 +22,16 @@ from app.domain.services.workspace_runtime.policies import (
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence import (
     WebReadingConvergenceJudge,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
-    get_page_reading_contract_state,
-)
 from ..contracts import ConstraintDecision, ConstraintInput, ConstraintToolResultPayload
 from ..reason_codes import (
     REASON_BROWSER_CLICK_TARGET_BLOCKED,
     REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED,
     REASON_BROWSER_ROUTE_BLOCKED,
     REASON_FILE_PROCESSING_SHELL_EXPLICIT_REQUIRED,
-    REASON_GENERAL_INLINE_FILE_CONTEXT_REQUIRED,
     REASON_INVALID_TOOL,
     REASON_RESEARCH_FILE_CONTEXT_REQUIRED,
     REASON_TASK_MODE_TOOL_BLOCKED,
     REASON_WEB_READING_FILE_TOOL_BLOCKED,
-)
-
-_GENERAL_PAGE_EVIDENCE_PRESENTATION_PATTERN = re.compile(
-    r"(整理|总结|归纳|概括|提炼|梳理|列出|筛选|汇总|展示|说明|要点|链接)",
-    re.IGNORECASE,
 )
 
 
@@ -46,7 +39,7 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
     """处理 task_mode 的前置工具约束。
 
     这里只处理任务模式、自身页面证据和浏览器路由相关限制；
-    更具体的最终交付/产物/human_wait 原因码交给各自策略处理，避免职责重叠。
+    更具体的产物策略 / human_wait 原因码交给各自策略处理，避免职责重叠。
     """
     normalized_function_name = str(constraint_input.normalized_function_name or "").strip().lower()
     function_name = str(constraint_input.function_name or "").strip()
@@ -54,10 +47,6 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
     blocked_names = set(constraint_input.iteration_blocked_function_names or set())
     ctx = constraint_input.execution_context
     state = constraint_input.execution_state
-    page_contract_state = get_page_reading_contract_state(
-        runtime_recent_action=state.runtime_recent_action,
-        execution_state=state,
-    )
     web_reading_progress_state = (
         WebReadingConvergenceJudge.get_completion_progress(
             step=constraint_input.step,
@@ -135,18 +124,6 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
 
     if normalized_function_name not in blocked_names:
         if (
-                task_mode == "general"
-                and normalized_function_name in {"search_web", "fetch_page"}
-                and _general_step_should_reuse_page_evidence(
-                    constraint_input=constraint_input,
-                    page_contract_state=page_contract_state,
-                )
-        ):
-            return _hard_block(
-                REASON_TASK_MODE_TOOL_BLOCKED,
-                "当前整理步骤已经具备可用网页证据，请直接基于已有页面/摘要信息完成，不要重新发起搜索或抓取。",
-            )
-        if (
                 task_mode == "web_reading"
                 and normalized_function_name == "fetch_page"
                 and bool(dict(web_reading_progress_state.get("progress") or {}).get("contract_satisfied"))
@@ -160,11 +137,8 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
     downstream_owned_blocked_names = set()
     downstream_owned_blocked_names.update(ctx.read_only_file_blocked_function_names or set())
     downstream_owned_blocked_names.update(ctx.artifact_policy_blocked_function_names or set())
-    downstream_owned_blocked_names.update(ctx.final_delivery_search_blocked_function_names or set())
-    downstream_owned_blocked_names.update(ctx.final_delivery_shell_blocked_function_names or set())
-    downstream_owned_blocked_names.update(ctx.final_inline_file_output_blocked_function_names or set())
     if normalized_function_name in downstream_owned_blocked_names:
-        # task_mode_policy 固定前置，但后续 policy 拥有更具体的产物/最终交付原因码。
+        # task_mode_policy 固定前置，但后续 policy 拥有更具体的原因码。
         return None
 
     if normalized_function_name in set(ctx.research_file_context_blocked_function_names or set()):
@@ -174,10 +148,6 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
     if task_mode == "web_reading" and normalized_function_name in READ_ONLY_FILE_FUNCTION_NAMES:
         message = "当前步骤属于网页读取任务，请优先使用 search_web、fetch_page 或浏览器高阶读取工具，不要回退到文件工具。"
         return _hard_block(REASON_WEB_READING_FILE_TOOL_BLOCKED, message)
-
-    if normalized_function_name in set(ctx.general_inline_blocked_function_names or set()):
-        message = "当前步骤是直接内联展示结果的步骤，且没有可用文件上下文，请直接返回文本结果，不要继续读写文件。"
-        return _hard_block(REASON_GENERAL_INLINE_FILE_CONTEXT_REQUIRED, message)
 
     if normalized_function_name in set(ctx.file_processing_shell_blocked_function_names or set()):
         message = "当前步骤属于文件处理，默认禁止调用 shell_execute。仅在用户明确要求执行命令时才允许。"
@@ -223,23 +193,3 @@ def _soft_block(*, reason_code: str, message: str) -> ConstraintDecision:
         tool_result_payload=ConstraintToolResultPayload(success=False, message=message),
         message_for_model=message,
     )
-
-
-def _general_step_should_reuse_page_evidence(
-        *,
-        constraint_input: ConstraintInput,
-        page_contract_state: dict[str, object],
-) -> bool:
-    if not bool(page_contract_state.get("has_any_evidence")):
-        return False
-    step = constraint_input.step
-    step_text = " ".join(
-        [
-            str(getattr(step, "title", "") or ""),
-            str(getattr(step, "description", "") or ""),
-            " ".join([str(item or "") for item in list(getattr(step, "success_criteria", []) or [])]),
-        ]
-    ).strip()
-    if not step_text:
-        return False
-    return bool(_GENERAL_PAGE_EVIDENCE_PRESENTATION_PATTERN.search(step_text))

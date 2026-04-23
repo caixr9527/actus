@@ -21,15 +21,9 @@ BLOCKED_TOOL_LOOP_BREAK_REASONS: Set[str] = {
     "read_only_file_intent_write_blocked",
     "research_file_context_required",
     "web_reading_file_tool_blocked",
-    "general_inline_file_context_required",
     # P3-CASE3 修复：file_processing 在无显式命令意图时拦截 shell_execute。
     "file_processing_shell_explicit_required",
     "artifact_policy_file_output_blocked",
-    # P3-一次性收口：最终 inline 交付默认禁写文件。
-    "final_inline_file_output_blocked",
-    "final_delivery_search_drift_blocked",
-    # P3-1A 收敛修复：最终交付阶段拦截 shell 漂移也记为 blocked tool call。
-    "final_delivery_shell_drift_blocked",
     "browser_route_blocked",
     "task_mode_tool_blocked",
     "research_route_search_required",
@@ -74,7 +68,6 @@ def build_loop_break_payload(
         "success": False,
         "summary": f"当前步骤暂时未能完成：{step.description}",
         "result": f"当前步骤暂时未能完成：{step.description}",
-        "delivery_text": "",
         "attachments": [],
         "blockers": [blocker],
         "next_hint": next_hint,

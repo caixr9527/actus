@@ -169,6 +169,13 @@ PHATIC_PATTERN = re.compile(
     r"^(你好|您好|hi|hello|thanks|thank you|谢谢|再见|bye|早上好|晚上好|在吗|收到|ok|okay|好的)[!,.，。 ]*$",
     re.IGNORECASE,
 )
+CONTEXTUAL_FOLLOWUP_PATTERN = re.compile(
+    r"(^(继续|展开|详细点|再详细一点|再补充|补充一下|更详细|具体点|再说说|换个说法|精简一下|改写一下)[!,.，。 ]*$)"
+    r"|((不够|再|更|需要).{0,8}(详细|具体|完整|展开|补充))"
+    r"|((继续|展开|补充|改写|精简).{0,8}(上面|上一轮|刚才|这个|该内容|原主题)?)"
+    r"|(\b(continue|elaborate|more detail|expand|rewrite|summarize|shorten|add more)\b)",
+    re.IGNORECASE,
+)
 # 等待语义拆成两层：
 # 1. WAIT_PATTERN 识别用户原始消息里的“先确认/等待回复”这类直接等待语气；
 # 2. WAIT_REQUEST_PATTERN 识别 Planner 产出的“向用户请求确认/请求用户选择/向用户询问”这类请求式文案。
