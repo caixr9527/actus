@@ -4,14 +4,12 @@
 
 本模块负责在 planner / replan 之后，对步骤做一次统一收紧：
 - 纠正常见的结构化字段冲突；
-- 拦截不符合“Step 纯执行化”的步骤语义；
-- 区分“执行过程型整理”和“最终用户交付型整理”；
-- 保证进入执行链的步骤只承载执行职责，不承载最终用户交付职责。
+- 收紧 human_wait / 文件产出 / 写副作用 等结构化字段；
+- 保证进入执行链的步骤至少具备可执行的契约语义。
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -32,23 +30,6 @@ class StepContractCompilationIssue:
     step_id: str
     issue_code: str
     issue_message: str
-
-
-_ORGANIZATION_MARKER_PATTERN = re.compile(
-    r"(整理|总结|归纳|提炼|梳理|汇总|形成要点|输出要点|给出要点|撰写总结|组织成说明|组织内容|组织结构)"
-    r"|(\b(summarize|summary|organize findings|write[- ]?up)\b)",
-    re.IGNORECASE,
-)
-_FINAL_DELIVERY_MARKER_PATTERN = re.compile(
-    r"(输出给用户|回复用户|返回给用户|面向用户|最终说明|最终答复|最终回答|最终正文|最终结论|最终方案|最终攻略|成稿)"
-    r"|(\b(final answer|final response|user-facing|user facing|deliver to user)\b)",
-    re.IGNORECASE,
-)
-_EXECUTION_PROGRESS_MARKER_PATTERN = re.compile(
-    r"(导出|保存|写入|生成文件|生成文档|输出文件|读取|检索|抓取|提取|收集|比对|分析|计算|执行|运行|查看|打开|获取|记录|归档|形成结构|生成清单|生成表格)"
-    r"|(\b(export|save|write|generate file|read|search|fetch|extract|collect|compare|analyze|compute|execute|run|get|record|catalog|table)\b)",
-    re.IGNORECASE,
-)
 
 
 def compile_step_contracts(
@@ -75,7 +56,10 @@ def compile_step_contracts(
 
 
 def collect_step_contract_hard_issues(*, steps: List[Step]) -> List[StepContractCompilationIssue]:
-    """收集不可自动纠偏的硬错误。"""
+    """收集不可自动纠偏的硬错误。
+
+    当前只保留结构化字段级硬冲突，不在这里对“最后一步是否像总结”做文本语义封杀。
+    """
     issues: List[StepContractCompilationIssue] = []
     for step in list(steps or []):
         step_id = str(getattr(step, "id", "") or "")
@@ -88,14 +72,6 @@ def collect_step_contract_hard_issues(*, steps: List[Step]) -> List[StepContract
                     step_id=step_id,
                     issue_code="output_artifact_conflict",
                     issue_message="output_mode=file 与 artifact_policy=forbid_file_output 互斥。",
-                )
-            )
-        if is_user_facing_final_delivery_step(step):
-            issues.append(
-                StepContractCompilationIssue(
-                    step_id=step_id,
-                    issue_code="summary_only_step_forbidden",
-                    issue_message="Step 纯执行化主链不允许规划承担最终用户交付整理职责的步骤。",
                 )
             )
     return issues
@@ -172,55 +148,3 @@ def _normalize_step_contract_enum_fields(step: Step) -> Step:
     normalized_step.output_mode = StepOutputMode(raw_output_mode) if raw_output_mode else None
     normalized_step.artifact_policy = StepArtifactPolicy(raw_artifact_policy) if raw_artifact_policy else None
     return normalized_step
-
-
-def _step_candidate_text(step: Step) -> str:
-    """统一提取步骤判定文本，避免 planner/replan/execute 各自维护一套拼接逻辑。"""
-    return build_step_candidate_text(step)
-
-
-def step_requests_organizational_work(step: Step) -> bool:
-    """判断步骤是否带有整理/归纳语义。
-
-    注意：
-    - 这里只判断是否“在做整理”，不代表该步骤一定非法；
-    - 非法与否取决于它整理的是中间执行结果，还是最终用户交付内容。
-    """
-    candidate_text = _step_candidate_text(step)
-    if not candidate_text:
-        return False
-    return bool(_ORGANIZATION_MARKER_PATTERN.search(candidate_text))
-
-
-def step_has_execution_progress_semantics(step: Step) -> bool:
-    """判断步骤是否仍在推进执行，而不是只消费已有结果做最终表述。"""
-    candidate_text = _step_candidate_text(step)
-    if not candidate_text:
-        return False
-    return bool(_EXECUTION_PROGRESS_MARKER_PATTERN.search(candidate_text))
-
-
-def is_user_facing_final_delivery_step(step: Step) -> bool:
-    """识别“最终用户交付型整理步骤”。
-
-    判定原则：
-    - 允许执行过程型整理：例如整理结构、形成中间清单、生成导出文件；
-    - 禁止最终用户交付型整理：例如给用户成稿、输出最终要点、形成最终回答。
-
-    这比简单的“纯整理步骤”更稳：
-    - 不会误伤合法的中间归纳/结构化步骤；
-    - 也能拦截带有少量分析词、但本质已越界到最终交付的步骤。
-    """
-    task_mode = normalize_controlled_value(getattr(step, "task_mode_hint", None), StepTaskModeHint) or ""
-    if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
-        return False
-    candidate_text = _step_candidate_text(step)
-    if not candidate_text:
-        return False
-    if not step_requests_organizational_work(step):
-        return False
-    if _FINAL_DELIVERY_MARKER_PATTERN.search(candidate_text):
-        return True
-    if step_has_execution_progress_semantics(step):
-        return False
-    return True

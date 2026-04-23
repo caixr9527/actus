@@ -49,7 +49,6 @@ from .step_contract_policy import (
     StepContractCompilationIssue,
     collect_step_contract_hard_issues,
     compile_step_contracts,
-    is_user_facing_final_delivery_step,
 )
 
 __all__ = [
@@ -94,7 +93,6 @@ __all__ = [
     "StepContractCompilationIssue",
     "collect_step_contract_hard_issues",
     "compile_step_contracts",
-    "is_user_facing_final_delivery_step",
     "summarize_tool_result_data",
     "truncate_tool_text",
 ]

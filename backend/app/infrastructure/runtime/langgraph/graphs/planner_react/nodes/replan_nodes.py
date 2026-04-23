@@ -41,7 +41,6 @@ from .control_state import (
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
 )
-from .plan_contract_helpers import filter_summary_only_step_issues
 from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
@@ -176,10 +175,6 @@ async def replan_node(
             user_message=user_message,
         )
         contract_issues.extend(collect_step_contract_hard_issues(steps=candidate_steps))
-        candidate_steps, contract_issues, dropped_summary_only_steps = filter_summary_only_step_issues(
-            candidate_steps,
-            contract_issues,
-        )
         if corrected_count > 0:
             log_runtime(
                 logger,
@@ -189,15 +184,6 @@ async def replan_node(
                 corrected_step_count=corrected_count,
                 success_criteria_missing_count=criteria_missing_count,
                 success_criteria_filtered_count=criteria_filtered_count,
-                attempt=attempt + 1,
-            )
-        if dropped_summary_only_steps > 0:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "重规划已移除纯整理步骤",
-                state=state,
-                dropped_step_count=dropped_summary_only_steps,
                 attempt=attempt + 1,
             )
         if contract_issues:

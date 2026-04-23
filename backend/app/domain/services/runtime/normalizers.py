@@ -89,21 +89,16 @@ def normalize_step_result_text(value: Any, *, fallback: str = "") -> str:
 
 
 def normalize_step_internal_summary(value: Any, *, fallback: str = "") -> str:
-    """收紧步骤级 summary，只保留内部轻量摘要语义。
+    """规整步骤级 summary，保留足够事实给 replan / summary 使用。
 
-    目的：
-    - step.summary 供执行链路、replan、summary 上下文消费；
-    - 不允许它长成“最终用户交付正文”或成稿式开场。
-
-    这里不做复杂改写，只做最小收口：
-    - 去掉明显的最终答复式前缀；
-    - 压成单段轻摘要；
-    - 保留事实性、过程性描述。
+    这里只做轻量清洗：
+    - 去掉明显的“最终答案如下”这类答复式前缀；
+    - 保留原有事实、证据和阶段性结论，不再裁成第一段/第一行。
     """
     normalized_value = normalize_step_result_text(value, fallback=fallback)
     if not normalized_value:
         return ""
-    compact_value = normalized_value.replace("\r", "\n").split("\n\n", 1)[0].split("\n", 1)[0].strip()
+    compact_value = normalized_value.replace("\r", "\n").strip()
     compact_value = _USER_FACING_FINAL_SUMMARY_PREFIX_PATTERN.sub("", compact_value).strip(" ：:，,")
     return normalize_step_result_text(compact_value, fallback=fallback)
 

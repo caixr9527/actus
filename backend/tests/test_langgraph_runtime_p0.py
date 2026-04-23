@@ -1335,7 +1335,7 @@ def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -
     assert steps[0].output_mode == StepOutputMode.NONE
 
 
-def test_compile_step_contracts_should_flag_summary_only_step() -> None:
+def test_compile_step_contracts_should_not_block_summary_like_general_step() -> None:
     steps, issues, corrected_count = compile_step_contracts(
         steps=[
             Step(
@@ -1351,7 +1351,7 @@ def test_compile_step_contracts_should_flag_summary_only_step() -> None:
 
     assert corrected_count == 0
     assert len(steps) == 1
-    assert any(item.issue_code == "summary_only_step_forbidden" for item in issues)
+    assert issues == []
 
 
 def test_compile_step_contracts_should_allow_execution_side_organization_step() -> None:

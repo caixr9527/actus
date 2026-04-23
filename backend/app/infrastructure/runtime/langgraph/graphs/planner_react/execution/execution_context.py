@@ -25,7 +25,6 @@ from app.domain.services.workspace_runtime.policies import (
     build_step_candidate_text as _build_step_candidate_text,
     build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
     classify_file_access_intent as _classify_file_access_intent,
-    is_user_facing_final_delivery_step as _is_user_facing_final_delivery_step,
 )
 
 @dataclass(slots=True)
@@ -104,10 +103,6 @@ def build_execution_context(
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
-    if _step_is_general_final_delivery(step=step, task_mode=task_mode):
-        # Step 纯执行化：general 的最终用户交付型整理步骤不应继续发起 research/fetch 链路。
-        # 这类步骤一旦出现，说明 planner/replan 漏放了越界步骤；执行期继续 fail-safe 限制其放大影响。
-        blocked_function_names.update({"search_web", "fetch_page"})
     if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
         # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
         file_processing_shell_blocked_function_names.add("shell_execute")
@@ -263,19 +258,6 @@ def _step_requests_read_only_file_access(
 ) -> bool:
     candidate_text = str(read_only_intent_text or "").strip() or _build_step_candidate_text(step)
     return _classify_file_access_intent(candidate_text) == "read_only_intent"
-
-
-def _step_is_general_final_delivery(*, step: Step, task_mode: str) -> bool:
-    """识别 general 模式下越界到“最终用户交付整理”的步骤。
-
-    说明：
-    - 这里只做执行期 fail-safe，不替代 planner/replan 的主校验；
-    - 保留执行过程型整理，例如生成结构化中间结果、整理导出文件等；
-    - 只拦截已经越界到“面向用户成稿/最终回答”的 general 步骤。
-    """
-    if str(task_mode or "").strip().lower() != "general":
-        return False
-    return _is_user_facing_final_delivery_step(step)
 
 
 def _step_or_user_content_has_url(

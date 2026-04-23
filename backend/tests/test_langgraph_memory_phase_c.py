@@ -206,6 +206,26 @@ class _FakeLegacyFinalMessageOnlySummaryLLM:
         }
 
 
+class _FakeSummaryAttachmentPathDisclosureLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "已完成调研并附上报告。",
+                    "final_answer_text": (
+                        "LangGraph Human-in-the-Loop 实现模式调研报告\n\n"
+                        "完整报告文件：/home/ubuntu/langgraph_hitl_report.md"
+                    ),
+                    "attachments": ["/home/ubuntu/langgraph_hitl_report.md"],
+                    "facts_in_session": [],
+                    "user_preferences": {},
+                    "memory_candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _FailIfSummaryLLMCalled:
     def __init__(self) -> None:
         self.calls = 0
@@ -2232,6 +2252,66 @@ def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep
     assert message_event.stage == "final"
     assert message_event.message == "最终整理后的正文"
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
+
+
+def test_summarize_should_not_expose_attachment_path_in_final_answer_text_by_default() -> None:
+    llm = _FakeSummaryAttachmentPathDisclosureLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "调研 LangGraph Human-in-the-Loop 实现模式，给我总结。",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": Step(
+            id="step-1",
+            title="生成调研报告",
+            description="生成调研报告",
+            objective_key="objective-step-1",
+            success_criteria=["报告生成完成"],
+            status=ExecutionStatus.COMPLETED,
+            outcome=StepOutcome(
+                done=True,
+                summary="已生成调研报告",
+                produced_artifacts=["/home/ubuntu/langgraph_hitl_report.md"],
+            ),
+        ),
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成调研报告",
+                    "produced_artifacts": ["/home/ubuntu/langgraph_hitl_report.md"],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
+        "working_memory": {
+            "goal": "验证默认不暴露附件路径",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "selected_artifacts": ["/home/ubuntu/langgraph_hitl_report.md"],
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert "/home/ubuntu/langgraph_hitl_report.md" not in summarized_state["final_answer_text"]
+    assert "完整内容已作为附件交付。" in summarized_state["final_answer_text"]
+    message_event = summarized_state["emitted_events"][0]
+    assert "/home/ubuntu/langgraph_hitl_report.md" not in message_event.message
+    assert [attachment.filepath for attachment in message_event.attachments] == [
+        "/home/ubuntu/langgraph_hitl_report.md"
+    ]
 
 
 def test_summarize_should_use_current_run_artifacts_as_attachment_truth_source() -> None:
