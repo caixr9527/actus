@@ -10,8 +10,6 @@ from app.domain.models import (
     SearchResults,
     Step,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepOutcome,
     StepOutputMode,
     StepTaskModeHint,
@@ -95,20 +93,6 @@ class _CaptureDirectAnswerPromptLLM:
         }
 
 
-class _InlineDeliveryLLM:
-    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
-        return {
-            "content": json.dumps(
-                {
-                    "success": True,
-                    "result": "这是完整的内联交付正文。",
-                    "attachments": [],
-                },
-                ensure_ascii=False,
-            )
-        }
-
-
 class _IntermediateInlineDeliveryLLM:
     async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
         return {
@@ -116,43 +100,8 @@ class _IntermediateInlineDeliveryLLM:
                 {
                     "success": True,
                     "summary": "已展示候选课程",
-                    "delivery_text": "候选课程 A、候选课程 B、候选课程 C。",
+                    "facts_learned": ["候选课程 A", "候选课程 B", "候选课程 C"],
                     "attachments": [],
-                },
-                ensure_ascii=False,
-            )
-        }
-
-
-class _SplitSummaryDeliveryLLM:
-    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
-        return {
-            "content": json.dumps(
-                {
-                    "success": True,
-                    "summary": "已完成最终整理",
-                    "delivery_text": "这是面向用户的完整最终交付正文。",
-                    "attachments": [],
-                },
-                ensure_ascii=False,
-            )
-        }
-
-
-class _SplitSummaryDeliveryWithMixedAttachmentsLLM:
-    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
-        return {
-            "content": json.dumps(
-                {
-                    "success": True,
-                    "summary": "已完成最终整理",
-                    "delivery_text": "这是面向用户的完整最终交付正文。",
-                    "attachments": [
-                        "artifact-id-1",
-                        "https://example.com/final.md",
-                        "final-output.md",
-                        "/home/ubuntu/final-output.md",
-                    ],
                 },
                 ensure_ascii=False,
             )
@@ -166,7 +115,7 @@ class _LeakyNonInlineDeliveryLLM:
                 {
                     "success": True,
                     "summary": "已完成搜索步骤",
-                    "delivery_text": "这段正文不应在非 inline 步骤中被保留。",
+                    "facts_learned": ["这段正文不应在非 inline 步骤中被保留。"],
                     "attachments": [],
                 },
                 ensure_ascii=False,
@@ -331,7 +280,7 @@ class _ShellTool(BaseTool):
         return ToolResult(success=True, data={"command": command, "stdout": "ok"})
 
 
-class _FinalDeliverySearchDriftLLM:
+class _SearchThenFinishLLM:
     def __init__(self) -> None:
         self.calls = 0
 
@@ -354,8 +303,7 @@ class _FinalDeliverySearchDriftLLM:
             "content": json.dumps(
                 {
                     "success": True,
-                    "summary": "已直接完成最终交付",
-                    "delivery_text": "这是基于已知上下文整理出的完整最终正文。",
+                    "summary": "已完成当前步骤",
                     "attachments": [],
                 },
                 ensure_ascii=False,
@@ -363,7 +311,7 @@ class _FinalDeliverySearchDriftLLM:
         }
 
 
-class _FinalDeliveryShellDriftLLM:
+class _ShellThenFinishLLM:
     def __init__(self) -> None:
         self.calls = 0
 
@@ -386,8 +334,7 @@ class _FinalDeliveryShellDriftLLM:
             "content": json.dumps(
                 {
                     "success": True,
-                    "summary": "已直接完成最终交付",
-                    "delivery_text": "这是基于已知上下文整理出的完整最终正文。",
+                    "summary": "已完成当前步骤",
                     "attachments": [],
                 },
                 ensure_ascii=False,
@@ -751,17 +698,13 @@ class _PlanOnlyPlannerLLM:
                             "task_mode_hint": "research",
                             "output_mode": "none",
                             "artifact_policy": "forbid_file_output",
-                            "delivery_role": "none",
-                            "delivery_context_state": "none",
                         },
                         {
                             "id": "2",
                             "description": "整理成三天行程草案",
                             "task_mode_hint": "general",
-                            "output_mode": "inline",
-                            "artifact_policy": "default",
-                            "delivery_role": "intermediate",
-                            "delivery_context_state": "none",
+                            "output_mode": "none",
+                            "artifact_policy": "forbid_file_output",
                         },
                     ],
                 },
@@ -1182,8 +1125,8 @@ def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
     assert state["graph_metadata"]["control"]["direct_wait_execute_task_mode"] == "research"
     assert state["graph_metadata"]["control"]["direct_wait_original_task_executed"] is False
     assert state["plan"].steps[1].task_mode_hint == "research"
-    assert state["plan"].steps[1].delivery_role == "final"
-    assert state["plan"].steps[1].delivery_context_state == "needs_preparation"
+    assert state["plan"].steps[1].output_mode == "none"
+    assert state["plan"].steps[1].artifact_policy == "default"
 
 
 def test_direct_execute_node_should_build_single_step_plan() -> None:
@@ -1202,8 +1145,8 @@ def test_direct_execute_node_should_build_single_step_plan() -> None:
     assert state["current_step_id"] == "direct-execute-step"
     assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
     assert state["plan"].steps[0].task_mode_hint == "research"
-    assert state["plan"].steps[0].delivery_role == "final"
-    assert state["plan"].steps[0].delivery_context_state == "needs_preparation"
+    assert state["plan"].steps[0].output_mode == "none"
+    assert state["plan"].steps[0].artifact_policy == "default"
 
 
 def test_direct_wait_node_should_preserve_english_working_language() -> None:
@@ -1278,8 +1221,6 @@ def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_ste
                                 "task_mode_hint": "file_processing",
                                 "output_mode": "none",
                                 "artifact_policy": "forbid_file_output",
-                                "delivery_role": "none",
-                                "delivery_context_state": "none",
                             }
                         ],
                     },
@@ -1325,8 +1266,6 @@ def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_ste
     assert isinstance(state["plan"].steps[0].task_mode_hint, StepTaskModeHint)
     assert isinstance(state["plan"].steps[0].output_mode, StepOutputMode)
     assert isinstance(state["plan"].steps[0].artifact_policy, StepArtifactPolicy)
-    assert isinstance(state["plan"].steps[0].delivery_role, StepDeliveryRole)
-    assert isinstance(state["plan"].steps[0].delivery_context_state, StepDeliveryContextState)
 
 
 def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -> None:
@@ -1338,8 +1277,6 @@ def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -
                 task_mode_hint="general",
                 output_mode="none",
                 artifact_policy="forbid_file_output",
-                delivery_role="none",
-                delivery_context_state="none",
             )
         ],
         user_message="帮我改写这段文案",
@@ -1367,10 +1304,8 @@ def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enu
                                 "id": "1",
                                 "description": "先等待用户确认后再继续",
                                 "task_mode_hint": "human_wait",
-                                "output_mode": "inline",
-                                "artifact_policy": "allow_file_output",
-                                "delivery_role": "final",
-                                "delivery_context_state": "ready",
+                                "output_mode": "none",
+                                "artifact_policy": "forbid_file_output",
                             }
                         ],
                     },
@@ -1412,12 +1347,8 @@ def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enu
     step = state["plan"].steps[0]
     assert isinstance(step.output_mode, StepOutputMode)
     assert isinstance(step.artifact_policy, StepArtifactPolicy)
-    assert isinstance(step.delivery_role, StepDeliveryRole)
-    assert isinstance(step.delivery_context_state, StepDeliveryContextState)
     assert step.output_mode == StepOutputMode.NONE
     assert step.artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
-    assert step.delivery_role == StepDeliveryRole.NONE
-    assert step.delivery_context_state == StepDeliveryContextState.NONE
 
 
 def test_direct_execute_node_should_preserve_english_working_language() -> None:
@@ -1801,7 +1732,7 @@ def test_execute_step_with_prompt_should_block_file_tools_for_inline_general_wit
             llm=llm,
             step=Step(
                 description="将课程详情直接展示给用户",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
             ),
             runtime_tools=[file_tool],
@@ -1820,7 +1751,7 @@ def test_execute_step_with_prompt_should_block_file_tools_for_inline_general_wit
     assert called_events[0].function_name == "read_file"
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
-    assert "内联展示结果" in str(called_events[0].function_result.message or "")
+    assert "当前步骤缺少可用文件上下文" in str(called_events[0].function_result.message or "")
 
 
 def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_with_file_context() -> None:
@@ -1832,7 +1763,7 @@ def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_wit
             llm=llm,
             step=Step(
                 description="基于已有课程详情文件整理内联摘要",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
             ),
             runtime_tools=[file_tool],
@@ -1853,8 +1784,8 @@ def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_wit
     assert called_events[0].function_result.success is True
 
 
-def test_execute_step_with_prompt_should_block_search_for_final_delivery_step() -> None:
-    llm = _FinalDeliverySearchDriftLLM()
+def test_execute_step_with_prompt_should_not_block_search_without_legacy_delivery_semantics() -> None:
+    llm = _SearchThenFinishLLM()
     search_tool = _SearchFetchTool()
 
     async def _run():
@@ -1862,10 +1793,8 @@ def test_execute_step_with_prompt_should_block_search_for_final_delivery_step() 
             llm=llm,
             step=Step(
                 description="基于已有信息整理最终攻略",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
-                delivery_role="final",
-                delivery_context_state="ready",
             ),
             runtime_tools=[search_tool],
             task_mode="general",
@@ -1874,19 +1803,17 @@ def test_execute_step_with_prompt_should_block_search_for_final_delivery_step() 
 
     payload, events = asyncio.run(_run())
 
-    assert payload["summary"] == "已直接完成最终交付"
-    assert payload["delivery_text"] == "这是基于已知上下文整理出的完整最终正文。"
-    assert search_tool.invocations == []
+    assert payload["summary"] == "已完成当前步骤"
+    assert search_tool.invocations == ["search_web"]
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
     assert called_events[0].function_name == "search_web"
     assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "负责最终交付正文" in str(called_events[0].function_result.message or "")
+    assert called_events[0].function_result.success is True
 
 
-def test_execute_step_with_prompt_should_block_search_for_final_delivery_step_even_if_task_mode_is_web_reading() -> None:
-    llm = _FinalDeliverySearchDriftLLM()
+def test_execute_step_with_prompt_should_not_block_search_for_web_reading_without_legacy_delivery_semantics() -> None:
+    llm = _SearchThenFinishLLM()
     search_tool = _SearchFetchTool()
 
     async def _run():
@@ -1894,10 +1821,8 @@ def test_execute_step_with_prompt_should_block_search_for_final_delivery_step_ev
             llm=llm,
             step=Step(
                 description="基于已有页面信息整理最终课程详情",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
-                delivery_role="final",
-                delivery_context_state="ready",
             ),
             runtime_tools=[search_tool],
             task_mode="web_reading",
@@ -1906,19 +1831,17 @@ def test_execute_step_with_prompt_should_block_search_for_final_delivery_step_ev
 
     payload, events = asyncio.run(_run())
 
-    assert payload["summary"] == "已直接完成最终交付"
-    assert payload["delivery_text"] == "这是基于已知上下文整理出的完整最终正文。"
-    assert search_tool.invocations == []
+    assert payload["summary"] == "已完成当前步骤"
+    assert search_tool.invocations == ["search_web"]
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
     assert called_events[0].function_name == "search_web"
     assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "负责最终交付正文" in str(called_events[0].function_result.message or "")
+    assert called_events[0].function_result.success is True
 
 
-def test_execute_step_with_prompt_should_block_shell_for_final_delivery_step() -> None:
-    llm = _FinalDeliveryShellDriftLLM()
+def test_execute_step_with_prompt_should_not_block_shell_without_legacy_delivery_semantics() -> None:
+    llm = _ShellThenFinishLLM()
     shell_tool = _ShellTool()
 
     async def _run():
@@ -1926,10 +1849,8 @@ def test_execute_step_with_prompt_should_block_shell_for_final_delivery_step() -
             llm=llm,
             step=Step(
                 description="基于已有上下文输出最终结论",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
-                delivery_role="final",
-                delivery_context_state="ready",
             ),
             runtime_tools=[shell_tool],
             task_mode="general",
@@ -1938,15 +1859,13 @@ def test_execute_step_with_prompt_should_block_shell_for_final_delivery_step() -
 
     payload, events = asyncio.run(_run())
 
-    assert payload["summary"] == "已直接完成最终交付"
-    assert payload["delivery_text"] == "这是基于已知上下文整理出的完整最终正文。"
-    assert shell_tool.invoked == 0
+    assert payload["summary"] == "已完成当前步骤"
+    assert shell_tool.invoked == 1
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
     assert called_events[0].function_name == "shell_execute"
     assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "不要调用 shell_execute" in str(called_events[0].function_result.message or "")
+    assert called_events[0].function_result.success is True
 
 
 def test_execute_step_with_prompt_should_block_shell_for_file_processing_without_explicit_command() -> None:
@@ -1993,8 +1912,8 @@ def test_execute_step_with_prompt_should_allow_shell_for_file_processing_with_ex
     assert shell_tool.invoked == 1
 
 
-def test_direct_execute_step_should_allow_search_before_final_delivery_when_context_not_ready() -> None:
-    llm = _FinalDeliverySearchDriftLLM()
+def test_direct_execute_step_should_allow_search_without_legacy_delivery_contract() -> None:
+    llm = _SearchThenFinishLLM()
     search_tool = _SearchTool()
     state = asyncio.run(
         direct_execute_node(
@@ -2009,16 +1928,13 @@ def test_direct_execute_step_should_allow_search_before_final_delivery_when_cont
 
     assert search_tool.invoked == 1
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert next_state["final_message"] == "已直接完成最终交付"
-    assert next_state["working_memory"]["final_delivery_payload"] == {
-        "text": "这是基于已知上下文整理出的完整最终正文。",
-        "sections": [],
-        "source_refs": [],
-    }
+    assert next_state["final_message"] == ""
+    assert next_state["last_executed_step"].outcome is not None
+    assert next_state["last_executed_step"].outcome.summary == "已完成当前步骤"
 
 
-def test_direct_wait_execute_step_should_allow_search_before_final_delivery_when_context_not_ready() -> None:
-    llm = _FinalDeliverySearchDriftLLM()
+def test_direct_wait_execute_step_should_allow_search_without_legacy_delivery_contract() -> None:
+    llm = _SearchThenFinishLLM()
     search_tool = _SearchTool()
     state = asyncio.run(
         direct_wait_node(
@@ -2038,12 +1954,9 @@ def test_direct_wait_execute_step_should_allow_search_before_final_delivery_when
     assert search_tool.invoked == 1
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert next_state["graph_metadata"]["control"]["direct_wait_original_task_executed"] is True
-    assert next_state["final_message"] == "已直接完成最终交付"
-    assert next_state["working_memory"]["final_delivery_payload"] == {
-        "text": "这是基于已知上下文整理出的完整最终正文。",
-        "sections": [],
-        "source_refs": [],
-    }
+    assert next_state["final_message"] == ""
+    assert next_state["last_executed_step"].outcome is not None
+    assert next_state["last_executed_step"].outcome.summary == "已完成当前步骤"
 
 
 def test_execute_step_node_should_treat_selected_artifacts_as_available_file_context() -> None:
@@ -2058,7 +1971,7 @@ def test_execute_step_node_should_treat_selected_artifacts_as_available_file_con
                 id="step-1",
                 title="展示课程详情",
                 description="基于已有课程详情文件整理内联摘要",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
                 status=ExecutionStatus.PENDING,
             )
@@ -2099,219 +2012,7 @@ def test_execute_step_node_should_treat_selected_artifacts_as_available_file_con
 
     assert file_tool.invocations == ["/home/ubuntu/course-detail.md"]
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert next_state["final_message"] == "已结束步骤"
-
-
-def test_execute_step_node_should_store_final_delivery_payload_for_inline_step() -> None:
-    llm = _InlineDeliveryLLM()
-    search_tool = _SearchTool()
-    plan = Plan(
-        title="生成内联结果",
-        goal="生成内联结果",
-        language="zh",
-        steps=[
-            Step(
-                id="step-1",
-                title="整理最终答案",
-                description="整理最终答案并内联展示给用户",
-                output_mode="inline",
-                artifact_policy="default",
-                delivery_role="final",
-                status=ExecutionStatus.PENDING,
-            )
-        ],
-    )
-    state = {
-        "plan": plan,
-        "graph_metadata": {},
-        "message_window": [],
-        "working_memory": {},
-        "execution_count": 0,
-        "input_parts": [],
-        "selected_artifacts": [],
-        "step_states": [],
-        "pending_interrupt": {},
-        "retrieved_memories": [],
-        "recent_run_briefs": [],
-        "recent_attempt_briefs": [],
-        "session_open_questions": [],
-        "session_blockers": [],
-        "historical_artifact_paths": [],
-        "emitted_events": [],
-        "user_message": "请直接给我最终答案",
-        "current_step_id": None,
-        "final_message": "",
-        "thread_id": "thread-1",
-        "conversation_summary": "",
-    }
-
-    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[search_tool]))
-
-    assert next_state["final_message"] == "这是完整的内联交付正文。"
-    assert next_state["working_memory"]["final_delivery_payload"] == {
-        "text": "这是完整的内联交付正文。",
-        "sections": [],
-        "source_refs": [],
-    }
-
-
-def test_execute_step_node_should_split_light_summary_and_final_delivery_text() -> None:
-    llm = _SplitSummaryDeliveryLLM()
-    search_tool = _SearchTool()
-    plan = Plan(
-        title="生成最终交付",
-        goal="生成最终交付",
-        language="zh",
-        steps=[
-            Step(
-                id="step-1",
-                title="整理最终答案",
-                description="整理最终答案并内联展示给用户",
-                output_mode="inline",
-                artifact_policy="default",
-                delivery_role="final",
-                status=ExecutionStatus.PENDING,
-            )
-        ],
-    )
-    state = {
-        "plan": plan,
-        "graph_metadata": {},
-        "message_window": [],
-        "working_memory": {},
-        "execution_count": 0,
-        "input_parts": [],
-        "selected_artifacts": [],
-        "step_states": [],
-        "pending_interrupt": {},
-        "retrieved_memories": [],
-        "recent_run_briefs": [],
-        "recent_attempt_briefs": [],
-        "session_open_questions": [],
-        "session_blockers": [],
-        "historical_artifact_paths": [],
-        "emitted_events": [],
-        "user_message": "请给我最终答案",
-        "current_step_id": None,
-        "final_message": "",
-        "thread_id": "thread-1",
-        "conversation_summary": "",
-    }
-
-    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[search_tool]))
-
-    # final_message 只保留轻量摘要，最终重正文单独进入 final_delivery_payload。
-    assert next_state["final_message"] == "已完成最终整理"
-    assert next_state["working_memory"]["final_delivery_payload"] == {
-        "text": "这是面向用户的完整最终交付正文。",
-        "sections": [],
-        "source_refs": [],
-    }
-
-
-def test_execute_step_node_should_filter_non_file_attachment_refs_from_final_delivery_payload() -> None:
-    llm = _SplitSummaryDeliveryWithMixedAttachmentsLLM()
-    plan = Plan(
-        title="生成最终交付",
-        goal="生成最终交付",
-        language="zh",
-        steps=[
-            Step(
-                id="step-1",
-                title="整理最终答案",
-                description="整理最终答案并内联展示给用户",
-                output_mode="inline",
-                artifact_policy="default",
-                delivery_role="final",
-                status=ExecutionStatus.PENDING,
-            )
-        ],
-    )
-    state = {
-        "plan": plan,
-        "graph_metadata": {},
-        "message_window": [],
-        "working_memory": {},
-        "execution_count": 0,
-        "input_parts": [],
-        "selected_artifacts": [],
-        "step_states": [],
-        "pending_interrupt": {},
-        "retrieved_memories": [],
-        "recent_run_briefs": [],
-        "recent_attempt_briefs": [],
-        "session_open_questions": [],
-        "session_blockers": [],
-        "historical_artifact_paths": [],
-        "emitted_events": [],
-        "user_message": "请给我最终答案",
-        "current_step_id": None,
-        "final_message": "",
-        "thread_id": "thread-1",
-        "conversation_summary": "",
-    }
-
-    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[]))
-
-    assert next_state["last_executed_step"].outcome.produced_artifacts == ["/home/ubuntu/final-output.md"]
-    assert next_state["working_memory"]["final_delivery_payload"] == {
-        "text": "这是面向用户的完整最终交付正文。",
-        "sections": [],
-        "source_refs": ["/home/ubuntu/final-output.md"],
-    }
-
-
-def test_execute_step_node_should_support_no_tool_execution_path() -> None:
-    llm = _SplitSummaryDeliveryLLM()
-    plan = Plan(
-        title="无工具最终交付",
-        goal="无工具最终交付",
-        language="zh",
-        steps=[
-            Step(
-                id="step-1",
-                title="直接整理最终答案",
-                description="直接整理最终答案并返回",
-                output_mode="inline",
-                artifact_policy="default",
-                delivery_role="final",
-                status=ExecutionStatus.PENDING,
-            )
-        ],
-    )
-    state = {
-        "plan": plan,
-        "graph_metadata": {},
-        "message_window": [],
-        "working_memory": {},
-        "execution_count": 0,
-        "input_parts": [],
-        "selected_artifacts": [],
-        "step_states": [],
-        "pending_interrupt": {},
-        "retrieved_memories": [],
-        "recent_run_briefs": [],
-        "recent_attempt_briefs": [],
-        "session_open_questions": [],
-        "session_blockers": [],
-        "historical_artifact_paths": [],
-        "emitted_events": [],
-        "user_message": "请直接给我最终答案",
-        "current_step_id": None,
-        "final_message": "",
-        "thread_id": "thread-1",
-        "conversation_summary": "",
-    }
-
-    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[]))
-
-    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert next_state["final_message"] == "已完成最终整理"
-    assert next_state["working_memory"]["final_delivery_payload"] == {
-        "text": "这是面向用户的完整最终交付正文。",
-        "sections": [],
-        "source_refs": [],
-    }
+    assert next_state["final_message"] == ""
 
 
 def test_execute_step_node_should_store_attachment_delivery_preference_in_outcome_and_working_memory() -> None:
@@ -2337,60 +2038,6 @@ def test_execute_step_node_should_store_attachment_delivery_preference_in_outcom
     }
 
 
-def test_execute_step_node_should_not_overwrite_final_delivery_payload_for_intermediate_inline_step() -> None:
-    llm = _InlineDeliveryLLM()
-    search_tool = _SearchTool()
-    plan = Plan(
-        title="生成中间展示",
-        goal="生成中间展示",
-        language="zh",
-        steps=[
-            Step(
-                id="step-1",
-                title="整理候选项",
-                description="整理候选项并内联展示给用户",
-                output_mode="inline",
-                artifact_policy="default",
-                delivery_role="intermediate",
-                status=ExecutionStatus.PENDING,
-            )
-        ],
-    )
-    existing_payload = {
-        "text": "已有最终正文。",
-        "sections": [],
-        "source_refs": [],
-    }
-    state = {
-        "plan": plan,
-        "graph_metadata": {},
-        "message_window": [],
-        "working_memory": {"final_delivery_payload": existing_payload},
-        "execution_count": 0,
-        "input_parts": [],
-        "selected_artifacts": [],
-        "step_states": [],
-        "pending_interrupt": {},
-        "retrieved_memories": [],
-        "recent_run_briefs": [],
-        "recent_attempt_briefs": [],
-        "session_open_questions": [],
-        "session_blockers": [],
-        "historical_artifact_paths": [],
-        "emitted_events": [],
-        "user_message": "请展示候选项",
-        "current_step_id": None,
-        "final_message": "",
-        "thread_id": "thread-1",
-        "conversation_summary": "",
-    }
-
-    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[search_tool]))
-
-    assert next_state["final_message"] == "这是完整的内联交付正文。"
-    assert next_state["working_memory"]["final_delivery_payload"] == existing_payload
-
-
 def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candidate_step() -> None:
     llm = _IntermediateInlineDeliveryLLM()
     search_tool = _SearchTool()
@@ -2404,9 +2051,8 @@ def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candi
                 title="展示候选课程",
                 description="展示候选课程并等待用户选择",
                 task_mode_hint="general",
-                output_mode="inline",
+                output_mode="none",
                 artifact_policy="default",
-                delivery_role="intermediate",
                 status=ExecutionStatus.PENDING,
             )
         ],
@@ -2448,11 +2094,11 @@ def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candi
     intermediate_events = [event for event in emitted_events if isinstance(event, MessageEvent)]
     assert len(intermediate_events) == 0
     assert next_state["plan"].steps[0].outcome is not None
-    assert next_state["plan"].steps[0].outcome.delivery_text == "候选课程 A、候选课程 B、候选课程 C。"
-    assert next_state["final_message"] == "已展示候选课程"
+    assert next_state["plan"].steps[0].outcome.facts_learned == ["候选课程 A", "候选课程 B", "候选课程 C"]
+    assert next_state["final_message"] == ""
 
 
-def test_execute_step_node_should_drop_delivery_text_for_non_inline_step() -> None:
+def test_execute_step_node_should_not_store_step_level_body_for_non_summary_step() -> None:
     llm = _LeakyNonInlineDeliveryLLM()
     plan = Plan(
         title="搜索课程",
@@ -2465,7 +2111,6 @@ def test_execute_step_node_should_drop_delivery_text_for_non_inline_step() -> No
                 description="搜索课程信息",
                 output_mode="none",
                 artifact_policy="forbid_file_output",
-                delivery_role="none",
                 status=ExecutionStatus.PENDING,
             )
         ],
@@ -2497,8 +2142,56 @@ def test_execute_step_node_should_drop_delivery_text_for_non_inline_step() -> No
     next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[]))
 
     assert next_state["last_executed_step"].outcome is not None
-    assert next_state["last_executed_step"].outcome.delivery_text == ""
-    assert next_state["final_message"] == "已完成搜索步骤"
+    assert next_state["last_executed_step"].outcome.summary == "已完成搜索步骤"
+    assert next_state["final_message"] == ""
+
+
+def test_execute_step_node_should_not_overwrite_existing_final_message_with_step_summary() -> None:
+    llm = _LeakyNonInlineDeliveryLLM()
+    plan = Plan(
+        title="搜索课程",
+        goal="搜索课程",
+        language="zh",
+        steps=[
+            Step(
+                id="step-1",
+                title="搜索课程",
+                description="搜索课程信息",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "input_parts": [],
+        "selected_artifacts": [],
+        "step_states": [],
+        "pending_interrupt": {},
+        "retrieved_memories": [],
+        "recent_run_briefs": [],
+        "recent_attempt_briefs": [],
+        "session_open_questions": [],
+        "session_blockers": [],
+        "historical_artifact_paths": [],
+        "emitted_events": [],
+        "user_message": "请先搜索课程",
+        "current_step_id": None,
+        "final_message": "已有最终正文",
+        "thread_id": "thread-1",
+        "conversation_summary": "",
+    }
+
+    next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[]))
+
+    assert next_state["last_executed_step"].outcome is not None
+    assert next_state["last_executed_step"].outcome.summary == "已完成搜索步骤"
+    assert next_state["final_message"] == "已有最终正文"
 
 
 def test_execute_step_with_prompt_should_break_on_browser_no_progress() -> None:

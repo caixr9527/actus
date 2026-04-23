@@ -12,8 +12,6 @@ from app.domain.models import (
     Session,
     Step,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepEvent,
     StepEventStatus,
     StepOutcome,
@@ -124,8 +122,6 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
             task_mode_hint=StepTaskModeHint.RESEARCH,
             output_mode=StepOutputMode.NONE,
             artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
-            delivery_role=StepDeliveryRole.FINAL,
-            delivery_context_state=StepDeliveryContextState.NEEDS_PREPARATION,
             objective_key="objective-step-2",
             success_criteria=["增量步骤完成"],
             status=ExecutionStatus.RUNNING,
@@ -146,8 +142,8 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
     assert step_record.task_mode_hint == StepTaskModeHint.RESEARCH.value
     assert step_record.output_mode == StepOutputMode.NONE.value
     assert step_record.artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value
-    assert step_record.delivery_role == StepDeliveryRole.FINAL.value
-    assert step_record.delivery_context_state == StepDeliveryContextState.NEEDS_PREPARATION.value
+    assert step_record.delivery_role is None
+    assert step_record.delivery_context_state is None
 
 
 def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_current_step() -> None:
@@ -181,10 +177,8 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
             title="新描述",
             description="新描述",
             task_mode_hint=StepTaskModeHint.GENERAL,
-            output_mode=StepOutputMode.INLINE,
+            output_mode=StepOutputMode.FILE,
             artifact_policy=StepArtifactPolicy.DEFAULT,
-            delivery_role=StepDeliveryRole.FINAL,
-            delivery_context_state=StepDeliveryContextState.READY,
             objective_key="objective-step-3",
             success_criteria=["新描述完成"],
             status=ExecutionStatus.COMPLETED,
@@ -205,14 +199,13 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     assert existing_step_record.objective_key == "objective-step-3"
     assert existing_step_record.status == ExecutionStatus.COMPLETED.value
     assert existing_step_record.task_mode_hint == StepTaskModeHint.GENERAL.value
-    assert existing_step_record.output_mode == StepOutputMode.INLINE.value
+    assert existing_step_record.output_mode == StepOutputMode.FILE.value
     assert existing_step_record.artifact_policy == StepArtifactPolicy.DEFAULT.value
-    assert existing_step_record.delivery_role == StepDeliveryRole.FINAL.value
-    assert existing_step_record.delivery_context_state == StepDeliveryContextState.READY.value
+    assert existing_step_record.delivery_role is None
+    assert existing_step_record.delivery_context_state is None
     assert existing_step_record.outcome == {
         "done": True,
         "summary": "完成",
-        "delivery_text": "",
         "produced_artifacts": ["/tmp/file-1.md"],
         "blockers": [],
         "facts_learned": [],
@@ -240,7 +233,6 @@ def test_workflow_run_step_model_to_domain_should_filter_non_file_artifacts_from
         outcome={
             "done": True,
             "summary": "完成",
-            "delivery_text": "",
             "produced_artifacts": [
                 "artifact-id-1",
                 "https://example.com/file.md",

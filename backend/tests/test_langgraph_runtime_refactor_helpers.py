@@ -121,7 +121,7 @@ def test_finalize_no_tool_call_should_retry_empty_payload_and_block_human_wait()
         logger=logger,
         step=step,
         task_mode="general",
-        llm_message={"content": '{"success": true, "summary": "", "delivery_text": ""}'},
+        llm_message={"content": '{"success": true, "summary": ""}'},
         llm_cost_ms=1,
         started_at=time.perf_counter(),
         iteration=0,
@@ -153,7 +153,7 @@ def test_finalize_no_tool_call_should_retry_web_reading_without_contract_evidenc
         logger=logger,
         step=step,
         task_mode="web_reading",
-        llm_message={"content": '{"success": true, "summary": "已完成页面阅读", "delivery_text": "已完成"}'},
+        llm_message={"content": '{"success": true, "summary": "已完成页面阅读"}'},
         llm_cost_ms=1,
         started_at=time.perf_counter(),
         iteration=0,
@@ -177,7 +177,7 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -
         logger=logger,
         step=step,
         task_mode="web_reading",
-        llm_message={"content": '{"success": true, "summary": "已完成页面阅读", "delivery_text": "已完成"}'},
+        llm_message={"content": '{"success": true, "summary": "已完成页面阅读"}'},
         llm_cost_ms=1,
         started_at=time.perf_counter(),
         iteration=0,
@@ -217,12 +217,8 @@ def test_constraint_engine_should_generate_research_fetch_required_for_explicit_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -276,12 +272,8 @@ def test_constraint_engine_evaluate_guard_should_accept_runtime_logger() -> None
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -320,12 +312,8 @@ def test_constraint_engine_should_fail_closed_when_policy_raises() -> None:
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -378,12 +366,8 @@ def test_constraint_engine_should_fail_closed_when_rewrite_builder_raises() -> N
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -434,12 +418,8 @@ def test_constraint_engine_should_rewrite_in_guard_main_path() -> None:
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -482,12 +462,8 @@ def test_evaluate_human_wait_policy_should_block_non_ask_user_in_human_wait() ->
         blocked_function_names={"search_web"},
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=True,
@@ -522,12 +498,8 @@ def test_evaluate_human_wait_policy_should_block_ask_user_when_step_not_allow_wa
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -562,12 +534,8 @@ def test_evaluate_task_mode_policy_should_block_web_reading_file_tool() -> None:
         blocked_function_names={"read_file"},
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -603,12 +571,8 @@ def test_policy_order_should_prefer_task_mode_before_human_wait() -> None:
         blocked_function_names={"search_web"},
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=True,
@@ -649,12 +613,8 @@ def test_evaluate_research_route_policy_should_block_keyword_stacked_query() -> 
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -700,12 +660,8 @@ def test_evaluate_repeat_loop_policy_should_block_search_repeat() -> None:
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,
@@ -740,12 +696,8 @@ def test_evaluate_repeat_loop_policy_should_use_normalized_search_query_fingerpr
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,
@@ -779,12 +731,8 @@ def test_evaluate_repeat_loop_policy_should_block_fetch_repeat_on_current_round(
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,
@@ -820,12 +768,8 @@ def test_evaluate_repeat_loop_policy_should_block_repeat_tool_call_on_current_ro
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,
@@ -861,12 +805,8 @@ def test_evaluate_repeat_loop_policy_should_predict_same_tool_repeat_from_normal
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,
@@ -901,12 +841,8 @@ def test_evaluate_repeat_loop_policy_should_use_snapshot_override_limit() -> Non
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,
@@ -931,12 +867,8 @@ def test_constraint_engine_should_block_explicit_url_search_call() -> None:
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1020,12 +952,8 @@ def test_constraint_engine_should_log_final_decision_with_required_fields() -> N
             blocked_function_names=set(),
             read_only_file_blocked_function_names=set(),
             research_file_context_blocked_function_names=set(),
-            general_inline_blocked_function_names=set(),
             file_processing_shell_blocked_function_names=set(),
             artifact_policy_blocked_function_names=set(),
-            final_delivery_search_blocked_function_names=set(),
-            final_delivery_shell_blocked_function_names=set(),
-            final_inline_file_output_blocked_function_names=set(),
             requested_max_tool_iterations=5,
             effective_max_tool_iterations=5,
             allow_ask_user=False,
@@ -1062,12 +990,8 @@ def test_constraint_engine_should_soft_block_listing_click_target_mismatch() -> 
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1111,12 +1035,8 @@ def test_constraint_engine_should_soft_block_failed_browser_high_level_retry() -
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1183,8 +1103,7 @@ def test_finalize_max_iterations_should_converge_success_when_file_facts_ready()
     step = Step(
         description="获取目录文件列表并以文本输出",
         task_mode_hint="file_processing",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
     payload = finalize_max_iterations(
@@ -1280,8 +1199,8 @@ def test_finalize_max_iterations_should_converge_research_when_snippets_availabl
     )
 
     assert payload["success"] is True
-    assert "search_web snippet" in str(payload["delivery_text"])
-    assert "https://docs.langchain.com/langgraph-platform/human-in-the-loop" in str(payload["delivery_text"])
+    assert any("LangGraph 支持通过 interrupt" in str(item) for item in list(payload["facts_learned"]))
+    assert any("来源链接：https://docs.langchain.com/langgraph-platform/human-in-the-loop" == str(item) for item in list(payload["facts_learned"]))
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -1295,12 +1214,8 @@ def test_apply_tool_result_effects_should_update_research_search_state() -> None
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -1354,12 +1269,8 @@ def test_apply_tool_result_effects_should_capture_search_snippet_evidence() -> N
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -1414,12 +1325,8 @@ def test_apply_tool_result_effects_should_reset_fetch_failure_counter_on_search_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1460,12 +1367,8 @@ def test_apply_tool_result_effects_should_blacklist_failed_fetch_url_key() -> No
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -1514,12 +1417,8 @@ def test_apply_tool_result_effects_should_persist_cross_domain_repeat_blocks() -
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1565,12 +1464,8 @@ def test_apply_tool_result_effects_should_not_mark_browser_high_level_failed_on_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1614,12 +1509,8 @@ def test_build_research_route_rewrite_decision_should_not_fallback_to_candidate_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1667,12 +1558,8 @@ def test_build_research_route_rewrite_decision_should_not_rewrite_to_explicit_wi
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1714,12 +1601,8 @@ def test_build_research_route_rewrite_decision_should_not_rewrite_search_ready_w
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1763,12 +1646,8 @@ def test_build_research_route_rewrite_decision_should_rewrite_explicit_only_once
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1846,12 +1725,8 @@ def test_build_research_route_rewrite_decision_should_rewrite_explicit_for_open_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1897,12 +1772,8 @@ def test_build_research_route_rewrite_decision_should_rewrite_when_explicit_url_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1948,12 +1819,8 @@ def test_build_research_route_rewrite_decision_should_not_rewrite_explicit_for_m
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -1991,8 +1858,7 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
         id="step-final",
         description="列出目录并文本交付",
         task_mode_hint="file_processing",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
     context = {"called_functions": {"write_file", "list_files"}}
@@ -2013,11 +1879,11 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
     assert result.payload is not None
     assert result.payload["success"] is True
     assert result.reason_code == "file_processing_facts_ready"
-    delivery_text = str(result.payload.get("delivery_text") or "")
-    assert "已读取文件" in delivery_text
-    assert "/home/ubuntu/workspace/hello.txt" in delivery_text
-    assert "P3_WORKSPACE_OK" not in delivery_text
-    assert "读取内容长度" in delivery_text
+    assert "已读取文件" in str(result.payload.get("summary") or "")
+    facts = [str(item) for item in list(result.payload.get("facts_learned") or [])]
+    assert any("/home/ubuntu/workspace/hello.txt" in item for item in facts + [str(result.payload.get("summary") or "")])
+    assert not any("P3_WORKSPACE_OK" in item for item in facts)
+    assert any("读取内容长度" in item for item in facts + [str(result.payload.get("summary") or "")])
 
 
 def test_convergence_judge_should_return_raw_file_content_when_step_requires_verbatim_output() -> None:
@@ -2026,8 +1892,7 @@ def test_convergence_judge_should_return_raw_file_content_when_step_requires_ver
         id="file-raw",
         description="读取 /home/ubuntu/workspace/p3-case1/hello.txt 的内容并原样返回",
         task_mode_hint="file_processing",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="forbid_file_output",
     )
 
@@ -2048,7 +1913,7 @@ def test_convergence_judge_should_return_raw_file_content_when_step_requires_ver
     assert result.should_break is True
     assert result.reason_code == "file_processing_raw_content_ready"
     assert result.payload is not None
-    assert result.payload["delivery_text"] == "P3_WORKSPACE_OK"
+    assert result.payload["result"] == "P3_WORKSPACE_OK"
     assert result.payload["result"] == "P3_WORKSPACE_OK"
 
 
@@ -2058,8 +1923,7 @@ def test_convergence_judge_should_break_when_find_files_and_read_file_facts_read
         id="step-final-find",
         description="读取课程目录并文本交付",
         task_mode_hint="file_processing",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
     shared_context = {}
@@ -2092,7 +1956,7 @@ def test_convergence_judge_should_break_when_find_files_and_read_file_facts_read
         runtime_recent_action={},
     )
     assert result.should_break is True
-    assert "目录文件" in str((result.payload or {}).get("delivery_text") or "")
+    assert any("目录文件" in str(item) for item in list((result.payload or {}).get("facts_learned") or []))
 
 
 def test_convergence_judge_should_break_when_coding_write_file_succeeds() -> None:
@@ -2101,8 +1965,7 @@ def test_convergence_judge_should_break_when_coding_write_file_succeeds() -> Non
         id="coding-write",
         description="创建 result.md，内容为 VERSION_1，但不作为附件返回",
         task_mode_hint="coding",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="forbid_file_output",
     )
 
@@ -2126,7 +1989,7 @@ def test_convergence_judge_should_break_when_coding_write_file_succeeds() -> Non
     assert result.should_break is True
     assert result.payload is not None
     assert result.payload["success"] is True
-    assert "已写入文件" in str(result.payload["delivery_text"])
+    assert "已写入文件" in str(result.payload["summary"])
     assert result.payload["attachments"] == []
 
 
@@ -2137,7 +2000,6 @@ def test_convergence_judge_should_break_when_file_processing_none_step_has_verif
         description="在指定目录创建 hello.txt 并写入内容",
         task_mode_hint="file_processing",
         output_mode="none",
-        delivery_role="none",
         artifact_policy="allow_file_output",
     )
 
@@ -2169,8 +2031,7 @@ def test_convergence_judge_should_not_break_complex_coding_after_single_write() 
         id="coding-complex",
         description="实现搜索服务重构并补齐测试",
         task_mode_hint="coding",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2216,7 +2077,7 @@ def test_research_convergence_should_break_when_snippet_sufficient() -> None:
     assert result.payload is not None
     assert result.payload["success"] is True
     assert result.reason_code == "research_snippet_evidence_ready"
-    assert "来源链接" in str(result.payload["delivery_text"])
+    assert any("来源链接" in str(item) for item in list(result.payload["facts_learned"]))
     assert len(result.payload["facts_learned"]) >= 1
 
 
@@ -2245,13 +2106,12 @@ def test_research_convergence_should_not_break_for_web_reading_task_mode() -> No
     assert result.payload is None
 
 
-def test_general_convergence_should_break_when_search_and_page_evidence_exist() -> None:
+def test_general_convergence_should_not_break_when_only_search_and_page_evidence_exist() -> None:
     judge = GeneralConvergenceJudge()
     step = Step(
         description="整理所有检索和读取的信息，输出最终计划",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2280,19 +2140,16 @@ def test_general_convergence_should_break_when_search_and_page_evidence_exist() 
         iteration=2,
     )
 
-    assert result.should_break is True
-    assert result.payload is not None
-    assert result.reason_code == "general_final_delivery_ready"
-    assert "可用依据" in str(result.payload["delivery_text"])
+    assert result.should_break is False
+    assert result.payload is None
 
 
-def test_general_convergence_should_not_break_when_structured_delivery_contract_not_met() -> None:
+def test_general_convergence_should_not_break_when_general_step_only_has_page_evidence() -> None:
     judge = GeneralConvergenceJudge()
     step = Step(
         description="整理为 5 条要点，并且每条都附上来源链接",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2322,8 +2179,7 @@ def test_general_convergence_should_break_when_file_observation_facts_exist() ->
     step = Step(
         description="获取当前目录状态并列出所有文件名称",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2345,7 +2201,7 @@ def test_general_convergence_should_break_when_file_observation_facts_exist() ->
     assert result.should_break is True
     assert result.reason_code == "general_file_observation_ready"
     assert result.payload is not None
-    assert "hello.txt" in str(result.payload["delivery_text"])
+    assert any("hello.txt" in str(item) for item in list(result.payload["facts_learned"]))
 
 
 def test_general_convergence_should_keep_file_observation_snapshot_after_other_success() -> None:
@@ -2353,8 +2209,7 @@ def test_general_convergence_should_keep_file_observation_snapshot_after_other_s
     step = Step(
         description="获取当前目录状态并列出所有文件名称",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2381,15 +2236,14 @@ def test_general_convergence_should_keep_file_observation_snapshot_after_other_s
     assert result.should_break is True
     assert result.reason_code == "general_file_observation_ready"
     assert result.payload is not None
-    assert "hello.txt" in str(result.payload["delivery_text"])
+    assert any("hello.txt" in str(item) for item in list(result.payload["facts_learned"]))
 
 
 def test_build_execution_context_should_keep_file_tools_for_general_file_observation_step() -> None:
     step = Step(
         description="获取当前目录状态并列出所有文件名称",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2404,8 +2258,6 @@ def test_build_execution_context_should_keep_file_tools_for_general_file_observa
         user_message_text="获取当前目录状态并列出所有文件名称",
     )
 
-    assert "list_files" not in context.general_inline_blocked_function_names
-    assert "find_files" not in context.general_inline_blocked_function_names
     assert "list_files" not in context.blocked_function_names
     assert "find_files" not in context.blocked_function_names
 
@@ -2415,8 +2267,7 @@ def test_general_convergence_should_not_break_non_synthesis_general_without_file
     step = Step(
         description="继续实现搜索服务并补齐测试",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2462,7 +2313,7 @@ def test_web_reading_convergence_should_break_when_browser_evidence_ready() -> N
     assert result.should_break is True
     assert result.payload is not None
     assert result.reason_code == "web_reading_page_evidence_ready"
-    assert "页面证据" in str(result.payload["delivery_text"])
+    assert any("页面证据" in str(item) or "来源链接" in str(item) for item in list(result.payload["facts_learned"]))
 
 
 def test_web_reading_convergence_should_not_break_when_only_weak_browser_evidence_exists() -> None:
@@ -2642,63 +2493,9 @@ def test_web_reading_convergence_should_break_when_explicit_url_degraded() -> No
     assert result.should_break is True
     assert result.payload is not None
     assert result.reason_code == "explicit_url_fetch_degraded"
-    assert "停止重复读取" in str(result.payload["delivery_text"])
-    assert "浏览器已打开页面" in str(result.payload["delivery_text"])
-
-
-def test_evaluate_task_mode_policy_should_block_general_search_when_page_evidence_exists() -> None:
-    step = Step(
-        description="基于页面内容概括核心要点并展示给我",
-        task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
-    )
-    decision = evaluate_task_mode_policy(
-        ConstraintInput(
-            step=step,
-            task_mode="general",
-            function_name="search_web",
-            normalized_function_name="search_web",
-            function_args={"query": "LangGraph human in the loop"},
-            matched_tool=object(),
-            iteration_blocked_function_names=set(),
-            execution_context=ExecutionContext(
-                normalized_user_content=[],
-                available_tools=[],
-                available_function_names={"search_web", "fetch_page"},
-                browser_route_enabled=False,
-                blocked_function_names=set(),
-                read_only_file_blocked_function_names=set(),
-                research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
-                file_processing_shell_blocked_function_names=set(),
-                artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
-                requested_max_tool_iterations=4,
-                effective_max_tool_iterations=4,
-                allow_ask_user=False,
-                research_route_enabled=True,
-                research_has_explicit_url=False,
-            ),
-            execution_state=ExecutionState(
-                runtime_recent_action={
-                    "web_reading_evidence_summaries": [
-                        {
-                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
-                            "summary": "页面正文已经包含 interrupt、resume 与审批流程说明。",
-                            "quality": "strong",
-                        }
-                    ]
-                }
-            ),
-        )
-    )
-
-    assert decision is not None
-    assert decision.reason_code == "task_mode_tool_blocked"
-    assert "已有页面/摘要信息" in str(decision.message_for_model or "")
+    degraded_facts = [str(item) for item in list(result.payload["facts_learned"])]
+    assert any("停止重复读取" in item for item in degraded_facts)
+    assert any("浏览器已打开页面" in item for item in degraded_facts)
 
 
 def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_evidence_exists() -> None:
@@ -2720,12 +2517,8 @@ def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_ev
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=4,
                 effective_max_tool_iterations=4,
                 allow_ask_user=False,
@@ -2773,12 +2566,8 @@ def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=6,
                 effective_max_tool_iterations=6,
                 allow_ask_user=False,
@@ -2802,12 +2591,11 @@ def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_
     assert decision is None
 
 
-def test_build_execution_context_should_block_shell_for_general_synthesis_step() -> None:
+def test_build_execution_context_should_not_block_shell_for_general_step() -> None:
     step = Step(
         description="整理所有信息并输出最终结论",
         task_mode_hint="general",
-        output_mode="inline",
-        delivery_role="final",
+        output_mode="none",
         artifact_policy="default",
     )
 
@@ -2822,23 +2610,63 @@ def test_build_execution_context_should_block_shell_for_general_synthesis_step()
         user_message_text="整理所有信息并输出最终结论",
     )
 
-    assert "shell_wait_process" in context.general_inline_blocked_function_names
-    assert "shell_wait_process" in context.blocked_function_names
+    assert "shell_wait_process" not in context.blocked_function_names
+
+
+def test_evaluate_task_mode_policy_should_not_block_general_search_with_existing_page_evidence() -> None:
+    step = Step(
+        description="整理已有页面信息并输出总结",
+        task_mode_hint="general",
+    )
+    decision = evaluate_task_mode_policy(
+        ConstraintInput(
+            step=step,
+            task_mode="general",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": "LangGraph human in the loop"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"fetch_page", "search_web"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                requested_max_tool_iterations=6,
+                effective_max_tool_iterations=6,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=False,
+            ),
+            execution_state=ExecutionState(
+                runtime_recent_action={
+                    "web_reading_evidence_summaries": [
+                        {
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                            "summary": "页面正文已经包含 interrupt、resume 与审批流程说明。",
+                            "quality": "strong",
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+
+    assert decision is None
 
 
 def test_resolve_summary_attachment_refs_should_filter_runtime_temp_files() -> None:
     state = {
-        "working_memory": {
-            "final_delivery_payload": {
-                "text": "done",
-                "sections": [],
-                "source_refs": [
-                    "/workspace/final.md",
-                    "/workspace/temp_response.json",
-                    "/workspace/final_output.txt",
-                ],
-            }
-        }
+        "selected_artifacts": [
+            "/workspace/final.md",
+            "/workspace/temp_response.json",
+            "/workspace/final_output.txt",
+        ]
     }
 
     class _FakeRuntimeContextService:
@@ -3044,12 +2872,8 @@ def test_constraint_engine_should_resolve_rewritten_matched_tool_from_runtime_to
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3093,12 +2917,8 @@ def test_constraint_engine_should_block_when_rewrite_target_tool_is_missing() ->
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3141,12 +2961,8 @@ def test_constraint_engine_should_prefer_task_mode_policy_by_fixed_order() -> No
         blocked_function_names={"browser_view"},
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -3297,12 +3113,8 @@ def test_policy_engine_should_not_count_blocked_search_call_as_real_invocation()
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3369,12 +3181,8 @@ def test_evaluate_research_route_policy_should_block_keyword_stacked_search_quer
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3409,12 +3217,8 @@ def test_evaluate_research_route_policy_should_allow_natural_language_search_que
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3447,12 +3251,8 @@ def test_evaluate_research_route_policy_should_allow_compact_natural_language_qu
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3485,12 +3285,8 @@ def test_evaluate_research_route_policy_should_block_compact_keyword_stacked_sea
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3515,7 +3311,7 @@ def test_evaluate_research_route_policy_should_block_compact_keyword_stacked_sea
 
 
 def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_empty_model_output() -> None:
-    llm = _FakeNoToolLLM({"content": '{"success": false, "summary": "", "delivery_text": ""}'})
+    llm = _FakeNoToolLLM({"content": '{"success": false, "summary": ""}'})
     step = Step(description="整理当前目录结果")
 
     payload, tool_events = asyncio.run(
@@ -3553,7 +3349,6 @@ def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_e
                     {
                         "success": True,
                         "summary": "已读取目标URL",
-                        "delivery_text": "",
                         "attachments": [],
                         "blockers": [],
                         "facts_learned": [],
@@ -3616,12 +3411,8 @@ def test_policy_engine_should_count_only_final_rewritten_call_once() -> None:
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=5,
                 effective_max_tool_iterations=5,
                 allow_ask_user=False,
@@ -3701,12 +3492,8 @@ def test_apply_tool_result_effects_should_convert_low_value_fetch_into_research_
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3755,12 +3542,8 @@ def test_apply_tool_result_effects_should_mark_web_reading_low_value_fetch_url()
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3808,12 +3591,8 @@ def test_apply_tool_result_effects_should_sync_web_reading_contract_state_withou
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=5,
         effective_max_tool_iterations=5,
         allow_ask_user=False,
@@ -3859,12 +3638,8 @@ def test_apply_tool_result_effects_should_store_file_observation_snapshot() -> N
         blocked_function_names=set(),
         read_only_file_blocked_function_names=set(),
         research_file_context_blocked_function_names=set(),
-        general_inline_blocked_function_names=set(),
         file_processing_shell_blocked_function_names=set(),
         artifact_policy_blocked_function_names=set(),
-        final_delivery_search_blocked_function_names=set(),
-        final_delivery_shell_blocked_function_names=set(),
-        final_inline_file_output_blocked_function_names=set(),
         requested_max_tool_iterations=3,
         effective_max_tool_iterations=3,
         allow_ask_user=False,
@@ -3918,12 +3693,8 @@ def test_evaluate_repeat_loop_policy_should_block_web_reading_low_value_fetch_re
                 blocked_function_names=set(),
                 read_only_file_blocked_function_names=set(),
                 research_file_context_blocked_function_names=set(),
-                general_inline_blocked_function_names=set(),
                 file_processing_shell_blocked_function_names=set(),
                 artifact_policy_blocked_function_names=set(),
-                final_delivery_search_blocked_function_names=set(),
-                final_delivery_shell_blocked_function_names=set(),
-                final_inline_file_output_blocked_function_names=set(),
                 requested_max_tool_iterations=3,
                 effective_max_tool_iterations=3,
                 allow_ask_user=False,

@@ -7,7 +7,10 @@ from app.domain.services.prompts.en.planner import (
     CREATE_PLAN_PROMPT as EN_CREATE_PLAN_PROMPT,
     UPDATE_PLAN_PROMPT as EN_UPDATE_PLAN_PROMPT,
 )
-from app.domain.services.prompts.en.react import EXECUTION_PROMPT as EN_EXECUTION_PROMPT
+from app.domain.services.prompts.en.react import (
+    EXECUTION_PROMPT as EN_EXECUTION_PROMPT,
+    SUMMARIZE_PROMPT as EN_SUMMARIZE_PROMPT,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.parsers import (
     build_step_from_payload,
 )
@@ -79,7 +82,6 @@ def test_build_step_from_payload_should_normalize_task_mode_hint() -> None:
     assert step.task_mode_hint == "human_wait"
     assert step.output_mode == "none"
     assert step.artifact_policy == "forbid_file_output"
-    assert step.delivery_role == "none"
 
 
 def test_build_step_from_payload_should_default_research_step_to_forbid_file_output() -> None:
@@ -95,7 +97,6 @@ def test_build_step_from_payload_should_default_research_step_to_forbid_file_out
     assert step.description == "访问搜索结果中的多个页面，提取至少三门课程的名称，并将这些名称保存到临时文件中以备后续使用。"
     assert step.output_mode == "none"
     assert step.artifact_policy == "forbid_file_output"
-    assert step.delivery_role == "none"
 
 
 def test_build_step_from_payload_should_keep_file_output_when_user_explicitly_requests_it() -> None:
@@ -113,96 +114,66 @@ def test_build_step_from_payload_should_keep_file_output_when_user_explicitly_re
     assert step.description == "搜索网页并把结果保存到临时文件中。"
     assert step.output_mode == "file"
     assert step.artifact_policy == "require_file_output"
-    assert step.delivery_role == "none"
 
-
-def test_build_step_from_payload_should_keep_final_delivery_role_for_inline_step() -> None:
+def test_build_step_from_payload_should_keep_general_none_output_mode() -> None:
     step = build_step_from_payload(
         {
-            "description": "基于前序检索结果整理最终旅游攻略",
+            "description": "基于前序检索结果提取可供后续总结使用的事实",
             "task_mode_hint": "general",
-            "output_mode": "inline",
+            "output_mode": "none",
             "artifact_policy": "default",
-            "delivery_role": "final",
         },
         fallback_index=0,
     )
 
-    assert step.output_mode == "inline"
+    assert step.output_mode == "none"
     assert step.artifact_policy == "default"
-    assert step.delivery_role == "final"
-    assert step.delivery_context_state == "ready"
 
-
-def test_build_step_from_payload_should_default_inline_step_to_non_delivery_role() -> None:
+def test_build_step_from_payload_should_keep_preview_request_as_execution_step() -> None:
     step = build_step_from_payload(
         {
-            "description": "展示候选城市供用户选择",
+            "description": "收集候选城市事实供后续总结使用",
             "task_mode_hint": "general",
-            "output_mode": "inline",
+            "output_mode": "none",
             "artifact_policy": "default",
         },
         fallback_index=0,
     )
 
-    assert step.delivery_role == "none"
-    assert step.delivery_context_state == "none"
+    assert step.output_mode == "none"
+    assert step.artifact_policy == "default"
 
-
-def test_build_step_from_payload_should_keep_intermediate_delivery_role_for_explicit_preview_request() -> None:
+def test_build_step_from_payload_should_not_expose_delivery_fields() -> None:
     step = build_step_from_payload(
         {
-            "description": "展示候选城市供用户选择",
+            "description": "收集候选城市事实供后续总结使用",
             "task_mode_hint": "general",
-            "output_mode": "inline",
+            "output_mode": "none",
             "artifact_policy": "default",
-            "delivery_role": "intermediate",
         },
         fallback_index=0,
         user_message="先给我看一个候选方案草稿，我确认后再继续。",
     )
 
-    assert step.delivery_role == "intermediate"
-    assert step.delivery_context_state == "none"
+    assert step.output_mode == "none"
+    assert step.artifact_policy == "default"
+    assert not hasattr(step, "delivery_role")
+    assert not hasattr(step, "delivery_context_state")
 
-
-def test_build_step_from_payload_should_default_non_general_final_inline_step_to_needs_preparation() -> None:
+def test_build_step_from_payload_should_force_web_reading_without_file_request_to_none_output() -> None:
     step = build_step_from_payload(
         {
-            "description": "读取课程详情页并直接作为最终交付",
+            "description": "读取课程详情页并提取课程名称、讲师和适用人群",
             "task_mode_hint": "web_reading",
-            "output_mode": "inline",
+            "output_mode": "none",
             "artifact_policy": "default",
-            "delivery_role": "final",
         },
         fallback_index=0,
     )
 
     assert step.task_mode_hint == "web_reading"
-    assert step.output_mode == "inline"
-    assert step.artifact_policy == "default"
-    assert step.delivery_role == "final"
-    assert step.delivery_context_state == "needs_preparation"
-
-
-def test_build_step_from_payload_should_mark_non_general_final_inline_step_as_needs_preparation() -> None:
-    step = build_step_from_payload(
-        {
-            "description": "继续读取页面并在同一步中输出最终课程详情",
-            "task_mode_hint": "web_reading",
-            "output_mode": "inline",
-            "artifact_policy": "default",
-            "delivery_role": "final",
-            "delivery_context_state": "needs_preparation",
-        },
-        fallback_index=0,
-    )
-
-    assert step.task_mode_hint == "web_reading"
-    assert step.output_mode == "inline"
-    assert step.artifact_policy == "default"
-    assert step.delivery_role == "final"
-    assert step.delivery_context_state == "needs_preparation"
+    assert step.output_mode == "none"
+    assert step.artifact_policy == "forbid_file_output"
 
 
 def test_migration_should_normalize_legacy_step_payload_into_outcome() -> None:
@@ -266,3 +237,9 @@ def test_en_prompts_should_require_single_topic_natural_language_search() -> Non
     for prompt in (EN_CREATE_PLAN_PROMPT, EN_UPDATE_PLAN_PROMPT, EN_EXECUTION_PROMPT):
         assert "single-topic natural-language" in prompt
         assert "keyword stacking" in prompt
+
+
+def test_en_summarize_prompt_should_use_summary_only_final_answer_contract() -> None:
+    assert "final_answer_text" in EN_SUMMARIZE_PROMPT
+    assert "final delivery payload" not in EN_SUMMARIZE_PROMPT
+    assert "heavy delivery" not in EN_SUMMARIZE_PROMPT

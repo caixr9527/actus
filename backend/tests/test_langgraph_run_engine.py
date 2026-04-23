@@ -758,15 +758,11 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
             "goal": "整理上下文",
             "facts_in_session": ["已经确认问题边界"],
             "open_questions": ["还需确认最终输出"],
-            "final_delivery_payload": {
-                "text": "这是最终交付正文。",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "selected_artifacts": ["/tmp/final-output.md"],
         "graph_metadata": {"projection": {"run_status": "completed"}},
         "final_message": "最终总结",
+        "final_answer_text": "这是最终交付正文。",
         "retrieved_memories": [],
         "pending_memory_writes": [],
         "recent_run_briefs": [],
@@ -810,14 +806,14 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
 
 
 def test_langgraph_run_engine_session_snapshot_should_prefer_conversation_summary() -> None:
-    long_delivery_text = "这是很长的最终交付正文，包含大量细节。" * 30
+    long_final_answer_text = "这是很长的最终交付正文，包含大量细节。" * 30
     summary = WorkflowRunSummary(
         run_id="run-1",
         session_id="session-1",
         status=WorkflowRunStatus.COMPLETED,
         title="本轮运行",
         final_answer_summary="轻量最终摘要",
-        final_answer_text=long_delivery_text,
+        final_answer_text=long_final_answer_text,
     )
 
     snapshot = LangGraphRunEngine._build_session_context_snapshot_projection(
@@ -829,7 +825,86 @@ def test_langgraph_run_engine_session_snapshot_should_prefer_conversation_summar
 
     assert snapshot.summary_text == "真实会话主题摘要"
     assert snapshot.recent_run_briefs[0]["final_answer_summary"] == "轻量最终摘要"
-    assert snapshot.recent_run_briefs[0]["final_answer_text_excerpt"] == long_delivery_text[:200]
+    assert snapshot.recent_run_briefs[0]["final_answer_text_excerpt"] == long_final_answer_text[:200]
+
+
+def test_langgraph_run_engine_should_not_project_stale_final_answer_text_for_intermediate_round() -> None:
+    summary = LangGraphRunEngine._build_run_summary_projection(
+        run=SimpleNamespace(
+            id="run-1",
+            session_id="session-1",
+            user_id="user-1",
+            thread_id="thread-1",
+            status=WorkflowRunStatus.COMPLETED,
+        ),
+        state={
+            "plan": Plan(
+                title="生成草稿",
+                goal="先输出候选草稿",
+                steps=[
+                    Step(
+                        id="step-1",
+                        title="候选草稿",
+                        description="生成候选草稿",
+                        output_mode="none",
+                        status=ExecutionStatus.COMPLETED,
+                        outcome=StepOutcome(done=True, summary="已生成候选草稿"),
+                    )
+                ],
+                status=ExecutionStatus.COMPLETED,
+            ),
+            "step_states": [
+                {
+                    "step_id": "step-1",
+                    "title": "候选草稿",
+                    "description": "生成候选草稿",
+                    "status": "completed",
+                    "outcome": {
+                        "done": True,
+                        "summary": "已生成候选草稿",
+                        "blockers": [],
+                        "facts_learned": [],
+                        "open_questions": [],
+                    },
+                }
+            ],
+            "working_memory": {
+                "goal": "先输出候选草稿",
+                "facts_in_session": [],
+                "open_questions": [],
+            },
+            "selected_artifacts": [],
+            "graph_metadata": {"projection": {"run_status": "completed"}},
+            "final_message": "轻量总结",
+            "final_answer_text": "轻量总结",
+            "retrieved_memories": [],
+            "pending_memory_writes": [],
+            "recent_run_briefs": [],
+            "recent_attempt_briefs": [],
+            "session_open_questions": [],
+            "session_blockers": [],
+            "message_window": [],
+            "input_parts": [],
+            "execution_count": 1,
+            "max_execution_steps": 20,
+            "current_step_id": None,
+            "last_executed_step": Step(
+                id="step-1",
+                title="候选草稿",
+                description="生成候选草稿",
+                output_mode="none",
+                status=ExecutionStatus.COMPLETED,
+                outcome=StepOutcome(done=True, summary="已生成候选草稿"),
+            ),
+            "pending_interrupt": {},
+            "emitted_events": [],
+            "conversation_summary": "",
+            "historical_artifact_paths": [],
+        },
+    )
+
+    assert summary.final_answer_summary == "轻量总结"
+    assert summary.final_answer_text == "轻量总结"
 
 
 def test_langgraph_run_engine_session_snapshot_should_fallback_to_recent_run_briefs_without_conversation_summary() -> None:

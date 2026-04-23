@@ -407,7 +407,7 @@ def test_execute_step_with_prompt_should_block_write_file_when_artifact_policy_f
     assert "结构化产物策略禁止文件产出" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_block_write_file_for_final_inline_delivery_by_default() -> None:
+def test_execute_step_with_prompt_should_block_write_file_for_none_output_by_default() -> None:
     llm = _WriteFileAttemptLLM()
 
     async def _run():
@@ -416,9 +416,7 @@ def test_execute_step_with_prompt_should_block_write_file_for_final_inline_deliv
             step=Step(
                 description="直接输出最终答复",
                 task_mode_hint="general",
-                output_mode="inline",
-                delivery_role="final",
-                delivery_context_state="ready",
+                output_mode="none",
                 artifact_policy="default",
             ),
             runtime_tools=[_WriteFileTool()],
@@ -438,7 +436,7 @@ def test_execute_step_with_prompt_should_block_write_file_for_final_inline_deliv
     assert called_events[0].function_name == "write_file"
     assert called_events[0].function_result is not None
     assert called_events[0].function_result.success is False
-    assert "最终内联交付" in str(called_events[0].function_result.message or "")
+    assert "当前步骤未声明文件产出" in str(called_events[0].function_result.message or "")
 
 
 def test_execute_step_with_prompt_should_allow_write_file_when_user_explicitly_requests_file_delivery() -> None:
@@ -450,10 +448,8 @@ def test_execute_step_with_prompt_should_allow_write_file_when_user_explicitly_r
             step=Step(
                 description="整理最终结果并交付",
                 task_mode_hint="general",
-                output_mode="inline",
-                delivery_role="final",
-                delivery_context_state="ready",
-                artifact_policy="default",
+                output_mode="file",
+                artifact_policy="allow_file_output",
             ),
             runtime_tools=[_WriteFileTool()],
             max_tool_iterations=5,
@@ -483,7 +479,7 @@ def test_execute_step_with_prompt_should_block_write_file_for_read_only_file_req
             step=Step(
                 description="读取 /tmp/course.txt 内容并返回结果，不要改文件。",
                 task_mode_hint="file_processing",
-                output_mode="inline",
+                output_mode="none",
             ),
             runtime_tools=[_WriteFileTool()],
             max_tool_iterations=5,
@@ -927,18 +923,17 @@ def test_route_after_execute_should_fail_fast_to_replan_when_failed_step_has_pen
     assert route_after_execute(next_state) == "replan"
 
 
-def test_route_after_execute_should_skip_replan_when_final_inline_step_completed() -> None:
+def test_route_after_execute_should_replan_when_plan_finished_without_direct_path_flag() -> None:
     completed_plan = Plan(
         title="批次执行",
         goal="最终交付",
         language="zh",
         steps=[
             Step(
-                id="step-final-inline",
-                title="输出最终结果",
-                description="直接输出最终结果",
-                output_mode="inline",
-                delivery_role="final",
+                id="step-final",
+                title="完成执行步骤",
+                description="完成执行步骤",
+                output_mode="none",
                 status=ExecutionStatus.COMPLETED,
             )
         ],
@@ -952,7 +947,7 @@ def test_route_after_execute_should_skip_replan_when_final_inline_step_completed
         "max_execution_steps": 20,
         "graph_metadata": {"control": {}},
     }
-    assert route_after_execute(next_state) == "summarize"
+    assert route_after_execute(next_state) == "replan"
 
 
 def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> None:
@@ -994,7 +989,7 @@ def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> 
     assert executed_state["pending_interrupt"] == {}
     assert executed_state["current_step_id"] is None
     assert executed_state["user_message"] == user_message
-    assert executed_state["final_message"] == "当前步骤只完成搜索，不提前让用户选择"
+    assert executed_state["final_message"] == ""
     assert executed_state["last_executed_step"].id == "direct-wait-execute"
     assert executed_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert control["direct_wait_original_task_executed"] is True

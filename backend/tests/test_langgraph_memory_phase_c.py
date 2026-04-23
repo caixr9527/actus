@@ -115,6 +115,7 @@ class _FakeLLM:
             "content": json.dumps(
                 {
                     "message": "最终总结",
+                    "final_answer_text": "最终整理后的正文",
                     "attachments": [],
                     "facts_in_session": [],
                     "user_preferences": {},
@@ -131,6 +132,7 @@ class _FakeStructuredMemoryLLM:
             "content": json.dumps(
                 {
                     "message": "任务完成，后续都只需要关注 backend 并保持中文简洁回复。",
+                    "final_answer_text": "任务已完成，后续只需要关注 backend，并保持中文简洁回复。",
                     "attachments": [],
                     "facts_in_session": ["当前任务后续都只需要关注 backend"],
                     "user_preferences": {"language": "zh", "response_style": "concise"},
@@ -159,6 +161,7 @@ class _CaptureSummaryPromptLLM:
             "content": json.dumps(
                 {
                     "message": "最终总结",
+                    "final_answer_text": "最终整理后的正文",
                     "attachments": [],
                     "facts_in_session": [],
                     "user_preferences": {},
@@ -175,6 +178,24 @@ class _FakeLightSummaryLLM:
             "content": json.dumps(
                 {
                     "message": "轻量总结",
+                    "final_answer_text": "最终整理后的正文",
+                    "attachments": [],
+                    "facts_in_session": [],
+                    "user_preferences": {},
+                    "memory_candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _FakeLegacyFinalMessageOnlySummaryLLM:
+    async def invoke(self, messages, tools, response_format):
+        return {
+            "content": json.dumps(
+                {
+                    "message": "轻量总结",
+                    "final_message": "旧合同里的完整正文，不应再被当作最终正文。",
                     "attachments": [],
                     "facts_in_session": [],
                     "user_preferences": {},
@@ -556,7 +577,7 @@ def test_execute_step_node_should_not_write_string_none_when_no_executor_path_av
 
     assert next_state["plan"].steps[0].outcome is not None
     assert next_state["plan"].steps[0].outcome.summary == "步骤执行失败：执行阶段"
-    assert next_state["final_message"] == "步骤执行失败：执行阶段"
+    assert next_state["final_message"] == ""
     assert next_state["working_memory"]["decisions"] == ["步骤执行失败：执行阶段"]
     assert next_state["step_states"][0]["step_id"] == "step-1"
 
@@ -659,6 +680,7 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
     assert next_state["graph_metadata"]["control"]["step_reuse_hit"] is True
     assert next_state["selected_artifacts"] == []
     assert next_state["working_memory"]["facts_in_session"] == ["报告结构已确定"]
+    assert next_state.get("final_message", "") == ""
 
 
 def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
@@ -1009,11 +1031,6 @@ def test_runtime_context_service_should_hide_execute_only_fields_in_summary_stag
         "task_mode": StepTaskModeHint.RESEARCH.value,
         "working_memory": {
             "goal": "输出总结",
-            "final_delivery_payload": {
-                "text": "最终交付正文",
-                "sections": [],
-                "source_refs": ["/tmp/final.md"],
-            },
         },
         "environment_digest": {
             "task_mode": StepTaskModeHint.RESEARCH.value,
@@ -1639,16 +1656,6 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
             "goal": "验证总结快照",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是一段需要压缩后再喂给总结模型的最终交付正文。",
-                "sections": [
-                    {
-                        "title": "行程建议",
-                        "content": "第一天先去古城墙，第二天安排博物馆。",
-                    }
-                ],
-                "source_refs": ["/home/ubuntu/final.md"],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -1660,13 +1667,12 @@ def test_summarize_should_use_compacted_plan_snapshot_in_prompt() -> None:
 
     assert "上下文数据包(JSON)" in llm.last_prompt
     assert '"plan_snapshot"' in llm.last_prompt
-    assert '"final_delivery_payload"' in llm.last_prompt
     assert '"selected_artifacts": ["/home/ubuntu/final.md"]' in llm.last_prompt
     assert '"objective_key"' not in llm.last_prompt
     assert '"success_criteria"' not in llm.last_prompt
 
 
-def test_summarize_should_add_lightweight_constraint_for_intermediate_round() -> None:
+def test_summarize_should_use_unified_summary_prompt_for_preview_requests() -> None:
     llm = _CaptureSummaryPromptLLM()
     state = {
         "session_id": "session-1",
@@ -1682,20 +1688,17 @@ def test_summarize_should_add_lightweight_constraint_for_intermediate_round() ->
             description="生成北京三日游草稿",
             objective_key="objective-step-3",
             success_criteria=["草稿生成完成"],
-            output_mode="inline",
-            delivery_role="intermediate",
             status=ExecutionStatus.COMPLETED,
             outcome=StepOutcome(
                 done=True,
                 summary="已生成北京三日游草稿",
-                delivery_text="这里是一整段很长的草稿正文。",
+                facts_learned=["这里是一整段很长的草稿证据。"],
             ),
         ),
         "step_states": [
             {
                 "step_id": "step-3",
                 "status": ExecutionStatus.COMPLETED.value,
-                "delivery_role": "intermediate",
                 "outcome": {
                     "done": True,
                     "summary": "已生成北京三日游草稿",
@@ -1718,8 +1721,9 @@ def test_summarize_should_add_lightweight_constraint_for_intermediate_round() ->
 
     asyncio.run(summarize_node(state, llm))
 
-    assert "最后一步属于“预览/草稿”步骤" in llm.last_prompt
-    assert "不要重复草稿正文" in llm.last_prompt
+    assert "final_answer_text" in llm.last_prompt
+    assert "你是多步执行链里最终面向用户正文的唯一整理者" in llm.last_prompt
+    assert "最后一步属于“预览/草稿”步骤" not in llm.last_prompt
 
 
 def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_state() -> None:
@@ -1742,11 +1746,6 @@ def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_
             "goal": "验证轻重分轨",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是用户最终应该看到的完整攻略正文。",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -1758,25 +1757,24 @@ def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_
     summarized_state = asyncio.run(summarize_node(state, llm))
 
     assert summarized_state["final_message"] == "轻量总结"
+    assert summarized_state["final_answer_text"] == "最终整理后的正文"
     message_event = summarized_state["emitted_events"][0]
     assert message_event.type == "message"
     assert message_event.stage == "final"
-    assert message_event.message == "这是用户最终应该看到的完整攻略正文。"
+    assert message_event.message == "最终整理后的正文"
 
 
-def test_summarize_should_skip_llm_when_final_delivery_text_ready() -> None:
-    llm = _FailIfSummaryLLMCalled()
+def test_summarize_should_always_generate_final_answer_text_via_summary_llm() -> None:
+    llm = _FakeLightSummaryLLM()
     final_step = Step(
         id="step-final",
         title="输出最终结果",
         description="输出最终结果",
-        output_mode="inline",
-        delivery_role="final",
         status=ExecutionStatus.COMPLETED,
         outcome=StepOutcome(
             done=True,
             summary="步骤完成",
-            delivery_text="这是确定性的最终正文，应该直接返回给用户。",
+            facts_learned=["这是步骤阶段的旧草稿证据，不应直接作为最终答案。"],
         ),
     )
     state = {
@@ -1795,14 +1793,9 @@ def test_summarize_should_skip_llm_when_final_delivery_text_ready() -> None:
             }
         ],
         "working_memory": {
-            "goal": "验证确定性交付跳过总结模型",
+            "goal": "验证最终正文由 summary 生成",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是确定性的最终正文，应该直接返回给用户。",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -1813,28 +1806,104 @@ def test_summarize_should_skip_llm_when_final_delivery_text_ready() -> None:
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert llm.calls == 0
-    assert summarized_state["final_message"] == "轻量摘要"
+    assert summarized_state["final_message"] == "轻量总结"
+    assert summarized_state["final_answer_text"] == "最终整理后的正文"
     message_event = summarized_state["emitted_events"][0]
     assert message_event.type == "message"
     assert message_event.stage == "final"
-    assert message_event.message == "这是确定性的最终正文，应该直接返回给用户。"
+    assert message_event.message == "最终整理后的正文"
+
+
+def test_summarize_should_not_use_legacy_final_message_as_final_answer_text() -> None:
+    llm = _FakeLegacyFinalMessageOnlySummaryLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终结果",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证旧 final_message 不再作为最终正文",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "旧的状态摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["final_message"] == "轻量总结"
+    assert summarized_state["final_answer_text"] == "轻量总结"
+    message_event = summarized_state["emitted_events"][0]
+    assert message_event.type == "message"
+    assert message_event.stage == "final"
+    assert message_event.message == "轻量总结"
+
+
+def test_summarize_should_not_reuse_generic_step_summary_as_final_message() -> None:
+    llm = _FakeLightSummaryLLM()
+    final_step = Step(
+        id="step-final",
+        title="导出最终报告",
+        description="导出最终报告",
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="当前步骤已完成",
+            facts_learned=["这里有一份候选报告证据。"],
+        ),
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请输出最终报告",
+        "plan": _build_plan(),
+        "execution_count": 2,
+        "last_executed_step": final_step,
+        "working_memory": {
+            "goal": "验证泛化步骤摘要不会污染最终轻总结",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [],
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "旧的轻量摘要",
+    }
+
+    summarized_state = asyncio.run(summarize_node(state, llm))
+
+    assert summarized_state["final_message"] == "轻量总结"
+    assert summarized_state["emitted_events"][0].message == "最终整理后的正文"
 
 
 def test_summarize_should_emit_final_message_stream_before_final_message_event() -> None:
-    llm = _FailIfSummaryLLMCalled()
+    llm = _FakeLightSummaryLLM()
     captured_events = []
     final_step = Step(
         id="step-final",
         title="输出最终结果",
         description="输出最终结果",
-        output_mode="inline",
-        delivery_role="final",
         status=ExecutionStatus.COMPLETED,
         outcome=StepOutcome(
             done=True,
             summary="步骤完成",
-            delivery_text="这是确定性的最终正文，应该直接返回给用户。",
+            facts_learned=["这里有一份候选最终结论。"],
         ),
     )
     state = {
@@ -1856,11 +1925,6 @@ def test_summarize_should_emit_final_message_stream_before_final_message_event()
             "goal": "验证 final_message 流式输出",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是确定性的最终正文，应该直接返回给用户。",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -1883,7 +1947,7 @@ def test_summarize_should_emit_final_message_stream_before_final_message_event()
     assert isinstance(captured_events[2], TextStreamEndEvent)
     assert isinstance(captured_events[-2], MessageEvent)
     assert captured_events[-2].stage == "final"
-    assert captured_events[-2].message == "这是确定性的最终正文，应该直接返回给用户。"
+    assert captured_events[-2].message == "最终整理后的正文"
     assert [event.type for event in summarized_state["emitted_events"]] == ["message", "plan"]
 
 
@@ -1942,23 +2006,24 @@ def test_summarize_should_emit_final_message_stream_for_direct_wait_summary_erro
     assert [event.type for event in summarized_state["emitted_events"]] == ["error", "message"]
 
 
-def test_summarize_should_not_build_summary_context_when_skipping_llm(monkeypatch) -> None:
-    llm = _FailIfSummaryLLMCalled()
+def test_summarize_should_build_summary_context_for_final_round(monkeypatch) -> None:
+    llm = _FakeLightSummaryLLM()
     final_step = Step(
         id="step-final",
         title="输出最终结果",
         description="输出最终结果",
-        output_mode="inline",
-        delivery_role="final",
         status=ExecutionStatus.COMPLETED,
     )
 
-    async def _should_not_be_called(*args, **kwargs):
-        raise AssertionError("跳过 summary LLM 时不应构建 summary context")
+    called = {"value": False}
+
+    async def _capture_call(*args, **kwargs):
+        called["value"] = True
+        return {"stable_background": {}, "current_turn": {}}
 
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes._build_prompt_context_packet_async",
-        _should_not_be_called,
+        _capture_call,
     )
 
     state = {
@@ -1974,11 +2039,6 @@ def test_summarize_should_not_build_summary_context_when_skipping_llm(monkeypatc
             "goal": "验证跳过总结时不构建上下文",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是确定性的最终正文，应该直接返回给用户。",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -1989,10 +2049,11 @@ def test_summarize_should_not_build_summary_context_when_skipping_llm(monkeypatc
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["final_message"] == "轻量摘要"
+    assert called["value"] is True
+    assert summarized_state["final_message"] == "轻量总结"
 
 
-def test_summarize_should_emit_light_summary_for_intermediate_round_even_with_stale_final_payload() -> None:
+def test_summarize_should_still_generate_final_answer_text_for_preview_requests() -> None:
     llm = _FakeLightSummaryLLM()
     state = {
         "session_id": "session-1",
@@ -2008,20 +2069,17 @@ def test_summarize_should_emit_light_summary_for_intermediate_round_even_with_st
             description="生成候选草稿",
             objective_key="objective-step-3",
             success_criteria=["草稿生成完成"],
-            output_mode="inline",
-            delivery_role="intermediate",
             status=ExecutionStatus.COMPLETED,
             outcome=StepOutcome(
                 done=True,
                 summary="已生成候选草稿",
-                delivery_text="这是一段草稿正文。",
+                facts_learned=["已生成候选草稿，可供最终总结参考。"],
             ),
         ),
         "step_states": [
             {
                 "step_id": "step-3",
                 "status": ExecutionStatus.COMPLETED.value,
-                "delivery_role": "intermediate",
                 "outcome": {
                     "done": True,
                     "summary": "已生成候选草稿",
@@ -2035,11 +2093,6 @@ def test_summarize_should_emit_light_summary_for_intermediate_round_even_with_st
             "goal": "生成候选草稿",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是上一轮遗留的旧最终正文，不应被发给用户。",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -2051,9 +2104,10 @@ def test_summarize_should_emit_light_summary_for_intermediate_round_even_with_st
     summarized_state = asyncio.run(summarize_node(state, llm))
 
     assert summarized_state["final_message"] == "轻量总结"
+    assert summarized_state["final_answer_text"] == "最终整理后的正文"
     message_event = summarized_state["emitted_events"][0]
     assert message_event.stage == "final"
-    assert message_event.message == "轻量总结"
+    assert message_event.message == "最终整理后的正文"
 
 
 def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep_light_summary() -> None:
@@ -2097,11 +2151,6 @@ def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep
             "goal": "验证最终交付正文与附件一并输出",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是用户最终应该看到的完整攻略正文。",
-                "sections": [],
-                "source_refs": ["/home/ubuntu/final-output.md"],
-            },
         },
         "selected_artifacts": ["/home/ubuntu/final-output.md"],
         "pending_memory_writes": [],
@@ -2114,15 +2163,16 @@ def test_summarize_should_emit_heavy_delivery_with_resolved_attachments_and_keep
     summarized_state = asyncio.run(summarize_node(state, llm))
 
     assert summarized_state["final_message"] == "最终总结"
+    assert summarized_state["final_answer_text"] == "最终整理后的正文"
     assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
     message_event = summarized_state["emitted_events"][0]
     assert message_event.type == "message"
     assert message_event.stage == "final"
-    assert message_event.message == "这是用户最终应该看到的完整攻略正文。"
+    assert message_event.message == "最终整理后的正文"
     assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
 
 
-def test_summarize_should_use_final_delivery_source_refs_as_attachment_truth_source() -> None:
+def test_summarize_should_use_current_run_artifacts_as_attachment_truth_source() -> None:
     llm = _FakeLightSummaryLLM()
     state = {
         "session_id": "session-1",
@@ -2132,19 +2182,27 @@ def test_summarize_should_use_final_delivery_source_refs_as_attachment_truth_sou
         "user_message": "请输出最终结果",
         "plan": _build_plan(),
         "execution_count": 2,
-        "step_states": [],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成最终文档",
+                    "produced_artifacts": [
+                        "/home/ubuntu/final-output.md",
+                        "/home/ubuntu/final-checklist.md",
+                    ],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
         "working_memory": {
-            "goal": "验证最终交付来源附件",
+            "goal": "验证当前运行产物附件",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是用户最终应该看到的完整攻略正文。",
-                "sections": [],
-                "source_refs": [
-                    "/home/ubuntu/final-output.md",
-                    "/home/ubuntu/final-checklist.md",
-                ],
-            },
         },
         "selected_artifacts": [],
         "pending_memory_writes": [],
@@ -2206,14 +2264,9 @@ def test_summarize_should_not_fallback_to_last_step_artifacts_without_final_deli
             }
         ],
         "working_memory": {
-            "goal": "验证无真相源时不回退中间附件",
+            "goal": "验证模型返回未知附件时回退到当前运行附件",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "",
-                "sections": [],
-                "source_refs": [],
-            },
         },
         "pending_memory_writes": [],
         "message_window": [],
@@ -2223,10 +2276,9 @@ def test_summarize_should_not_fallback_to_last_step_artifacts_without_final_deli
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    # P3-一次性收口：未声明 final_delivery_payload.source_refs 时，不再回退到中间步骤产物。
-    assert summarized_state["selected_artifacts"] == []
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == []
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/intermediate.md"]
 
 
 def test_summarize_should_filter_non_file_refs_from_final_delivery_source_refs() -> None:
@@ -2239,23 +2291,34 @@ def test_summarize_should_filter_non_file_refs_from_final_delivery_source_refs()
         "user_message": "请输出最终结果",
         "plan": _build_plan(),
         "execution_count": 2,
-        "step_states": [],
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+                "outcome": {
+                    "done": True,
+                    "summary": "已生成最终文档",
+                    "produced_artifacts": [
+                        "/home/ubuntu/final-output.md",
+                        "/home/ubuntu/final-checklist.md",
+                    ],
+                    "blockers": [],
+                    "facts_learned": [],
+                    "open_questions": [],
+                },
+            }
+        ],
         "working_memory": {
             "goal": "验证最终附件过滤",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是用户最终应该看到的完整攻略正文。",
-                "sections": [],
-                "source_refs": [
-                    "artifact-id-1",
-                    "https://example.com/final.md",
-                    "final-output.md",
-                    "/home/ubuntu/final-output.md",
-                ],
-            },
         },
-        "selected_artifacts": [],
+        "selected_artifacts": [
+            "artifact-id-1",
+            "https://example.com/final.md",
+            "final-output.md",
+            "/home/ubuntu/final-output.md",
+        ],
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -2285,15 +2348,6 @@ def test_summarize_should_not_emit_non_file_refs_as_attachments() -> None:
             "goal": "验证非文件引用不会变成附件",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "这是用户最终应该看到的完整攻略正文。",
-                "sections": [],
-                "source_refs": [
-                    "artifact-id-1",
-                    "https://example.com/final.md",
-                    "final-output.md",
-                ],
-            },
         },
         "selected_artifacts": ["artifact-id-2"],
         "pending_memory_writes": [],
@@ -2328,16 +2382,11 @@ def test_summarize_should_filter_final_delivery_refs_by_workspace_artifact_index
             "goal": "验证 workspace artifact 过滤",
             "user_preferences": {},
             "facts_in_session": [],
-            "final_delivery_payload": {
-                "text": "最终正文",
-                "sections": [],
-                "source_refs": [
-                    "/home/ubuntu/final-output.md",
-                    "/home/ubuntu/not-indexed.md",
-                ],
-            },
         },
-        "selected_artifacts": ["/home/ubuntu/not-indexed.md"],
+        "selected_artifacts": [
+            "/home/ubuntu/final-output.md",
+            "/home/ubuntu/not-indexed.md",
+        ],
         "pending_memory_writes": [],
         "message_window": [],
         "graph_metadata": {},
@@ -2521,6 +2570,7 @@ def test_summarize_should_block_direct_wait_without_original_execution(monkeypat
     assert summarized_state["plan"].status == ExecutionStatus.FAILED
     assert summarized_state["plan"].error == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
     assert summarized_state["final_message"] == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
+    assert summarized_state["final_answer_text"] == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
     assert any(getattr(event, "type", "") == "error" for event in captured_events)
     assert any(
         getattr(event, "type", "") == "error"
@@ -2731,7 +2781,7 @@ def test_summarize_should_ignore_structured_memory_extraction_when_working_memor
             outcome=StepOutcome(
                 done=True,
                 summary="当前任务后续都只需要关注 backend",
-                delivery_text="后续仅关注 backend。",
+                facts_learned=["后续仅关注 backend。"],
             ),
         ),
         "execution_count": 1,
@@ -3047,6 +3097,7 @@ class _FakeSummaryAttachmentLLM:
             "content": json.dumps(
                 {
                     "message": "最终总结",
+                    "final_answer_text": "最终整理后的正文",
                     "attachments": ["/home/ubuntu/final-output.md"],
                     "facts_in_session": [],
                     "user_preferences": {},
@@ -3122,6 +3173,7 @@ class _FakeUnknownSummaryAttachmentLLM:
             "content": json.dumps(
                 {
                     "message": "最终总结",
+                    "final_answer_text": "最终整理后的正文",
                     "attachments": ["/home/ubuntu/non-existent-final-output.md"],
                     "facts_in_session": [],
                     "user_preferences": {},

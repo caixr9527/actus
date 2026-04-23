@@ -12,8 +12,6 @@ from app.domain.models import (
     Session,
     Step,
     StepArtifactPolicy,
-    StepDeliveryContextState,
-    StepDeliveryRole,
     StepEvent,
     StepEventStatus,
     StepOutcome,
@@ -64,8 +62,6 @@ def _build_plan(step_status: ExecutionStatus = ExecutionStatus.PENDING) -> Plan:
                 task_mode_hint=StepTaskModeHint.RESEARCH,
                 output_mode=StepOutputMode.NONE,
                 artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
-                delivery_role=StepDeliveryRole.FINAL,
-                delivery_context_state=StepDeliveryContextState.NEEDS_PREPARATION,
                 objective_key="objective-step-1",
                 success_criteria=["执行第一步完成"],
                 status=step_status,
@@ -236,8 +232,6 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["step_states"][0]["status"] == ExecutionStatus.PENDING.value
     assert sorted(state["step_states"][0].keys()) == [
         "artifact_policy",
-        "delivery_context_state",
-        "delivery_role",
         "description",
         "output_mode",
         "status",
@@ -247,7 +241,6 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
         "title",
     ]
     assert state["step_states"][0]["task_mode_hint"] == StepTaskModeHint.RESEARCH.value
-    assert state["step_states"][0]["delivery_context_state"] == StepDeliveryContextState.NEEDS_PREPARATION.value
     assert sorted(state["retrieved_memories"][0].keys()) == ["content", "id", "memory_type", "summary", "tags"]
     assert state["pending_interrupt"]["prompt"] == "请补充上下文"
     assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
@@ -559,8 +552,6 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
     assert contract["graph_state"]["selected_artifacts"] == ["/tmp/final.md"]
     assert sorted(contract["graph_state"]["step_states"][0].keys()) == [
         "artifact_policy",
-        "delivery_context_state",
-        "delivery_role",
         "description",
         "outcome",
         "output_mode",
@@ -625,8 +616,6 @@ def test_build_initial_state_should_rebuild_step_states_from_plan_when_metadata_
     assert state["step_states"][0]["task_mode_hint"] == StepTaskModeHint.RESEARCH.value
     assert state["step_states"][0]["output_mode"] == StepOutputMode.NONE.value
     assert state["step_states"][0]["artifact_policy"] == StepArtifactPolicy.FORBID_FILE_OUTPUT.value
-    assert state["step_states"][0]["delivery_role"] == StepDeliveryRole.FINAL.value
-    assert state["step_states"][0]["delivery_context_state"] == StepDeliveryContextState.NEEDS_PREPARATION.value
 
 
 def test_graph_state_contract_should_clear_pending_interrupt_after_done() -> None:
@@ -810,8 +799,6 @@ def test_normalize_runtime_state_should_rebuild_step_states_and_current_step_fro
                         "task_mode_hint": StepTaskModeHint.RESEARCH.value,
                         "output_mode": StepOutputMode.NONE.value,
                         "artifact_policy": StepArtifactPolicy.FORBID_FILE_OUTPUT.value,
-                        "delivery_role": StepDeliveryRole.INTERMEDIATE.value,
-                        "delivery_context_state": StepDeliveryContextState.NONE.value,
                         "outcome": {
                             "done": True,
                             "summary": "第一步完成",
@@ -824,10 +811,8 @@ def test_normalize_runtime_state_should_rebuild_step_states_and_current_step_fro
                         "description": "第二步",
                         "status": ExecutionStatus.PENDING.value,
                         "task_mode_hint": StepTaskModeHint.GENERAL.value,
-                        "output_mode": StepOutputMode.INLINE.value,
+                        "output_mode": StepOutputMode.NONE.value,
                         "artifact_policy": StepArtifactPolicy.DEFAULT.value,
-                        "delivery_role": StepDeliveryRole.FINAL.value,
-                        "delivery_context_state": StepDeliveryContextState.READY.value,
                     },
                 ],
             },
