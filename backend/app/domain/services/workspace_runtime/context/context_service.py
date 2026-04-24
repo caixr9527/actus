@@ -453,8 +453,9 @@ class RuntimeContextService:
                     self._truncate_text(item, max_chars=120)
                     for item in normalize_text_list(last_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
                 ]
+                # facts_learned 作为步骤级证据文本，需要把完整内容传给后续 step，而不是再次截断成摘要。
                 digest["last_step_facts"] = [
-                    self._truncate_text(item, max_chars=120)
+                    str(item)
                     for item in normalize_text_list(last_step.outcome.facts_learned)[:_OPEN_QUESTION_LIMIT]
                 ]
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
@@ -628,8 +629,9 @@ class RuntimeContextService:
                 self._truncate_text(item, max_chars=120)
                 for item in normalize_text_list(working_memory.get("decisions"))[:_OPEN_QUESTION_LIMIT]
             ],
+            # facts_in_session 沉淀的是可复用证据，不应在上下文服务中再次压缩。
             "facts_in_session": [
-                self._truncate_text(item, max_chars=120)
+                str(item)
                 for item in normalize_text_list(working_memory.get("facts_in_session"))[:_OPEN_QUESTION_LIMIT]
             ],
             "user_preferences": dict(working_memory.get("user_preferences") or {}),
@@ -998,8 +1000,9 @@ class RuntimeContextService:
                     self._truncate_text(item, max_chars=120)
                     for item in normalize_text_list(target_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
                 ],
+                # 当前步骤执行结果里的证据文本必须完整暴露给后续 prompt，上层模型才能直接复用。
                 "facts_learned": [
-                    self._truncate_text(item, max_chars=120)
+                    str(item)
                     for item in normalize_text_list(target_step.outcome.facts_learned)[:_OPEN_QUESTION_LIMIT]
                 ],
                 "open_questions": [
@@ -1056,8 +1059,9 @@ class RuntimeContextService:
                     "description": self._truncate_text(item.get("description"), max_chars=120),
                     "status": str(item.get("status") or "").strip(),
                     "summary": self._truncate_text(outcome.get("summary"), max_chars=_STEP_SUMMARY_MAX_CHARS),
+                    # 已完成步骤摘要中的 facts_learned 同样保留全文，避免下游只能看到残缺片段。
                     "facts_learned": [
-                        self._truncate_text(item, max_chars=120)
+                        str(item)
                         for item in normalize_text_list(outcome.get("facts_learned"))[:_OPEN_QUESTION_LIMIT]
                     ],
                 }
