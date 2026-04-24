@@ -15,7 +15,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse, urlsplit, urlunsplit, parse_qsl
 from urllib.request import Request, urlopen
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+import httpx
+import trafilatura
+from lxml import html as lxml_html
+from readability import Document
 
 from app.interfaces.errors import BadRequestException, AppException
 from app.models import SearXNGFetchPageResult, SearXNGSearchItem, SearXNGSearchResult, SearXNGStatusResult
@@ -23,6 +26,22 @@ from app.services.search_quality_policy import SearchQualityPolicy, get_search_q
 
 logger = logging.getLogger(__name__)
 MAX_QUERY_TOKENS = 48
+DEFAULT_FETCH_PAGE_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+)
+SUPPORTED_FETCH_PAGE_CONTENT_TYPES = (
+    "text/html",
+    "application/xhtml+xml",
+    "text/plain",
+)
+FETCH_PAGE_NOISE_LINE_PATTERNS = (
+    re.compile(r"^(advertisement|ad|sponsored)$", re.IGNORECASE),
+    re.compile(r"^(cookie|cookies|accept cookies|privacy settings)$", re.IGNORECASE),
+    re.compile(r"^(subscribe|sign in|sign up|log in|register)$", re.IGNORECASE),
+    re.compile(r"^(share|copy link|read more|more|menu)$", re.IGNORECASE),
+    re.compile(r"^(广告|赞助内容|订阅|登录|注册|分享|复制链接|阅读全文|展开全部)$"),
+)
 
 
 class SearXNGService:
@@ -31,7 +50,6 @@ class SearXNGService:
     def __init__(self) -> None:
         self.base_url = os.getenv("SEARXNG_BASE_URL", "http://127.0.0.1:8082").rstrip("/")
         self.timeout_seconds = int(os.getenv("SEARXNG_TIMEOUT_SECONDS", "30"))
-        self.crawl4ai_cdp_url = os.getenv("CRAWL4AI_CDP_URL", "http://127.0.0.1:9222")
         self.quality_policy = get_search_quality_policy()
 
     def _build_url(self, path: str, params: Optional[dict[str, Any]] = None) -> str:
@@ -101,39 +119,128 @@ class SearXNGService:
         return None
 
     @staticmethod
-    def _extract_crawl_content(result: Any) -> str:
-        markdown = getattr(result, "markdown", None)
-        if isinstance(markdown, str):
-            return markdown.strip()
-
-        if markdown is not None:
-            for attr_name in ("fit_markdown", "raw_markdown", "markdown_with_citations"):
-                value = getattr(markdown, attr_name, None)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-
-        extracted_content = getattr(result, "extracted_content", None)
-        if isinstance(extracted_content, str):
-            return extracted_content.strip()
-
-        return ""
-
-    def _build_crawl4ai_browser_config(self, browser_config_cls: Any) -> Any:
-        parsed_cdp_url = urlparse(self.crawl4ai_cdp_url)
-        cdp_host = str(parsed_cdp_url.hostname or "127.0.0.1").strip() or "127.0.0.1"
-        cdp_port = int(parsed_cdp_url.port or 9222)
-        return browser_config_cls(
-            browser_mode="builtin",
-            host=cdp_host,
-            debugging_port=cdp_port,
-            headless=True,
-            text_mode=True,
-            verbose=False,
-        )
+    def _is_supported_fetch_page_content_type(content_type: Optional[str]) -> bool:
+        if not content_type:
+            return True
+        normalized_content_type = str(content_type).split(";", 1)[0].strip().lower()
+        return normalized_content_type in SUPPORTED_FETCH_PAGE_CONTENT_TYPES
 
     @staticmethod
-    def _get_crawl4ai_components() -> tuple[Any, Any, Any, Any]:
-        return AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+    def _build_fetch_page_headers() -> dict[str, str]:
+        return {
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+            "User-Agent": DEFAULT_FETCH_PAGE_USER_AGENT,
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+
+    @staticmethod
+    def _normalize_text_block(text: str) -> str:
+        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\u00a0", " ")
+        normalized = re.sub(r"[ \t]+", " ", normalized)
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _is_noise_line(line: str) -> bool:
+        normalized_line = str(line or "").strip()
+        if not normalized_line:
+            return True
+        if len(normalized_line) <= 1:
+            return True
+        return any(pattern.match(normalized_line) for pattern in FETCH_PAGE_NOISE_LINE_PATTERNS)
+
+    def _clean_extracted_content(self, content: str) -> str:
+        normalized = self._normalize_text_block(content)
+        if not normalized:
+            return ""
+
+        cleaned_lines: list[str] = []
+        previous_line = ""
+        for raw_line in normalized.split("\n"):
+            line = raw_line.strip()
+            if self._is_noise_line(line):
+                continue
+            if line == previous_line:
+                continue
+            cleaned_lines.append(line)
+            previous_line = line
+
+        cleaned = "\n\n".join(cleaned_lines)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _extract_title_from_html(html_text: str) -> str:
+        normalized_html = str(html_text or "").strip()
+        if not normalized_html:
+            return ""
+        try:
+            return str(Document(normalized_html).short_title() or "").strip()
+        except Exception:
+            return ""
+
+    def _extract_main_content_from_html(self, *, html_text: str, url: str) -> tuple[str, str]:
+        normalized_html = str(html_text or "").strip()
+        if not normalized_html:
+            return "", ""
+
+        title = self._extract_title_from_html(normalized_html)
+        try:
+            primary_content = trafilatura.extract(
+                normalized_html,
+                url=url,
+                output_format="txt",
+                include_links=False,
+                include_images=False,
+                include_comments=False,
+                deduplicate=True,
+                favor_precision=True,
+                fast=True,
+            )
+        except Exception as exc:
+            logger.warning("trafilatura正文抽取失败: %s", exc)
+            primary_content = None
+
+        cleaned_primary = self._clean_extracted_content(str(primary_content or ""))
+        if cleaned_primary:
+            return title, cleaned_primary
+
+        try:
+            summary_html = Document(normalized_html).summary()
+            fallback_root = lxml_html.fromstring(summary_html)
+            fallback_content = fallback_root.text_content()
+        except Exception as exc:
+            logger.warning("readability兜底抽取失败: %s", exc)
+            fallback_content = ""
+
+        cleaned_fallback = self._clean_extracted_content(fallback_content)
+        return title, cleaned_fallback
+
+    async def _fetch_page_html(self, url: str) -> tuple[str, str, int, Optional[str], str]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+                headers=self._build_fetch_page_headers(),
+        ) as client:
+            response = await client.get(url)
+
+        content_type = response.headers.get("Content-Type")
+        if response.status_code >= 400:
+            error_message = f"页面读取失败: HTTP {response.status_code}"
+            if 400 <= response.status_code < 500:
+                raise BadRequestException(error_message)
+            raise AppException(error_message)
+        if not self._is_supported_fetch_page_content_type(content_type):
+            raise BadRequestException(f"暂不支持读取该类型页面: {content_type}")
+
+        return (
+            url,
+            str(response.url),
+            int(response.status_code),
+            content_type,
+            response.text,
+        )
 
     async def get_status(self) -> SearXNGStatusResult:
         """检查 SearXNG 服务是否可访问。"""
@@ -540,50 +647,46 @@ class SearXNGService:
         return domains
 
     async def fetch_page(self, url: str, max_chars: Optional[int] = 20000) -> SearXNGFetchPageResult:
-        """使用 crawl4ai 读取单个页面内容。"""
+        """读取单个页面正文并尽量剔除导航、订阅、广告等噪音。"""
         normalized_url = self._normalize_page_url(url)
         if max_chars is not None and max_chars <= 0:
             raise BadRequestException("max_chars 必须大于 0")
 
-        crawler_cls, browser_config_cls, run_config_cls, cache_mode_cls = self._get_crawl4ai_components()
-        browser_config = self._build_crawl4ai_browser_config(browser_config_cls)
-        run_config = run_config_cls(
-            cache_mode=cache_mode_cls.BYPASS,
-            page_timeout=self.timeout_seconds * 1000,
-        )
-
         try:
-            async with crawler_cls(config=browser_config) as crawler:
-                result = await crawler.arun(url=normalized_url, config=run_config)
+            _, final_url, status_code, content_type, html_text = await self._fetch_page_html(normalized_url)
+        except httpx.TimeoutException as exc:
+            logger.error("页面读取超时: %s", exc)
+            raise AppException("页面读取超时")
+        except httpx.HTTPStatusError as exc:
+            logger.error("页面读取HTTP异常: %s", exc)
+            status_code = int(exc.response.status_code)
+            error_message = f"页面读取失败: HTTP {status_code}"
+            if 400 <= status_code < 500:
+                raise BadRequestException(error_message)
+            raise AppException(error_message)
+        except httpx.HTTPError as exc:
+            logger.error("页面读取网络异常: %s", exc)
+            raise AppException(f"页面读取失败: {exc}")
         except BadRequestException:
             raise
         except Exception as exc:
-            logger.error(f"crawl4ai读取页面异常: {exc}")
+            logger.error(f"页面读取异常: {exc}")
             raise AppException(f"页面读取失败: {exc}")
 
-        if not getattr(result, "success", False):
-            error_message = str(getattr(result, "error_message", None) or "页面读取失败")
-            status_code = getattr(result, "status_code", None)
-            if isinstance(status_code, int) and 400 <= status_code < 500:
-                raise BadRequestException(error_message)
-            raise AppException(error_message)
-
-        full_content = self._extract_crawl_content(result)
+        title, full_content = self._extract_main_content_from_html(
+            html_text=html_text,
+            url=final_url,
+        )
         if not full_content:
             raise AppException("页面读取成功，但未提取到正文内容")
 
         truncated = max_chars is not None and len(full_content) > max_chars
         content = full_content[:max_chars] if truncated and max_chars is not None else full_content
-        metadata = getattr(result, "metadata", None) or {}
-        title = str(metadata.get("title") or "") if isinstance(metadata, dict) else ""
-        response_headers = getattr(result, "response_headers", None)
-        content_type = self._pick_header_value(response_headers, "Content-Type")
-        status_code = getattr(result, "status_code", None)
 
         return SearXNGFetchPageResult(
             url=normalized_url,
-            final_url=str(getattr(result, "url", None) or normalized_url),
-            status_code=int(status_code) if isinstance(status_code, int) else 200,
+            final_url=final_url,
+            status_code=status_code,
             content_type=content_type,
             title=title,
             content=content,

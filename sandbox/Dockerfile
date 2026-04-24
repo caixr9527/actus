@@ -128,11 +128,6 @@ WORKDIR /sandbox
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# 预装 Playwright Chromium 到 app 进程使用的 HOME，避免运行时找不到浏览器二进制
-RUN mkdir -p /home/ubuntu/.cache/ms-playwright && \
-    chown -R ubuntu:ubuntu /home/ubuntu/.cache && \
-    su -s /bin/bash -c "HOME=/home/ubuntu PLAYWRIGHT_BROWSERS_PATH=/home/ubuntu/.cache/ms-playwright python3 -m playwright install chromium" ubuntu
-
 # 拷贝当前整个项目文件
 COPY . .
 
@@ -149,7 +144,6 @@ ENV CHROME_ARGS=""
 ENV UVI_ARGS=""
 ENV SEARXNG_SECRET=""
 ENV BOCHA_API_KEY=${BOCHA_API_KEY}
-ENV PLAYWRIGHT_BROWSERS_PATH=/home/ubuntu/.cache/ms-playwright
 
 # 使用supervisor管理所有进程
 CMD ["supervisord", "-n", "-c", "/sandbox/supervisord.conf"]

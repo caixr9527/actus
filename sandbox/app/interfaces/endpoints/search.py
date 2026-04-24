@@ -79,7 +79,7 @@ async def ai_search(
     path="/fetch-page",
     response_model=Response[SearXNGFetchPageResult],
     summary="读取单个页面正文",
-    description="使用 crawl4ai 读取指定 URL 的页面正文",
+    description="使用轻量正文抽取链路读取指定 URL 的页面正文",
 )
 async def fetch_page(
         request: SearXNGFetchPageRequest,
