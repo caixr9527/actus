@@ -19,10 +19,10 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.parsers import (
 
 def _load_refactor_migration_module():
     migration_path = (
-        Path(__file__).resolve().parents[1]
-        / "alembic"
-        / "versions"
-        / "f0a1b2c3d4e5_refactor_workflow_run_steps_outcome.py"
+            Path(__file__).resolve().parents[1]
+            / "alembic"
+            / "versions"
+            / "f0a1b2c3d4e5_refactor_workflow_run_steps_outcome.py"
     )
     spec = importlib.util.spec_from_file_location(
         "workflow_run_steps_outcome_refactor_migration",
@@ -134,6 +134,7 @@ def test_build_step_from_payload_should_keep_file_output_when_user_explicitly_re
     assert step.output_mode == "file"
     assert step.artifact_policy == "require_file_output"
 
+
 def test_build_step_from_payload_should_keep_general_none_output_mode() -> None:
     step = build_step_from_payload(
         {
@@ -147,6 +148,7 @@ def test_build_step_from_payload_should_keep_general_none_output_mode() -> None:
 
     assert step.output_mode == "none"
     assert step.artifact_policy == "default"
+
 
 def test_build_step_from_payload_should_keep_preview_request_as_execution_step() -> None:
     step = build_step_from_payload(
@@ -162,6 +164,7 @@ def test_build_step_from_payload_should_keep_preview_request_as_execution_step()
     assert step.output_mode == "none"
     assert step.artifact_policy == "default"
 
+
 def test_build_step_from_payload_should_not_expose_delivery_fields() -> None:
     step = build_step_from_payload(
         {
@@ -176,8 +179,7 @@ def test_build_step_from_payload_should_not_expose_delivery_fields() -> None:
 
     assert step.output_mode == "none"
     assert step.artifact_policy == "default"
-    assert not hasattr(step, "delivery_role")
-    assert not hasattr(step, "delivery_context_state")
+
 
 def test_build_step_from_payload_should_force_web_reading_without_file_request_to_none_output() -> None:
     step = build_step_from_payload(

@@ -90,12 +90,6 @@ class WorkflowRunStepModel(Base):
     task_mode_hint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     output_mode: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     artifact_policy: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    # 已废弃数据库物理壳：
-    # - 这两个列只为兼容现有表结构而保留；
-    # - Phase C 起不再参与任何业务主链语义；
-    # - 仓库层统一只写 None，不再从领域对象回填。
-    delivery_role: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    delivery_context_state: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     outcome: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -125,9 +119,6 @@ class WorkflowRunStepModel(Base):
             task_mode_hint=record.task_mode_hint.value if record.task_mode_hint is not None else None,
             output_mode=record.output_mode.value if record.output_mode is not None else None,
             artifact_policy=record.artifact_policy.value if record.artifact_policy is not None else None,
-            # 已废弃数据库物理壳：始终写 None，避免旧语义重新回流。
-            delivery_role=None,
-            delivery_context_state=None,
             # 步骤投影与 runtime 主链共用同一套 outcome 归一化，避免附件语义再次漂移。
             outcome=normalize_step_outcome_payload(record.outcome),
             error=record.error,

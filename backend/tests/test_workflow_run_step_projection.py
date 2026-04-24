@@ -9,7 +9,6 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     PlanEventStatus,
-    Session,
     Step,
     StepArtifactPolicy,
     StepEvent,
@@ -142,8 +141,6 @@ def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_s
     assert step_record.task_mode_hint == StepTaskModeHint.RESEARCH.value
     assert step_record.output_mode == StepOutputMode.NONE.value
     assert step_record.artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value
-    assert step_record.delivery_role is None
-    assert step_record.delivery_context_state is None
 
 
 def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_current_step() -> None:
@@ -163,8 +160,6 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         task_mode_hint=None,
         output_mode=None,
         artifact_policy=None,
-        delivery_role=None,
-        delivery_context_state=None,
         outcome=None,
         error=None,
     )
@@ -201,8 +196,6 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
     assert existing_step_record.task_mode_hint == StepTaskModeHint.GENERAL.value
     assert existing_step_record.output_mode == StepOutputMode.FILE.value
     assert existing_step_record.artifact_policy == StepArtifactPolicy.DEFAULT.value
-    assert existing_step_record.delivery_role is None
-    assert existing_step_record.delivery_context_state is None
     assert existing_step_record.outcome == {
         "done": True,
         "summary": "完成",
