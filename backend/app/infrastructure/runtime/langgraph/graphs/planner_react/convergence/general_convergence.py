@@ -9,13 +9,11 @@
 它不生成反馈经验、不修改计划，也不替代最终 summary 节点。
 """
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step
-from app.domain.services.workspace_runtime.policies import truncate_tool_text
-
 
 _GENERAL_FILE_OBSERVATION_PATTERN = re.compile(
     r"(目录|文件列表|文件名|当前目录|目录状态|列出文件|查看目录|list files|directory|folder|current directory|file names)",
@@ -110,11 +108,11 @@ class GeneralConvergenceJudge:
             function_name = str(last_success.get("function_name") or "").strip().lower()
             data = last_success.get("data")
         if function_name == "list_files" and isinstance(data, dict):
-            dir_path = truncate_tool_text(data.get("dir_path"), max_chars=160)
+            dir_path = data.get("dir_path")
             raw_files = data.get("files")
             file_names: List[str] = []
             if isinstance(raw_files, list):
-                for item in raw_files[:20]:
+                for item in raw_files:
                     if isinstance(item, dict):
                         name = str(item.get("name") or item.get("filename") or "").strip()
                     else:
@@ -124,17 +122,18 @@ class GeneralConvergenceJudge:
             if dir_path:
                 evidence_lines.append(f"当前目录：{dir_path}")
             if file_names:
-                evidence_lines.append("文件列表：" + "、".join(file_names[:12]))
+                evidence_lines.append("文件列表：" + "、".join(file_names))
         if function_name == "find_files" and isinstance(data, dict):
-            dir_path = truncate_tool_text(data.get("dir_path"), max_chars=160)
+            dir_path = data.get("dir_path")
             raw_files = data.get("files")
-            file_names = [str(item.get("name") or item.get("filename") or item or "").strip() for item in list(raw_files or [])[:20]]
+            file_names = [str(item.get("name") or item.get("filename") or item or "").strip() for item in
+                          list(raw_files or [])]
             file_names = [item for item in file_names if item]
             if dir_path:
                 evidence_lines.append(f"搜索目录：{dir_path}")
             if file_names:
-                evidence_lines.append("匹配文件：" + "、".join(file_names[:12]))
-        return _dedupe_non_empty(evidence_lines)[:8]
+                evidence_lines.append("匹配文件：" + "、".join(file_names))
+        return _dedupe_non_empty(evidence_lines)
 
     @staticmethod
     def _build_payload(
@@ -157,7 +156,7 @@ class GeneralConvergenceJudge:
             "result": summary,
             "attachments": [],
             "blockers": [],
-            "facts_learned": evidence_lines[:8],
+            "facts_learned": evidence_lines,
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_action,

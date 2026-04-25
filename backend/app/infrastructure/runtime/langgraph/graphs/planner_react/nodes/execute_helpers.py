@@ -25,7 +25,6 @@ from app.domain.models import (
     ToolEvent,
 )
 from app.domain.services.prompts import EXECUTION_PROMPT
-from app.domain.services.runtime.contracts.langgraph_settings import MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
@@ -49,7 +48,6 @@ from .delivery_helpers import (
     _infer_step_attachment_delivery_preference,
     _merge_step_outcome_into_working_memory,
 )
-from ..parsers import extract_write_file_paths_from_tool_events, merge_attachment_paths
 from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
@@ -57,6 +55,7 @@ from .prompt_context_helpers import (
 )
 from .wait_helpers import _build_step_label
 from .working_memory import _ensure_working_memory
+from ..parsers import extract_write_file_paths_from_tool_events, merge_attachment_paths
 
 
 @dataclass(frozen=True)
@@ -362,7 +361,6 @@ async def build_execute_completed_transition(
     tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
     step_attachment_paths = normalize_file_path_list(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
-        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
     step.outcome = StepOutcome(
         done=step_success,

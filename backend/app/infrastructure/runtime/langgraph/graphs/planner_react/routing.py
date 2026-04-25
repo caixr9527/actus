@@ -134,10 +134,7 @@ def route_after_execute(
         ExecutionStatus,
     )
     if last_step_status == ExecutionStatus.FAILED.value:
-        plan = state.get("plan")
-        has_next_step = bool(plan is not None and plan.get_next_step() is not None)
-        if has_next_step and not bool(
-                get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
+        if not bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
             log_runtime(
                 logger,
                 logging.INFO,

@@ -218,7 +218,7 @@ def summarize_tool_result_data(function_name: str, tool_result: ToolResult) -> D
 def build_tool_feedback_content(function_name: str, tool_result: ToolResult) -> str:
     payload = {
         "success": bool(tool_result.success),
-        "message": truncate_tool_text(tool_result.message, max_chars=240),
+        "message": tool_result.message,
         "data": summarize_tool_result_data(function_name, tool_result),
     }
     return json.dumps(payload, ensure_ascii=False)

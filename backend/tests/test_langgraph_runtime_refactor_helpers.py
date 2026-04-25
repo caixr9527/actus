@@ -2,17 +2,66 @@
 # -*- coding: utf-8 -*-
 """P3 重构辅助模块单测。"""
 
-import logging
-import time
 import asyncio
 import json
+import logging
+import time
 from io import StringIO
-import pytest
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from unittest.mock import patch
 
 from app.domain.models import Step, ToolResult
 from app.domain.models.search import FetchedPage
+from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
+from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.policies import (
+    build_browser_high_level_failure_key,
+    build_browser_route_state_key,
+    build_search_fingerprint,
+    build_tool_feedback_content,
+    build_tool_fingerprint,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import (
+    ConstraintDecision,
+    ConstraintEngineResult,
+    ConstraintInput,
+    ConstraintPolicyTraceEntry,
+    build_default_external_signals_snapshot,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine import (
+    ConstraintEngine,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.human_wait_policy import (
+    evaluate_human_wait_policy,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.repeat_loop_policy import (
+    evaluate_repeat_loop_policy,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.research_route_policy import (
+    build_research_route_rewrite_decision,
+    evaluate_research_route_policy,
+    normalize_research_fetch_dedupe_key,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.task_mode_policy import (
+    evaluate_task_mode_policy,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import (
+    REASON_ALLOW,
+    REASON_CONSTRAINT_ENGINE_ERROR,
+    REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
+    GeneralConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
+    ConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.research_convergence import (
+    ResearchConvergenceJudge,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.web_reading_convergence import (
+    WebReadingConvergenceJudge,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import (
     ExecutionContext,
     build_execution_context,
@@ -24,9 +73,17 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.finaliz
     finalize_max_iterations,
     finalize_no_tool_call,
 )
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
+    execute_step_with_prompt,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import (
     build_loop_break_result,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.delivery_helpers import (
+    _resolve_summary_attachment_refs,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import (
+    ToolPolicyEngine,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
     build_research_diagnosis,
@@ -35,83 +92,19 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_query_builder import (
     build_research_query,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
+    normalize_tool_execution_args,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import (
     apply_tool_preinvoke_effects,
     apply_rewrite_effects,
     apply_tool_result_effects,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_argument_normalizers import (
-    normalize_tool_execution_args,
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
+    build_tool_call_lifecycle,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_handlers import (
     execute_tool_with_policy,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
-    ConvergenceJudge,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
-    GeneralConvergenceJudge,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.research_convergence import (
-    ResearchConvergenceJudge,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.web_reading_convergence import (
-    WebReadingConvergenceJudge,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import (
-    ConstraintDecision,
-    ConstraintEngineResult,
-    ConstraintInput,
-    ConstraintPolicyTraceEntry,
-    ConstraintToolResultPayload,
-    build_default_external_signals_snapshot,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine import (
-    ConstraintEngine,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import (
-    ToolPolicyEngine,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.human_wait_policy import (
-    evaluate_human_wait_policy,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.research_route_policy import (
-    build_research_route_rewrite_decision,
-    evaluate_research_route_policy,
-    normalize_research_fetch_dedupe_key,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.repeat_loop_policy import (
-    evaluate_repeat_loop_policy,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.task_mode_policy import (
-    evaluate_task_mode_policy,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import (
-    REASON_ALLOW,
-    REASON_CONSTRAINT_ENGINE_ERROR,
-    REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
-    ToolEventDispatcher,
-    bind_tool_name,
-    build_called_event,
-    build_calling_event,
-    build_tool_call_lifecycle,
-    build_tool_feedback_message,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
-    execute_step_with_prompt,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.delivery_helpers import (
-    _resolve_summary_attachment_refs,
-)
-from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.domain.services.workspace_runtime.policies import (
-    build_browser_high_level_failure_key,
-    build_browser_route_state_key,
-    build_search_fingerprint,
-    build_tool_feedback_content,
-    build_tool_fingerprint,
 )
 
 
@@ -409,8 +402,8 @@ def test_constraint_engine_should_fail_closed_when_policy_raises() -> None:
     )
     execution_state = ExecutionState()
     with patch(
-        "app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine.evaluate_task_mode_policy",
-        side_effect=RuntimeError("boom"),
+            "app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine.evaluate_task_mode_policy",
+            side_effect=RuntimeError("boom"),
     ):
         result = engine.evaluate_guard(
             constraint_input=ConstraintInput(
@@ -466,8 +459,8 @@ def test_constraint_engine_should_fail_closed_when_rewrite_builder_raises() -> N
     execution_state.research_search_ready = False
     execution_state.consecutive_fetch_failure_count = 0
     with patch(
-        "app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine.build_research_route_rewrite_decision",
-        side_effect=RuntimeError("rewrite boom"),
+            "app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine.build_research_route_rewrite_decision",
+            side_effect=RuntimeError("rewrite boom"),
     ):
         result = engine.evaluate_guard(
             constraint_input=ConstraintInput(
@@ -1287,7 +1280,8 @@ def test_finalize_max_iterations_should_converge_research_when_snippets_availabl
 
     assert payload["success"] is True
     assert any("LangGraph 支持通过 interrupt" in str(item) for item in list(payload["facts_learned"]))
-    assert any("来源链接：https://docs.langchain.com/langgraph-platform/human-in-the-loop" == str(item) for item in list(payload["facts_learned"]))
+    assert any("来源链接：https://docs.langchain.com/langgraph-platform/human-in-the-loop" == str(item) for item in
+               list(payload["facts_learned"]))
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -1968,7 +1962,8 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
     assert result.reason_code == "file_processing_facts_ready"
     assert "已读取文件" in str(result.payload.get("summary") or "")
     facts = [str(item) for item in list(result.payload.get("facts_learned") or [])]
-    assert any("/home/ubuntu/workspace/hello.txt" in item for item in facts + [str(result.payload.get("summary") or "")])
+    assert any(
+        "/home/ubuntu/workspace/hello.txt" in item for item in facts + [str(result.payload.get("summary") or "")])
     assert not any("P3_WORKSPACE_OK" in item for item in facts)
     assert any("读取内容长度" in item for item in facts + [str(result.payload.get("summary") or "")])
 
@@ -2166,6 +2161,39 @@ def test_research_convergence_should_break_when_snippet_sufficient() -> None:
     assert result.reason_code == "research_snippet_evidence_ready"
     assert any("来源链接" in str(item) for item in list(result.payload["facts_learned"]))
     assert len(result.payload["facts_learned"]) >= 1
+
+
+def test_research_convergence_should_not_break_for_broad_scope_research_on_first_snippet_only() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "重庆历史文化景点",
+                "url": "https://example.com/a",
+                "snippet": "重庆历史文化景点包括三峡博物馆、磁器口古镇、湖广会馆等，可作为行程候选。",
+            },
+            {
+                "title": "重庆住宿推荐",
+                "url": "https://example.org/b",
+                "snippet": "解放碑和南滨路是五一期间情侣住宿的热门区域，价格区间存在明显波动。",
+            },
+        ],
+        runtime_recent_action={"research_diagnosis": {"code": "search_snippet_sufficient"}},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(
+            description="搜索五一期间热门景点、交通方式、住宿推荐及注意事项",
+            success_criteria=["检索到至少3个候选景点或路线", "包含交通、住宿等基础信息"],
+        ),
+        task_mode="research",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
 
 
 def test_research_convergence_should_not_break_for_web_reading_task_mode() -> None:
@@ -2372,6 +2400,33 @@ def test_build_execution_context_should_block_research_tools_for_general_summary
     assert "fetch_page" in context.blocked_function_names
 
 
+def test_build_execution_context_should_block_research_tools_for_general_summary_from_existing_evidence_step() -> None:
+    step = Step(
+        description="基于已有搜索摘要和用户偏好，生成详细的重庆五一旅行行程草案，不依赖新的网络请求",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+        success_criteria=[
+            "生成包含每日安排、餐饮建议和费用预估的结构化行程草案",
+            "内容基于现有搜索摘要，不依赖新的网络请求",
+        ],
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={"search_web", "fetch_page", "read_file", "write_file"},
+        user_message_text="根据已有搜索摘要整理重庆五一 4 天 3 夜行程草案，不要继续联网搜索",
+    )
+
+    assert "search_web" in context.blocked_function_names
+    assert "fetch_page" in context.blocked_function_names
+
+
 def test_general_convergence_should_not_break_non_synthesis_general_without_file_observation() -> None:
     judge = GeneralConvergenceJudge()
     step = Step(
@@ -2546,7 +2601,9 @@ def test_runtime_context_service_should_project_research_evidence_into_web_readi
                     "candidate_url_count": 2,
                     "fetched_url_count": 0,
                     "fetch_success_count": 0,
+                    "coverage_score": 0.35,
                     "latest_query": "LangGraph human in the loop 官方文档",
+                    "missing_signals": ["至少读取 2 个来源页面正文", "至少覆盖 2 个不同站点来源"],
                     "search_evidence_summaries": [
                         {
                             "title": "LangGraph 文档",
@@ -2566,6 +2623,11 @@ def test_runtime_context_service_should_project_research_evidence_into_web_readi
     )
 
     assert packet["recent_action_digest"]["research_progress"]["candidate_url_count"] == 2
+    assert packet["recent_action_digest"]["research_progress"]["coverage_score"] == 0.35
+    assert packet["recent_action_digest"]["research_progress"]["missing_signals"] == [
+        "至少读取 2 个来源页面正文",
+        "至少覆盖 2 个不同站点来源",
+    ]
     assert packet["recent_action_digest"]["search_evidence_summaries"][0]["url"] == (
         "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"
     )

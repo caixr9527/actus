@@ -176,7 +176,7 @@ def _resolve_current_run_attachment_candidates(state: PlannerReActLangGraphState
     return _filter_runtime_temp_attachment_refs(
         normalize_file_path_list(
             merge_attachment_paths(
-                state.get("selected_artifacts"),
+                list(state.get("selected_artifacts") or []),
                 _collect_current_run_artifacts(state),
             ),
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,

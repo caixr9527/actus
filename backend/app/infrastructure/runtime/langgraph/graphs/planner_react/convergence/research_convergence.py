@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step
-from app.domain.services.workspace_runtime.policies import truncate_tool_text
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import (
     ExecutionState,
 )
@@ -136,12 +135,12 @@ class ResearchConvergenceJudge:
     ) -> Dict[str, Any]:
         evidence_lines: List[str] = []
         source_links: List[str] = []
-        for index, item in enumerate(list(evidence_items or [])[:5], start=1):
+        for index, item in enumerate(list(evidence_items or []), start=1):
             if not isinstance(item, dict):
                 continue
-            title = truncate_tool_text(item.get("title"), max_chars=100)
+            title = item.get("title")
             url = str(item.get("url") or "").strip()
-            snippet = truncate_tool_text(item.get("snippet"), max_chars=260)
+            snippet = item.get("snippet")
             if not snippet and not url:
                 continue
             if url:
@@ -155,7 +154,7 @@ class ResearchConvergenceJudge:
             line for line in evidence_lines
             if str(line).strip()
         ]
-        facts_learned.extend([f"来源链接：{url}" for url in source_links[:5]])
+        facts_learned.extend([f"来源链接：{url}" for url in source_links])
         runtime_action = dict(runtime_recent_action or {})
         runtime_action["research_convergence"] = {
             "reason_code": reason_code,
@@ -169,7 +168,7 @@ class ResearchConvergenceJudge:
             "attachments": [],
             "blockers": [],
             # Phase C：步骤收敛只保留结构化证据，不再产出步骤级正文。
-            "facts_learned": facts_learned[:10],
+            "facts_learned": facts_learned,
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_action,

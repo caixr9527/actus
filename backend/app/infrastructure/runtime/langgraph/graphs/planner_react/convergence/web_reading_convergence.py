@@ -8,12 +8,11 @@
 - 该合同同时被工具循环中的 convergence 与 no-tool / max-iteration finalizer 共用。
 """
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step
-from app.domain.services.workspace_runtime.policies import truncate_tool_text
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import ExecutionState
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
     get_page_reading_contract_state,
@@ -224,7 +223,9 @@ class WebReadingConvergenceJudge:
                 pattern=r"(?:至少|不少于|读取|阅读|参考|覆盖)\s*(\d+|[一二两三四五六七八九十]+)\s*(?:个|篇|条|个不同)?(?:页面|网页|来源|站点|链接)",
                 default=1,
             ),
-            "require_source_links": bool(re.search(r"(来源链接|引用链接|参考链接|链接信息|source\s+link|sources?)", candidate_text, re.IGNORECASE)),
+            "require_source_links": bool(
+                re.search(r"(来源链接|引用链接|参考链接|链接信息|source\s+link|sources?)", candidate_text,
+                          re.IGNORECASE)),
         }
 
     @staticmethod
@@ -271,10 +272,10 @@ class WebReadingConvergenceJudge:
     ) -> Dict[str, Any]:
         evidence_lines: List[str] = []
         source_links: List[str] = []
-        for index, item in enumerate(evidence_items[:6], start=1):
-            title = truncate_tool_text(item.get("title"), max_chars=100)
+        for index, item in enumerate(evidence_items, start=1):
+            title = item.get("title")
             url = str(item.get("url") or "").strip()
-            summary = truncate_tool_text(item.get("summary"), max_chars=260)
+            summary = item.get("summary")
             link_count = int(item.get("link_count") or 0)
             if url:
                 source_links.append(url)
@@ -297,7 +298,7 @@ class WebReadingConvergenceJudge:
             "result": summary_text,
             "attachments": [],
             "blockers": [],
-            "facts_learned": evidence_lines[:8] + [f"来源链接：{url}" for url in source_links[:5]],
+            "facts_learned": evidence_lines + [f"来源链接：{url}" for url in source_links],
             "open_questions": [],
             "next_hint": "",
             "runtime_recent_action": runtime_action,
@@ -324,18 +325,19 @@ class WebReadingConvergenceJudge:
             reason_code: str,
     ) -> Dict[str, Any]:
         explicit_url_state = dict(runtime_recent_action.get("explicit_url_read_state") or {})
-        failed_urls = [str(item).strip() for item in list(explicit_url_state.get("failed_urls") or []) if str(item).strip()]
+        failed_urls = [str(item).strip() for item in list(explicit_url_state.get("failed_urls") or []) if
+                       str(item).strip()]
         failed_url_text = "、".join(failed_urls[:3]) if failed_urls else "用户提供的显式 URL"
         browser_evidence_ready = bool(explicit_url_state.get("browser_evidence_ready"))
         summary = f"显式 URL 页面读取已降级：{failed_url_text}"
         degraded_fact = (
-            f"{summary}。原因：fetch_page 未获得足够正文内容，且继续重复抓取不会增加有效信息。"
-            + (
-                " 浏览器已打开页面并拿到部分结构信号，但未获得足够稳定的正文摘要。"
-                if browser_evidence_ready
-                else ""
-            )
-            + " 当前步骤停止重复读取，后续只能基于已有可用信息或明确向用户说明页面读取失败。"
+                f"{summary}。原因：fetch_page 未获得足够正文内容，且继续重复抓取不会增加有效信息。"
+                + (
+                    " 浏览器已打开页面并拿到部分结构信号，但未获得足够稳定的正文摘要。"
+                    if browser_evidence_ready
+                    else ""
+                )
+                + " 当前步骤停止重复读取，后续只能基于已有可用信息或明确向用户说明页面读取失败。"
         )
         runtime_action = dict(runtime_recent_action or {})
         runtime_action["web_reading_convergence"] = {

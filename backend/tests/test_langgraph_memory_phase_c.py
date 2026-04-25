@@ -1812,6 +1812,8 @@ def test_summarize_should_use_unified_summary_prompt_for_preview_requests() -> N
     assert "final_answer_text" in llm.last_prompt
     assert "你是多步执行链里最终面向用户正文的唯一整理者" in llm.last_prompt
     assert "最后一步属于“预览/草稿”步骤" not in llm.last_prompt
+    assert "如果最终正文已经足够完整、结构化、可直接使用，优先只交付正文" in llm.last_prompt
+    assert "对攻略、方案、教程、清单、对比类任务，默认优先把核心可执行内容放进 `final_answer_text`" in llm.last_prompt
 
 
 def test_summarize_should_emit_heavy_delivery_to_user_but_keep_light_summary_in_state() -> None:

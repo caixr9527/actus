@@ -38,6 +38,9 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
+from .execution_context import build_execution_context
+from .execution_state import ExecutionState
+from .iteration_context import build_iteration_context
 from ..convergence.general_convergence import GeneralConvergenceJudge
 from ..convergence.judge import ConvergenceJudge
 from ..convergence.research_convergence import ResearchConvergenceJudge
@@ -53,9 +56,6 @@ from ..tool_runtime.tool_events import (
     build_tool_feedback_message,
 )
 from ..tool_runtime.tool_schema import extract_function_name
-from .execution_context import build_execution_context
-from .execution_state import ExecutionState
-from .iteration_context import build_iteration_context
 
 logger = logging.getLogger(__name__)
 
@@ -91,23 +91,7 @@ def _build_read_only_intent_text(
         candidate_parts.append(step_candidate_text)
     file_context_paths = normalize_file_path_list([*(attachment_paths or []), *(artifact_paths or [])])
     if file_context_paths:
-        candidate_parts.append("已知文件上下文: " + " ".join(file_context_paths[:8]))
-    return "\n".join(candidate_parts).strip()
-
-
-def _build_file_output_intent_text(
-        *,
-        step: Step,
-        user_message: str,
-) -> str:
-    """文件产出判定同样只看业务语义输入，不读取系统提示词内容。"""
-    candidate_parts: List[str] = []
-    normalized_user_message = str(user_message or "").strip()
-    if normalized_user_message:
-        candidate_parts.append(normalized_user_message)
-    step_candidate_text = _build_step_candidate_text(step)
-    if step_candidate_text:
-        candidate_parts.append(step_candidate_text)
+        candidate_parts.append("已知文件上下文: " + " ".join(file_context_paths))
     return "\n".join(candidate_parts).strip()
 
 
@@ -304,6 +288,19 @@ def _build_tool_feedback_content_with_runtime_progress(
         execution_context: Any,
         execution_state: ExecutionState,
 ) -> str:
+    """构造带 research 运行进度的工具反馈消息。
+
+    业务含义：
+    - 普通 tool feedback 只回放“这一次工具调用返回了什么”；
+    - 但 research 链路的下一轮决策，往往还依赖“当前步骤累计已经搜到什么、缺什么、该不该转 fetch_page”；
+    - 因此这里会把 runtime_recent_action 中沉淀的 research 进度状态，回灌到 tool feedback 里，
+      让下一轮 LLM 在同一步内显式继承阶段性研究进展，而不是只看到单次工具结果。
+
+    生效范围：
+    - 仅在 research_route_enabled 打开时启用；
+    - 仅对 `search_web` / `fetch_page` 两类 research 主工具追加进度字段；
+    - 其他工具保持原始反馈，避免把 research 噪音扩散到无关模式。
+    """
     feedback_content = _build_tool_feedback_content(function_name, tool_result)
     if not bool(getattr(execution_context, "research_route_enabled", False)):
         return feedback_content
@@ -312,27 +309,35 @@ def _build_tool_feedback_content_with_runtime_progress(
         return feedback_content
     parsed_feedback = safe_parse_json(feedback_content)
     if not isinstance(parsed_feedback, dict):
+        # 只有结构化 JSON 反馈才能安全追加 research 进度字段；
+        # 非结构化文本保持原样返回，避免污染工具反馈合同。
         return feedback_content
     research_progress = dict(execution_state.runtime_recent_action.get("research_progress") or {})
     if len(research_progress) == 0:
+        # 当前步骤还没有累计出可复用 research 进度时，不强行附加空状态。
         return feedback_content
     parsed_feedback["research_progress"] = research_progress
     research_diagnosis = dict(execution_state.runtime_recent_action.get("research_diagnosis") or {})
     if research_diagnosis:
+        # 诊断信息描述“当前证据为什么足够/不足”，供下一轮模型纠偏。
         parsed_feedback["research_diagnosis"] = research_diagnosis
     search_evidence_quality = dict(execution_state.last_search_evidence_quality or {})
     if search_evidence_quality:
+        # 搜索质量评估帮助模型判断当前 snippet 是否已够用，还是应继续抓页补强。
         parsed_feedback["search_evidence_quality"] = search_evidence_quality
     if execution_state.research_recommended_fetch_urls:
-        parsed_feedback["recommended_fetch_urls"] = list(execution_state.research_recommended_fetch_urls[:3])
+        # 推荐抓取链接是 research 路由器给出的下一步候选，减少无效重复搜索。
+        parsed_feedback["recommended_fetch_urls"] = list(execution_state.research_recommended_fetch_urls)
     search_evidence_summaries = _build_search_evidence_feedback_summaries(execution_state)
     if search_evidence_summaries:
+        # 最近搜索证据摘要作为同一步内的显式证据基底，避免模型忽略已拿到的 snippet。
         parsed_feedback["search_evidence_summaries"] = search_evidence_summaries
     missing_signals = list(research_progress.get("missing_signals") or [])
     if missing_signals:
+        # next_action_hint 是给下一轮模型的明确动作提示，优先补齐尚未覆盖的事实维度。
         parsed_feedback["next_action_hint"] = (
                 "请优先补齐缺失信息后再继续检索："
-                + "；".join([str(item) for item in missing_signals[:2] if str(item).strip()])
+                + "；".join([str(item) for item in missing_signals if str(item).strip()])
         )
     return json.dumps(parsed_feedback, ensure_ascii=False)
 
@@ -350,9 +355,9 @@ def _build_search_evidence_feedback_summaries(execution_state: ExecutionState) -
             continue
         summaries.append(
             {
-                "title": title[:100],
-                "url": url[:240],
-                "snippet": snippet[:320],
+                "title": title,
+                "url": url,
+                "snippet": snippet,
             }
         )
     return summaries
@@ -363,7 +368,8 @@ def _seed_execution_state_from_initial_recent_action(execution_state: ExecutionS
     recent_action = dict(execution_state.runtime_recent_action or {})
     research_progress = dict(recent_action.get("research_progress") or {})
     search_items: List[Dict[str, Any]] = []
-    for raw_items in (recent_action.get("search_evidence_summaries"), research_progress.get("search_evidence_summaries")):
+    for raw_items in (
+            recent_action.get("search_evidence_summaries"), research_progress.get("search_evidence_summaries")):
         for item in list(raw_items or []):
             if isinstance(item, dict):
                 search_items.append(item)
@@ -449,10 +455,6 @@ async def execute_step_with_prompt(
             user_message=user_message,
             attachment_paths=attachment_paths,
             artifact_paths=artifact_paths,
-        ),
-        file_output_intent_text=_build_file_output_intent_text(
-            step=step,
-            user_message=user_message,
         ),
     )
     log_runtime(
@@ -591,6 +593,11 @@ async def execute_step_with_prompt(
                 runtime_recent_action=execution_state.runtime_recent_action,
             )
             if no_tool_call_result.action == "retry":
+                # 这里的 retry 不是“利用本轮结果推进下一轮”，而只是“丢弃本轮结果后原地重试”
+                # - payload 不参与后续流程
+                # - parsed 也不会写回主循环
+                # - 下一轮基本还是基于旧状态重新问模型
+                # 所以这里的内容可以做反馈。
                 continue
             return no_tool_call_result.payload or {}, event_dispatcher.emitted_events
 
@@ -616,6 +623,7 @@ async def execute_step_with_prompt(
             ),
         )
         if selected_tool_call is None:
+            # 缺少受控反馈
             continue
 
         lifecycle = build_tool_call_lifecycle(
@@ -623,6 +631,7 @@ async def execute_step_with_prompt(
             parse_tool_call_args=_parse_tool_call_args,
         )
         if lifecycle is None:
+            # 缺少受控反馈
             continue
         requested_function_name = str(lifecycle.function_name or "")
         matched_tool = _resolve_tool_by_function_name(function_name=lifecycle.function_name,
@@ -657,7 +666,8 @@ async def execute_step_with_prompt(
         lifecycle.normalized_function_name = str(
             policy_result.final_normalized_function_name or lifecycle.normalized_function_name or ""
         ).strip().lower()
-        lifecycle.function_args = dict(policy_result.executed_function_args or policy_result.final_function_args or lifecycle.function_args or {})
+        lifecycle.function_args = dict(
+            policy_result.executed_function_args or policy_result.final_function_args or lifecycle.function_args or {})
         matched_tool = policy_result.final_matched_tool
         lifecycle.tool_name = str(
             policy_result.final_tool_name or (matched_tool.name if matched_tool is not None else ""))

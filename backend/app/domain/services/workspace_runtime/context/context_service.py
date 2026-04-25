@@ -30,7 +30,7 @@ from .policies import ContextPolicy, get_context_policy
 _ARTIFACT_LIMIT = 6
 _BRIEF_LIMIT = 3
 _COMPLETED_STEP_LIMIT = 5
-_MESSAGE_LIMIT = 6
+_MESSAGE_LIMIT = 15
 _OPEN_QUESTION_LIMIT = 8
 _SUMMARY_MAX_CHARS = 400
 _MESSAGE_MAX_CHARS = 200
@@ -39,6 +39,8 @@ _MEMORY_CONTENT_MAX_CHARS = 240
 _STEP_SUMMARY_MAX_CHARS = 160
 _FINAL_MESSAGE_MAX_CHARS = 240
 _DIGEST_TEXT_MAX_CHARS = 240
+_SEARCH_EVIDENCE_SNIPPET_MAX_CHARS = 520
+_WEB_EVIDENCE_SUMMARY_MAX_CHARS = 720
 
 
 class RuntimeContextService:
@@ -212,7 +214,9 @@ class RuntimeContextService:
                 "candidate_url_count": int(research_progress.get("candidate_url_count") or 0),
                 "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
                 "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
+                "coverage_score": float(research_progress.get("coverage_score") or 0.0),
                 "latest_query": str(research_progress.get("latest_query") or "").strip(),
+                "missing_signals": normalize_text_list(research_progress.get("missing_signals"))[:_OPEN_QUESTION_LIMIT],
                 "search_evidence_summaries": self._normalize_search_evidence_items(
                     research_progress.get("search_evidence_summaries")
                 ),
@@ -322,8 +326,8 @@ class RuntimeContextService:
                 continue
             deduped_questions.append(item)
         return [
-            self._truncate_text(item, max_chars=120)
-            for item in deduped_questions[:_OPEN_QUESTION_LIMIT]
+            item
+            for item in deduped_questions
             if str(item).strip()
         ]
 
@@ -336,9 +340,9 @@ class RuntimeContextService:
             "kind": str(payload.get("kind") or "").strip(),
             "title": str(payload.get("title") or "").strip(),
             "prompt": str(payload.get("prompt") or "").strip(),
-            "details": self._truncate_text(payload.get("details"), max_chars=240),
+            "details": str(payload.get("details")),
             "suggest_user_takeover": str(payload.get("suggest_user_takeover") or "none").strip(),
-            "attachments": normalize_file_path_list(payload.get("attachments"))[:_ARTIFACT_LIMIT],
+            "attachments": normalize_file_path_list(payload.get("attachments")),
         }
         if packet["kind"] == "confirm":
             packet["confirm_label"] = str(payload.get("confirm_label") or "").strip()
@@ -350,10 +354,10 @@ class RuntimeContextService:
             packet["options"] = [
                 {
                     "label": str(item.get("label") or "").strip(),
-                    "description": self._truncate_text(item.get("description"), max_chars=120),
+                    "description": item.get("description"),
                     "resume_value": item.get("resume_value"),
                 }
-                for item in list(payload.get("options") or [])[:_OPEN_QUESTION_LIMIT]
+                for item in list(payload.get("options") or [])
                 if isinstance(item, dict) and str(item.get("label") or "").strip()
             ]
         return packet
@@ -450,13 +454,13 @@ class RuntimeContextService:
             )
             if last_step.outcome is not None:
                 digest["last_step_blockers"] = [
-                    self._truncate_text(item, max_chars=120)
-                    for item in normalize_text_list(last_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
+                    item
+                    for item in normalize_text_list(last_step.outcome.blockers)
                 ]
                 # facts_learned 作为步骤级证据文本，需要把完整内容传给后续 step，而不是再次截断成摘要。
                 digest["last_step_facts"] = [
                     str(item)
-                    for item in normalize_text_list(last_step.outcome.facts_learned)[:_OPEN_QUESTION_LIMIT]
+                    for item in normalize_text_list(last_step.outcome.facts_learned)
                 ]
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             latest_fetch_summary = self._collect_fetch_page_summaries(
@@ -545,7 +549,9 @@ class RuntimeContextService:
                     "candidate_url_count": int(research_progress.get("candidate_url_count") or len(search_evidence)),
                     "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
                     "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
+                    "coverage_score": float(research_progress.get("coverage_score") or 0.0),
                     "latest_query": str(research_progress.get("latest_query") or "").strip(),
+                    "missing_signals": normalize_text_list(research_progress.get("missing_signals")),
                     "search_evidence_summaries": search_evidence,
                 }
             web_evidence = self._normalize_web_reading_evidence_items(
@@ -571,13 +577,13 @@ class RuntimeContextService:
         for item in list(raw_items or []):
             if not isinstance(item, dict):
                 continue
-            title = self._truncate_text(item.get("title"), max_chars=100)
-            url = self._truncate_text(item.get("url"), max_chars=240)
-            snippet = self._truncate_text(item.get("snippet"), max_chars=320)
+            title = item.get("title")
+            url = item.get("url")
+            snippet = item.get("snippet")
             if not url and not snippet:
                 continue
             items.append({"title": title, "url": url, "snippet": snippet})
-        return items[:5]
+        return items
 
     def _normalize_web_reading_evidence_items(self, raw_items: Any) -> List[Dict[str, Any]]:
         """归一化页面证据，保留完成合同需要的 url/summary/quality/link_count。"""
@@ -585,8 +591,8 @@ class RuntimeContextService:
         for item in list(raw_items or []):
             if not isinstance(item, dict):
                 continue
-            summary = self._truncate_text(item.get("summary"), max_chars=420)
-            url = self._truncate_text(item.get("url"), max_chars=240)
+            summary = item.get("summary")
+            url = item.get("url")
             if not summary and not url:
                 continue
             items.append(
@@ -600,7 +606,7 @@ class RuntimeContextService:
                     "quality": str(item.get("quality") or "").strip(),
                 }
             )
-        return items[:6]
+        return items
 
     @staticmethod
     def _dedupe_evidence_items(items: List[Dict[str, Any]], *, key_names: tuple[str, ...]) -> List[Dict[str, Any]]:
@@ -626,13 +632,13 @@ class RuntimeContextService:
         digest: Dict[str, Any] = {
             "goal": self._build_user_goal(state=state),
             "decisions": [
-                self._truncate_text(item, max_chars=120)
-                for item in normalize_text_list(working_memory.get("decisions"))[:_OPEN_QUESTION_LIMIT]
+                item
+                for item in normalize_text_list(working_memory.get("decisions"))
             ],
             # facts_in_session 沉淀的是可复用证据，不应在上下文服务中再次压缩。
             "facts_in_session": [
                 str(item)
-                for item in normalize_text_list(working_memory.get("facts_in_session"))[:_OPEN_QUESTION_LIMIT]
+                for item in normalize_text_list(working_memory.get("facts_in_session"))
             ],
             "user_preferences": dict(working_memory.get("user_preferences") or {}),
         }
@@ -734,10 +740,7 @@ class RuntimeContextService:
         # 稳定背景承载跨阶段共用信息，不混入模式瞬时状态。
         background: Dict[str, Any] = {}
         if policy.stable_background.include_conversation_summary:
-            background["conversation_summary"] = self._truncate_text(
-                state.get("conversation_summary"),
-                max_chars=_SUMMARY_MAX_CHARS,
-            )
+            background["conversation_summary"] = state.get("conversation_summary")
         if policy.stable_background.include_recent_messages:
             background["recent_messages"] = self._build_recent_messages(state=state)
         if policy.stable_background.include_completed_steps:
@@ -756,15 +759,9 @@ class RuntimeContextService:
             background["plan_snapshot"] = self._build_plan_snapshot(state=state)
         if policy.stable_background.include_summary_focus:
             background["summary_focus"] = {
-                "final_message": self._truncate_text(
-                    state.get("final_message"),
-                    max_chars=_FINAL_MESSAGE_MAX_CHARS,
-                ),
-                "final_answer_text": self._truncate_text(
-                    state.get("final_answer_text"),
-                    max_chars=_FINAL_MESSAGE_MAX_CHARS,
-                ),
-                "selected_artifacts": normalize_file_path_list(state.get("selected_artifacts"))[:_ARTIFACT_LIMIT],
+                "final_message": state.get("final_message"),
+                "final_answer_text": state.get("final_answer_text"),
+                "selected_artifacts": normalize_file_path_list(state.get("selected_artifacts")),
             }
         if policy.stable_background.include_topic_anchor:
             topic_anchor = self._build_topic_anchor(state=state)
@@ -778,10 +775,7 @@ class RuntimeContextService:
 
     def _build_topic_anchor(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:
         """为 direct_answer 生成显式主题锚点，避免追问时主题漂移。"""
-        conversation_summary = self._truncate_text(
-            state.get("conversation_summary"),
-            max_chars=_SUMMARY_MAX_CHARS,
-        )
+        conversation_summary = state.get("conversation_summary"),
         if conversation_summary:
             return {
                 "source": "conversation_summary",
@@ -796,20 +790,14 @@ class RuntimeContextService:
         if message_window_anchor:
             return message_window_anchor
 
-        previous_final_message = self._truncate_text(
-            state.get("previous_final_message"),
-            max_chars=_FINAL_MESSAGE_MAX_CHARS,
-        )
+        previous_final_message = state.get("previous_final_message")
         if previous_final_message:
             return {
                 "source": "previous_final_message",
                 "text": previous_final_message,
             }
 
-        final_message = self._truncate_text(
-            state.get("final_answer_text") or state.get("final_message"),
-            max_chars=_FINAL_MESSAGE_MAX_CHARS,
-        )
+        final_message = state.get("final_answer_text") or state.get("final_message"),
         if final_message:
             return {
                 "source": "final_answer_text" if state.get("final_answer_text") else "final_message",
@@ -825,18 +813,15 @@ class RuntimeContextService:
         for item in list(state.get("recent_run_briefs") or []):
             if not isinstance(item, dict):
                 continue
-            title = self._truncate_text(item.get("title"), max_chars=80)
-            goal = self._truncate_text(item.get("goal"), max_chars=120)
-            summary = self._truncate_text(
-                item.get("final_answer_summary") or item.get("final_answer_text_excerpt"),
-                max_chars=200,
-            )
+            title = item.get("title")
+            goal = item.get("goal")
+            summary = item.get("final_answer_summary") or item.get("final_answer_text_excerpt")
             parts = [value for value in (title, goal, summary) if value]
             if not parts:
                 continue
             return {
                 "source": "recent_run_brief",
-                "text": " | ".join(parts[:3]),
+                "text": " | ".join(parts),
             }
         return {}
 
@@ -948,7 +933,7 @@ class RuntimeContextService:
             if not path or path in paths:
                 continue
             paths.append(path)
-        return paths[:_ARTIFACT_LIMIT]
+        return paths
 
     async def list_workspace_artifact_paths(self) -> List[str]:
         """返回当前 workspace 已索引的产物路径。"""
@@ -968,7 +953,7 @@ class RuntimeContextService:
             field_name="recent_action_digest",
             expected_task_mode=task_mode,
         )
-        return normalize_text_list(stored_digest.get("recent_search_queries"))[:_OPEN_QUESTION_LIMIT]
+        return normalize_text_list(stored_digest.get("recent_search_queries"))
 
     def _build_current_step(
             self,
@@ -986,28 +971,28 @@ class RuntimeContextService:
 
         current_step = {
             "step_id": str(target_step.id or "").strip(),
-            "title": self._truncate_text(target_step.title, max_chars=80),
-            "description": self._truncate_text(target_step.description, max_chars=160),
+            "title": target_step.title,
+            "description": target_step.description,
             "task_mode_hint": normalize_controlled_value(getattr(target_step, "task_mode_hint", None),
                                                          StepTaskModeHint),
             "output_mode": normalize_controlled_value(getattr(target_step, "output_mode", None), StepOutputMode),
             "status": str(getattr(target_step, "status", "") or "").strip(),
         }
-        if target_step.outcome is not None:
+        if target_step.outcome is not None:  # 只有在replan时才有
             current_step["result"] = {
                 "summary": normalize_step_result_text(target_step.outcome.summary),
                 "blockers": [
-                    self._truncate_text(item, max_chars=120)
-                    for item in normalize_text_list(target_step.outcome.blockers)[:_OPEN_QUESTION_LIMIT]
+                    item
+                    for item in normalize_text_list(target_step.outcome.blockers)
                 ],
                 # 当前步骤执行结果里的证据文本必须完整暴露给后续 prompt，上层模型才能直接复用。
                 "facts_learned": [
                     str(item)
-                    for item in normalize_text_list(target_step.outcome.facts_learned)[:_OPEN_QUESTION_LIMIT]
+                    for item in normalize_text_list(target_step.outcome.facts_learned)
                 ],
                 "open_questions": [
-                    self._truncate_text(item, max_chars=120)
-                    for item in normalize_text_list(target_step.outcome.open_questions)[:_OPEN_QUESTION_LIMIT]
+                    item
+                    for item in normalize_text_list(target_step.outcome.open_questions)
                 ],
             }
         return {
@@ -1035,10 +1020,7 @@ class RuntimeContextService:
             recent_messages.append(
                 {
                     **normalized_item,
-                    "message": self._truncate_text(
-                        normalized_item.get("message"),
-                        max_chars=_MESSAGE_MAX_CHARS,
-                    ),
+                    "message": normalized_item.get("message")
                 }
             )
         return recent_messages
@@ -1046,23 +1028,23 @@ class RuntimeContextService:
     def _build_completed_steps(self, *, state: PlannerReActLangGraphState) -> List[Dict[str, Any]]:
         step_states = [dict(item) for item in list(state.get("step_states") or []) if isinstance(item, dict)]
         completed_steps = [
-                              item for item in step_states
-                              if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
-                          ][-_COMPLETED_STEP_LIMIT:]
+            item for item in step_states
+            if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value
+        ]
         sanitized_completed_steps: List[Dict[str, Any]] = []
         for item in completed_steps:
             outcome = item.get("outcome") if isinstance(item.get("outcome"), dict) else {}
             sanitized_completed_steps.append(
                 {
                     "step_id": str(item.get("step_id") or "").strip(),
-                    "title": self._truncate_text(item.get("title"), max_chars=80),
-                    "description": self._truncate_text(item.get("description"), max_chars=120),
+                    "title": item.get("title"),
+                    "description": item.get("description"),
                     "status": str(item.get("status") or "").strip(),
-                    "summary": self._truncate_text(outcome.get("summary"), max_chars=_STEP_SUMMARY_MAX_CHARS),
+                    "summary": outcome.get("summary"),
                     # 已完成步骤摘要中的 facts_learned 同样保留全文，避免下游只能看到残缺片段。
                     "facts_learned": [
                         str(item)
-                        for item in normalize_text_list(outcome.get("facts_learned"))[:_OPEN_QUESTION_LIMIT]
+                        for item in normalize_text_list(outcome.get("facts_learned"))
                     ],
                 }
             )
@@ -1075,7 +1057,7 @@ class RuntimeContextService:
             field_name: str,
     ) -> List[Dict[str, Any]]:
         briefs: List[Dict[str, Any]] = []
-        for item in list(state.get(field_name) or [])[:_BRIEF_LIMIT]:
+        for item in list(state.get(field_name) or []):
             if not isinstance(item, dict) or not str(item.get("run_id") or "").strip():
                 continue
             briefs.append(
@@ -1084,14 +1066,8 @@ class RuntimeContextService:
                     "title": str(item.get("title") or "").strip(),
                     "goal": str(item.get("goal") or "").strip(),
                     "status": str(item.get("status") or "").strip(),
-                    "final_answer_summary": self._truncate_text(
-                        item.get("final_answer_summary"),
-                        max_chars=120,
-                    ),
-                    "final_answer_text_excerpt": self._truncate_text(
-                        item.get("final_answer_text_excerpt"),
-                        max_chars=160,
-                    ),
+                    "final_answer_summary": item.get("final_answer_summary"),
+                    "final_answer_text_excerpt": item.get("final_answer_text_excerpt"),
                 }
             )
         return briefs
@@ -1122,9 +1098,9 @@ class RuntimeContextService:
             "goal": str(plan.goal or "").strip(),
             "status": str(plan.status.value if hasattr(plan.status, "value") else plan.status or "").strip(),
             "step_count": len(list(plan.steps or [])),
-            "completed_step_summaries": completed_step_summaries[:5],
-            "failed_step_summaries": failed_step_summaries[:3],
-            "pending_step_titles": pending_step_titles[:5],
+            "completed_step_summaries": completed_step_summaries,
+            "failed_step_summaries": failed_step_summaries,
+            "pending_step_titles": pending_step_titles,
         }
 
     def _collect_candidate_links(
@@ -1133,7 +1109,7 @@ class RuntimeContextService:
             workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
     ) -> List[Dict[str, str]]:
         workspace_links = list(self._get_workspace_environment_summary(workspace_snapshot).get("candidate_links") or [])
-        return [item for item in workspace_links if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
+        return [item for item in workspace_links if isinstance(item, dict)]
 
     def _collect_search_evidence_summaries(
             self,
@@ -1142,9 +1118,9 @@ class RuntimeContextService:
     ) -> List[Dict[str, str]]:
         return [
             {
-                "title": self._truncate_text(item.get("title"), max_chars=80),
-                "snippet": self._truncate_text(item.get("snippet"), max_chars=220),
-                "url": self._truncate_text(item.get("url"), max_chars=200),
+                "title": item.get("title"),
+                "snippet": item.get("snippet"),
+                "url": item.get("url"),
             }
             for item in self._collect_candidate_links(workspace_snapshot=workspace_snapshot)
             if isinstance(item, dict)
@@ -1157,7 +1133,7 @@ class RuntimeContextService:
     ) -> List[Dict[str, Any]]:
         workspace_pages = list(
             self._get_workspace_environment_summary(workspace_snapshot).get("read_page_summaries") or [])
-        return [item for item in workspace_pages if isinstance(item, dict)][: _OPEN_QUESTION_LIMIT]
+        return [item for item in workspace_pages if isinstance(item, dict)]
 
     def _collect_browser_page_summary(
             self,
@@ -1189,7 +1165,7 @@ class RuntimeContextService:
         workspace_files = normalize_file_path_list(
             self._get_workspace_environment_summary(workspace_snapshot).get("recent_changed_files")
         )
-        return workspace_files[:_ARTIFACT_LIMIT]
+        return workspace_files
 
     def _collect_file_tree_summary(
             self,
@@ -1199,7 +1175,7 @@ class RuntimeContextService:
         workspace_summaries = normalize_text_list(
             self._get_workspace_environment_summary(workspace_snapshot).get("file_tree_summary")
         )
-        return workspace_summaries[:_OPEN_QUESTION_LIMIT]
+        return workspace_summaries
 
     def _collect_available_artifacts(
             self,

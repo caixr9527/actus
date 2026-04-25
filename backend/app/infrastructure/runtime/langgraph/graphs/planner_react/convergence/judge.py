@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """P3 解耦：步骤收敛判定器。"""
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step, StepArtifactPolicy, StepOutputMode
@@ -22,7 +22,7 @@ _COMPLEX_CODING_TASK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _RAW_CONTENT_RETURN_PATTERN = re.compile(
-    r"(原样返回|原样输出|直接返回|直接输出|返回内容|输出内容|显示内容|原文返回|raw\s+content|return\s+content|print\s+content)",
+    r"((原样|原文|全文|完整)?(返回|输出|显示|展示|贴出|贴一下|贴出来)(文件|附件)?(内容|全文|原文|完整内容)?|(看下|看一下|看一眼|看看|查看|读取|读出|阅读)(这个|这个附件|这个文件|该附件|该文件)?的?(内容|全文|原文|完整内容)|(返回|输出|显示|展示)(这个|这个附件|这个文件|该附件|该文件)?的?(内容|全文|原文|完整内容)|raw\s+content|return\s+(full\s+)?content|print\s+(full\s+)?content|show\s+(raw\s+|full\s+)?content|read\s+(the\s+)?(attached\s+)?file(\s+content)?)",
     re.IGNORECASE,
 )
 
@@ -160,7 +160,7 @@ class ConvergenceJudge:
                 if isinstance(files, list):
                     normalized_files = [str(item).strip() for item in files if str(item).strip()]
                     if normalized_files:
-                        context["listed_files"] = normalized_files[:12]
+                        context["listed_files"] = normalized_files
         elif normalized_function_name == "read_file":
             if isinstance(tool_result_data, dict):
                 filepath = str(
@@ -188,7 +188,7 @@ class ConvergenceJudge:
                 written_files = list(context.get("written_files") or [])
                 if filepath not in written_files:
                     written_files.append(filepath)
-                context["written_files"] = written_files[:8]
+                context["written_files"] = written_files
             content = str(function_args.get("content") or "").strip()
             if content:
                 context["last_written_content_length"] = len(content)
@@ -227,7 +227,8 @@ class ConvergenceJudge:
         """文件事实收敛只基于执行事实，不依赖任何已废弃的步骤交付角色语义。"""
         output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
         artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
-        return output_mode in {"", StepOutputMode.NONE.value} and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+        return output_mode in {"",
+                               StepOutputMode.NONE.value} and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
 
     @staticmethod
     def _is_simple_coding_file_task(step: Step) -> bool:
@@ -264,9 +265,9 @@ class ConvergenceJudge:
         if last_dir_path:
             lines.append(f"当前目录：{last_dir_path}")
         if listed_files:
-            lines.append("目录文件：" + "、".join(listed_files[:8]))
+            lines.append("目录文件：" + "、".join(listed_files))
         if written_files:
-            lines.append("已写入文件：" + "、".join(written_files[:5]))
+            lines.append("已写入文件：" + "、".join(written_files))
         if last_checked_file:
             lines.append(f"已校验文件存在：{last_checked_file}")
         if last_read_file:
@@ -276,7 +277,7 @@ class ConvergenceJudge:
         if last_written_content_length > 0:
             lines.append(f"写入内容长度：{last_written_content_length} 字符")
         if called_functions:
-            lines.append("已执行工具：" + "、".join(called_functions[:6]))
+            lines.append("已执行工具：" + "、".join(called_functions))
         return "\n".join(lines)
 
     @staticmethod

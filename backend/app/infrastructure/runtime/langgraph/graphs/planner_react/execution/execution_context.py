@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """P3 重构：执行循环上下文构建与步骤语义判断。"""
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from app.domain.models import (
     Step,
     StepArtifactPolicy,
-    StepOutputMode,
     StepTaskModeHint,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import (
@@ -26,6 +26,12 @@ from app.domain.services.workspace_runtime.policies import (
     build_task_mode_disallowed_names as _build_task_mode_disallowed_names,
     classify_file_access_intent as _classify_file_access_intent,
 )
+
+_GENERAL_SUMMARY_ONLY_PATTERN = re.compile(
+    r"(整理|归纳|提炼|梳理|总结|汇总|输出.{0,8}(要点|草案|方案|总结)|生成.{0,8}(草案|方案|要点|总结)|基于已有|已有搜索摘要|已有摘要|不依赖新的网络请求|仅基于已有)",
+    re.IGNORECASE,
+)
+
 
 @dataclass(slots=True)
 class ExecutionContext:
@@ -72,7 +78,6 @@ def build_execution_context(
         available_function_names: Set[str],
         user_message_text: str = "",
         read_only_intent_text: str = "",
-        file_output_intent_text: str = "",
 ) -> ExecutionContext:
     normalized_user_content = list(user_content or [])
     if len(normalized_user_content) == 0:
@@ -99,6 +104,12 @@ def build_execution_context(
     ):
         read_only_file_blocked_function_names.update({"write_file", "replace_in_file", "shell_execute"})
         blocked_function_names.update(read_only_file_blocked_function_names)
+
+    if task_mode == "general" and _step_is_general_summary_only(
+            step=step,
+            user_message_text=user_message_text,
+    ):
+        blocked_function_names.update({"search_web", "fetch_page"})
 
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
@@ -278,3 +289,33 @@ def _step_or_user_content_has_url(
         ]
     )
     return bool(_analyze_text_intent(candidate_text)["has_url"])
+
+
+def _step_is_general_summary_only(
+        *,
+        step: Step,
+        user_message_text: str,
+) -> bool:
+    """识别“应基于已有证据直接整理”的 general 步骤。
+
+    这类步骤的正确动作是消费已有 research / web_reading 证据直接成稿，
+    不应继续调用 search_web / fetch_page 把步骤漂回搜索链路。
+    """
+    candidate_text = "\n".join(
+        [
+            _build_step_candidate_text(step),
+            str(user_message_text or "").strip(),
+        ]
+    ).strip()
+    if not candidate_text:
+        return False
+    signals = _analyze_text_intent(candidate_text)
+    if not bool(signals.get("has_synthesis_signal")):
+        return False
+    if not bool(_GENERAL_SUMMARY_ONLY_PATTERN.search(candidate_text)):
+        return False
+    if bool(signals.get("has_url")):
+        return False
+    if bool(signals.get("has_web_reading_signal")) and not bool(signals.get("has_search_signal")):
+        return False
+    return True
