@@ -233,6 +233,11 @@ export function useSessionDetail(
     if (nextRuntime.streaming !== streamingRef.current) {
       setStreamingState(nextRuntime.streaming)
     }
+    if (nextRuntime.status === 'waiting') {
+      // human_wait 是后端主动暂停等待用户输入，不属于实时流异常。
+      setError(null)
+      stopEmptyStream()
+    }
     if (nextRuntime.status !== sessionStatusRef.current) {
       sessionStatusRef.current = nextRuntime.status
       setSession((prev) => {
@@ -240,7 +245,7 @@ export function useSessionDetail(
         return { ...prev, status: nextRuntime.status }
       })
     }
-  }, [setStreamingState])
+  }, [setStreamingState, stopEmptyStream])
 
   const plannerTextStream = getLatestActiveStreamByChannel(displayedTextStreams, 'planner_message')
   const finalTextStream = getLatestActiveStreamByChannel(displayedTextStreams, 'final_message')

@@ -10,44 +10,18 @@ import { formatFileSize } from '@/lib/utils'
 import { toast } from 'sonner'
 import type { AttachmentFile } from '@/lib/session-events'
 import { useI18n } from '@/lib/i18n'
+import { MarkdownContent } from '@/components/markdown-content'
+import {
+  formatJsonPreview,
+  parseDelimitedPreview,
+  resolveFilePreviewType,
+} from '@/lib/file-preview'
 
 export interface FilePreviewPanelProps {
   /** 要预览的文件信息 */
   file: AttachmentFile | null
   /** 关闭回调 */
   onClose: () => void
-}
-
-/**
- * 判断文件类型是否支持预览
- * - 文本类：txt, md, json, xml, csv, log, js, ts, tsx, jsx, py, java, go, rs, etc.
- * - 图片类：jpg, jpeg, png, gif, svg, webp, bmp
- */
-function isSupportedFileType(extension: string): { type: 'text' | 'image' | 'unsupported' } {
-  const ext = extension.toLowerCase().replace(/^\./, '')
-  
-  // 文本类文件
-  const textExtensions = [
-    'txt', 'md', 'markdown', 'json', 'xml', 'html', 'htm', 'css', 'scss', 'sass', 'less',
-    'js', 'jsx', 'ts', 'tsx', 'vue', 'py', 'java', 'go', 'rs', 'c', 'cpp', 'h', 'hpp',
-    'cs', 'php', 'rb', 'swift', 'kt', 'scala', 'sh', 'bash', 'zsh', 'yml', 'yaml',
-    'toml', 'ini', 'conf', 'config', 'log', 'csv', 'sql', 'r', 'dart', 'lua', 'perl',
-  ]
-  
-  // 图片类文件
-  const imageExtensions = [
-    'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico',
-  ]
-  
-  if (textExtensions.includes(ext)) {
-    return { type: 'text' }
-  }
-  
-  if (imageExtensions.includes(ext)) {
-    return { type: 'image' }
-  }
-  
-  return { type: 'unsupported' }
 }
 
 export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
@@ -60,7 +34,9 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   const previewAbortControllerRef = useRef<AbortController | null>(null)
   const previewObjectUrlRef = useRef<string | null>(null)
 
-  const fileType = file ? isSupportedFileType(file.extension) : { type: 'unsupported' as const }
+  const fileType = file
+    ? resolveFilePreviewType(file.extension, (file as { content_type?: string | null }).content_type)
+    : { kind: 'unsupported' as const, binary: true }
 
   const cleanupPreviewObjectUrl = useCallback(() => {
     if (!previewObjectUrlRef.current) return
@@ -69,11 +45,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   }, [])
 
   // 加载文件内容
-  const loadFileContent = useCallback(async (fileId: string, type: 'text' | 'image' | 'unsupported') => {
-    if (type === 'unsupported') {
-      return
-    }
-
+  const loadFileContent = useCallback(async (fileId: string, binary: boolean, unsupported: boolean) => {
     previewRequestIdRef.current += 1
     const requestId = previewRequestIdRef.current
     previewAbortControllerRef.current?.abort()
@@ -86,9 +58,14 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
     cleanupPreviewObjectUrl()
     setImageUrl(null)
 
+    if (unsupported) {
+      setLoading(false)
+      return
+    }
+
     try {
-      if (type === 'image') {
-        // 图片类型：生成预览 URL
+      if (binary) {
+        // 浏览器原生可预览的二进制格式统一走 object URL。
         const blob = await fileApi.downloadFile(fileId, { signal: controller.signal })
         if (controller.signal.aborted || requestId !== previewRequestIdRef.current) return
         const url = URL.createObjectURL(blob)
@@ -138,9 +115,9 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   // 当文件改变时加载内容
   useEffect(() => {
     if (file && file.id) {
-      loadFileContent(file.id, fileType.type)
+      loadFileContent(file.id, fileType.binary, fileType.kind === 'unsupported')
     }
-  }, [file, fileType.type, loadFileContent])
+  }, [file, fileType.binary, fileType.kind, loadFileContent])
 
   // 清理函数：关闭时释放资源
   useEffect(() => {
@@ -207,7 +184,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
           </div>
         )}
 
-        {!loading && !error && fileType.type === 'unsupported' && (
+        {!loading && !error && fileType.kind === 'unsupported' && (
           <div className="flex flex-col items-center justify-center h-full px-6 gap-4">
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-gray-100 text-gray-400">
               <FileText size={32} />
@@ -228,7 +205,7 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
           </div>
         )}
 
-        {!loading && !error && fileType.type === 'image' && imageUrl && (
+        {!loading && !error && fileType.kind === 'image' && imageUrl && (
           <ScrollArea className="h-full">
             <div className="p-4">
               <Image
@@ -243,7 +220,69 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
           </ScrollArea>
         )}
 
-        {!loading && !error && fileType.type === 'text' && content !== null && (
+        {!loading && !error && fileType.kind === 'pdf' && imageUrl && (
+          <iframe
+            src={imageUrl}
+            title={file.filename}
+            className="h-full w-full border-0 bg-white"
+          />
+        )}
+
+        {!loading && !error && fileType.kind === 'audio' && imageUrl && (
+          <div className="flex h-full items-center justify-center p-6">
+            <audio controls src={imageUrl} className="w-full max-w-xl">
+              {t('filePreview.unsupportedHint')}
+            </audio>
+          </div>
+        )}
+
+        {!loading && !error && fileType.kind === 'video' && imageUrl && (
+          <div className="flex h-full items-center justify-center bg-black p-4">
+            <video controls src={imageUrl} className="max-h-full max-w-full rounded-lg">
+              {t('filePreview.unsupportedHint')}
+            </video>
+          </div>
+        )}
+
+        {!loading && !error && fileType.kind === 'markdown' && content !== null && (
+          <ScrollArea className="h-full">
+            <div className="p-4">
+              <MarkdownContent content={content} className="text-gray-700" />
+            </div>
+          </ScrollArea>
+        )}
+
+        {!loading && !error && fileType.kind === 'json' && content !== null && (
+          <ScrollArea className="h-full">
+            <pre className="p-4 text-xs font-mono whitespace-pre-wrap break-words text-gray-700">
+              {formatJsonPreview(content)}
+            </pre>
+          </ScrollArea>
+        )}
+
+        {!loading && !error && fileType.kind === 'csv' && content !== null && (
+          <ScrollArea className="h-full">
+            <div className="p-4">
+              <div className="overflow-auto rounded-lg border border-gray-200">
+                <table className="min-w-full border-collapse text-xs">
+                  <tbody>
+                    {parseDelimitedPreview(content, file.extension.toLowerCase().replace(/^\./, '') === 'tsv' ? '\t' : ',').map((row, rowIndex) => (
+                      <tr key={rowIndex} className={rowIndex === 0 ? 'bg-gray-50 font-medium text-gray-800' : 'text-gray-700'}>
+                        {row.map((cell, cellIndex) => (
+                          <td key={cellIndex} className="max-w-[240px] border border-gray-200 px-2 py-1 align-top break-words">
+                            {cell}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </ScrollArea>
+        )}
+
+        {!loading && !error && fileType.kind === 'text' && content !== null && (
           <ScrollArea className="h-full">
             <pre className="p-4 text-xs font-mono whitespace-pre-wrap break-words text-gray-700">
               {content}

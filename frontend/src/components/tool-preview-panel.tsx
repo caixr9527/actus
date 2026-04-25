@@ -309,66 +309,13 @@ function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const query = getArg(tool.args, "query", "q")
 
   if (isFetchPage) {
-    const url = content.url
-    const finalUrl = typeof content.final_url === "string" ? content.final_url : ""
-    const title = typeof content.title === "string" ? content.title : ""
-    const excerpt = typeof content.excerpt === "string" ? content.excerpt : ""
     const pageContent = typeof content.content === "string" ? content.content : ""
-    const contentType = typeof content.content_type === "string" ? content.content_type : ""
-    const statusCode = typeof content.status_code === "number" ? String(content.status_code) : ""
-    const contentLength = typeof content.content_length === "number" ? String(content.content_length) : ""
-    const truncated = content.truncated === true
 
     return (
-      <div className="flex flex-col gap-3 p-4 h-full">
-        <div className="flex flex-col gap-2 rounded-lg border bg-gray-50 p-3 text-sm text-gray-700">
-          <div>
-            <span className="text-gray-500">{t("toolPreview.fetchPage.url")}</span>
-            <span className="break-all">{url}</span>
-          </div>
-          {finalUrl && finalUrl !== url && (
-            <div>
-              <span className="text-gray-500">{t("toolPreview.fetchPage.finalUrl")}</span>
-              <span className="break-all">{finalUrl}</span>
-            </div>
-          )}
-          {(statusCode || contentType || contentLength) && (
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
-              {statusCode && (
-                <span>{t("toolPreview.fetchPage.statusCode", { statusCode })}</span>
-              )}
-              {contentType && (
-                <span>{t("toolPreview.fetchPage.contentType", { contentType })}</span>
-              )}
-              {contentLength && (
-                <span>{t("toolPreview.fetchPage.contentLength", { contentLength })}</span>
-              )}
-              {truncated && (
-                <span>{t("toolPreview.fetchPage.truncated")}</span>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col min-h-0">
-          {title && (
-            <div className="px-4 py-3 border-b border-gray-700 bg-[#2d2d2d] text-sm font-medium text-white">
-              {title}
-            </div>
-          )}
-          <ScrollArea className="flex-1">
-            <div className="p-4 flex flex-col gap-4">
-              {excerpt && (
-                <div className="rounded-lg border border-gray-700/80 bg-white/5 p-3">
-                  <MarkdownContent
-                    content={excerpt}
-                    format="auto"
-                    tone="inverse"
-                    compact
-                    preserveLineBreaks
-                  />
-                </div>
-              )}
+      <div className="h-full min-h-0 p-4">
+        <div className="h-full min-h-0 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e]">
+          <ScrollArea className="h-full">
+            <div className="p-4">
               <MarkdownContent
                 content={pageContent || t("toolPreview.fetchPage.waitingContent")}
                 format="auto"
@@ -430,14 +377,14 @@ function FileToolPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const filepath = getArg(tool.args, "filepath", "path", "pathname")
 
   return (
-    <div className="flex flex-col gap-3 p-4 h-full">
-      <div className="flex-1 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col min-h-0">
+    <div className="h-full min-h-0 p-4">
+      <div className="h-full min-h-0 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col">
         {filepath && (
           <div className="text-center text-xs text-gray-400 py-1.5 bg-[#2d2d2d] border-b border-gray-700 flex-shrink-0 truncate px-4">
             {filepath}
           </div>
         )}
-        <ScrollArea className="flex-1">
+        <ScrollArea className="h-full min-h-0">
           <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
             {fileContent ?? t("toolPreview.fileWaitingContent")}
           </pre>

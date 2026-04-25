@@ -24,6 +24,9 @@ export function shouldStartEmptySessionStream(
   skipEmptyStream: boolean,
 ): boolean {
   if (!status) return false
+  // waiting 是 human_wait 的稳定暂停态，不需要空 SSE 继续保活；
+  // 否则服务端正常断开后会被误判为实时连接中断。
+  if (status === 'waiting') return false
   if (status === 'completed' || status === 'failed' || status === 'cancelled') return false
   if (isSendingMessage) return false
   if (skipEmptyStream) return false
