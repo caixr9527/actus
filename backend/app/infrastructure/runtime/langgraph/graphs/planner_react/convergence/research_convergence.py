@@ -6,22 +6,13 @@
 它不负责约束决策、不写反馈层，也不改变 planner/replan 的业务语义。
 """
 
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import ConvergenceDecision
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import (
     ExecutionState,
 )
-
-
-@dataclass(slots=True)
-class ResearchConvergenceResult:
-    """研究链路收敛结果。"""
-
-    should_break: bool
-    payload: Optional[Dict[str, Any]] = None
-    reason_code: str = ""
 
 
 class ResearchConvergenceJudge:
@@ -34,7 +25,7 @@ class ResearchConvergenceJudge:
             task_mode: str,
             recent_function_name: str,
             execution_state: ExecutionState,
-    ) -> ResearchConvergenceResult:
+    ) -> ConvergenceDecision:
         """每轮 search/fetch 后执行的收敛判定。
 
         业务语义：
@@ -43,10 +34,10 @@ class ResearchConvergenceJudge:
         - web_reading 不能使用该判定器直接按 snippet 收敛，必须交给页面阅读证据链路处理。
         """
         if str(task_mode or "").strip().lower() != "research":
-            return ResearchConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         normalized_function_name = str(recent_function_name or "").strip().lower()
         if normalized_function_name not in {"search_web", "fetch_page"}:
-            return ResearchConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
 
         if bool(execution_state.research_snippet_sufficient):
             reason_code = (
@@ -54,7 +45,7 @@ class ResearchConvergenceJudge:
                 if normalized_function_name == "fetch_page"
                 else "research_snippet_evidence_ready"
             )
-            return ResearchConvergenceResult(
+            return ConvergenceDecision(
                 should_break=True,
                 payload=self._build_snippet_payload(
                     step=step,
@@ -70,7 +61,7 @@ class ResearchConvergenceJudge:
                 and len(list(execution_state.research_search_evidence_items or [])) > 0
         ):
             reason_code = "research_fetch_unavailable_snippet_fallback"
-            return ResearchConvergenceResult(
+            return ConvergenceDecision(
                 should_break=True,
                 payload=self._build_snippet_payload(
                     step=step,
@@ -80,7 +71,7 @@ class ResearchConvergenceJudge:
                 reason_code=reason_code,
             )
 
-        return ResearchConvergenceResult(should_break=False)
+        return ConvergenceDecision(should_break=False)
 
     @staticmethod
     def build_max_iteration_convergence_payload(

@@ -10,24 +10,15 @@
 """
 
 import re
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import ConvergenceDecision
 
 _GENERAL_FILE_OBSERVATION_PATTERN = re.compile(
     r"(目录|文件列表|文件名|当前目录|目录状态|列出文件|查看目录|list files|directory|folder|current directory|file names)",
     re.IGNORECASE,
 )
-
-
-@dataclass(slots=True)
-class GeneralConvergenceResult:
-    """general 步骤收敛结果。"""
-
-    should_break: bool
-    payload: Optional[Dict[str, Any]] = None
-    reason_code: str = ""
 
 
 class GeneralConvergenceJudge:
@@ -40,18 +31,18 @@ class GeneralConvergenceJudge:
             task_mode: str,
             runtime_recent_action: Optional[Dict[str, Any]],
             iteration: int,
-    ) -> GeneralConvergenceResult:
+    ) -> ConvergenceDecision:
         """每轮工具调用后判断 general 步骤是否已具备无工具完成条件。"""
         _ = iteration
         if str(task_mode or "").strip().lower() != "general":
-            return GeneralConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         if not self._is_file_observation_step(step):
-            return GeneralConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
 
         file_evidence_lines = self._collect_file_evidence_lines(runtime_recent_action)
         if len(file_evidence_lines) == 0:
-            return GeneralConvergenceResult(should_break=False)
-        return GeneralConvergenceResult(
+            return ConvergenceDecision(should_break=False)
+        return ConvergenceDecision(
             should_break=True,
             payload=self._build_payload(
                 step=step,

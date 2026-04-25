@@ -9,23 +9,14 @@
 """
 
 import re
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import ConvergenceDecision
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import ExecutionState
 from app.infrastructure.runtime.langgraph.graphs.planner_react.research.research_diagnosis import (
     get_page_reading_contract_state,
 )
-
-
-@dataclass(slots=True)
-class WebReadingConvergenceResult:
-    """网页阅读收敛结果。"""
-
-    should_break: bool
-    payload: Optional[Dict[str, Any]] = None
-    reason_code: str = ""
 
 
 class WebReadingConvergenceJudge:
@@ -110,9 +101,9 @@ class WebReadingConvergenceJudge:
             task_mode: str,
             recent_function_name: str,
             execution_state: ExecutionState,
-    ) -> WebReadingConvergenceResult:
+    ) -> ConvergenceDecision:
         if str(task_mode or "").strip().lower() != "web_reading":
-            return WebReadingConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         normalized_function_name = str(recent_function_name or "").strip().lower()
         if normalized_function_name not in {
             "fetch_page",
@@ -120,7 +111,7 @@ class WebReadingConvergenceJudge:
             "browser_extract_main_content",
             "browser_find_actionable_elements",
         }:
-            return WebReadingConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
 
         contract_state = self.get_completion_contract_state(
             runtime_recent_action=execution_state.runtime_recent_action,
@@ -142,7 +133,7 @@ class WebReadingConvergenceJudge:
                 if bool(execution_state.explicit_url_degraded)
                 else "web_reading_page_evidence_ready"
             )
-            return WebReadingConvergenceResult(
+            return ConvergenceDecision(
                 should_break=True,
                 payload=self._build_payload(
                     step=step,
@@ -155,7 +146,7 @@ class WebReadingConvergenceJudge:
 
         if bool(execution_state.explicit_url_degraded):
             reason_code = "explicit_url_fetch_degraded"
-            return WebReadingConvergenceResult(
+            return ConvergenceDecision(
                 should_break=True,
                 payload=self._build_degraded_payload(
                     step=step,
@@ -168,9 +159,9 @@ class WebReadingConvergenceJudge:
         # 非显式 URL 的普通 web_reading，只有合同满足时才能成功收敛。
         # 如果当前只是证据不足，不允许在 convergence 层误判成“页面证据满足”。
         if not bool(explicit_url_state):
-            return WebReadingConvergenceResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
 
-        return WebReadingConvergenceResult(should_break=False)
+        return ConvergenceDecision(should_break=False)
 
     @staticmethod
     def build_max_iteration_convergence_payload(

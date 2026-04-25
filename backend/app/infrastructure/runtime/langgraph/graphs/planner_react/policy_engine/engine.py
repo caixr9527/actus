@@ -28,7 +28,6 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.finaliz
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.finalizer import (
     finalize_no_tool_call,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.plugins.convergence_plugin import run_convergence_plugin
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.plugins.effects_plugin import run_effects_plugin
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.plugins.effects_plugin import run_preinvoke_effects_plugin
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.plugins.effects_plugin import run_rewrite_effects_plugin
@@ -61,21 +60,13 @@ class PolicyEvaluationResult:
     final_tool_name: str = ""
 
 
-@dataclass(slots=True)
-class PolicyConvergenceResult:
-    """循环收敛判定结果。"""
-
-    should_break: bool
-    payload: Optional[Dict[str, Any]] = None
-
-
 class ToolPolicyEngine:
-    """封装 constraint_engine/executor/effects/loop_break 的统一策略入口。
+    """封装 constraint_engine/executor/effects 的统一策略入口。
 
     实现语义：
     - 先通过 `ConstraintEngine` 决定当前轮最终应该执行哪个函数；
     - 再由 executor 真正调用工具；
-    - 最后统一进入 effects / convergence，更新执行态并判断是否收敛。
+    - 最后统一进入 effects，更新执行态；收敛判断由 convergence 层独立编排。
     """
 
     def __init__(self, *, logger: logging.Logger) -> None:
@@ -263,25 +254,6 @@ class ToolPolicyEngine:
             final_matched_tool=resolved_matched_tool,
             final_tool_name=str(getattr(resolved_matched_tool, "name", "") or ""),
         )
-
-    def evaluate_iteration_convergence(
-            self,
-            *,
-            loop_break_reason: str,
-            step: Step,
-            tool_result: ToolResult,
-            execution_state: ExecutionState,
-    ) -> PolicyConvergenceResult:
-        """统一处理 loop_break 与失败上限收敛。"""
-        loop_break_payload = run_convergence_plugin(
-            loop_break_reason=loop_break_reason,
-            step=step,
-            tool_result=tool_result,
-            execution_state=execution_state,
-        )
-        if loop_break_payload is None:
-            return PolicyConvergenceResult(should_break=False, payload=None)
-        return PolicyConvergenceResult(should_break=True, payload=loop_break_payload)
 
     def finalize_no_tool_call(
             self,

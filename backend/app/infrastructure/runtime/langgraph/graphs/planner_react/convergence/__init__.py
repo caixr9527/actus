@@ -2,18 +2,22 @@
 # -*- coding: utf-8 -*-
 """P3 解耦：收敛判定模块。"""
 
-from .judge import ConvergenceJudge, ConvergenceEvaluationResult
-from .general_convergence import GeneralConvergenceJudge, GeneralConvergenceResult
-from .research_convergence import ResearchConvergenceJudge, ResearchConvergenceResult
-from .web_reading_convergence import WebReadingConvergenceJudge, WebReadingConvergenceResult
+from .contracts import (
+    ConvergenceDecision,
+    IterationConvergenceContext,
+    MaxIterationConvergenceContext,
+)
+from .judge import ConvergenceJudge
+from .general_convergence import GeneralConvergenceJudge
+from .research_convergence import ResearchConvergenceJudge
+from .web_reading_convergence import WebReadingConvergenceJudge
 
 __all__ = [
+    "ConvergenceDecision",
+    "IterationConvergenceContext",
+    "MaxIterationConvergenceContext",
     "ConvergenceJudge",
-    "ConvergenceEvaluationResult",
     "GeneralConvergenceJudge",
-    "GeneralConvergenceResult",
     "ResearchConvergenceJudge",
-    "ResearchConvergenceResult",
     "WebReadingConvergenceJudge",
-    "WebReadingConvergenceResult",
 ]

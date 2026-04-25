@@ -53,6 +53,11 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
     GeneralConvergenceJudge,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import (
+    IterationConvergenceContext,
+    MaxIterationConvergenceContext,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.engine import ConvergenceEngine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
     ConvergenceJudge,
 )
@@ -2132,6 +2137,117 @@ def test_convergence_judge_should_not_break_complex_coding_after_single_write() 
     )
 
     assert result.should_break is False
+
+
+def test_convergence_engine_should_keep_loop_break_before_evidence_rules() -> None:
+    engine = ConvergenceEngine(logger=logging.getLogger("test.convergence"))
+    state = ExecutionState(
+        runtime_recent_action={
+            "last_successful_tool_call": {
+                "function_name": "list_files",
+                "data": {
+                    "dir_path": "/home/ubuntu/workspace",
+                    "files": [{"name": "hello.txt"}],
+                },
+            }
+        }
+    )
+
+    decision = engine.evaluate_after_iteration(
+        context=IterationConvergenceContext(
+            step=Step(
+                id="general-file",
+                description="获取当前目录状态并列出所有文件名称",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="default",
+            ),
+            task_mode="general",
+            iteration=1,
+            recent_function_name="list_files",
+            function_args={"dir_path": "/home/ubuntu/workspace"},
+            tool_result=ToolResult(success=True, data={"files": [{"name": "hello.txt"}]}),
+            loop_break_reason="repeat_tool_call",
+            execution_state=state,
+            step_file_context={},
+        )
+    )
+
+    assert decision.should_break is True
+    assert decision.rule_name == "loop_break"
+    assert decision.payload is not None
+    assert decision.reason_code == "repeat_tool_call"
+
+
+def test_convergence_engine_should_route_iteration_to_file_fact_rule() -> None:
+    engine = ConvergenceEngine(logger=logging.getLogger("test.convergence"))
+
+    decision = engine.evaluate_after_iteration(
+        context=IterationConvergenceContext(
+            step=Step(
+                id="file-read",
+                description="读取 /home/ubuntu/workspace/hello.txt 的内容并原样返回",
+                task_mode_hint="file_processing",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            ),
+            task_mode="file_processing",
+            iteration=1,
+            recent_function_name="read_file",
+            function_args={"filepath": "/home/ubuntu/workspace/hello.txt"},
+            tool_result=ToolResult(
+                success=True,
+                data={
+                    "filepath": "/home/ubuntu/workspace/hello.txt",
+                    "content": "P3_WORKSPACE_OK",
+                },
+            ),
+            loop_break_reason="",
+            execution_state=ExecutionState(runtime_recent_action={}),
+            step_file_context={},
+        )
+    )
+
+    assert decision.should_break is True
+    assert decision.rule_name == "file_fact"
+    assert decision.reason_code == "file_processing_raw_content_ready"
+    assert decision.payload is not None
+    assert decision.payload["result"] == "P3_WORKSPACE_OK"
+
+
+def test_convergence_engine_should_reuse_rules_for_max_iteration() -> None:
+    engine = ConvergenceEngine(logger=logging.getLogger("test.convergence"))
+
+    decision = engine.evaluate_max_iteration(
+        context=MaxIterationConvergenceContext(
+            step=Step(
+                id="general-file",
+                description="获取当前目录状态并列出所有文件名称",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="default",
+            ),
+            task_mode="general",
+            requested_max_tool_iterations=3,
+            iteration_count=3,
+            runtime_recent_action={
+                "last_successful_tool_call": {
+                    "function_name": "list_files",
+                    "data": {
+                        "dir_path": "/home/ubuntu/workspace",
+                        "files": [{"name": "hello.txt"}],
+                    },
+                }
+            },
+        ),
+        started_at=time.perf_counter(),
+    )
+
+    assert decision.should_break is True
+    assert decision.rule_name == "general_file_observation"
+    assert decision.reason_code == "general_file_observation_ready"
+    assert decision.payload is not None
+    assert any("hello.txt" in str(item) for item in list(decision.payload["facts_learned"]))
 
 
 def test_research_convergence_should_break_when_snippet_sufficient() -> None:

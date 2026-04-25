@@ -3,11 +3,11 @@
 """P3 解耦：步骤收敛判定器。"""
 
 import re
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.domain.models import Step, StepArtifactPolicy, StepOutputMode
 from app.domain.services.runtime.normalizers import normalize_controlled_value
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import ConvergenceDecision
 
 _SIMPLE_FILE_ACTION_PATTERN = re.compile(
     r"(创建|写入|读取|读出|列出|保存|生成文件|create|write|read|list|save)",
@@ -27,15 +27,6 @@ _RAW_CONTENT_RETURN_PATTERN = re.compile(
 )
 
 
-@dataclass(slots=True)
-class ConvergenceEvaluationResult:
-    """步骤收敛判定结果。"""
-
-    should_break: bool
-    payload: Optional[Dict[str, Any]] = None
-    reason_code: str = ""
-
-
 class ConvergenceJudge:
     """基于关键事实的早停判定，避免已达成目标仍空转。"""
 
@@ -50,14 +41,14 @@ class ConvergenceJudge:
             tool_result_success: bool,
             step_file_context: Dict[str, Any],
             runtime_recent_action: Optional[Dict[str, Any]],
-    ) -> ConvergenceEvaluationResult:
+    ) -> ConvergenceDecision:
         """在文件处理任务中判定“已满足事实，直接收敛成功”。"""
         if task_mode not in {"file_processing", "coding"}:
-            return ConvergenceEvaluationResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         if not tool_result_success:
-            return ConvergenceEvaluationResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         if task_mode == "coding" and not self._is_simple_coding_file_task(step):
-            return ConvergenceEvaluationResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
 
         self._accumulate_file_context(
             context=step_file_context,
@@ -67,9 +58,9 @@ class ConvergenceJudge:
         )
 
         if not self._step_allows_file_fact_convergence(step):
-            return ConvergenceEvaluationResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         if not self._has_minimal_file_progress(step_file_context):
-            return ConvergenceEvaluationResult(should_break=False)
+            return ConvergenceDecision(should_break=False)
         raw_content_payload = self._build_raw_file_content_payload_if_applicable(
             step=step,
             recent_function_name=recent_function_name,
@@ -77,7 +68,7 @@ class ConvergenceJudge:
             runtime_recent_action=runtime_recent_action,
         )
         if raw_content_payload is not None:
-            return ConvergenceEvaluationResult(
+            return ConvergenceDecision(
                 should_break=True,
                 payload=raw_content_payload,
                 reason_code="file_processing_raw_content_ready",
@@ -95,7 +86,7 @@ class ConvergenceJudge:
             "next_hint": "",
             "runtime_recent_action": runtime_recent_action or {},
         }
-        return ConvergenceEvaluationResult(
+        return ConvergenceDecision(
             should_break=True,
             payload=payload,
             reason_code="file_processing_facts_ready",

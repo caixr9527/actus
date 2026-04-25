@@ -20,12 +20,12 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence import (
-    ConvergenceJudge,
-    GeneralConvergenceJudge,
-    ResearchConvergenceJudge,
-    WebReadingConvergenceJudge,
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence import WebReadingConvergenceJudge
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import (
+    MaxIterationConvergenceContext,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.engine import ConvergenceEngine
+
 
 @dataclass(slots=True)
 class NoToolCallFinalizationResult:
@@ -201,79 +201,19 @@ def finalize_max_iterations(
         attachment_count=len(normalize_attachments(parsed.get("attachments"))),
         elapsed_ms=elapsed_ms(started_at),
     )
-    # P3 解耦：先尝试按关键事实收敛，避免 file_processing 在事实已满足时误判失败。
-    research_converged_payload = ResearchConvergenceJudge.build_max_iteration_convergence_payload(
-        step=step,
-        task_mode=task_mode,
-        runtime_recent_action=runtime_recent_action,
-    )
-    if research_converged_payload is not None:
-        log_runtime(
-            logger,
-            logging.INFO,
-            "达到最大工具轮次但研究摘要证据可用，按阶段性结果收敛",
-            step_id=str(step.id or ""),
+    convergence_decision = ConvergenceEngine(logger=logger).evaluate_max_iteration(
+        context=MaxIterationConvergenceContext(
+            step=step,
             task_mode=task_mode,
             requested_max_tool_iterations=requested_max_tool_iterations,
             iteration_count=iteration_count,
-            elapsed_ms=elapsed_ms(started_at),
-        )
-        return research_converged_payload
-
-    web_reading_converged_payload = WebReadingConvergenceJudge.build_max_iteration_convergence_payload(
-        step=step,
-        task_mode=task_mode,
-        runtime_recent_action=runtime_recent_action,
+            runtime_recent_action=runtime_recent_action,
+            step_file_context=dict(step_file_context or {}),
+        ),
+        started_at=started_at,
     )
-    if web_reading_converged_payload is not None:
-        log_runtime(
-            logger,
-            logging.INFO,
-            "达到最大工具轮次但网页阅读证据可用，按阶段性结果收敛",
-            step_id=str(step.id or ""),
-            task_mode=task_mode,
-            requested_max_tool_iterations=requested_max_tool_iterations,
-            iteration_count=iteration_count,
-            elapsed_ms=elapsed_ms(started_at),
-        )
-        return web_reading_converged_payload
-
-    general_converged_payload = GeneralConvergenceJudge.build_max_iteration_convergence_payload(
-        step=step,
-        task_mode=task_mode,
-        runtime_recent_action=runtime_recent_action,
-    )
-    if general_converged_payload is not None:
-        log_runtime(
-            logger,
-            logging.INFO,
-            "达到最大工具轮次但 general 文件观察事实可用，按成功收敛",
-            step_id=str(step.id or ""),
-            task_mode=task_mode,
-            requested_max_tool_iterations=requested_max_tool_iterations,
-            iteration_count=iteration_count,
-            elapsed_ms=elapsed_ms(started_at),
-        )
-        return general_converged_payload
-
-    converged_payload = ConvergenceJudge.build_max_iteration_convergence_payload(
-        step=step,
-        task_mode=task_mode,
-        runtime_recent_action=runtime_recent_action,
-        step_file_context=dict(step_file_context or {}),
-    )
-    if converged_payload is not None:
-        log_runtime(
-            logger,
-            logging.INFO,
-            "达到最大工具轮次但关键事实已满足，按成功收敛",
-            step_id=str(step.id or ""),
-            task_mode=task_mode,
-            requested_max_tool_iterations=requested_max_tool_iterations,
-            iteration_count=iteration_count,
-            elapsed_ms=elapsed_ms(started_at),
-        )
-        return converged_payload
+    if convergence_decision.should_break and convergence_decision.payload is not None:
+        return convergence_decision.payload
     # P3-1A 收敛修复：max_tool_iterations 到达后一律按未完成收敛，不再返回 success=true。
     return _build_loop_break_payload(
         step=step,

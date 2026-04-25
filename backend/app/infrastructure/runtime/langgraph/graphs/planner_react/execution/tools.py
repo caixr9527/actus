@@ -38,16 +38,12 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     normalize_attachments,
     safe_parse_json,
 )
-from .execution_context import build_execution_context
-from .execution_state import ExecutionState
-from .iteration_context import build_iteration_context
-from ..convergence.general_convergence import GeneralConvergenceJudge
-from ..convergence.judge import ConvergenceJudge
-from ..convergence.research_convergence import ResearchConvergenceJudge
-from ..convergence.web_reading_convergence import WebReadingConvergenceJudge
-from ..policy_engine.engine import ToolPolicyEngine
-from ..tool_runtime.tool_effects import build_interrupt_payload, extract_interrupt_request
-from ..tool_runtime.tool_events import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import IterationConvergenceContext
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.engine import ConvergenceEngine
+from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import ToolPolicyEngine
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import build_interrupt_payload, \
+    extract_interrupt_request
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
     ToolEventDispatcher,
     bind_tool_name,
     build_called_event,
@@ -55,7 +51,10 @@ from ..tool_runtime.tool_events import (
     build_tool_call_lifecycle,
     build_tool_feedback_message,
 )
-from ..tool_runtime.tool_schema import extract_function_name
+from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_schema import extract_function_name
+from .execution_context import build_execution_context
+from .execution_state import ExecutionState
+from .iteration_context import build_iteration_context
 
 logger = logging.getLogger(__name__)
 
@@ -426,10 +425,7 @@ async def execute_step_with_prompt(
         on_tool_event=on_tool_event,
     )
     policy_engine = ToolPolicyEngine(logger=logger)
-    convergence_judge = ConvergenceJudge()
-    general_convergence_judge = GeneralConvergenceJudge()
-    research_convergence_judge = ResearchConvergenceJudge()
-    web_reading_convergence_judge = WebReadingConvergenceJudge()
+    convergence_engine = ConvergenceEngine(logger=logger)
     step_file_context: Dict[str, Any] = {
         "called_functions": set(),
     }
@@ -780,87 +776,21 @@ async def execute_step_with_prompt(
                 ),
             )
         )
-        convergence_result = policy_engine.evaluate_iteration_convergence(
-            loop_break_reason=loop_break_reason or "",
-            step=step,
-            tool_result=tool_result,
-            execution_state=execution_state,
+        convergence_result = convergence_engine.evaluate_after_iteration(
+            context=IterationConvergenceContext(
+                step=step,
+                task_mode=task_mode,
+                iteration=index,
+                recent_function_name=lifecycle.normalized_function_name,
+                function_args=lifecycle.function_args,
+                tool_result=tool_result,
+                loop_break_reason=loop_break_reason or "",
+                execution_state=execution_state,
+                step_file_context=step_file_context,
+            ),
         )
         if convergence_result.should_break and convergence_result.payload is not None:
             return convergence_result.payload, event_dispatcher.emitted_events
-        research_convergence_result = research_convergence_judge.evaluate_after_iteration(
-            step=step,
-            task_mode=task_mode,
-            recent_function_name=lifecycle.normalized_function_name,
-            execution_state=execution_state,
-        )
-        if research_convergence_result.should_break and research_convergence_result.payload is not None:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "研究证据满足，提前收敛步骤",
-                step_id=str(step.id or ""),
-                task_mode=task_mode,
-                reason_code=research_convergence_result.reason_code,
-                iteration=index,
-            )
-            return research_convergence_result.payload, event_dispatcher.emitted_events
-        web_reading_convergence_result = web_reading_convergence_judge.evaluate_after_iteration(
-            step=step,
-            task_mode=task_mode,
-            recent_function_name=lifecycle.normalized_function_name,
-            execution_state=execution_state,
-        )
-        if web_reading_convergence_result.should_break and web_reading_convergence_result.payload is not None:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "网页阅读证据满足，提前收敛步骤",
-                step_id=str(step.id or ""),
-                task_mode=task_mode,
-                reason_code=web_reading_convergence_result.reason_code,
-                iteration=index,
-            )
-            return web_reading_convergence_result.payload, event_dispatcher.emitted_events
-        progress_result = convergence_judge.evaluate_file_processing_progress(
-            step=step,
-            task_mode=task_mode,
-            recent_function_name=lifecycle.normalized_function_name,
-            function_args=lifecycle.function_args,
-            tool_result_data=tool_result.data,
-            tool_result_success=bool(tool_result.success),
-            step_file_context=step_file_context,
-            runtime_recent_action=execution_state.runtime_recent_action,
-        )
-        if progress_result.should_break and progress_result.payload is not None:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "关键事实满足，提前收敛步骤",
-                step_id=str(step.id or ""),
-                task_mode=task_mode,
-                reason_code=progress_result.reason_code,
-                iteration=index,
-            )
-            return progress_result.payload, event_dispatcher.emitted_events
-        general_convergence_result = general_convergence_judge.evaluate_after_iteration(
-            step=step,
-            task_mode=task_mode,
-            runtime_recent_action=execution_state.runtime_recent_action,
-            iteration=index,
-        )
-        if general_convergence_result.should_break and general_convergence_result.payload is not None:
-            log_runtime(
-                logger,
-                logging.INFO,
-                "general 文件观察事实满足，提前收敛步骤",
-                step_id=str(step.id or ""),
-                task_mode=task_mode,
-                reason_code=general_convergence_result.reason_code,
-                iteration=index,
-            )
-            return general_convergence_result.payload, event_dispatcher.emitted_events
-
     return policy_engine.finalize_max_iterations(
         step=step,
         task_mode=task_mode,
