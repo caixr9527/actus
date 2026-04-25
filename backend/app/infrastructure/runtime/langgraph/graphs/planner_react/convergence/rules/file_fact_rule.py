@@ -9,7 +9,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contr
     MaxIterationConvergenceContext,
     MaxIterationConvergenceRule,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import ConvergenceJudge
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import FileFactConvergenceJudge
 
 
 class FileFactConvergenceRule(IterationConvergenceRule, MaxIterationConvergenceRule):
@@ -18,7 +18,7 @@ class FileFactConvergenceRule(IterationConvergenceRule, MaxIterationConvergenceR
     max_iteration_log_message = "达到最大工具轮次但关键事实已满足，按成功收敛"
 
     def __init__(self) -> None:
-        self._judge = ConvergenceJudge()
+        self._judge = FileFactConvergenceJudge()
 
     def evaluate_after_iteration(
             self,
@@ -44,7 +44,7 @@ class FileFactConvergenceRule(IterationConvergenceRule, MaxIterationConvergenceR
             *,
             context: MaxIterationConvergenceContext,
     ) -> ConvergenceDecision:
-        payload = ConvergenceJudge.build_max_iteration_convergence_payload(
+        payload = FileFactConvergenceJudge.build_max_iteration_convergence_payload(
             step=context.step,
             task_mode=context.task_mode,
             runtime_recent_action=context.runtime_recent_action,

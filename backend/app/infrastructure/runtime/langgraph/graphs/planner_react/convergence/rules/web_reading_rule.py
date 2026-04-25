@@ -9,7 +9,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contr
     MaxIterationConvergenceContext,
     MaxIterationConvergenceRule,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.web_reading_convergence import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge.web_reading_convergence import (
     WebReadingConvergenceJudge,
 )
 

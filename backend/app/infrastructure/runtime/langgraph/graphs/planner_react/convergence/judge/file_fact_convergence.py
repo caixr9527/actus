@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""P3 解耦：步骤收敛判定器。"""
+"""P3 解耦：文件事实收敛判定器。"""
 
 import re
 from typing import Any, Dict, List, Optional
@@ -27,7 +27,7 @@ _RAW_CONTENT_RETURN_PATTERN = re.compile(
 )
 
 
-class ConvergenceJudge:
+class FileFactConvergenceJudge:
     """基于关键事实的早停判定，避免已达成目标仍空转。"""
 
     def evaluate_file_processing_progress(
@@ -103,13 +103,13 @@ class ConvergenceJudge:
         """在达到最大轮次时，优先尝试按事实收敛，避免误判失败。"""
         if task_mode not in {"file_processing", "coding"}:
             return None
-        if task_mode == "coding" and not ConvergenceJudge._is_simple_coding_file_task(step):
+        if task_mode == "coding" and not FileFactConvergenceJudge._is_simple_coding_file_task(step):
             return None
-        if not ConvergenceJudge._step_allows_file_fact_convergence(step):
+        if not FileFactConvergenceJudge._step_allows_file_fact_convergence(step):
             return None
-        if not ConvergenceJudge._has_minimal_file_progress(step_file_context):
+        if not FileFactConvergenceJudge._has_minimal_file_progress(step_file_context):
             return None
-        summary = ConvergenceJudge._build_file_processing_convergence_summary(
+        summary = FileFactConvergenceJudge._build_file_processing_convergence_summary(
             step=step,
             context=step_file_context,
         )

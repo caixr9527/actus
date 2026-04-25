@@ -7,16 +7,18 @@ from .contracts import (
     IterationConvergenceContext,
     MaxIterationConvergenceContext,
 )
-from .judge import ConvergenceJudge
-from .general_convergence import GeneralConvergenceJudge
-from .research_convergence import ResearchConvergenceJudge
-from .web_reading_convergence import WebReadingConvergenceJudge
+from .judge import (
+    FileFactConvergenceJudge,
+    GeneralConvergenceJudge,
+    ResearchConvergenceJudge,
+    WebReadingConvergenceJudge,
+)
 
 __all__ = [
     "ConvergenceDecision",
     "IterationConvergenceContext",
     "MaxIterationConvergenceContext",
-    "ConvergenceJudge",
+    "FileFactConvergenceJudge",
     "GeneralConvergenceJudge",
     "ResearchConvergenceJudge",
     "WebReadingConvergenceJudge",

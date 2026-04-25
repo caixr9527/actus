@@ -50,7 +50,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
     REASON_CONSTRAINT_ENGINE_ERROR,
     REASON_RESEARCH_SEARCH_TO_FETCH_REWRITE,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.general_convergence import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge.general_convergence import (
     GeneralConvergenceJudge,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import (
@@ -59,12 +59,12 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contr
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.engine import ConvergenceEngine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge import (
-    ConvergenceJudge,
+    FileFactConvergenceJudge,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.research_convergence import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge.research_convergence import (
     ResearchConvergenceJudge,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.web_reading_convergence import (
+from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge.web_reading_convergence import (
     WebReadingConvergenceJudge,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import (
@@ -1938,8 +1938,8 @@ def test_build_research_route_rewrite_decision_should_not_rewrite_explicit_for_m
     assert decision is None
 
 
-def test_convergence_judge_should_break_when_file_processing_facts_ready() -> None:
-    judge = ConvergenceJudge()
+def test_file_fact_convergence_judge_should_break_when_file_processing_facts_ready() -> None:
+    judge = FileFactConvergenceJudge()
     step = Step(
         id="step-final",
         description="列出目录并文本交付",
@@ -1973,8 +1973,8 @@ def test_convergence_judge_should_break_when_file_processing_facts_ready() -> No
     assert any("读取内容长度" in item for item in facts + [str(result.payload.get("summary") or "")])
 
 
-def test_convergence_judge_should_return_raw_file_content_when_step_requires_verbatim_output() -> None:
-    judge = ConvergenceJudge()
+def test_file_fact_convergence_judge_should_return_raw_file_content_when_step_requires_verbatim_output() -> None:
+    judge = FileFactConvergenceJudge()
     step = Step(
         id="file-raw",
         description="读取 /home/ubuntu/workspace/p3-case1/hello.txt 的内容并原样返回",
@@ -2004,8 +2004,8 @@ def test_convergence_judge_should_return_raw_file_content_when_step_requires_ver
     assert result.payload["result"] == "P3_WORKSPACE_OK"
 
 
-def test_convergence_judge_should_break_when_find_files_and_read_file_facts_ready() -> None:
-    judge = ConvergenceJudge()
+def test_file_fact_convergence_judge_should_break_when_find_files_and_read_file_facts_ready() -> None:
+    judge = FileFactConvergenceJudge()
     step = Step(
         id="step-final-find",
         description="读取课程目录并文本交付",
@@ -2046,8 +2046,8 @@ def test_convergence_judge_should_break_when_find_files_and_read_file_facts_read
     assert any("目录文件" in str(item) for item in list((result.payload or {}).get("facts_learned") or []))
 
 
-def test_convergence_judge_should_break_when_coding_write_file_succeeds() -> None:
-    judge = ConvergenceJudge()
+def test_file_fact_convergence_judge_should_break_when_coding_write_file_succeeds() -> None:
+    judge = FileFactConvergenceJudge()
     step = Step(
         id="coding-write",
         description="创建 result.md，内容为 VERSION_1，但不作为附件返回",
@@ -2080,8 +2080,8 @@ def test_convergence_judge_should_break_when_coding_write_file_succeeds() -> Non
     assert result.payload["attachments"] == []
 
 
-def test_convergence_judge_should_break_when_file_processing_none_step_has_verified_file() -> None:
-    judge = ConvergenceJudge()
+def test_file_fact_convergence_judge_should_break_when_file_processing_none_step_has_verified_file() -> None:
+    judge = FileFactConvergenceJudge()
     step = Step(
         id="file-none",
         description="在指定目录创建 hello.txt 并写入内容",
@@ -2112,8 +2112,8 @@ def test_convergence_judge_should_break_when_file_processing_none_step_has_verif
     assert result.payload["success"] is True
 
 
-def test_convergence_judge_should_not_break_complex_coding_after_single_write() -> None:
-    judge = ConvergenceJudge()
+def test_file_fact_convergence_judge_should_not_break_complex_coding_after_single_write() -> None:
+    judge = FileFactConvergenceJudge()
     step = Step(
         id="coding-complex",
         description="实现搜索服务重构并补齐测试",
