@@ -29,6 +29,7 @@ class PromptContextPacket(TypedDict, total=False):
     stage: str
     task_mode: str
     user_goal: str
+    temporal_context: Dict[str, Any]
     current_step: Dict[str, Any]
     open_questions: List[str]
     pending_confirmation: PendingConfirmationPacket

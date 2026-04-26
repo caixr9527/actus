@@ -3752,6 +3752,12 @@ def test_build_research_query_should_keep_single_topic_and_strip_trailing_constr
     )
 
 
+def test_build_research_query_should_preserve_natural_language_connectors() -> None:
+    assert build_research_query("请帮我查一下 AI 编程助手、IDE 支持、价格 对比 最新") == (
+        "AI 编程助手以及IDE 支持以及价格 对比 最新"
+    )
+
+
 def test_build_research_diagnosis_should_mark_search_low_recall() -> None:
     state = ExecutionState()
     state.search_invocation_count = 1

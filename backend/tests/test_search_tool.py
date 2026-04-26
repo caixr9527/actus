@@ -40,6 +40,9 @@ class _FakeSandbox:
             },
         )
 
+    async def search(self, **kwargs):
+        return await self.search_searxng(**kwargs)
+
     async def fetch_searxng_page(
             self,
             url: str,

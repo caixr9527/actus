@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import datetime
 
 from app.domain.models import (
     ExecutionStatus,
@@ -897,6 +898,23 @@ def test_runtime_context_service_should_clear_previous_mode_digest_when_switchin
         "task_mode": StepTaskModeHint.CODING.value,
         "payload": {},
     }
+
+
+def test_runtime_context_service_should_inject_current_temporal_context() -> None:
+    context_service = RuntimeContextService()
+
+    context_packet = context_service.build_packet(
+        stage="planner",
+        state={"user_message": "查询最新政策"},
+        task_mode=StepTaskModeHint.GENERAL.value,
+    )
+
+    temporal_context = dict(context_packet.get("temporal_context") or {})
+    assert temporal_context["timezone"] == "Asia/Shanghai"
+    assert temporal_context["utc_offset"] == "+08:00"
+    assert temporal_context["current_date"]
+    datetime.fromisoformat(str(temporal_context["current_datetime"]))
+    assert "模型训练年份" in temporal_context["relative_time_rule"]
 
 
 def test_runtime_context_service_should_hide_observation_digest_in_human_wait_mode() -> None:

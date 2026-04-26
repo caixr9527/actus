@@ -10,6 +10,7 @@ from typing import Any
 _CJK_CONNECTOR_PATTERN = re.compile(r"[，,、；;|/]+")
 _MULTI_SPACE_PATTERN = re.compile(r"\s+")
 _URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+_CONNECTOR_WORD_PATTERN = re.compile(r"\s*(以及|并且|和|与|及其)\s*")
 
 # 只移除明确属于“请求动作”的引导短语，避免误删主题正文。
 _QUESTION_PREFIXES = (
@@ -75,11 +76,19 @@ def build_research_query(raw_query: Any) -> str:
         return ""
     query = _URL_PATTERN.sub("", query)
     query = _strip_question_prefix(query)
-    query = _CJK_CONNECTOR_PATTERN.sub(" ", query)
+    query = _normalize_connectors(query)
     query = _MULTI_SPACE_PATTERN.sub(" ", query).strip()
     query = _strip_trailing_constraints(query)
     query = _MULTI_SPACE_PATTERN.sub(" ", query).strip(" ，,、；;。.!?？")
     return query
+
+
+def _normalize_connectors(query: str) -> str:
+    """把列表式分隔符转成自然语言连接词，避免搜索 query 退化成短语堆叠。"""
+    normalized = str(query or "").strip()
+    normalized = _CJK_CONNECTOR_PATTERN.sub("以及", normalized)
+    normalized = _CONNECTOR_WORD_PATTERN.sub(r"\1", normalized)
+    return normalized
 
 
 def _strip_trailing_constraints(query: str) -> str:

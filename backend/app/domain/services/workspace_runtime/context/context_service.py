@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.domain.models import (
     ExecutionStatus,
@@ -41,6 +43,7 @@ _FINAL_MESSAGE_MAX_CHARS = 240
 _DIGEST_TEXT_MAX_CHARS = 240
 _SEARCH_EVIDENCE_SNIPPET_MAX_CHARS = 520
 _WEB_EVIDENCE_SUMMARY_MAX_CHARS = 720
+_DEFAULT_RUNTIME_TIMEZONE = "Asia/Shanghai"
 
 
 class RuntimeContextService:
@@ -106,6 +109,7 @@ class RuntimeContextService:
             "stage": stage,
             "task_mode": resolved_task_mode,
             "user_goal": self._build_user_goal(state=state),
+            "temporal_context": self._build_temporal_context(),
         }
         if policy.include_current_step:
             packet["current_step"] = self._build_current_step(stage=stage, state=state, step=step)
@@ -305,6 +309,31 @@ class RuntimeContextService:
         if plan is not None and str(plan.goal or "").strip():
             return str(plan.goal or "").strip()
         return str(state.get("user_message") or "").strip()
+
+    def _build_temporal_context(self) -> Dict[str, Any]:
+        """给所有 Prompt 阶段提供运行时当前时间，避免模型沿用历史年份。"""
+        timezone_name = _DEFAULT_RUNTIME_TIMEZONE
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            timezone_name = "UTC"
+            timezone = ZoneInfo(timezone_name)
+        now = datetime.now(timezone).replace(microsecond=0)
+        return {
+            "current_date": now.date().isoformat(),
+            "current_time": now.strftime("%H:%M:%S"),
+            "current_datetime": now.isoformat(),
+            "timezone": timezone_name,
+            "utc_offset": self._format_utc_offset(now.strftime("%z")),
+            "relative_time_rule": "所有相对时间（今天、昨天、明天、今年、最新、当前）必须以 current_date 和 timezone 为准，不得沿用模型训练年份或历史上下文中的旧年份。",
+        }
+
+    @staticmethod
+    def _format_utc_offset(raw_offset: str) -> str:
+        normalized = str(raw_offset or "").strip()
+        if len(normalized) == 5 and normalized[0] in {"+", "-"}:
+            return f"{normalized[:3]}:{normalized[3:]}"
+        return normalized
 
     def _build_open_questions(
             self,
