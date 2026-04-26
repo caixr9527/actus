@@ -23,6 +23,8 @@ from app.application.service import (
     AuthService,
     UserService,
 )
+from app.interfaces.facades import SessionStreamFacade
+from app.application.service.run_engine_selector import build_run_engine
 from app.application.service.session_service import SessionService
 from app.infrastructure.external.cache import ModelConfigCache
 from app.infrastructure.external.email_sender import SMTPEmailSender
@@ -160,6 +162,12 @@ def get_user_service() -> UserService:
     return UserService(uow_factory=get_uow)
 
 
+@lru_cache()
+def get_session_stream_facade() -> SessionStreamFacade:
+    """获取会话流式 facade。"""
+    return SessionStreamFacade()
+
+
 def get_access_token_blacklist_store() -> RedisAccessTokenBlacklistStore:
     """获取 Access Token 黑名单存储服务"""
     redis_client = get_redis_client()
@@ -195,6 +203,7 @@ def build_agent_service(cos: Cos) -> AgentService:
         uow_factory=get_uow,
         model_runtime_resolver=get_model_runtime_resolver(),
         llm_factory=get_openai_llm_factory(),
+        run_engine_factory=build_run_engine,
     )
 
 

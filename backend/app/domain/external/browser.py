@@ -13,6 +13,26 @@ from app.domain.models import ToolResult
 class Browser(Protocol):
     """浏览器服务扩展"""
 
+    async def read_current_page_structured(self) -> ToolResult:
+        """读取当前页面的结构化摘要。"""
+        ...
+
+    async def extract_main_content(self) -> ToolResult:
+        """提取当前页面的正文内容。"""
+        ...
+
+    async def extract_cards(self) -> ToolResult:
+        """提取当前页面的候选卡片。"""
+        ...
+
+    async def find_link_by_text(self, text: str) -> ToolResult:
+        """按文本查找最匹配的链接。"""
+        ...
+
+    async def find_actionable_elements(self) -> ToolResult:
+        """提取当前页面的主要可交互元素。"""
+        ...
+
     async def view_page(self) -> ToolResult:
         """查看页面"""
         ...

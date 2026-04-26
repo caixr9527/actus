@@ -24,7 +24,14 @@ def _build_model(
         model_name: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 8192,
+        capabilities: dict | None = None,
 ) -> LLMModelConfig:
+    config = {
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if capabilities is not None:
+        config["capabilities"] = capabilities
     return LLMModelConfig(
         id=model_id,
         provider="openai",
@@ -32,7 +39,7 @@ def _build_model(
         base_url=base_url,
         api_key=api_key,
         model_name=model_name or model_id,
-        config={"temperature": temperature, "max_tokens": max_tokens},
+        config=config,
     )
 
 
@@ -79,3 +86,66 @@ def test_model_runtime_resolver_should_raise_when_default_model_unavailable() ->
         asyncio.run(resolver.resolve(session))
 
     assert exc.value.error_key == error_keys.APP_CONFIG_DEFAULT_MODEL_UNAVAILABLE
+
+
+def test_model_runtime_resolver_should_parse_multimodal_capabilities() -> None:
+    resolver = ModelRuntimeResolver(
+        model_config_service=_FakeModelConfigService(
+            models=[
+                _build_model(
+                    "gpt-5.4",
+                    capabilities={"multimodal": True, "supported": ["image", "audio", "file"]},
+                )
+            ],
+            default_model_id="gpt-5.4",
+        )
+    )
+    session = Session(id="session-a", user_id="user-a", current_model_id="auto")
+
+    _, llm_config = asyncio.run(resolver.resolve(session))
+
+    assert llm_config.multimodal is True
+    assert llm_config.supported == ["image", "audio", "file"]
+
+
+def test_model_runtime_resolver_should_parse_api_style_capability() -> None:
+    resolver = ModelRuntimeResolver(
+        model_config_service=_FakeModelConfigService(
+            models=[
+                _build_model(
+                    "gpt-5.4",
+                    capabilities={
+                        "api_style": "responses",
+                        "multimodal": True,
+                        "supported": ["image"],
+                    },
+                )
+            ],
+            default_model_id="gpt-5.4",
+        )
+    )
+    session = Session(id="session-a", user_id="user-a", current_model_id="auto")
+
+    _, llm_config = asyncio.run(resolver.resolve(session))
+
+    assert llm_config.api_style == "responses"
+
+
+def test_model_runtime_resolver_should_fallback_supported_to_empty_when_invalid() -> None:
+    resolver = ModelRuntimeResolver(
+        model_config_service=_FakeModelConfigService(
+            models=[
+                _build_model(
+                    "deepseek",
+                    capabilities={"multimodal": False, "supported": ["unknown_type"]},
+                )
+            ],
+            default_model_id="deepseek",
+        )
+    )
+    session = Session(id="session-a", user_id="user-a", current_model_id="auto")
+
+    _, llm_config = asyncio.run(resolver.resolve(session))
+
+    assert llm_config.multimodal is False
+    assert llm_config.supported == []

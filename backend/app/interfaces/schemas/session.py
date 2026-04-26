@@ -6,9 +6,9 @@
 @File   : session.py
 """
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models import SessionStatus, File
 from app.interfaces.schemas import AgentSSEEvent
@@ -35,11 +35,37 @@ class ListSessionResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    class ResumePayload(BaseModel):
+        """恢复 LangGraph interrupt 的请求体。"""
+
+        value: Any = None
+
+    class CommandPayload(BaseModel):
+        """显式结构化命令请求体。"""
+
+        type: Literal["continue_cancelled_task"] = "continue_cancelled_task"
+
     """聊天请求结构"""
     message: Optional[str] = None  # 人类消息
     attachments: Optional[List[str]] = Field(default_factory=list)  # 附件列表(传递的是文件id列表)
+    resume: Optional[ResumePayload] = None  # 恢复 LangGraph interrupt 的载荷
+    command: Optional[CommandPayload] = None  # 显式结构化命令
     event_id: Optional[str] = None  # 最新事件id
     timestamp: Optional[int] = None  # 当前时间戳
+
+    @model_validator(mode="after")
+    def validate_request_shape(self) -> "ChatRequest":
+        has_message = bool(str(self.message or "").strip())
+        has_resume = self.resume is not None
+        has_command = self.command is not None
+        request_shape_count = int(has_message) + int(has_resume) + int(has_command)
+        if request_shape_count > 1:
+            raise ValueError("chat 请求不能同时携带 message、resume 和 command")
+        if request_shape_count == 0 and len(self.attachments or []) > 0:
+            raise ValueError("纯监听请求不允许携带 attachments")
+        if (has_resume or has_command) and len(self.attachments or []) > 0:
+            raise ValueError("resume 或 command 请求不允许携带 attachments")
+        return self
 
 
 class GetSessionResponse(BaseModel):
@@ -78,11 +104,6 @@ class FileReadResponse(BaseModel):
     content: str
 
 
-class ShellReadRequest(BaseModel):
-    """需要读取的沙箱shell请求结构体"""
-    session_id: str  # Shell会话id
-
-
 class ConsoleRecord(BaseModel):
     """控制台记录模型，包含ps1、command、output"""
     ps1: str
@@ -92,6 +113,5 @@ class ConsoleRecord(BaseModel):
 
 class ShellReadResponse(BaseModel):
     """需要读取的沙箱shell响应结构体"""
-    session_id: str
     output: str
     console_records: List[ConsoleRecord] = Field(default_factory=list)

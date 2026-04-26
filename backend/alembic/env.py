@@ -27,6 +27,26 @@ if database_url:
 # target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 
+# 这些表由外部运行时自行管理，不纳入业务 ORM schema 的迁移对比范围。
+IGNORED_REFLECTED_TABLES = {
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+}
+
+
+def include_object(object_, name, type_, reflected, compare_to):
+    """过滤 autogenerate 对比对象，避免误删外部管理表。"""
+    if (
+        type_ == "table"
+        and reflected
+        and compare_to is None
+        and name in IGNORED_REFLECTED_TABLES
+    ):
+        return False
+    return True
+
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
@@ -49,6 +69,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -72,7 +93,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

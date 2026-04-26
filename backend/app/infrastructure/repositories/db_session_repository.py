@@ -13,9 +13,11 @@ from sqlalchemy import select, delete, update, func, cast
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.models import Session, SessionStatus, BaseEvent, File, Memory
+from app.domain.models import Session, SessionStatus, BaseEvent, File, PlanEvent, StepEvent
 from app.domain.repositories import SessionRepository
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.infrastructure.models import SessionModel
+from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 from app.infrastructure.storage.redis import get_redis_client
 from core.realtime import SESSION_LIST_CHANGE_CHANNEL
 
@@ -26,6 +28,43 @@ class DBSessionRepository(SessionRepository):
 
     def __init__(self, db_session: AsyncSession) -> None:
         self.db_session = db_session
+        self._workflow_run_repository = DBWorkflowRunRepository(db_session=db_session)
+
+    async def _get_current_run_id(self, session_id: str) -> Optional[str]:
+        stmt = select(SessionModel.current_run_id).where(SessionModel.id == session_id)
+        result = await self.db_session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _get_session_record_with_lock(self, session_id: str) -> SessionModel:
+        """按会话ID加锁读取记录，保证事件幂等判断与投影更新在同一事务内。"""
+        stmt = (
+            select(SessionModel)
+            .where(SessionModel.id == session_id)
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record is None:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        return record
+
+    @staticmethod
+    def _require_current_run_id(record: SessionModel, session_id: str) -> str:
+        """事件已迁移到 workflow_run_events 作为真相源，写入时必须存在 current_run_id。"""
+        # Context: 事件写路径已从 sessions.events 迁移到 workflow_run_events。
+        # Decision: 当前会话缺少 current_run_id 时直接 fail-fast。
+        # Trade-off: 对历史脏数据容忍度下降，但可避免静默丢事件与双写继续扩散。
+        # Removal Plan: 会话 run 关联全量补齐后，可将该校验转为初始化阶段硬约束。
+        run_id = str(record.current_run_id or "").strip()
+        if not run_id:
+            raise RuntimeError(
+                f"会话[{session_id}]缺少 current_run_id，无法写入 workflow_run_events"
+            )
+        return run_id
+
+    async def _hydrate_session_events(self, session: Session) -> Session:
+        session.events = await self._workflow_run_repository.list_events_by_session(session.id)
+        return session
 
     def _register_session_list_changed(self, session_id: str) -> None:
         """注册会话列表变更通知，在事务提交成功后再执行发布。"""
@@ -91,8 +130,14 @@ class DBSessionRepository(SessionRepository):
         # 获取查询结果，如果不存在则返回None
         record = result.scalar_one_or_none()
 
-        # 如果找到了记录，则转换为领域模型并返回；否则返回None
-        return record.to_domain() if record is not None else None
+        if record is None:
+            return None
+
+        # 详情读取策略：
+        # 1) events 统一从 workflow_run_events 聚合；
+        # 2) files 继续由 Session 聚合字段承载。
+        session = record.to_domain()
+        return await self._hydrate_session_events(session)
 
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的id删除会话"""
@@ -154,51 +199,28 @@ class DBSessionRepository(SessionRepository):
 
     async def add_event(self, session_id: str, event: BaseEvent) -> None:
         """往会话中新增事件"""
-        # 将事件对象转换为JSON格式的数据
-        event_data = event.model_dump(mode="json")
-
-        # 构建更新语句，将会话的events字段更新为原events列表加上新事件数据的新列表
-        # 使用coalesce函数处理events字段为空的情况，如果为空则视为空列表
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(
-                events=func.coalesce(SessionModel.events, cast([], JSONB)) + cast([event_data], JSONB),
-            )
+        if not should_persist_event(event):
+            return
+        # 事件历史以 workflow_run_events 为唯一写入真相源。
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        run_id = self._require_current_run_id(record=record, session_id=session_id)
+        await self._workflow_run_repository.add_event_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
         )
-        # 执行更新操作
-        result = await self.db_session.execute(stmt)
-
-        # 检查是否有行被更新，如果没有则抛出异常
-        if result.rowcount == 0:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
 
     async def add_event_if_absent(self, session_id: str, event: BaseEvent) -> bool:
         """按事件ID幂等新增事件"""
-        # 这里使用行级锁而不是直接JSONB append，目的是保证“存在性判断+写入”原子化。
-        stmt = (
-            select(SessionModel)
-            .where(SessionModel.id == session_id)
-            .with_for_update()
+        if not should_persist_event(event):
+            return False
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        run_id = self._require_current_run_id(record=record, session_id=session_id)
+        return await self._workflow_run_repository.add_event_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
         )
-        result = await self.db_session.execute(stmt)
-        record = result.scalar_one_or_none()
-        if not record:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-        # 读取当前事件列表，缺省时按空列表处理。
-        current_events = list(record.events or [])
-        event_id = str(event.id)
-
-        # 幂等判断：只要事件ID已存在就视为已处理，直接返回False。
-        for current_event in current_events:
-            if str(current_event.get("id", "")) == event_id:
-                return False
-
-        # 事件不存在才追加，确保同一event_id不会重复入库。
-        current_events.append(event.model_dump(mode="json"))
-        record.events = current_events
-        return True
 
     async def add_event_with_snapshot_if_absent(
             self,
@@ -211,32 +233,31 @@ class DBSessionRepository(SessionRepository):
             status: Optional[SessionStatus] = None,
     ) -> bool:
         """按事件ID幂等新增事件，并在同一事务中更新会话投影"""
-        # 与add_event_if_absent一致：使用悲观锁保证并发安全和幂等判断准确性。
-        stmt = (
-            select(SessionModel)
-            .where(SessionModel.id == session_id)
-            .with_for_update()
+        if not should_persist_event(event):
+            return False
+        # Context: 事件幂等写入与会话投影更新需要跨多个字段保持一致。
+        # Decision: 同一行锁事务内完成“事件写入 + 投影收敛”。
+        # Trade-off: 锁持有时间略增，但可避免重放场景下历史与投影分叉。
+        # Removal Plan: 若后续拆分为独立投影模型，可改为异步投影并保留幂等主线。
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        run_id = self._require_current_run_id(record=record, session_id=session_id)
+        event_inserted = await self._workflow_run_repository.add_event_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
         )
-        result = await self.db_session.execute(stmt)
-        record = result.scalar_one_or_none()
-        if not record:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-        # 事件幂等判断与投影更新要分离：
-        # 1) 事件历史只允许按event_id写入一次；
-        # 2) 会话投影(status/title/latest)在幂等重放时仍应收敛到最新值。
-        current_events = list(record.events or [])
-        event_id = str(event.id)
-        event_inserted = True
-        for current_event in current_events:
-            if str(current_event.get("id", "")) == event_id:
-                event_inserted = False
-                break
-
-        # 事件不存在才写入历史，保证event_id幂等。
-        if event_inserted:
-            current_events.append(event.model_dump(mode="json"))
-            record.events = current_events
+        if not event_inserted and isinstance(event, PlanEvent):
+            # 对计划事件，幂等重放也应收敛步骤快照，避免异常窗口导致运行步骤缺失。
+            await self._workflow_run_repository.replace_steps_from_plan(
+                run_id=run_id,
+                plan=event.plan,
+            )
+        elif not event_inserted and isinstance(event, StepEvent):
+            # 对步骤事件，幂等重放时也需要补齐步骤快照，避免详情步骤状态落后于事件流。
+            await self._workflow_run_repository.upsert_step_from_event(
+                run_id=run_id,
+                event=event,
+            )
 
         # 标题属于会话投影的一部分，按调用方意图进行更新。
         if title is not None:
@@ -264,8 +285,24 @@ class DBSessionRepository(SessionRepository):
 
     async def add_file(self, session_id: str, file: File) -> None:
         """往会话中新增文件"""
+        stmt = select(SessionModel).where(SessionModel.id == session_id).with_for_update()
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
 
-        """往会话中新增文件"""
+        file_data = file.model_dump(mode="json")
+        normalized_filepath = str(file.filepath or "").strip()
+        existing_files = list(record.files or [])
+        deduped_files = [
+            item
+            for item in existing_files
+            if str(item.get("filepath") or "").strip() != normalized_filepath
+        ]
+        deduped_files.append(file_data)
+        record.files = deduped_files
+
+    async def add_final_files(self, session_id: str, file: File) -> None:
         # 将文件对象转换为JSON格式的数据
         file_data = file.model_dump(mode="json")
 
@@ -275,7 +312,7 @@ class DBSessionRepository(SessionRepository):
             update(SessionModel)
             .where(SessionModel.id == session_id)
             .values(
-                files=func.coalesce(SessionModel.files, cast([], JSONB)) + cast([file_data], JSONB),
+                final_files=func.coalesce(SessionModel.final_files, cast([], JSONB)) + cast([file_data], JSONB),
             )
         )
         # 执行更新操作
@@ -315,19 +352,19 @@ class DBSessionRepository(SessionRepository):
 
     async def get_file_by_path(self, session_id: str, filepath: str) -> Optional[File]:
         """根据文件路径获取文件信息"""
-        # 构建查询语句，根据session_id获取会话的所有文件列表
-        stmt = select(SessionModel.files).where(SessionModel.id == session_id)
+        # 构建查询语句，根据 session_id 获取会话聚合中的文件列表。
+        stmt = select(SessionModel).where(SessionModel.id == session_id)
         # 执行查询操作
         result = await self.db_session.execute(stmt)
-        # 获取查询结果
-        files = result.scalar_one_or_none()
+        record = result.scalar_one_or_none()
 
-        # 如果没有找到文件列表，返回None
-        if not files:
+        # 如果会话不存在，返回None
+        if record is None:
             return None
 
+        files = list(record.files or [])
         # 遍历文件列表，查找匹配指定文件路径的文件
-        for file in files:
+        for file in reversed(files):
             if file.get("filepath", "") == filepath:
                 # 找到匹配的文件，将其转换为File对象并返回
                 return File(**file)
@@ -405,48 +442,3 @@ class DBSessionRepository(SessionRepository):
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
         self._register_session_list_changed(session_id)
-
-    async def save_memory(self, session_id: str, agent_name: str, memory: Memory) -> None:
-        """存储或者更新会话中的记忆(字典直接覆盖)"""
-
-        # 将记忆对象转换为JSON格式数据
-        memory_data = memory.model_dump(mode="json")
-
-        # 创建补丁数据，以代理名称作为键，记忆数据作为值
-        patch_data = {agent_name: memory_data}
-
-        # 构建更新语句，将会话的记忆字段更新为原记忆字典与新记忆数据的合并
-        # 使用coalesce函数处理memories字段为空的情况，如果为空则视为默认空字典
-        stmt = (
-            update(SessionModel)
-            .where(SessionModel.id == session_id)
-            .values(
-                memories=func.coalesce(SessionModel.memories, cast({}, JSONB)) + cast(patch_data, JSONB),
-            )
-        )
-        # 执行更新操作
-        result = await self.db_session.execute(stmt)
-
-        # 检查是否有行被更新，如果没有则抛出异常
-        if result.rowcount == 0:
-            raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
-
-    async def get_memory(self, session_id: str, agent_name: str) -> Memory:
-        """获取指定会话的agent记忆信息"""
-
-        # 构建查询语句，从会话中获取指定代理的记忆数据
-        stmt = (
-            select(SessionModel.memories[agent_name])
-            .where(SessionModel.id == session_id)
-        )
-        # 执行查询操作
-        result = await self.db_session.execute(stmt)
-        # 获取查询结果，如果不存在则返回None
-        memory_data = result.scalar_one_or_none()
-
-        # 如果找到了记忆数据，则将其转换为Memory对象并返回
-        if memory_data:
-            return Memory(**memory_data)
-
-        # 如果没有找到对应的记忆数据，返回一个空的记忆对象
-        return Memory(messages=[])

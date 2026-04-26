@@ -3,13 +3,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { configApi } from '@/lib/api/config'
 import { sessionApi } from '@/lib/api/session'
-import { normalizeEvent, normalizeEvents } from '@/lib/session-events'
+import { normalizeEvents, unwrapNestedEvent, visitSessionEvent } from '@/lib/session-event-adapter'
 import { canRetry, computeRetryDelayMs, shouldStartEmptySessionStream, type RetryPolicy } from '@/lib/session-stream-policy'
 import {
   classifyMessageStreamCloseReason,
+  collectSessionEventIds,
+  getSessionEventId,
   reduceSessionRuntimeStateOnEvent,
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '@/lib/session-detail-runtime'
+import {
+  getLatestActiveStreamByChannel,
+  isTextStreamEvent,
+  reduceTextStreamState,
+  type ActiveTextStream,
+  type TextStreamState,
+} from '@/lib/session-text-stream-state'
+import {
+  advanceDisplayedTextStreams,
+  syncDisplayedTextStreams,
+} from '@/lib/session-text-stream-playback'
 import type { ListModelItem, SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
 import { useI18n } from '@/lib/i18n'
 
@@ -23,11 +36,15 @@ export type UseSessionDetailResult = {
   modelsLoading: boolean
   modelUpdating: boolean
   error: Error | null
-  refresh: () => Promise<void>
+  refresh: (options?: { resetRealtime?: boolean }) => Promise<void>
   refreshFiles: () => Promise<void>
   updateSessionModel: (modelId: string) => Promise<void>
   sendMessage: (message: string, attachmentIds: string[]) => Promise<void>
+  resumeWaitingRun: (resumeValue: unknown) => Promise<void>
+  continueCancelledRun: () => Promise<void>
   streaming: boolean
+  plannerTextStream: ActiveTextStream | null
+  finalTextStream: ActiveTextStream | null
 }
 
 const EMPTY_STREAM_RECONNECT_DELAY = 500
@@ -35,6 +52,53 @@ const EMPTY_STREAM_RETRY_POLICY: RetryPolicy = {
   maxRetries: 8,
   baseDelayMs: 1000,
   maxDelayMs: 10_000,
+}
+
+type SessionSnapshotPayload = {
+  detail: SessionDetail
+  fileListRaw: unknown
+}
+
+const pendingPromiseCache = new Map<string, Promise<unknown>>()
+
+function reusePendingPromise<T>(key: string, factory: () => Promise<T>): Promise<T> {
+  const existing = pendingPromiseCache.get(key)
+  if (existing) return existing as Promise<T>
+
+  const pending = factory().finally(() => {
+    if (pendingPromiseCache.get(key) === pending) {
+      pendingPromiseCache.delete(key)
+    }
+  })
+  pendingPromiseCache.set(key, pending)
+  return pending
+}
+
+function loadSessionSnapshotOnce(sessionId: string): Promise<SessionSnapshotPayload> {
+  return reusePendingPromise(`session-snapshot:${sessionId}`, async () => {
+    const [detail, fileListRaw] = await Promise.all([
+      sessionApi.getSessionDetail(sessionId),
+      sessionApi.getSessionFiles(sessionId),
+    ])
+    return {
+      detail,
+      fileListRaw,
+    }
+  })
+}
+
+function loadSessionFilesOnce(sessionId: string): Promise<unknown> {
+  return reusePendingPromise(`session-files:${sessionId}`, () => sessionApi.getSessionFiles(sessionId))
+}
+
+function loadModelsOnce(): Promise<{ models: ListModelItem[]; default_model_id: string | null }> {
+  return reusePendingPromise('models', async () => {
+    const data = await configApi.getModels()
+    return {
+      models: data.models,
+      default_model_id: data.default_model_id,
+    }
+  })
 }
 
 /**
@@ -57,12 +121,16 @@ export function useSessionDetail(
   const [modelUpdating, setModelUpdating] = useState(false)
   const [error, setError] = useState<Error | null>(null)
   const [streaming, setStreaming] = useState(false)
+  const [textStreams, setTextStreams] = useState<TextStreamState>({})
+  const [displayedTextStreams, setDisplayedTextStreams] = useState<TextStreamState>({})
   const [skipEmptyStream, setSkipEmptyStream] = useState(initialSkipEmptyStream || false)
   const emptyStreamCleanupRef = useRef<(() => void) | null>(null)
   const messageStreamCleanupRef = useRef<(() => void) | null>(null)
   const emptyStreamReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const emptyStreamRetryCountRef = useRef(0)
   const emptyStreamInstanceIdRef = useRef(0)
+  const messageStreamInstanceIdRef = useRef(0)
+  const seenEventIdsRef = useRef<Set<string>>(new Set())
   const isSendMessageRef = useRef(false)
   const lastEventIdRef = useRef<string | null>(null)
   const sessionEpochRef = useRef(0)
@@ -93,30 +161,69 @@ export function useSessionDetail(
   }, [clearEmptyStreamReconnectTimer])
 
   const stopMessageStream = useCallback(() => {
+    messageStreamInstanceIdRef.current += 1
     if (messageStreamCleanupRef.current) {
       messageStreamCleanupRef.current()
       messageStreamCleanupRef.current = null
     }
   }, [])
 
+  const resetRealtimeStreams = useCallback(() => {
+    stopMessageStream()
+    stopEmptyStream()
+    emptyStreamRetryCountRef.current = 0
+    isSendMessageRef.current = false
+    setStreamingState(false)
+    setTextStreams({})
+    setDisplayedTextStreams({})
+  }, [setStreamingState, stopEmptyStream, stopMessageStream])
+
+  const replaceEvents = useCallback((nextEvents: SSEEventData[]) => {
+    // 快照替换时必须同步重建草稿流状态，避免事件列表与前端播放层状态漂移，
+    // 否则会出现刷新后残留旧草稿、或正式消息已落地但草稿仍继续显示的问题。
+    // text_stream_* 是 live-only 临时展示事件，即使异常出现在快照中也不能进入主事件列表。
+    const persistentEvents = nextEvents.filter((event) => !isTextStreamEvent(event))
+    const rebuiltTextStreams = persistentEvents.reduce<TextStreamState>(
+      (state, event) => reduceTextStreamState(state, event),
+      {},
+    )
+    seenEventIdsRef.current = collectSessionEventIds(persistentEvents)
+    setEvents(persistentEvents)
+    setTextStreams(rebuiltTextStreams)
+    setDisplayedTextStreams(rebuiltTextStreams)
+  }, [])
+
   const appendEvent = useCallback((ev: SSEEventData) => {
-    let evToAppend = ev
-    if (ev.data && typeof ev.data === 'object' && ('event' in ev.data || 'type' in ev.data) && 'data' in ev.data) {
-      const normalized = normalizeEvent(ev.data as { event?: string; type?: string; data?: unknown })
-      if (normalized) evToAppend = normalized
+    const evToAppend = unwrapNestedEvent(ev)
+    const isTemporaryTextStreamEvent = isTextStreamEvent(evToAppend)
+    const eventId = getSessionEventId(evToAppend)
+    if (eventId && !isTemporaryTextStreamEvent) {
+      if (seenEventIdsRef.current.has(eventId)) {
+        return
+      }
+      seenEventIdsRef.current.add(eventId)
+      lastEventIdRef.current = eventId
     }
 
-    const eventId = (evToAppend.data as { event_id?: string })?.event_id
-    if (eventId) lastEventIdRef.current = eventId
-
-    setEvents((prev) => [...prev, evToAppend])
-
-    // 更新会话标题
-    if (evToAppend.type === 'title' && evToAppend.data && typeof (evToAppend.data as { title?: string }).title === 'string') {
-      setSession((prev) =>
-        prev ? { ...prev, title: (evToAppend.data as { title: string }).title } : null
-      )
+    if (!isTemporaryTextStreamEvent) {
+      setEvents((prev) => [...prev, evToAppend])
     }
+    setTextStreams((prev) => reduceTextStreamState(prev, evToAppend))
+    // 正式 message/done/error 到达时，需要同步清理前端正在播放的草稿流，
+    // 不能只等 textStreams -> displayedTextStreams 的 effect 下一拍再收敛，
+    // 否则界面会短暂同时出现“草稿消息 + 正式消息”的重复展示。
+    if (evToAppend.type === 'message' || evToAppend.type === 'done' || evToAppend.type === 'error') {
+      setDisplayedTextStreams((prev) => reduceTextStreamState(prev, evToAppend))
+    }
+
+    // 更新会话标题（通过统一事件分发表驱动）
+    visitSessionEvent(evToAppend, {
+      title: (event) => {
+        const title = (event.data as { title?: string }).title
+        if (typeof title !== 'string') return
+        setSession((prev) => (prev ? { ...prev, title } : null))
+      },
+    })
 
     // 统一运行时状态迁移（status + streaming）
     const nextRuntime = reduceSessionRuntimeStateOnEvent(
@@ -126,6 +233,11 @@ export function useSessionDetail(
     if (nextRuntime.streaming !== streamingRef.current) {
       setStreamingState(nextRuntime.streaming)
     }
+    if (nextRuntime.status === 'waiting') {
+      // human_wait 是后端主动暂停等待用户输入，不属于实时流异常。
+      setError(null)
+      stopEmptyStream()
+    }
     if (nextRuntime.status !== sessionStatusRef.current) {
       sessionStatusRef.current = nextRuntime.status
       setSession((prev) => {
@@ -133,7 +245,29 @@ export function useSessionDetail(
         return { ...prev, status: nextRuntime.status }
       })
     }
-  }, [setStreamingState])
+  }, [setStreamingState, stopEmptyStream])
+
+  const plannerTextStream = getLatestActiveStreamByChannel(displayedTextStreams, 'planner_message')
+  const finalTextStream = getLatestActiveStreamByChannel(displayedTextStreams, 'final_message')
+
+  useEffect(() => {
+    setDisplayedTextStreams((prev) => syncDisplayedTextStreams(prev, textStreams))
+  }, [textStreams])
+
+  useEffect(() => {
+    if (Object.keys(textStreams).length === 0) {
+      setDisplayedTextStreams({})
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setDisplayedTextStreams((prev) => advanceDisplayedTextStreams(prev, textStreams))
+    }, 24)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [textStreams])
 
   const startEmptyStream = useCallback((expectedEpoch?: number) => {
     const streamSessionId = sessionId
@@ -231,10 +365,7 @@ export function useSessionDetail(
 
   const loadSessionSnapshot = useCallback(async (targetSessionId: string, targetEpoch: number): Promise<SessionDetail | null> => {
     try {
-      const [detail, fileListRaw] = await Promise.all([
-        sessionApi.getSessionDetail(targetSessionId),
-        sessionApi.getSessionFiles(targetSessionId),
-      ])
+      const { detail, fileListRaw } = await loadSessionSnapshotOnce(targetSessionId)
 
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return null
@@ -247,11 +378,11 @@ export function useSessionDetail(
       const rawEvents = (detail as { events?: unknown }).events
       if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
         const normalized = normalizeEvents(rawEvents)
-        setEvents(normalized)
-        const lastEvId = (normalized[normalized.length - 1]?.data as { event_id?: string })?.event_id
+        replaceEvents(normalized)
+        const lastEvId = getSessionEventId(normalized[normalized.length - 1] as SSEEventData)
         if (lastEvId) lastEventIdRef.current = lastEvId
       } else {
-        setEvents([])
+        replaceEvents([])
         lastEventIdRef.current = null
       }
       return detail
@@ -266,11 +397,14 @@ export function useSessionDetail(
         setLoading(false)
       }
     }
-  }, [normalizeFileList, t])
+  }, [normalizeFileList, replaceEvents, t])
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options?: { resetRealtime?: boolean }) => {
     if (!sessionId || !enabled) return
     const targetEpoch = sessionEpochRef.current
+    if (options?.resetRealtime) {
+      resetRealtimeStreams()
+    }
     setLoading(true)
     setError(null)
     const detail = await loadSessionSnapshot(sessionId, targetEpoch)
@@ -282,14 +416,14 @@ export function useSessionDetail(
     ) {
       startEmptyStream(targetEpoch)
     }
-  }, [enabled, loadSessionSnapshot, sessionId, skipEmptyStream, startEmptyStream])
+  }, [enabled, loadSessionSnapshot, resetRealtimeStreams, sessionId, skipEmptyStream, startEmptyStream])
 
   const refreshFiles = useCallback(async () => {
     if (!sessionId || !enabled) return
     const targetEpoch = sessionEpochRef.current
     const targetSessionId = sessionId
     try {
-      const fileListRaw = await sessionApi.getSessionFiles(targetSessionId)
+      const fileListRaw = await loadSessionFilesOnce(targetSessionId)
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return
       }
@@ -301,7 +435,7 @@ export function useSessionDetail(
 
   const loadModels = useCallback(async (targetSessionId: string, targetEpoch: number) => {
     try {
-      const data = await configApi.getModels()
+      const data = await loadModelsOnce()
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return
       }
@@ -325,13 +459,9 @@ export function useSessionDetail(
     sessionEpochRef.current += 1
     const currentEpoch = sessionEpochRef.current
 
-    stopMessageStream()
-    stopEmptyStream()
-    isSendMessageRef.current = false
-    setStreamingState(false)
+    resetRealtimeStreams()
     setSkipEmptyStream(Boolean(initialSkipEmptyStream))
     lastEventIdRef.current = null
-    emptyStreamRetryCountRef.current = 0
 
     if (!sessionId) {
       setLoading(false)
@@ -341,7 +471,7 @@ export function useSessionDetail(
       setFiles([])
       setAvailableModels([])
       setDefaultModelId(null)
-      setEvents([])
+      replaceEvents([])
       setError(null)
       return
     }
@@ -354,7 +484,7 @@ export function useSessionDetail(
       setFiles([])
       setAvailableModels([])
       setDefaultModelId(null)
-      setEvents([])
+      replaceEvents([])
       setError(null)
       return
     }
@@ -366,7 +496,7 @@ export function useSessionDetail(
     setFiles([])
     setAvailableModels([])
     setDefaultModelId(null)
-    setEvents([])
+    replaceEvents([])
     setError(null)
 
     void loadSessionSnapshot(sessionId, currentEpoch)
@@ -374,11 +504,9 @@ export function useSessionDetail(
 
     return () => {
       if (sessionEpochRef.current !== currentEpoch) return
-      stopMessageStream()
-      stopEmptyStream()
-      isSendMessageRef.current = false
+      resetRealtimeStreams()
     }
-  }, [enabled, initialSkipEmptyStream, loadModels, loadSessionSnapshot, sessionId, setStreamingState, stopEmptyStream, stopMessageStream])
+  }, [enabled, initialSkipEmptyStream, loadModels, loadSessionSnapshot, replaceEvents, resetRealtimeStreams, sessionId])
 
   useEffect(() => {
     const status = session?.status
@@ -396,15 +524,18 @@ export function useSessionDetail(
   // 组件卸载时清理所有流，避免连接泄漏
   useEffect(() => {
     return () => {
-      stopMessageStream()
-      stopEmptyStream()
-      isSendMessageRef.current = false
+      resetRealtimeStreams()
       sessionStatusRef.current = null
     }
-  }, [stopEmptyStream, stopMessageStream])
+  }, [resetRealtimeStreams])
 
-  const sendMessage = useCallback(
-    async (message: string, attachmentIds: string[]) => {
+  const openMessageStream = useCallback(
+    async (
+      chatParams:
+        | { message: string; attachments: string[] }
+        | { resume: { value: unknown } }
+        | { command: { type: 'continue_cancelled_task' } }
+    ) => {
       if (!sessionId || !enabled) return
 
       const streamEpoch = sessionEpochRef.current
@@ -413,27 +544,43 @@ export function useSessionDetail(
       stopEmptyStream()
       stopMessageStream()
       emptyStreamRetryCountRef.current = 0
+      const streamInstanceId = messageStreamInstanceIdRef.current + 1
+      messageStreamInstanceIdRef.current = streamInstanceId
 
       // 发送消息时，清除跳过空流的标记
       setSkipEmptyStream(false)
       isSendMessageRef.current = true
       setStreamingState(true)
 
-      // 立即更新状态为 running，不等待 SSE 事件
-      sessionStatusRef.current = 'running'
-      setSession((prev) => prev ? { ...prev, status: 'running' } : null)
+      // 新消息和显式继续已取消任务都会立刻启动新一轮执行，可以乐观切到 running。
+      // resume 需要先经过后端 checkpoint 预校验，失败时会保持 waiting，
+      // 因此前端不能在请求发出前抢先改成本地 running。
+      if ('message' in chatParams || 'command' in chatParams) {
+        sessionStatusRef.current = 'running'
+        setSession((prev) => prev ? { ...prev, status: 'running' } : null)
+      }
 
       const finalizeMessageStream = () => {
-        if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+        if (
+          streamEpoch !== sessionEpochRef.current ||
+          streamSessionId !== currentSessionIdRef.current ||
+          streamInstanceId !== messageStreamInstanceIdRef.current
+        ) {
           return
         }
         setStreamingState(false)
         isSendMessageRef.current = false
-        stopMessageStream()
+        const cleanup = messageStreamCleanupRef.current
+        messageStreamCleanupRef.current = null
+        cleanup?.()
       }
 
       const onEvent = (ev: SSEEventData) => {
-        if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+        if (
+          streamEpoch !== sessionEpochRef.current ||
+          streamSessionId !== currentSessionIdRef.current ||
+          streamInstanceId !== messageStreamInstanceIdRef.current
+        ) {
           return
         }
         appendEvent(ev)
@@ -445,10 +592,14 @@ export function useSessionDetail(
 
       const messageStreamCleanup = sessionApi.chat(
         streamSessionId,
-        { message, attachments: attachmentIds },
+        chatParams,
         onEvent,
         (err) => {
-          if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+          if (
+            streamEpoch !== sessionEpochRef.current ||
+            streamSessionId !== currentSessionIdRef.current ||
+            streamInstanceId !== messageStreamInstanceIdRef.current
+          ) {
             return
           }
           const closeReason = classifyMessageStreamCloseReason(err)
@@ -462,7 +613,11 @@ export function useSessionDetail(
         }
       )
 
-      if (streamEpoch !== sessionEpochRef.current || streamSessionId !== currentSessionIdRef.current) {
+      if (
+        streamEpoch !== sessionEpochRef.current ||
+        streamSessionId !== currentSessionIdRef.current ||
+        streamInstanceId !== messageStreamInstanceIdRef.current
+      ) {
         messageStreamCleanup()
         return
       }
@@ -471,6 +626,38 @@ export function useSessionDetail(
       messageStreamCleanupRef.current = messageStreamCleanup
     },
     [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream, t]
+  )
+
+  const sendMessage = useCallback(
+    async (message: string, attachmentIds: string[]) => {
+      await openMessageStream({
+        message,
+        attachments: attachmentIds,
+      })
+    },
+    [openMessageStream]
+  )
+
+  const resumeWaitingRun = useCallback(
+    async (resumeValue: unknown) => {
+      await openMessageStream({
+        resume: {
+          value: resumeValue,
+        },
+      })
+    },
+    [openMessageStream]
+  )
+
+  const continueCancelledRun = useCallback(
+    async () => {
+      await openMessageStream({
+        command: {
+          type: 'continue_cancelled_task',
+        },
+      })
+    },
+    [openMessageStream],
   )
 
   const updateSessionModel = useCallback(
@@ -508,6 +695,10 @@ export function useSessionDetail(
     refreshFiles,
     updateSessionModel,
     sendMessage,
+    resumeWaitingRun,
+    continueCancelledRun,
     streaming,
+    plannerTextStream,
+    finalTextStream,
   }
 }

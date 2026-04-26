@@ -31,8 +31,10 @@ test('canRetry should stop at maxRetries boundary', () => {
 
 test('shouldStartEmptySessionStream should only subscribe in valid runtime states', () => {
   assert.equal(shouldStartEmptySessionStream('running', false, false), true)
-  assert.equal(shouldStartEmptySessionStream('waiting', false, false), true)
+  assert.equal(shouldStartEmptySessionStream('waiting', false, false), false)
   assert.equal(shouldStartEmptySessionStream('completed', false, false), false)
+  assert.equal(shouldStartEmptySessionStream('failed', false, false), false)
+  assert.equal(shouldStartEmptySessionStream('cancelled', false, false), false)
   assert.equal(shouldStartEmptySessionStream('running', true, false), false)
   assert.equal(shouldStartEmptySessionStream('running', false, true), false)
   assert.equal(shouldStartEmptySessionStream(null, false, false), false)

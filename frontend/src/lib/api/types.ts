@@ -12,12 +12,12 @@ export type ApiResponse<T = unknown> = {
 /**
  * 会话状态
  */
-export type SessionStatus = "pending" | "running" | "waiting" | "completed";
+export type SessionStatus = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
 
 /**
  * 执行状态
  */
-export type ExecutionStatus = "pending" | "running" | "completed" | "failed";
+export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 /**
  * 工具事件状态
@@ -192,12 +192,17 @@ export type CreateSessionParams = {
 export type ChatMessage = {
   role: "user" | "assistant" | "system";
   message: string;
+  stage?: "intermediate" | "final";
   attachments?: Array<{
     file_id: string;
     filename: string;
     [key: string]: unknown;
   }>;
   [key: string]: unknown;
+};
+
+export type ChatCommand = {
+  type: "continue_cancelled_task";
 };
 
 /**
@@ -208,6 +213,10 @@ export type ChatParams = {
   message?: string;
   attachments?: string[];
   event_id?: string;
+  resume?: {
+    value: unknown;
+  };
+  command?: ChatCommand;
   [key: string]: unknown;
 };
 
@@ -234,6 +243,7 @@ export type PlanStep = {
   id: string;
   description: string;
   status: ExecutionStatus;
+  outcome?: StepOutcome | null;
   [key: string]: unknown;
 };
 
@@ -245,6 +255,19 @@ export type PlanEvent = {
   [key: string]: unknown;
 };
 
+export type StepOutcome = {
+  done: boolean;
+  summary: string;
+  produced_artifacts: string[];
+  blockers: string[];
+  facts_learned: string[];
+  open_questions: string[];
+  next_hint?: string | null;
+  reused_from_run_id?: string | null;
+  reused_from_step_id?: string | null;
+  [key: string]: unknown;
+};
+
 /**
  * 步骤事件
  */
@@ -252,6 +275,7 @@ export type StepEvent = {
   id: string;
   status: ExecutionStatus;
   description: string;
+  outcome?: StepOutcome | null;
   [key: string]: unknown;
 };
 
@@ -267,6 +291,141 @@ export type ToolEvent = {
   [key: string]: unknown;
 };
 
+export type SearchResultItem = {
+  url: string;
+  title: string;
+  snippet: string;
+};
+
+export type SearchToolContent = {
+  results: SearchResultItem[];
+};
+
+export type BrowserToolContent = {
+  screenshot?: string;
+  page_type?: string;
+  url?: string;
+  title?: string;
+  structured_page?: unknown;
+  main_content?: unknown;
+  cards?: unknown[];
+  actionable_elements?: unknown[];
+  matched_link_text?: string;
+  matched_link_url?: string;
+  matched_link_selector?: string;
+  matched_link_index?: number | null;
+  degrade_reason?: string;
+};
+
+export type FetchPageToolContent = {
+  url: string;
+  final_url?: string;
+  status_code?: number;
+  content_type?: string;
+  title?: string;
+  content?: string;
+  excerpt?: string;
+  content_length?: number;
+  truncated?: boolean;
+  max_chars?: number | null;
+};
+
+export type WaitUserTakeover = "none" | "browser";
+
+export type WaitChoice = {
+  label: string;
+  resume_value: unknown;
+  description?: string;
+};
+
+export type WaitInputTextPayload = {
+  kind: "input_text";
+  title?: string;
+  prompt: string;
+  details?: string;
+  attachments?: string[];
+  suggest_user_takeover?: WaitUserTakeover;
+  placeholder?: string;
+  submit_label?: string;
+  response_key?: string;
+  default_value?: string;
+  multiline?: boolean;
+  allow_empty?: boolean;
+};
+
+export type WaitConfirmPayload = {
+  kind: "confirm";
+  title?: string;
+  prompt: string;
+  details?: string;
+  attachments?: string[];
+  suggest_user_takeover?: WaitUserTakeover;
+  confirm_label?: string;
+  cancel_label?: string;
+  confirm_resume_value?: unknown;
+  cancel_resume_value?: unknown;
+  emphasis?: "default" | "destructive";
+};
+
+export type WaitSelectPayload = {
+  kind: "select";
+  title?: string;
+  prompt: string;
+  details?: string;
+  attachments?: string[];
+  suggest_user_takeover?: WaitUserTakeover;
+  options: WaitChoice[];
+  default_resume_value?: unknown;
+};
+
+export type WaitPayload =
+  | WaitInputTextPayload
+  | WaitConfirmPayload
+  | WaitSelectPayload;
+
+/**
+ * 等待事件数据
+ */
+export type WaitEventData = {
+  interrupt_id?: string | null;
+  payload?: WaitPayload;
+  [key: string]: unknown;
+};
+
+export type TextStreamChannel = "planner_message" | "final_message";
+
+export type TextStreamStartEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  stream_id: string;
+  channel: TextStreamChannel;
+  run_id?: string | null;
+  session_id?: string | null;
+  stage: "planner" | "summary" | "final";
+  is_replay?: boolean;
+  [key: string]: unknown;
+};
+
+export type TextStreamDeltaEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  stream_id: string;
+  channel: TextStreamChannel;
+  text: string;
+  sequence: number;
+  [key: string]: unknown;
+};
+
+export type TextStreamEndEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  stream_id: string;
+  channel: TextStreamChannel;
+  full_text_length: number;
+  reason: "completed" | "cancelled" | "error";
+  [key: string]: unknown;
+};
+
 /**
  * SSE 事件类型
  */
@@ -278,7 +437,10 @@ export type SSEEventType =
   | "tool"
   | "wait"
   | "done"
-  | "error";
+  | "error"
+  | "text_stream_start"
+  | "text_stream_delta"
+  | "text_stream_end";
 
 /**
  * SSE 事件数据
@@ -289,8 +451,11 @@ export type SSEEventData =
   | { type: "plan"; data: PlanEvent }
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
-  | { type: "wait"; data: Record<string, unknown> }
+  | { type: "wait"; data: WaitEventData }
   | { type: "done"; data: Record<string, unknown> }
+  | { type: "text_stream_start"; data: TextStreamStartEventData }
+  | { type: "text_stream_delta"; data: TextStreamDeltaEventData }
+  | { type: "text_stream_end"; data: TextStreamEndEventData }
   | {
       type: "error";
       data: {

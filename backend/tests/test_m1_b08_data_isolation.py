@@ -92,7 +92,6 @@ class _OwnedSessionRepo:
         self.session = Session(
             id="session-a",
             user_id="user-a",
-            task_id="task-a",
             status="running",
         )
 
@@ -130,10 +129,15 @@ class _TaskFactory:
         return _ExistingTask()
 
 
+class _GraphRuntime:
+    async def get_task(self, session: Session):
+        return _ExistingTask()
+
+
 def test_agent_service_chat_should_reject_foreign_attachment() -> None:
     service = object.__new__(AgentService)
     service._uow_factory = _AgentUoW
-    service._task_cls = _TaskFactory
+    service._graph_runtime = _GraphRuntime()
 
     async def _collect_first_event():
         async for event in service.chat(
@@ -157,6 +161,10 @@ class _SessionOwnershipService:
         if user_id == "user-a" and session_id == "session-a":
             return Session(id="session-a", user_id="user-a", title="我的会话")
         return None
+
+    async def get_session_detail(self, user_id: str, session_id: str):
+        session = await self.get_session(user_id=user_id, session_id=session_id)
+        return session, []
 
 
 class _FileOwnershipService:

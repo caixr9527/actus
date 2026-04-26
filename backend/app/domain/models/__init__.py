@@ -13,6 +13,16 @@ from .app_config import (
     MCPServerConfig,
     A2AConfig,
 )
+from .browser import (
+    BrowserPageType,
+    BrowserCardItem,
+    BrowserActionableElement,
+    BrowserPageStructuredResult,
+    BrowserMainContentResult,
+    BrowserCardExtractionResult,
+    BrowserLinkMatchResult,
+    BrowserActionableElementsResult,
+)
 from .event import (
     BaseEvent,
     PlanEvent,
@@ -23,11 +33,18 @@ from .event import (
     WaitEvent,
     ErrorEvent,
     DoneEvent,
+    TextStreamChannel,
+    TextStreamStartEvent,
+    TextStreamDeltaEvent,
+    TextStreamEndEvent,
     Event,
     ToolEventStatus,
     PlanEventStatus,
+    StepEventStatus,
     BrowserToolContent,
     SearchToolContent,
+    FetchPageToolContent,
+    ToolDiagnosticContent,
     ShellToolContent,
     FileToolContent,
     MCPToolContent,
@@ -36,14 +53,52 @@ from .event import (
 from .file import File
 from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
-from .memory import Memory
-from .message import Message
-from .plan import Plan, Step, ExecutionStatus
+from .long_term_memory import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
+from .message import Message, MessageCommand
+from .plan import (
+    Plan,
+    Step,
+    StepOutcome,
+    ExecutionStatus,
+    StepArtifactPolicy,
+    StepOutputMode,
+    StepTaskModeHint,
+    build_step_objective_key,
+    build_step_objective_source,
+)
+from .runtime_input import ContinueCancelledTaskInput, ResumeInput, RuntimeInput, RuntimeInputPayload
 from .runtime_llm_config import RuntimeLLMConfig
-from .search import SearchResults, SearchResultItem
+from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
 from .user import User, UserProfile, UserStatus
+from .workspace import Workspace, WorkspaceStatus
+from .workspace_artifact import WorkspaceArtifact
+from .workflow_run import (
+    WorkflowRun,
+    WorkflowRunStatus,
+    WorkflowRunEventRecord,
+    WorkflowRunStepRecord,
+    WorkflowRunSummary,
+    SessionContextSnapshot,
+)
+from .task_stream import (
+    TaskStreamRecord,
+    TaskStreamEventRecord,
+    TaskRequestStartedRecord,
+    TaskRequestFinishedRecord,
+    TaskRequestRejectedRecord,
+)
+from .wait import (
+    WaitChoice,
+    BaseWaitPayload,
+    TextInputWaitPayload,
+    ConfirmWaitPayload,
+    SelectWaitPayload,
+    normalize_wait_payload,
+    resolve_wait_resume_message,
+    validate_wait_resume_value,
+)
 
 __all__ = [
     "AppConfig",
@@ -53,9 +108,17 @@ __all__ = [
     "MCPServerConfig",
     "HealthStatus",
     "LLMModelConfig",
-    "Memory",
+    "LongTermMemory",
+    "LongTermMemorySearchMode",
+    "LongTermMemorySearchQuery",
     "Plan",
     "Step",
+    "StepOutcome",
+    "StepArtifactPolicy",
+    "StepOutputMode",
+    "StepTaskModeHint",
+    "build_step_objective_key",
+    "build_step_objective_source",
     "RuntimeLLMConfig",
     "ExecutionStatus",
     "BaseEvent",
@@ -67,19 +130,40 @@ __all__ = [
     "WaitEvent",
     "ErrorEvent",
     "DoneEvent",
+    "TextStreamChannel",
+    "TextStreamStartEvent",
+    "TextStreamDeltaEvent",
+    "TextStreamEndEvent",
     "Event",
     "ToolEventStatus",
     "PlanEventStatus",
+    "StepEventStatus",
     "ToolResult",
+    "ResumeInput",
+    "ContinueCancelledTaskInput",
+    "RuntimeInput",
+    "RuntimeInputPayload",
     "File",
     "Message",
+    "MessageCommand",
     "SearchResults",
     "SearchResultItem",
+    "FetchedPage",
     "Session",
     "SessionStatus",
     "A2AConfig",
+    "BrowserPageType",
+    "BrowserCardItem",
+    "BrowserActionableElement",
+    "BrowserPageStructuredResult",
+    "BrowserMainContentResult",
+    "BrowserCardExtractionResult",
+    "BrowserLinkMatchResult",
+    "BrowserActionableElementsResult",
     "BrowserToolContent",
     "SearchToolContent",
+    "FetchPageToolContent",
+    "ToolDiagnosticContent",
     "ShellToolContent",
     "FileToolContent",
     "MCPToolContent",
@@ -87,4 +171,26 @@ __all__ = [
     "User",
     "UserProfile",
     "UserStatus",
+    "Workspace",
+    "WorkspaceStatus",
+    "WorkspaceArtifact",
+    "WorkflowRun",
+    "WorkflowRunStatus",
+    "WorkflowRunEventRecord",
+    "WorkflowRunStepRecord",
+    "WorkflowRunSummary",
+    "SessionContextSnapshot",
+    "TaskStreamRecord",
+    "TaskStreamEventRecord",
+    "TaskRequestStartedRecord",
+    "TaskRequestFinishedRecord",
+    "TaskRequestRejectedRecord",
+    "WaitChoice",
+    "BaseWaitPayload",
+    "TextInputWaitPayload",
+    "ConfirmWaitPayload",
+    "SelectWaitPayload",
+    "normalize_wait_payload",
+    "resolve_wait_resume_message",
+    "validate_wait_resume_value",
 ]

@@ -53,6 +53,12 @@ SESSION_SANDBOX_NOT_BOUND = "error.session.sandbox_not_bound"
 SESSION_SANDBOX_UNAVAILABLE = "error.session.sandbox_unavailable"
 SESSION_FILE_READ_FAILED = "error.session.file_read_failed"
 SESSION_SHELL_READ_FAILED = "error.session.shell_read_failed"
+SESSION_RESUME_REQUIRED = "error.session.resume_required"
+SESSION_NOT_WAITING = "error.session.not_waiting"
+SESSION_RESUME_CHECKPOINT_INVALID = "error.session.resume_checkpoint_invalid"
+SESSION_RESUME_VALUE_INVALID = "error.session.resume_value_invalid"
+SESSION_NOT_CANCELLED = "error.session.not_cancelled"
+SESSION_CANCELLED_CONTINUE_UNAVAILABLE = "error.session.cancelled_continue_unavailable"
 
 # 文件链路
 FILE_NOT_FOUND = "error.file.not_found"

@@ -13,7 +13,7 @@ from app.application.errors import NotFoundError, ServerError, ValidationError
 from app.application.errors import error_keys
 from app.application.service.model_config_service import ModelConfigService
 from app.domain.external import Sandbox
-from app.domain.models import Session, File
+from app.domain.models import File, Session, WorkflowRunEventRecord
 from app.domain.repositories import IUnitOfWork
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,19 @@ class SessionService:
         async with self._uow_factory() as uow:
             return await uow.session.get_by_id(session_id=session_id, user_id=user_id)
 
+    async def get_session_detail(
+            self,
+            user_id: str,
+            session_id: str,
+    ) -> tuple[Session | None, list[WorkflowRunEventRecord]]:
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+            if session is None:
+                return None, []
+
+            event_records = await uow.workflow_run.list_event_records_by_session(session_id=session.id)
+            return session, event_records
+
     async def set_current_model(self, user_id: str, session_id: str, model_id: str) -> Session:
         logger.info(f"更新会话当前模型: session_id={session_id}, model_id={model_id}")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
@@ -102,27 +115,19 @@ class SessionService:
     async def get_session_files(self, user_id: str, session_id: str) -> List[File]:
         logger.info(f"获取任务会话文件列表: {session_id}")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
-        return session.files
+        return session.final_files
 
     async def read_file(self, user_id: str, session_id: str, filepath: str) -> FileReadResult:
         logger.info(f"获取会话：{session_id} 中文件路径：{filepath} 的内容")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
 
-        # 检查会话是否关联了沙盒
-        if not session.sandbox_id:
-            raise NotFoundError(
-                msg="任务会话未关联沙盒",
-                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
-                error_params={"session_id": session_id},
-            )
-
-        # 根据沙盒ID获取沙盒实例
-        sandbox = await self._sandbox_cls.get(id=session.sandbox_id)
+        workspace = await self._get_workspace_or_raise(session=session)
+        sandbox = await self._sandbox_cls.get(id=str(workspace.sandbox_id or ""))
         if not sandbox:
             raise NotFoundError(
                 msg="任务会话未关联沙盒或已销毁",
                 error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
-                error_params={"session_id": session_id, "sandbox_id": session.sandbox_id},
+                error_params={"session_id": session_id, "workspace_id": workspace.id},
             )
 
         # 调用沙盒读取文件方法
@@ -138,25 +143,49 @@ class SessionService:
             error_params={"session_id": session_id, "filepath": filepath},
         )
 
-    async def read_shell_output(self, user_id: str, session_id: str, shell_session_id: str) -> ShellReadResult:
-        logger.info(f"获取会话：{session_id} 中Shell会话ID：{shell_session_id} 的输出")
-        session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
-
-        # 检查会话是否关联了沙盒
-        if not session.sandbox_id:
+    async def _get_workspace_or_raise(self, session: Session):
+        workspace_id = str(session.workspace_id or "").strip()
+        if not workspace_id:
             raise NotFoundError(
-                msg="任务会话未关联沙盒",
+                msg="任务会话未关联工作区",
                 error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
-                error_params={"session_id": session_id},
+                error_params={"session_id": session.id},
             )
 
-        # 根据沙盒ID获取沙盒实例
-        sandbox = await self._sandbox_cls.get(id=session.sandbox_id)
+        async with self._uow_factory() as uow:
+            workspace = await uow.workspace.get_by_id(workspace_id=workspace_id)
+        if workspace is None:
+            raise NotFoundError(
+                msg="任务会话关联工作区不存在或已销毁",
+                error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
+                error_params={"session_id": session.id, "workspace_id": workspace_id},
+            )
+        if not workspace.sandbox_id:
+            raise NotFoundError(
+                msg="任务会话工作区未关联沙盒",
+                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
+                error_params={"session_id": session.id, "workspace_id": workspace_id},
+            )
+        return workspace
+
+    async def read_shell_output(self, user_id: str, session_id: str) -> ShellReadResult:
+        logger.info(f"获取会话：{session_id} 的默认Shell输出")
+        session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
+        workspace = await self._get_workspace_or_raise(session=session)
+        shell_session_id = str(workspace.shell_session_id or "").strip()
+        if not shell_session_id:
+            raise NotFoundError(
+                msg="任务会话工作区未关联Shell会话",
+                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
+                error_params={"session_id": session_id, "workspace_id": workspace.id},
+            )
+
+        sandbox = await self._sandbox_cls.get(id=str(workspace.sandbox_id or ""))
         if not sandbox:
             raise NotFoundError(
                 msg="任务会话未关联沙盒或已销毁",
                 error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
-                error_params={"session_id": session_id, "sandbox_id": session.sandbox_id},
+                error_params={"session_id": session_id, "workspace_id": workspace.id},
             )
         result = await sandbox.read_shell_output(session_id=shell_session_id, console=True)
         if result.success:
@@ -165,28 +194,19 @@ class SessionService:
         raise ServerError(
             msg=result.message,
             error_key=error_keys.SESSION_SHELL_READ_FAILED,
-            error_params={"session_id": session_id, "shell_session_id": shell_session_id},
+            error_params={"session_id": session_id, "workspace_id": workspace.id},
         )
 
     async def get_vnc_url(self, user_id: str, session_id: str) -> str:
         logger.info(f"获取会话：{session_id} 的VNC地址")
         session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
-
-        # 检查会话是否关联了沙盒
-        if not session.sandbox_id:
-            raise NotFoundError(
-                msg="任务会话未关联沙盒",
-                error_key=error_keys.SESSION_SANDBOX_NOT_BOUND,
-                error_params={"session_id": session_id},
-            )
-
-        # 根据沙盒ID获取沙盒实例
-        sandbox = await self._sandbox_cls.get(id=session.sandbox_id)
+        workspace = await self._get_workspace_or_raise(session=session)
+        sandbox = await self._sandbox_cls.get(id=str(workspace.sandbox_id or ""))
         if not sandbox:
             raise NotFoundError(
                 msg="任务会话未关联沙盒或已销毁",
                 error_key=error_keys.SESSION_SANDBOX_UNAVAILABLE,
-                error_params={"session_id": session_id, "sandbox_id": session.sandbox_id},
+                error_params={"session_id": session_id, "workspace_id": workspace.id},
             )
 
         return sandbox.vnc_url

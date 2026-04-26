@@ -1,0 +1,14 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""记忆沉淀领域策略常量。"""
+
+# 消息窗口裁剪策略。
+MESSAGE_WINDOW_MAX_ITEMS = 100
+MESSAGE_WINDOW_MAX_MESSAGE_CHARS = 500
+MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS = 8
+
+# 记忆候选筛选策略。
+MEMORY_CANDIDATE_MIN_CONFIDENCE = 0.3
+
+# 会话摘要压缩策略。
+CONVERSATION_SUMMARY_MAX_PARTS = 4

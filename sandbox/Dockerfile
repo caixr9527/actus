@@ -12,7 +12,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu
 
 # 更新和安装基础软件后并移除依赖
 RUN apt-get update && apt-get install -y \
-    sudo bc curl wget gnupg software-properties-common supervisor \
+    sudo bc curl wget gnupg software-properties-common supervisor git \
     xterm socat xvfb x11vnc websockify\
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -21,10 +21,11 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -d /home/ubuntu -s /bin/bash ubuntu && \
     echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu
 
-# 安装Python 3.10版本(非uv)
-RUN add-apt-repository ppa:deadsnakes/ppa && \
-    apt-get update && \
-    apt-get install -y python3.10 python3.10-venv python3.10-dev python3-pip && \
+# 安装Python 3.10运行时，供 sandbox 主服务使用
+RUN apt-get update && \
+    apt-get install -y \
+    python3.10 python3.10-venv python3.10-dev \
+    python3-pip && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
@@ -66,6 +67,60 @@ ENV LANG=zh_CN.UTF-8 \
     LANGUAGE=zh_CN:zh \
     LC_ALL=zh_CN.UTF-8
 
+# 安装SearXNG运行依赖，以及编译独立 Python 3.11 所需依赖
+RUN apt-get update && apt-get install -y \
+    python3-babel \
+    build-essential \
+    libbz2-dev \
+    libgdbm-dev \
+    liblzma-dev \
+    libncursesw5-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    zlib1g-dev \
+    libffi-dev \
+    libssl-dev \
+    tk-dev \
+    uuid-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 为 SearXNG 单独编译安装 Python 3.11，避免依赖慢速 PPA
+ARG PYTHON311_VERSION=3.11.14
+RUN curl -fsSLo /tmp/Python-${PYTHON311_VERSION}.tar.xz https://www.python.org/ftp/python/${PYTHON311_VERSION}/Python-${PYTHON311_VERSION}.tar.xz && \
+    mkdir -p /tmp/python-build && \
+    tar -xJf /tmp/Python-${PYTHON311_VERSION}.tar.xz -C /tmp/python-build --strip-components=1 && \
+    cd /tmp/python-build && \
+    ./configure --prefix=/opt/python3.11 --with-ensurepip=install && \
+    make -j"$(nproc)" && \
+    make install && \
+    ln -sf /opt/python3.11/bin/python3.11 /usr/local/bin/python3.11 && \
+    rm -rf /tmp/python-build /tmp/Python-${PYTHON311_VERSION}.tar.xz
+
+# 安装SearXNG
+ARG SEARXNG_REF=master
+RUN useradd --system --home-dir /usr/local/searxng --shell /bin/bash searxng && \
+    mkdir -p /usr/local/searxng /usr/local/searxng/run /etc/searxng && \
+    for attempt in 1 2 3; do \
+        curl -fsSLo /tmp/searxng.tar.gz https://codeload.github.com/searxng/searxng/tar.gz/refs/heads/${SEARXNG_REF} && \
+        mkdir -p /usr/local/searxng/searxng-src && \
+        tar -xzf /tmp/searxng.tar.gz -C /usr/local/searxng/searxng-src --strip-components=1 && \
+        rm -f /tmp/searxng.tar.gz && \
+        break; \
+        echo "SearXNG源码下载失败，准备重试(${attempt}/3)"; \
+        rm -rf /usr/local/searxng/searxng-src; \
+        rm -f /tmp/searxng.tar.gz; \
+        test "$attempt" -lt 3 || exit 1; \
+        sleep 5; \
+    done && \
+    python3.11 -m venv /usr/local/searxng/searx-pyenv && \
+    /usr/local/searxng/searx-pyenv/bin/pip install --no-cache-dir -U pip setuptools wheel granian pyyaml msgspec typing_extensions && \
+    cd /usr/local/searxng/searxng-src && \
+    /usr/local/searxng/searx-pyenv/bin/pip install --no-cache-dir --use-pep517 --no-build-isolation -e . && \
+    chown -R searxng:searxng /usr/local/searxng /etc/searxng
+
 # 设置工作空间
 WORKDIR /sandbox
 
@@ -78,13 +133,17 @@ COPY . .
 
 # 将supervisord.conf拷贝至supervisor服务配置目录中
 COPY supervisord.conf /etc/supervisor/conf.d/sandbox.conf
+COPY searxng/settings.yml /etc/searxng/settings.yml
 
-# 暴露端口: 8081(FastAPI) 9222(CDP) 5900(vnc)
-EXPOSE 8081 9222 5900 5901
+# 暴露端口: 8081(FastAPI) 8082(SearXNG) 9222(CDP) 5900(vnc)
+EXPOSE 8081 8082 9222 5900 5901
 
 # 额外的环境变量配置
+ARG BOCHA_API_KEY=""
 ENV CHROME_ARGS=""
 ENV UVI_ARGS=""
+ENV SEARXNG_SECRET=""
+ENV BOCHA_API_KEY=${BOCHA_API_KEY}
 
 # 使用supervisor管理所有进程
 CMD ["supervisord", "-n", "-c", "/sandbox/supervisord.conf"]

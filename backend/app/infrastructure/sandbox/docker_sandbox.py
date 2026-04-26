@@ -8,6 +8,7 @@
 import asyncio
 import io
 import logging
+import secrets
 import socket
 import uuid
 from typing import Optional, Self, BinaryIO
@@ -95,6 +96,11 @@ class DockerSandbox(Sandbox):
                     break
         return ip_address
 
+    @staticmethod
+    def _generate_searxng_secret() -> str:
+        """为每个沙箱生成独立的 SearXNG 密钥。"""
+        return secrets.token_hex(32)
+
     @classmethod
     def _create_task(cls) -> Self:
         # 获取配置信息
@@ -119,6 +125,7 @@ class DockerSandbox(Sandbox):
                     "HTTPS_PROXY": settings.sandbox_https_proxy,  # HTTPS代理
                     "HTTP_PROXY": settings.sandbox_http_proxy,  # HTTP代理
                     "NO_PROXY": settings.sandbox_no_proxy,  # 不使用代理的地址
+                    "SEARXNG_SECRET": cls._generate_searxng_secret(),  # 每个沙箱独立搜索服务密钥
                 }
             }
 
@@ -364,6 +371,57 @@ class DockerSandbox(Sandbox):
             json={
                 "dir_path": dir_path,
                 "glob_pattern": glob_pattern,
+            }
+        )
+        return ToolResult.from_sandbox(**response.json())
+
+    async def get_searxng_status(self) -> ToolResult:
+        response = await self.client.get(
+            f"{self._base_url}/api/searxng/status",
+        )
+        return ToolResult.from_sandbox(**response.json())
+
+    async def search(
+            self,
+            query: str,
+            categories: Optional[str] = None,
+            engines: Optional[str] = None,
+            language: Optional[str] = None,
+            page: Optional[int] = None,
+            time_range: Optional[str] = None,
+            safesearch: Optional[int] = None,
+    ) -> ToolResult:
+        response = await self.client.post(
+            f"{self._base_url}/api/searxng/ai-search",
+            json={
+                "query": query,
+            }
+        )
+        if response.status_code != 200:
+            response = await self.client.post(
+                f"{self._base_url}/api/searxng/search",
+                json={
+                    "query": query,
+                    "categories": categories,
+                    "engines": engines,
+                    "language": language,
+                    "page": page,
+                    "time_range": time_range,
+                    "safesearch": safesearch,
+                }
+            )
+        return ToolResult.from_sandbox(**response.json())
+
+    async def fetch_searxng_page(
+            self,
+            url: str,
+            max_chars: Optional[int] = None,
+    ) -> ToolResult:
+        response = await self.client.post(
+            f"{self._base_url}/api/searxng/fetch-page",
+            json={
+                "url": url,
+                "max_chars": max_chars,
             }
         )
         return ToolResult.from_sandbox(**response.json())

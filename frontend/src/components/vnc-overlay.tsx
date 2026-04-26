@@ -6,6 +6,7 @@ import { X, Loader2, WifiOff } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { VNCStatus } from "@/components/vnc-viewer"
 import { useI18n } from "@/lib/i18n"
+import { getAuthSnapshot } from "@/lib/auth"
 
 const VNCViewer = dynamic(
   () =>
@@ -18,7 +19,7 @@ export interface VNCOverlayProps {
   onClose: () => void
 }
 
-function buildVNCUrl(sessionId: string): string {
+function buildVNCUrl(sessionId: string, accessToken: string | null): string {
   const apiBase =
     process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:23140/api"
 
@@ -38,12 +39,20 @@ function buildVNCUrl(sessionId: string): string {
   }
 
   const protocol = isHttps ? "wss:" : "ws:"
-  return `${protocol}//${host}${pathname}/sessions/${sessionId}/vnc`
+  const baseUrl = `${protocol}//${host}${pathname}/sessions/${sessionId}/vnc`
+  if (!accessToken) {
+    return baseUrl
+  }
+
+  const url = new URL(baseUrl)
+  url.searchParams.set("access_token", accessToken)
+  return url.toString()
 }
 
 export function VNCOverlay({ sessionId, onClose }: VNCOverlayProps) {
   const { t } = useI18n()
-  const vncUrl = useMemo(() => buildVNCUrl(sessionId), [sessionId])
+  const accessToken = getAuthSnapshot().accessToken
+  const vncUrl = useMemo(() => buildVNCUrl(sessionId, accessToken), [accessToken, sessionId])
   const [status, setStatus] = useState<VNCStatus>("connecting")
   const [errorDetail, setErrorDetail] = useState("")
 

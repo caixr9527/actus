@@ -15,12 +15,15 @@ from app.domain.models import (
     Event,
     File,
     ExecutionStatus,
+    WaitEvent,
     ToolEvent,
     ToolEventStatus,
     PlanEvent,
-    StepEvent
+    PlanEventStatus,
+    StepEvent,
+    TextStreamChannel,
 )
-
+from app.domain.services.runtime.normalizers import normalize_event_payload
 
 class BaseEventData(BaseModel):
     """基础事件数据"""
@@ -83,6 +86,7 @@ class MessageEventData(BaseEventData):
     role: Literal["user", "assistant"] = "assistant"
     message: str = ""
     attachments: List[File] = Field(default_factory=list)
+    stage: Literal["intermediate", "final"] = "intermediate"
 
 
 class MessageSSEEvent(BaseSSEEvent):
@@ -98,6 +102,7 @@ class MessageSSEEvent(BaseSSEEvent):
                 role=event.role,
                 message=event.message,
                 attachments=event.attachments,
+                stage=event.stage,
             )
         )
 
@@ -118,6 +123,20 @@ class StepEventData(BaseEventData):
     id: str  # 步骤id
     status: ExecutionStatus  # 步骤执行状态
     description: str  # 步骤描述
+    outcome: Optional["StepOutcomeData"] = None
+
+
+class StepOutcomeData(BaseModel):
+    """步骤结果数据"""
+    done: bool = False
+    summary: str = ""
+    produced_artifacts: List[str] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    facts_learned: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+    next_hint: Optional[str] = None
+    reused_from_run_id: Optional[str] = None
+    reused_from_step_id: Optional[str] = None
 
 
 class StepSSEEvent(BaseSSEEvent):
@@ -132,7 +151,12 @@ class StepSSEEvent(BaseSSEEvent):
                 **BaseEventData.base_event_data(event),
                 status=event.step.status,
                 id=event.step.id,
-                description=event.step.description
+                description=event.step.description,
+                outcome=(
+                    StepOutcomeData.model_validate(event.step.outcome.model_dump(mode="json"))
+                    if event.step.outcome is not None
+                    else None
+                ),
             )
         )
 
@@ -140,6 +164,12 @@ class StepSSEEvent(BaseSSEEvent):
 class PlanEventData(BaseEventData):
     """计划事件数据"""
     steps: List[StepEventData]
+    title: str = ""
+    goal: str = ""
+    message: str = ""
+    language: str = ""
+    status: PlanEventStatus = PlanEventStatus.CREATED
+    plan_status: ExecutionStatus = ExecutionStatus.PENDING
 
 
 class PlanSSEEvent(BaseSSEEvent):
@@ -158,9 +188,20 @@ class PlanSSEEvent(BaseSSEEvent):
                         id=step.id,
                         status=step.status,
                         description=step.description,
+                        outcome=(
+                            StepOutcomeData.model_validate(step.outcome.model_dump(mode="json"))
+                            if step.outcome is not None
+                            else None
+                        ),
                     )
                     for step in event.plan.steps
-                ]
+                ],
+                title=event.plan.title,
+                goal=event.plan.goal,
+                message=event.plan.message,
+                language=event.plan.language,
+                status=event.status,
+                plan_status=event.plan.status,
             )
         )
 
@@ -200,9 +241,77 @@ class DoneSSEEvent(BaseSSEEvent):
     event: Literal["done"] = "done"
 
 
+class WaitEventData(BaseEventData):
+    """等待事件数据"""
+
+    interrupt_id: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
 class WaitSSEEvent(BaseSSEEvent):
     """等待人类输入流式事件"""
     event: Literal["wait"] = "wait"
+    data: WaitEventData
+
+    @classmethod
+    def from_event(cls, event: WaitEvent) -> Self:
+        return cls(
+            data=WaitEventData(
+                **BaseEventData.base_event_data(event),
+                interrupt_id=event.interrupt_id,
+                payload=dict(event.payload or {}),
+            )
+        )
+
+
+class TextStreamStartEventData(BaseEventData):
+    """文本流开始事件数据。"""
+
+    stream_id: str
+    channel: TextStreamChannel
+    run_id: Optional[str] = None
+    session_id: Optional[str] = None
+    stage: Literal["planner", "summary", "final"]
+    is_replay: bool = True
+
+
+class TextStreamStartSSEEvent(BaseSSEEvent):
+    """文本流开始 SSE 事件。"""
+
+    event: Literal["text_stream_start"] = "text_stream_start"
+    data: TextStreamStartEventData
+
+
+class TextStreamDeltaEventData(BaseEventData):
+    """文本流增量事件数据。"""
+
+    stream_id: str
+    channel: TextStreamChannel
+    text: str = ""
+    sequence: int = 0
+
+
+class TextStreamDeltaSSEEvent(BaseSSEEvent):
+    """文本流增量 SSE 事件。"""
+
+    event: Literal["text_stream_delta"] = "text_stream_delta"
+    data: TextStreamDeltaEventData
+
+
+class TextStreamEndEventData(BaseEventData):
+    """文本流结束事件数据。"""
+
+    stream_id: str
+    channel: TextStreamChannel
+    full_text_length: int = 0
+    reason: Literal["completed", "cancelled", "error"] = "completed"
+
+
+class TextStreamEndSSEEvent(BaseSSEEvent):
+    """文本流结束 SSE 事件。"""
+
+    event: Literal["text_stream_end"] = "text_stream_end"
+    data: TextStreamEndEventData
 
 
 class ErrorEventData(BaseEventData):
@@ -228,6 +337,9 @@ AgentSSEEvent = Union[
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,
+    TextStreamStartSSEEvent,
+    TextStreamDeltaSSEEvent,
+    TextStreamEndSSEEvent,
 ]
 
 
@@ -288,6 +400,8 @@ class EventMapper:
     @staticmethod
     def event_to_sse_event(event: Event) -> AgentSSEEvent:
         """将领域事件转换为Agent流式事件模型"""
+        # live SSE 与历史回放统一吃同一份干净事件，避免再出现事件层 outcome 旁路。
+        event = normalize_event_payload(event)
         # 获取事件类型到SSE事件类的映射关系
         event_type_mapping = EventMapper._get_event_type_mapping()
 
@@ -297,10 +411,10 @@ class EventMapper:
         # 如果找到匹配的事件映射，则使用对应SSE事件类构建流式事件
         if event_mapping:
             sse_event = event_mapping.sse_event_class.from_event(event)
-            return sse_event
-
-        # 如果未找到匹配的事件映射，则使用通用SSE事件类进行转换
-        return CommonSSEEvent.from_event(event)
+        else:
+            # 如果未找到匹配的事件映射，则使用通用SSE事件类进行转换
+            sse_event = CommonSSEEvent.from_event(event)
+        return sse_event
 
     @staticmethod
     def events_to_sse_events(events: List[Event]) -> List[AgentSSEEvent]:

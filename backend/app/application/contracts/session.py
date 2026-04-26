@@ -21,6 +21,5 @@ class ConsoleRecordResult(BaseModel):
 
 
 class ShellReadResult(BaseModel):
-    session_id: str
     output: str
     console_records: List[ConsoleRecordResult] = Field(default_factory=list)

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class MCPClientManager:
 
     def __init__(self, mcp_config: Optional[MCPConfig] = None) -> None:
-        self._mcp_config: MCPConfig = mcp_config
+        self._mcp_config: MCPConfig = mcp_config or MCPConfig()
         self._exit_stack: AsyncExitStack = AsyncExitStack()
         self._clients: Dict[str, ClientSession] = {}
         self._tools: Dict[str, List[Tool]] = {}
@@ -52,6 +52,10 @@ class MCPClientManager:
     async def _connect_mcp_servers(self) -> None:
         # 遍历所有配置的MCP服务器并尝试连接
         for server_name, server_config in self._mcp_config.mcpServers.items():
+            # 仅连接启用状态的服务器，避免将禁用配置暴露给运行时。
+            if not server_config.enabled:
+                logger.info(f"MCP服务器 {server_name} 已禁用，跳过连接")
+                continue
             try:
                 # 尝试连接单个MCP服务器
                 await self._connect_mcp_server(server_name, server_config)

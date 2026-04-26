@@ -10,8 +10,14 @@ from typing import TypeVar
 
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
+from .long_term_memory_repository import LongTermMemoryRepository
 from .session_repository import SessionRepository
+from .session_context_snapshot_repository import SessionContextSnapshotRepository
 from .user_repository import UserRepository
+from .workflow_run_repository import WorkflowRunRepository
+from .workflow_run_summary_repository import WorkflowRunSummaryRepository
+from .workspace_artifact_repository import WorkspaceArtifactRepository
+from .workspace_repository import WorkspaceRepository
 
 T = TypeVar("T", bound="IUnitOfWork")
 
@@ -22,6 +28,12 @@ class IUnitOfWork(ABC):
     session: SessionRepository
     user: UserRepository
     llm_model_config: LLMModelConfigRepository
+    long_term_memory: LongTermMemoryRepository
+    workflow_run: WorkflowRunRepository
+    workflow_run_summary: WorkflowRunSummaryRepository
+    session_context_snapshot: SessionContextSnapshotRepository
+    workspace: WorkspaceRepository
+    workspace_artifact: WorkspaceArtifactRepository
 
     @abstractmethod
     async def commit(self):

@@ -5,6 +5,8 @@
 @Author : caixiaorong01@outlook.com
 @File   : runtime_llm_config.py
 """
+from typing import Literal
+
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -16,3 +18,8 @@ class RuntimeLLMConfig(BaseModel):
     model_name: str
     temperature: float = Field(default=0.7)
     max_tokens: int = Field(default=8192, ge=0)
+    # 显式声明当前模型接入使用的 API 风格，避免把 OpenAI 专有协议误压给兼容网关。
+    api_style: Literal["chat_completions", "responses"] = Field(default="chat_completions")
+    # BE-LG-12：模型输入能力声明。
+    multimodal: bool = Field(default=False)
+    supported: list[str] = Field(default_factory=list)

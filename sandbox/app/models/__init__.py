@@ -30,6 +30,12 @@ from .supervisor import (
     SupervisorActionResult,
     SupervisorTimeout
 )
+from .searxng import (
+    SearXNGFetchPageResult,
+    SearXNGSearchItem,
+    SearXNGSearchResult,
+    SearXNGStatusResult,
+)
 
 _all_ = [
     "ShellExecResult",
@@ -49,5 +55,9 @@ _all_ = [
     "FileUploadResult",
     "ProcessInfo",
     "SupervisorActionResult",
-    "SupervisorTimeout"
+    "SupervisorTimeout",
+    "SearXNGFetchPageResult",
+    "SearXNGSearchItem",
+    "SearXNGSearchResult",
+    "SearXNGStatusResult",
 ]

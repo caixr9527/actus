@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : llm.py
 """
-from typing import Protocol, Any, Dict
+from typing import Protocol, Any, Dict, List
 
 
 class LLM(Protocol):
@@ -33,4 +33,18 @@ class LLM(Protocol):
     @property
     def max_tokens(self) -> int:
         """获取LLM模型最大token数"""
+        ...
+
+    @property
+    def multimodal(self) -> bool:
+        """是否支持原生多模态输入"""
+        ...
+
+    @property
+    def supported(self) -> list[str]:
+        """支持的输入类型集合"""
+        ...
+
+    async def format_multiplexed_message(self, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """格式化多模态消息"""
         ...

@@ -47,8 +47,14 @@ class SessionModel(Base):
         String(255),
         nullable=True,
     )  # 当前会话显式选择的模型id，NULL表示走默认模型
-    sandbox_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 沙箱id
-    task_id: Mapped[str] = mapped_column(String(255), nullable=True)  # 任务id
+    current_run_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 当前会话关联运行id（WorkflowRun）
+    workspace_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+    )  # 当前会话关联工作区id
     title: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -68,21 +74,16 @@ class SessionModel(Base):
         DateTime,
         nullable=True,
     )  # 最后一条消息时间
-    events: Mapped[List[Dict[str, Any]]] = mapped_column(
-        JSONB,
-        nullable=False,
-        server_default=text("'[]'::jsonb"),
-    )  # 事件列表
     files: Mapped[List[Dict[str, Any]]] = mapped_column(
         JSONB,
         nullable=False,
         server_default=text("'[]'::jsonb"),
-    )
-    memories: Mapped[Dict[str, Any]] = mapped_column(
+    )  # 所有文件
+    final_files: Mapped[List[Dict[str, Any]]] = mapped_column(
         JSONB,
         nullable=False,
-        server_default=text("'{}'::jsonb"),
-    )  # 会话两个Agent的记忆
+        server_default=text("'[]'::jsonb"),
+    )  # 最终文件
     status: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -107,31 +108,47 @@ class SessionModel(Base):
             # 基础字段: 使用BaseModel提供的python字典转换格式
             **session.model_dump(
                 mode="python",
-                exclude={"memories", "files", "events", "updated_at", "created_at"},
+                exclude={"events", "files", "final_files", "updated_at", "created_at"},
             ),
             # 复杂字段: 使用BaseModel提供的json字典转换格式
             **session.model_dump(
                 mode="json",
-                include={"memories", "files", "events"},
+                include={"files", "final_files"},
             )
         )
 
     def to_domain(self) -> Session:
         """将会话ORM模型转换成领域模型"""
-        return Session.model_validate(self, from_attributes=True)
+        payload = {
+            "id": self.id,
+            "user_id": self.user_id,
+            "current_model_id": self.current_model_id,
+            "workspace_id": self.workspace_id,
+            "current_run_id": self.current_run_id,
+            "title": self.title,
+            "unread_message_count": self.unread_message_count,
+            "latest_message": self.latest_message,
+            "latest_message_at": self.latest_message_at,
+            "files": list(self.files or []),
+            "final_files": list(self.final_files or []),
+            "status": self.status,
+            "updated_at": self.updated_at,
+            "created_at": self.created_at,
+        }
+        return Session.model_validate(payload)
 
     def update_from_domain(self, session: Session) -> None:
         """从传递的领域模型更新ORM数据"""
         # 基础字段: Python模式
         base_data = session.model_dump(
             mode="python",
-            exclude={"memories", "files", "events", "updated_at", "created_at"},
+            exclude={"events", "files", "final_files", "updated_at", "created_at"},
         )
 
         # 复杂字段: JSON模式
         json_data = session.model_dump(
             mode="json",
-            include={"memories", "files", "events"},
+            include={"files", "final_files"},
         )
 
         # 合并更新

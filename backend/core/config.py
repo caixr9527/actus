@@ -8,12 +8,27 @@
 from functools import lru_cache
 from typing import Optional
 
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
+
+
+class OllamaSettings(BaseModel):
+    """通用 Ollama 连接配置，供所有需要本地 Ollama 的运行时能力复用。"""
+
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen3:4b"
+    timeout_seconds: float = 30.0
 
 
 class Settings(BaseSettings):
     env: str = "development"
     log_level: str = "INFO"
+    log_dir: str = "logs"
+    log_filename: str = "backend.log"
+    log_file_max_mb: int = 100
+    log_retention_days: int = 3
     # 日志输出配置（单配置项）：
     # - all：输出全部日志（项目 + 系统/框架）
     # - 其他值：按逗号分隔解析为 logger 前缀白名单，仅输出命中的日志
@@ -76,10 +91,22 @@ class Settings(BaseSettings):
     sandbox_https_proxy: Optional[str] = None
     sandbox_http_proxy: Optional[str] = None
     sandbox_no_proxy: Optional[str] = None
+    agent_runtime_engine: str = "langgraph"
+    agent_runtime_router_model_name: Optional[str] = None
+    agent_runtime_planner_model_name: Optional[str] = None
+    agent_runtime_executor_model_name: Optional[str] = None
+    agent_runtime_replan_model_name: Optional[str] = None
+    agent_runtime_summary_model_name: Optional[str] = None
+    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        env_nested_delimiter="__",
         extra="ignore",
     )
 
@@ -119,6 +146,33 @@ class Settings(BaseSettings):
             if logger_name == prefix or logger_name.startswith(f"{prefix}."):
                 return True
         return False
+
+    @property
+    def resolved_embedding_dimensions(self) -> int:
+        """长期记忆向量列当前固定维度。"""
+        return LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_empty_embedding_dimensions(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        normalized_data = dict(data)
+        raw_embedding_dimensions = normalized_data.get("embedding_dimensions")
+        if isinstance(raw_embedding_dimensions, str) and not raw_embedding_dimensions.strip():
+            normalized_data["embedding_dimensions"] = None
+        return normalized_data
+
+    @model_validator(mode="after")
+    def validate_embedding_dimensions(self) -> "Settings":
+        if self.embedding_dimensions is None:
+            return self
+        if int(self.embedding_dimensions) != LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS:
+            raise ValueError(
+                f"EMBEDDING_DIMENSIONS 必须为 {LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS}，"
+                "以匹配 long_term_memories.embedding 列维度"
+            )
+        return self
 
 
 @lru_cache()

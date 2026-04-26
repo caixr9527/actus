@@ -7,8 +7,9 @@
 """
 from app.application.errors import ServerError
 from app.application.errors import error_keys
-from app.domain.models import Session, RuntimeLLMConfig, LLMModelConfig
 from app.application.service.model_config_service import ModelConfigService
+from app.application.service.model_input_policy import normalize_supported_input_types
+from app.domain.models import Session, RuntimeLLMConfig, LLMModelConfig
 
 
 class ModelRuntimeResolver:
@@ -47,6 +48,7 @@ class ModelRuntimeResolver:
     def _build_runtime_llm_config(model: LLMModelConfig) -> RuntimeLLMConfig:
         """把模型目录记录转换为运行时 LLM 配置。"""
         config = model.config or {}
+        capabilities = config.get("capabilities", {})
         try:
             return RuntimeLLMConfig(
                 base_url=model.base_url,
@@ -54,6 +56,11 @@ class ModelRuntimeResolver:
                 model_name=model.model_name,
                 temperature=config.get("temperature", 0.7),
                 max_tokens=config.get("max_tokens", 8192),
+                api_style=capabilities.get("api_style", "chat_completions"),
+                multimodal=capabilities.get("multimodal", False),
+                supported=normalize_supported_input_types(
+                    capabilities.get("supported", [])
+                ),
             )
         except Exception as e:
             raise ServerError(

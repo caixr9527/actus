@@ -6,14 +6,13 @@
 @File   : agent_task_runner.py
 """
 import asyncio
-import io
 import logging
-import uuid
 from datetime import datetime
-from typing import List, AsyncGenerator, Callable, BinaryIO, Optional
+from typing import List, AsyncGenerator, Callable, Optional, Any, Literal
 
 from pydantic import TypeAdapter
 
+from app.application.errors import error_keys
 from app.domain.external import (
     TaskRunner,
     Task,
@@ -23,7 +22,6 @@ from app.domain.external import (
     Browser,
     SearchEngine,
     Sandbox,
-    FileUploadPayload,
 )
 from app.domain.models import (
     AgentConfig,
@@ -33,26 +31,35 @@ from app.domain.models import (
     SessionStatus,
     Event,
     MessageEvent,
-    File,
     Message,
+    MessageCommand,
     BaseEvent,
     ToolEvent,
-    ToolEventStatus,
-    ToolResult,
-    SearchResults,
     DoneEvent,
     TitleEvent,
     WaitEvent,
-    BrowserToolContent,
-    SearchToolContent,
-    ShellToolContent,
-    FileToolContent,
-    MCPToolContent,
-    A2AToolContent,
+    ContinueCancelledTaskInput,
+    ResumeInput,
+    RuntimeInput,
+    WorkflowRunStatus,
+    TaskStreamEventRecord,
+    TaskRequestStartedRecord,
+    TaskRequestFinishedRecord,
+    TaskRequestRejectedRecord,
 )
 from app.domain.repositories import IUnitOfWork
-from app.domain.services.flows import PlannerReActFlow
-from app.domain.services.tools import MCPTool, A2ATool
+from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.cancellation import (
+    build_cancelled_runtime_events,
+)
+from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
+from app.domain.services.workspace_runtime.projectors import (
+    MessageAttachmentProjector,
+    ToolEventProjector,
+    UserInputAttachmentProjector,
+)
+from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +83,11 @@ class AgentTaskRunner(TaskRunner):
             browser: Browser,
             search_engine: SearchEngine,
             sandbox: Sandbox,
+            run_engine_factory: Optional[Callable[..., RunEngine]] = None,
+            tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
     ) -> None:
+        if tool_runtime_adapter is None:
+            raise ValueError("tool_runtime_adapter 不能为空")
         self._session_id = session_id
         self._user_id = user_id
         self._sandbox = sandbox
@@ -85,20 +96,98 @@ class AgentTaskRunner(TaskRunner):
         self._a2a_config = a2a_config
         self._a2a_tool = A2ATool()
         self._file_storage = file_storage
-        self._browser = browser
         self._uow_factory = uow_factory
-        self._flow = PlannerReActFlow(
+        self._workspace_runtime_service = WorkspaceRuntimeService(
+            session_id=session_id,
+            uow_factory=uow_factory,
+        )
+        self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
+        self._tool_runtime_adapter = tool_runtime_adapter
+        self._tool_event_projector = ToolEventProjector(
+            adapter=tool_runtime_adapter,
+            browser=browser,
+            file_storage=file_storage,
+            workspace_runtime_service=self._workspace_runtime_service,
+            user_id=user_id,
+        )
+        self._message_attachment_projector = MessageAttachmentProjector(
+            session_id=session_id,
+            user_id=user_id,
+            sandbox=sandbox,
+            file_storage=file_storage,
+            uow_factory=uow_factory,
+            workspace_runtime_service=self._workspace_runtime_service,
+        )
+        self._user_input_attachment_projector = UserInputAttachmentProjector(
+            session_id=session_id,
+            sandbox=sandbox,
+            file_storage=file_storage,
+            uow_factory=uow_factory,
+        )
+        self._run_engine = self._build_run_engine(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
-            uow_factory=self._uow_factory,
+            uow_factory=uow_factory,
+            json_parser=json_parser,
+            browser=browser,
+            sandbox=sandbox,
+            search_engine=search_engine,
+            run_engine_factory=run_engine_factory,
+        )
+
+    def _build_run_engine(
+            self,
+            llm: LLM,
+            agent_config: AgentConfig,
+            session_id: str,
+            uow_factory: Callable[[], IUnitOfWork],
+            json_parser: JSONParser,
+            browser: Browser,
+            sandbox: Sandbox,
+            search_engine: SearchEngine,
+            run_engine_factory: Optional[Callable[..., RunEngine]],
+    ) -> RunEngine:
+        if run_engine_factory is None:
+            raise RuntimeError(
+                "未配置 run_engine_factory，当前仅支持 LangGraph 运行时，禁止回退 legacy planner-react"
+            )
+
+        return run_engine_factory(
+            llm=llm,
+            agent_config=agent_config,
+            session_id=session_id,
+            file_storage=self._file_storage,
+            uow_factory=uow_factory,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
             search_engine=search_engine,
             mcp_tool=self._mcp_tool,
             a2a_tool=self._a2a_tool,
+            workspace_runtime_service=self._workspace_runtime_service,
+            mcp_config=self._mcp_config,
+            user_id=self._user_id,
+            tool_runtime_adapter=self._tool_runtime_adapter,
         )
+
+    def _get_workspace_manager(self) -> WorkspaceManager:
+        manager = getattr(self, "_workspace_manager", None)
+        if manager is None:
+            manager = WorkspaceManager(uow_factory=self._uow_factory)
+            self._workspace_manager = manager
+        return manager
+
+    async def _put_stream_record(
+            self,
+            task: Task,
+            record: TaskStreamEventRecord
+                    | TaskRequestStartedRecord
+                    | TaskRequestFinishedRecord
+                    | TaskRequestRejectedRecord,
+    ) -> str:
+        """写入任务内部输出流。"""
+        return await task.output_stream.put(record.model_dump_json())
 
     async def _put_and_add_event(
             self,
@@ -113,15 +202,24 @@ class AgentTaskRunner(TaskRunner):
         event_id = None
         try:
             # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
-            event_id = await task.output_stream.put(event.model_dump_json())
-            event.id = event_id
+            event_id = await self._put_stream_record(
+                task=task,
+                record=TaskStreamEventRecord(event=event),
+            )
+            if not should_persist_event(event):
+                return
+            # 注意：不要原地修改传入 event.id。
+            # LangGraphRunEngine 会对同一事件对象做 live + final replay 去重，
+            # 若这里直接改写 id，可能导致 replay 阶段去重失效并重复落库。
+            persisted_event = event.model_copy(deep=True)
+            persisted_event.id = event_id
 
             # 再把同一事件和会话投影在单事务内落库。
             # 这样可以保证“事件历史”与“会话列表投影(latest/status/title/unread)”一致提交。
             async with self._uow_factory() as uow:
                 await uow.session.add_event_with_snapshot_if_absent(
                     session_id=self._session_id,
-                    event=event,
+                    event=persisted_event,
                     title=title,
                     latest_message=latest_message,
                     latest_message_at=latest_message_at,
@@ -138,253 +236,125 @@ class AgentTaskRunner(TaskRunner):
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
 
-    async def _pop_event(self, task: Task) -> Optional[Event]:
+    async def _emit_request_started(self, task: Task, request_id: str) -> None:
+        await self._put_stream_record(
+            task=task,
+            record=TaskRequestStartedRecord(request_id=request_id),
+        )
+
+    async def _emit_request_finished(
+            self,
+            task: Task,
+            *,
+            request_id: str,
+            terminal_event_type: Literal["wait", "done", "error"],
+    ) -> None:
+        await self._put_stream_record(
+            task=task,
+            record=TaskRequestFinishedRecord(
+                request_id=request_id,
+                terminal_event_type=terminal_event_type,
+            ),
+        )
+
+    async def _emit_request_rejected(
+            self,
+            task: Task,
+            *,
+            request_id: str,
+            message: str,
+            error_key: Optional[str] = None,
+    ) -> None:
+        await self._put_stream_record(
+            task=task,
+            record=TaskRequestRejectedRecord(
+                request_id=request_id,
+                message=message,
+                error_key=error_key,
+            ),
+        )
+
+    async def _reject_pending_requests(
+            self,
+            task: Task,
+            *,
+            message: str,
+            error_key: Optional[str] = None,
+    ) -> None:
+        """拒绝当前终态之后尚未开始执行的排队请求。"""
+        while not await task.input_stream.is_empty():
+            pending_input = await self._pop_event(task)
+            if pending_input is None:
+                continue
+            await self._emit_request_rejected(
+                task=task,
+                request_id=pending_input.request_id,
+                message=message,
+                error_key=error_key,
+            )
+
+    async def _pop_event(self, task: Task) -> Optional[RuntimeInput]:
         # 从输入流中取出事件数据
         event_id, event_str = await task.input_stream.pop()
         if event_str is None:
             logger.warning(f"接收到空消息")
             return None
 
-        # 解析JSON字符串为Event对象
-        event = TypeAdapter(Event).validate_json(event_str)
-        # 设置事件ID
-        event.id = event_id
+        # 解析JSON字符串为运行时输入对象
+        runtime_input = TypeAdapter(RuntimeInput).validate_json(event_str)
+        event = runtime_input.payload
 
-        # 输入流消费阶段补写事件历史：
-        # 如果之前发生“入流成功但写库失败/进程中断”，这里会按event_id幂等补齐。
-        try:
-            async with self._uow_factory() as uow:
-                await uow.session.add_event_if_absent(self._session_id, event)
-        except Exception as e:
-            # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
-            logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")
-
-        return event
-
-    async def _sync_file_to_sandbox(self, file_id: str) -> File:
-
-        try:
-            # 从文件存储中下载文件数据和文件元信息
-            file_data, file = await self._file_storage.download_file(file_id=file_id)
-            # 构建沙箱中的文件路径
-            filepath = f"/home/ubuntu/upload/{file.filename}"
-
-            # 将文件上传到沙箱环境中
-            tool_result = await self._sandbox.upload_file(
-                file_data=file_data,
-                file_path=filepath,
-                filename=file.filename,
-            )
-
-            # 如果上传成功，则更新文件的存储路径并保存到文件仓库
-            if tool_result.success:
-                file.filepath = filepath
+        if isinstance(event, MessageEvent):
+            # 仅消息事件拥有领域事件ID；恢复输入是运行时内部控制消息，不进入事件历史。
+            event.id = event_id
+            # 输入流消费阶段补写事件历史：
+            # 如果之前发生“入流成功但写库失败/进程中断”，这里会按event_id幂等补齐。
+            try:
                 async with self._uow_factory() as uow:
-                    await uow.file.save(file=file)
-                return file
-        except Exception as e:
-            # 记录同步文件到沙箱时出现的异常
-            logger.exception(f"同步文件 [{file_id}] 到沙箱失败: {e}")
+                    if should_persist_event(event):
+                        await uow.session.add_event_if_absent(self._session_id, event)
+            except Exception as e:
+                # 补写失败只记录，不阻断任务主流程，避免出现“可处理消息被丢弃”。
+                logger.warning(f"会话[{self._session_id}]输入事件历史补写失败: {e}")
 
-    async def _sync_message_attachments_to_sandbox(self, event: MessageEvent) -> None:
-        # 初始化附件列表
-        attachments: List[File] = []
-        try:
-            # 检查事件是否包含附件
-            if event.attachments:
-                # 遍历所有附件，同步到沙箱环境
-                for attachment in event.attachments:
-                    # 将附件同步到沙箱
-                    file = await self._sync_file_to_sandbox(file_id=attachment.id)
-                    if file:
-                        # 添加到附件列表
-                        attachments.append(file)
-                        # 将文件添加到会话存储中
-                        async with self._uow_factory() as uow:
-                            await uow.session.add_file(session_id=self._session_id, file=file)
-
-                # 更新事件中的附件列表为已同步的文件
-                event.attachments = attachments
-        except Exception as e:
-            # 记录同步附件到沙箱时发生的异常
-            logger.exception(f"同步消息附件到沙箱失败: {e}")
-
-    @classmethod
-    def _get_stream_size(cls, f: BinaryIO) -> int:
-        # 获取当前文件指针位置
-        current_pos = f.tell()
-        # 将文件指针移动到文件末尾
-        f.seek(0, 2)
-        # 获取文件大小（当前位置即为文件大小）
-        size = f.tell()
-        # 将文件指针恢复到原来的位置
-        f.seek(current_pos)
-        # 返回文件大小
-        return size
-
-    async def _sync_file_to_storage(self, filepath: str) -> File:
-        try:
-            # 根据文件路径从会话存储中获取旧文件信息（如存在）
-            async with self._uow_factory() as uow:
-                old_file = await uow.session.get_file_by_path(session_id=self._session_id, filepath=filepath)
-
-            # 从沙箱环境中下载文件数据
-            file_data = await self._sandbox.download_file(file_path=filepath)
-
-            # 从路径中提取文件名
-            filename = filepath.split("/")[-1]
-
-            # 创建 UploadFile 对象用于上传
-            upload_file = FileUploadPayload(
-                file=file_data,
-                filename=filename,
-                size=self._get_stream_size(file_data),
-            )
-
-            # 上传并接收新文件对象，后续会话映射以该对象为准
-            new_file = await self._file_storage.upload_file(upload_file=upload_file, user_id=self._user_id)
-            new_file.filepath = filepath
-
-            # 原子更新会话文件索引：删除旧引用（若存在）并新增新引用
-            async with self._uow_factory() as uow:
-                if old_file:
-                    await uow.session.remove_file(session_id=self._session_id, file_id=old_file.id)
-                await uow.session.add_file(session_id=self._session_id, file=new_file)
-
-            return new_file
-        except Exception as e:
-            # 记录同步文件到存储时发生的异常
-            logger.exception(f"同步文件到存储失败: {e}")
-            raise
-
-    async def _sync_message_attachments_to_storage(self, event: MessageEvent) -> None:
-        attachments: List[File] = []
-
-        try:
-            if event.attachments:
-                for attachment in event.attachments:
-                    # 将附件上传到存储
-                    file = await self._sync_file_to_storage(attachment.filepath)
-                    if file:
-                        attachments.append(file)
-
-                # 更新事件中的附件列表为已上传的文件
-                event.attachments = attachments
-        except Exception as e:
-            # 记录同步附件到存储时发生的异常
-            logger.exception(f"同步消息附件到存储失败: {e}")
-            raise
-
-    async def _get_browser_screenshot(self) -> str:
-        # 获取浏览器截图
-        screenshot = await self._browser.screenshot()
-        screenshot_stream = io.BytesIO(screenshot)
-        file = await self._file_storage.upload_file(
-            upload_file=FileUploadPayload(
-                file=screenshot_stream,
-                filename=f"{str(uuid.uuid4())}.png",
-                size=self._get_stream_size(screenshot_stream),
-            ),
-            user_id=self._user_id,
-        )
-        return self._file_storage.get_file_url(file)
-
-    async def _handle_tool_event(self, event: ToolEvent) -> None:
-        try:
-            # 检查工具事件的状态是否为已调用
-            if event.status == ToolEventStatus.CALLED:
-                # 处理浏览器工具事件 - 生成屏幕截图
-                if event.tool_name == "browser":
-                    event.tool_content = BrowserToolContent(
-                        screenshot=await self._get_browser_screenshot(),
-                    )
-                # 处理搜索工具事件 - 提取搜索结果
-                elif event.tool_name == "search":
-                    search_results: ToolResult[SearchResults] = event.function_result
-                    logger.info(f"搜索工具结果: {search_results}")
-                    event.tool_content = SearchToolContent(results=search_results.data.results)
-                # 处理Shell工具事件 - 读取Shell命令输出
-                elif event.tool_name == "shell":
-                    if "session_id" in event.function_args:
-                        # 如果提供了session_id参数，读取对应会话的shell输出
-                        shell_result = await self._sandbox.read_shell_output(
-                            session_id=event.function_args["session_id"],
-                            console=True
-                        )
-                        event.tool_content = ShellToolContent(
-                            console=(shell_result.data or {}).get("console_records", [])
-                        )
-                    else:
-                        # 如果没有session_id参数，设置默认值
-                        event.tool_content = ShellToolContent(console="(No console)")
-                # 处理文件工具事件 - 读取文件内容并同步到存储
-                elif event.tool_name == "file":
-                    if "filepath" in event.function_args:
-                        # 从函数参数中获取文件路径
-                        filepath = event.function_args["filepath"]
-                        # 从沙箱中读取文件内容
-                        file_read_result = await self._sandbox.read_file(file_path=filepath)
-                        file_content: str = (file_read_result.data or {}).get("content", "")
-                        event.tool_content = FileToolContent(content=file_content)
-                        # 将文件同步到沙存储
-                        await self._sync_file_to_storage(filepath=filepath)
-                    else:
-                        # 如果没有提供文件路径参数，设置默认内容
-                        event.tool_content = FileToolContent(content="(No Content)")
-                # 处理MCP和A2A工具事件 - 处理外部工具调用结果
-                elif event.tool_name in ["mcp", "a2a"]:
-                    logger.info(f"处理MCP/A2A工具事件, function_result: {event.function_result}")
-                    if event.function_result:
-                        # 检查函数结果是否有数据属性
-                        if hasattr(event.function_result, "data") and event.function_result.data:
-                            logger.info(f"MCP/A2A工具调用结果: {event.function_result.data}")
-                            # 根据工具名称设置相应的工具内容
-                            event.tool_content = MCPToolContent(result=event.function_result.data) \
-                                if event.tool_name == "mcp" \
-                                else A2AToolContent(a2a_result=event.function_result.data)
-                        # 检查函数结果是否成功但无数据
-                        elif hasattr(event.function_result, "success") and event.function_result.success:
-                            logger.info(f"MCP/A2A工具调用成功返回，但无结果: {event.function_result}")
-                            # 获取结果数据，优先使用model_dump方法
-                            result_data = event.function_result.model_dump() \
-                                if hasattr(event.function_result, "model_dump") \
-                                else str(event.function_result)
-                            event.tool_content = MCPToolContent(result=result_data) \
-                                if event.tool_name == "mcp" \
-                                else A2AToolContent(a2a_result=result_data)
-                        # 其他情况，直接转换为字符串
-                        else:
-                            logger.info(f"MCP/A2A工具结果: {event.function_result}")
-                            event.tool_content = MCPToolContent(result=str(event.function_result)) \
-                                if event.tool_name == "mcp" \
-                                else A2AToolContent(a2a_result=str(event.function_result))
-                    else:
-                        # 没有找到函数结果时的默认处理
-                        logger.warning("MCP/A2A工具调用结果未发现")
-                        event.tool_content = MCPToolContent(result="(MCP工具无可用结果)") \
-                            if event.tool_name == "mcp" \
-                            else A2AToolContent(a2a_result="(A2A智能体无可用结果)")
-        except Exception as e:
-            # 记录处理工具事件时发生的异常
-            logger.exception(f"处理工具事件失败: {e}")
+        return runtime_input
 
     async def _run_flow(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         # 检查消息是否为空，如果为空则记录警告并返回错误事件
-        if not message.message:
+        if not message.message and message.command is None:
             logger.warning(f"接收了一条空消息")
             yield ErrorEvent(error=f"空消息错误")
             return
 
         # 遍历流程执行过程中产生的事件
-        async for event in self._flow.invoke(message):
+        async for event in self._run_engine.invoke(message):
             # 处理工具事件，根据工具类型进行相应的内容填充
             if isinstance(event, ToolEvent):
-                await self._handle_tool_event(event)
+                await self._tool_event_projector.project(event)
             # 处理消息事件，同步附件到存储
             elif isinstance(event, MessageEvent):
-                await self._sync_message_attachments_to_storage(event)
+                await self._message_attachment_projector.project(event)
 
             # 产出事件
+            yield event
+
+    async def _continue_cancelled_flow(self) -> AsyncGenerator[BaseEvent, None]:
+        """显式继续已取消任务，不伪造用户自然语言输入。"""
+        async for event in self._run_flow(
+                Message(
+                    message="",
+                    attachments=[],
+                    command=MessageCommand(type="continue_cancelled_task"),
+                )
+        ):
+            yield event
+
+    async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
+        async for event in self._run_engine.resume(value):
+            if isinstance(event, ToolEvent):
+                await self._tool_event_projector.project(event)
+            elif isinstance(event, MessageEvent):
+                await self._message_attachment_projector.project(event)
             yield event
 
     async def _cleanup_tools(self) -> None:
@@ -393,19 +363,13 @@ class AgentTaskRunner(TaskRunner):
         注意：该方法必须在初始化MCP/A2A的同一个asyncio Task中调用，
         否则anyio的cancel scope会检测到任务上下文切换并抛出RuntimeError。
         """
-        try:
-            if self._mcp_tool:
-                await self._mcp_tool.cleanup()
-        except Exception as e:
-            logger.warning(f"清理MCP工具资源时出错: {e}")
-        try:
-            if self._a2a_tool:
-                await self._a2a_tool.manager.cleanup()
-        except Exception as e:
-            logger.warning(f"清理A2A工具资源时出错: {e}")
+        await self._tool_runtime_adapter.cleanup_remote_tools(
+            mcp_tool=self._mcp_tool,
+            a2a_tool=self._a2a_tool,
+        )
 
     async def _mark_session_completed_fallback(self, scene: str) -> None:
-        """在事件写入失败时兜底更新会话状态为COMPLETED"""
+        """在事件写入失败时兜底更新会话状态为 completed。"""
         try:
             async with self._uow_factory() as uow:
                 await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
@@ -413,23 +377,110 @@ class AgentTaskRunner(TaskRunner):
             # 兜底再失败时保留错误日志，便于后续排障或离线修复。
             logger.error(f"会话[{self._session_id}]在{scene}状态兜底失败: {fallback_err}")
 
+    async def _mark_session_failed_fallback(self, scene: str) -> None:
+        """在错误收敛失败时至少落地 session 的 failed 状态。"""
+        try:
+            async with self._uow_factory() as uow:
+                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.FAILED)
+        except Exception as fallback_err:
+            logger.error(f"会话[{self._session_id}]在{scene}失败兜底失败: {fallback_err}")
+
+    async def _mark_session_cancelled_fallback(self, scene: str) -> None:
+        """在取消收敛失败时至少落地 session/run 的 cancelled 状态。"""
+        try:
+            async with self._uow_factory() as uow:
+                session = await uow.session.get_by_id(session_id=self._session_id)
+                if session is None:
+                    return
+                await uow.session.update_status(
+                    session_id=self._session_id,
+                    status=SessionStatus.CANCELLED,
+                )
+                current_run_id = await self._get_workspace_manager().resolve_current_run_id(
+                    session=session,
+                    uow=uow,
+                )
+                if current_run_id:
+                    await uow.workflow_run.cancel_run(current_run_id)
+        except Exception as fallback_err:
+            logger.error(f"会话[{self._session_id}]在{scene}取消兜底失败: {fallback_err}")
+
+    async def _persist_cancellation_state(self) -> None:
+        """将当前运行和未完成步骤统一收敛为 cancelled。"""
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=self._session_id)
+            if session is None:
+                return
+
+            await uow.session.update_status(
+                session_id=self._session_id,
+                status=SessionStatus.CANCELLED,
+            )
+
+            run_id = await self._get_workspace_manager().resolve_current_run_id(
+                session=session,
+                uow=uow,
+            )
+            if not run_id:
+                return
+
+            run = await uow.workflow_run.get_by_id(run_id)
+            if run is None:
+                return
+
+            if run.status == WorkflowRunStatus.CANCELLED:
+                return
+
+            run_events = await uow.workflow_run.list_events(run_id)
+            await uow.workflow_run.cancel_run(run_id)
+
+            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
+            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
+                runtime_metadata,
+                run_events=run_events,
+                current_step_id=run.current_step_id,
+            )
+
+            if cancelled_step_event is not None:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=self._session_id,
+                    event=cancelled_step_event,
+                )
+
+            if cancelled_plan_event is not None:
+                await uow.session.add_event_with_snapshot_if_absent(
+                    session_id=self._session_id,
+                    event=cancelled_plan_event,
+                    status=SessionStatus.CANCELLED,
+                )
+
     async def invoke(self, task: Task) -> None:
+        active_request_id: Optional[str] = None
+        terminal_session_status: Optional[SessionStatus] = None
+        pending_requests_rejected = False
         try:
             # 记录任务开始执行的日志
             logger.info(f"开始执行任务: {task.id}")
 
             # 确保沙箱环境就绪并初始化各种工具
             await self._sandbox.ensure_sandbox()
-            await self._mcp_tool.initialize(self._mcp_config)
-            await self._a2a_tool.initialize(self._a2a_config)
+            await self._tool_runtime_adapter.initialize_remote_tools(
+                mcp_tool=self._mcp_tool,
+                mcp_config=self._mcp_config,
+                a2a_tool=self._a2a_tool,
+                a2a_config=self._a2a_config,
+            )
 
             # 循环处理输入流中的事件，直到输入流为空
             while not await task.input_stream.is_empty():
                 # 从输入流中取出事件
-                event = await self._pop_event(task)
-                if event is None:
+                runtime_input = await self._pop_event(task)
+                if runtime_input is None:
                     # 空读场景直接跳过，避免后续访问空对象字段导致任务中断。
                     continue
+                active_request_id = runtime_input.request_id
+                event = runtime_input.payload
+                await self._emit_request_started(task=task, request_id=active_request_id)
 
                 # 初始化消息变量
                 message = ""
@@ -439,19 +490,29 @@ class AgentTaskRunner(TaskRunner):
                     message = event.message or ""
 
                     # 同步消息附件到沙箱环境
-                    await self._sync_message_attachments_to_sandbox(event)
+                    await self._user_input_attachment_projector.project(event)
 
                     # 记录接收到的消息日志
                     logger.info(f"收到消息: {message[:50]}...")
 
-                # 创建消息对象，包含消息内容和附件路径列表
-                message_obj = Message(
-                    message=message,
-                    attachments=[attachment.filepath for attachment in event.attachments]
-                )
+                if isinstance(event, MessageEvent):
+                    # 创建消息对象，包含消息内容和附件路径列表
+                    message_obj = Message(
+                        message=message,
+                        attachments=[attachment.filepath for attachment in event.attachments],
+                    )
+                    event_stream = self._run_flow(message_obj)
+                elif isinstance(event, ResumeInput):
+                    event_stream = self._resume_flow(event.value)
+                elif isinstance(event, ContinueCancelledTaskInput):
+                    logger.info("收到继续已取消任务命令")
+                    event_stream = self._continue_cancelled_flow()
+                else:
+                    logger.warning("收到不支持的运行时输入类型: %s", type(event).__name__)
+                    continue
 
                 # 运行流程并处理每个产生的事件
-                async for event in self._run_flow(message_obj):
+                async for event in event_stream:
                     # 将事件写入输出流+数据库，并在同一事务中更新会话投影字段。
                     # 说明：每种事件对应的投影更新在这里统一声明，便于审计事务边界。
                     if isinstance(event, TitleEvent):
@@ -471,62 +532,119 @@ class AgentTaskRunner(TaskRunner):
                             increment_unread=True,
                         )
                     elif isinstance(event, WaitEvent):
-                        # 等待事件：事件历史 + 状态切换为WAITING，并立即结束本轮消费。
+                        # 等待事件：先投影 WAITING，但必须继续消费到 run_engine 自然结束，
+                        # 否则会打断 graph state / summary / snapshot 的收尾写入。
                         await self._put_and_add_event(
                             task=task,
                             event=event,
                             status=SessionStatus.WAITING,
                         )
-                        return
+                        terminal_session_status = SessionStatus.WAITING
+                        if active_request_id is not None:
+                            await self._emit_request_finished(
+                                task=task,
+                                request_id=active_request_id,
+                                terminal_event_type="wait",
+                            )
+                            active_request_id = None
+                        if not pending_requests_rejected:
+                            await self._reject_pending_requests(
+                                task=task,
+                                message="当前任务进入等待状态，请使用 resume 恢复执行",
+                                error_key=error_keys.SESSION_RESUME_REQUIRED,
+                            )
+                            pending_requests_rejected = True
                     elif isinstance(event, DoneEvent):
-                        # Done事件优先走原子提交：
-                        # 当输入队列已空时，和COMPLETED状态一并落库，避免事件/状态分叉。
+                        # Done 事件先完成本轮终态投影，但不能立即 break；
+                        # run_engine 还需要继续完成 finally 中的状态合同与上下文投影收尾。
                         has_more_input = not await task.input_stream.is_empty()
+                        done_status = None if has_more_input else SessionStatus.COMPLETED
                         await self._put_and_add_event(
                             task=task,
                             event=event,
-                            status=None if has_more_input else SessionStatus.COMPLETED,
+                            status=done_status,
                         )
+                        terminal_session_status = done_status
+                        if active_request_id is not None:
+                            await self._emit_request_finished(
+                                task=task,
+                                request_id=active_request_id,
+                                terminal_event_type="done",
+                            )
+                            active_request_id = None
+                    elif isinstance(event, ErrorEvent):
+                        # 错误事件必须收敛 failed，但同样不能提前 break，
+                        # 否则 run_engine 的失败收尾与状态回写会被截断。
+                        await self._put_and_add_event(
+                            task=task,
+                            event=event,
+                            latest_message=event.error,
+                            latest_message_at=event.created_at,
+                            status=SessionStatus.FAILED,
+                        )
+                        terminal_session_status = SessionStatus.FAILED
+                        if active_request_id is not None:
+                            await self._emit_request_finished(
+                                task=task,
+                                request_id=active_request_id,
+                                terminal_event_type="error",
+                            )
+                            active_request_id = None
+                        if not pending_requests_rejected:
+                            await self._reject_pending_requests(
+                                task=task,
+                                message="当前任务执行失败，排队请求已终止，请重新发起",
+                            )
+                            pending_requests_rejected = True
                     else:
                         # 其他事件：仅记录事件历史。
                         await self._put_and_add_event(task=task, event=event)
 
-                    # 检查输入流是否还有更多事件，如果没有则退出循环
-                    if not await task.input_stream.is_empty():
-                        break
-
             # 所有事件处理完成后，执行一次状态兜底：
-            # 正常情况下Done事件已将状态置为COMPLETED，这里仅作为防御性保障。
-            async with self._uow_factory() as uow:
-                await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
+            # 这里只兜底正常完成路径，不能覆盖 wait/failed 等已真实收敛的终态。
+            if terminal_session_status in {None, SessionStatus.COMPLETED}:
+                async with self._uow_factory() as uow:
+                    await uow.session.update_status(session_id=self._session_id, status=SessionStatus.COMPLETED)
         except asyncio.CancelledError:
             # 处理任务被取消的情况
             logger.info(f"AgentTaskRunner任务运行取消")
-            # 取消时优先写入Done事件+状态；如果该路径失败，再走独立状态兜底。
             try:
-                await self._put_and_add_event(
+                await self._reject_pending_requests(
                     task=task,
-                    event=DoneEvent(),
-                    status=SessionStatus.COMPLETED,
+                    message="当前任务已取消，排队请求已终止，请重新发起",
                 )
-            except Exception as done_err:
-                logger.error(f"任务取消分支写入Done事件失败: {done_err}")
-                await self._mark_session_completed_fallback(scene="取消分支")
-            # 抛出异常
+                await self._persist_cancellation_state()
+            except Exception as cancel_err:
+                logger.error(f"任务取消分支收敛 cancelled 状态失败: {cancel_err}")
+                await self._mark_session_cancelled_fallback(scene="取消分支")
             raise
         except Exception as e:
             # 处理其他异常情况
             logger.exception(f"AgentTaskRunner运行出错: {str(e)}")
-            # 异常时优先提交“错误事件 + 状态完成”，失败时降级为状态兜底更新。
+            # 异常时优先提交“错误事件 + failed状态”，失败时降级为 failed 兜底更新。
             try:
+                error_event = ErrorEvent(error=f"{str(e)}")
                 await self._put_and_add_event(
                     task=task,
-                    event=ErrorEvent(error=f"{str(e)}"),
-                    status=SessionStatus.COMPLETED,
+                    event=error_event,
+                    latest_message=error_event.error,
+                    latest_message_at=error_event.created_at,
+                    status=SessionStatus.FAILED,
+                )
+                if active_request_id is not None:
+                    await self._emit_request_finished(
+                        task=task,
+                        request_id=active_request_id,
+                        terminal_event_type="error",
+                    )
+                    active_request_id = None
+                await self._reject_pending_requests(
+                    task=task,
+                    message="当前任务执行失败，排队请求已终止，请重新发起",
                 )
             except Exception as error_event_err:
                 logger.error(f"异常分支写入Error事件失败: {error_event_err}")
-                await self._mark_session_completed_fallback(scene="异常分支")
+                await self._mark_session_failed_fallback(scene="异常分支")
         finally:
             # 在同一个asyncio Task上下文中清理MCP/A2A工具资源
             # 这是关键：streamablehttp_client内部使用anyio.create_task_group()，

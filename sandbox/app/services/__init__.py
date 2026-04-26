@@ -5,12 +5,39 @@
 @Author : caixiaorong01@outlook.com
 @File   : __init__.py.py
 """
-from .file import FileService
-from .shell import ShellService
-from .supervisorService import SupervisorService
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .bocha_search import BochaSearchService
+    from .file import FileService
+    from .searxng import SearXNGService
+    from .shell import ShellService
+    from .supervisorService import SupervisorService
 
 __all__ = [
     "ShellService",
     "FileService",
-    "SupervisorService"
+    "SupervisorService",
+    "SearXNGService",
+    "BochaSearchService",
 ]
+
+
+def __getattr__(name: str):
+    """按需导入service，避免包初始化时的循环依赖。"""
+    if name == "ShellService":
+        from .shell import ShellService
+        return ShellService
+    if name == "FileService":
+        from .file import FileService
+        return FileService
+    if name == "SupervisorService":
+        from .supervisorService import SupervisorService
+        return SupervisorService
+    if name == "SearXNGService":
+        from .searxng import SearXNGService
+        return SearXNGService
+    if name == "BochaSearchService":
+        from .bocha_search import BochaSearchService
+        return BochaSearchService
+    raise AttributeError(f"module 'app.services' has no attribute '{name}'")

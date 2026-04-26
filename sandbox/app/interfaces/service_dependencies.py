@@ -6,20 +6,37 @@
 @File   : service_dependencies.py
 """
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
-from app.services import ShellService, FileService, SupervisorService
+if TYPE_CHECKING:
+    from app.services import ShellService, FileService, SupervisorService, SearXNGService, BochaSearchService
 
 
 @lru_cache()
-def get_shell_service() -> ShellService:
+def get_shell_service() -> "ShellService":
+    from app.services import ShellService
     return ShellService()
 
 
 @lru_cache()
-def get_file_service() -> FileService:
+def get_file_service() -> "FileService":
+    from app.services import FileService
     return FileService()
 
 
 @lru_cache()
-def get_supervisor_service() -> SupervisorService:
+def get_supervisor_service() -> "SupervisorService":
+    from app.services import SupervisorService
     return SupervisorService()
+
+
+@lru_cache()
+def get_searxng_service() -> "SearXNGService":
+    from app.services import SearXNGService
+    return SearXNGService()
+
+
+@lru_cache()
+def get_bocha_search_service() -> "BochaSearchService":
+    from app.services import BochaSearchService
+    return BochaSearchService()

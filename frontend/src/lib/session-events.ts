@@ -8,7 +8,6 @@
 
 import type {
   SSEEventData,
-  SSEEventType,
   ChatMessage,
   PlanStep,
   PlanEvent,
@@ -16,35 +15,12 @@ import type {
   ToolEvent,
   SessionFile,
 } from "./api/types";
+import { visitSessionEvent } from "./session-event-adapter";
 import { getApiErrorMessageFromPayload } from "./api/error-i18n";
 import { translateRuntime } from "./i18n/runtime";
 import type { AppLocale } from "./i18n";
 
-/** 后端返回的原始事件（可能用 event 或 type 表示类型） */
-type RawEvent = { event?: string; type?: string; data?: unknown };
-
-/**
- * 将后端单条事件转为前端 SSEEventData（统一 type + data）
- */
-export function normalizeEvent(raw: RawEvent): SSEEventData | null {
-  const type = (raw.type ?? raw.event) as SSEEventType | undefined;
-  const data = raw.data;
-  if (!type || data === undefined) return null;
-  return { type, data } as SSEEventData;
-}
-
-/**
- * 将后端事件列表转为前端 SSEEventData[]
- */
-export function normalizeEvents(rawList: unknown): SSEEventData[] {
-  if (!Array.isArray(rawList)) return [];
-  const out: SSEEventData[] = [];
-  for (const raw of rawList) {
-    const normalized = normalizeEvent(raw as RawEvent);
-    if (normalized) out.push(normalized);
-  }
-  return out;
-}
+export { normalizeEvent, normalizeEvents } from "./session-event-adapter";
 
 /** 时间线单项：用于渲染对话区的一条记录 */
 export type TimelineItem =
@@ -117,6 +93,19 @@ export function createTimelineBuildContext(): TimelineBuildContext {
   };
 }
 
+function resetStepTurnContext(context: TimelineBuildContext): void {
+  context.lastStepId = null;
+  context.stepIndexById.clear();
+  context.stepToolIndexByStepId.clear();
+}
+
+function buildToolTimelineKey(tool: ToolEvent): string | null {
+  const toolCallId = (tool as { tool_call_id?: string }).tool_call_id
+  if (!toolCallId) return null
+  // 会话对话区按“一次调用一条记录”展示，calling/called 通过状态就地更新，避免重复步骤噪音。
+  return String(toolCallId)
+}
+
 /** 将时间戳格式化为相对时间，如 2天前、刚刚 */
 function formatTimeLabel(
   ts: number | string | undefined,
@@ -168,8 +157,10 @@ export function getToolTimeLabel(
 
 function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): void {
   if (msg.role === "user") {
-    // 用户消息标志着新的对话轮次，清除 step 上下文
-    context.lastStepId = null;
+    // 用户消息标志着新的对话轮次。
+    // 对话区里的 step 卡片只在当前轮次内做增量合并，跨轮必须断开索引，
+    // 否则 stop/cancelled 等终态事件会和旧轮次复用的 step.id 发生串卡。
+    resetStepTurnContext(context);
 
     context.list.push({
       kind: "user",
@@ -205,10 +196,9 @@ function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): vo
 }
 
 function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
-  const shouldUpdateCurrentStep = context.lastStepId !== null && context.lastStepId === step.id;
   const existingIdx = context.stepIndexById.get(step.id);
 
-  if (shouldUpdateCurrentStep && existingIdx !== undefined) {
+  if (existingIdx !== undefined) {
     const existing = context.list[existingIdx];
     if (existing?.kind === "step") {
       context.list[existingIdx] = {
@@ -241,11 +231,40 @@ function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
     context.stepToolIndexByStepId.set(step.id, new Map<string, number>());
   }
 
-  // 只要 step 不是 completed/failed 状态，就保持跟踪
-  if (step.status === "completed" || step.status === "failed") {
+  // completed/failed/cancelled 都表示当前步骤已收敛，后续工具事件不应再挂到它身上。
+  if (step.status === "completed" || step.status === "failed" || step.status === "cancelled") {
     context.lastStepId = null;
   } else {
     context.lastStepId = step.id;
+  }
+}
+
+function reconcileStepsFromPlan(context: TimelineBuildContext, plan: PlanEvent): void {
+  if (!Array.isArray(plan.steps) || plan.steps.length === 0) return
+
+  for (const step of plan.steps) {
+    if (!step?.id) continue
+    const existingIdx = context.stepIndexById.get(step.id)
+    if (existingIdx === undefined) continue
+
+    const existing = context.list[existingIdx]
+    if (existing?.kind !== 'step') continue
+
+    context.list[existingIdx] = {
+      ...existing,
+      data: {
+        ...existing.data,
+        ...step,
+        description: step.description ?? existing.data.description,
+        outcome: step.outcome ?? existing.data.outcome,
+      },
+    }
+
+    if (step.status === 'completed' || step.status === 'failed' || step.status === 'cancelled') {
+      if (context.lastStepId === step.id) {
+        context.lastStepId = null
+      }
+    }
   }
 }
 
@@ -254,7 +273,7 @@ function appendToolEvent(
   tool: ToolEvent,
   locale: AppLocale,
 ): void {
-  const toolCallId = (tool as { tool_call_id?: string }).tool_call_id;
+  const toolTimelineKey = buildToolTimelineKey(tool);
   const activeStepId = context.lastStepId;
 
   if (activeStepId !== null) {
@@ -262,10 +281,10 @@ function appendToolEvent(
     if (stepIdx !== undefined) {
       const stepItem = context.list[stepIdx];
       if (stepItem?.kind === "step") {
-        if (toolCallId != null) {
+        if (toolTimelineKey != null) {
           const stepToolIndexes = context.stepToolIndexByStepId.get(activeStepId) ?? new Map<string, number>();
           context.stepToolIndexByStepId.set(activeStepId, stepToolIndexes);
-          const existingToolIdx = stepToolIndexes.get(toolCallId);
+          const existingToolIdx = stepToolIndexes.get(toolTimelineKey);
           if (
             existingToolIdx !== undefined &&
             existingToolIdx >= 0 &&
@@ -278,7 +297,7 @@ function appendToolEvent(
           }
           const nextToolIdx = stepItem.tools.length;
           context.list[stepIdx] = { ...stepItem, tools: [...stepItem.tools, tool] };
-          stepToolIndexes.set(toolCallId, nextToolIdx);
+          stepToolIndexes.set(toolTimelineKey, nextToolIdx);
           return;
         }
 
@@ -288,8 +307,8 @@ function appendToolEvent(
     }
   }
 
-  if (toolCallId != null) {
-    const existingStandaloneIdx = context.standaloneToolIndexByCallId.get(toolCallId);
+  if (toolTimelineKey != null) {
+    const existingStandaloneIdx = context.standaloneToolIndexByCallId.get(toolTimelineKey);
     if (existingStandaloneIdx !== undefined) {
       const existingItem = context.list[existingStandaloneIdx];
       if (existingItem?.kind === "tool") {
@@ -306,8 +325,8 @@ function appendToolEvent(
     data: tool,
     timeLabel: getToolTimeLabel(tool, locale),
   });
-  if (toolCallId != null) {
-    context.standaloneToolIndexByCallId.set(toolCallId, nextIdx);
+  if (toolTimelineKey != null) {
+    context.standaloneToolIndexByCallId.set(toolTimelineKey, nextIdx);
   }
 }
 
@@ -348,27 +367,13 @@ export function appendTimelineEvent(
   ev: SSEEventData,
   locale: AppLocale = "zh-CN",
 ): void {
-  switch (ev.type) {
-    case "message":
-      appendMessageEvent(context, ev.data as ChatMessage);
-      break;
-    case "step":
-      appendStepEvent(context, ev.data as StepEvent);
-      break;
-    case "tool":
-      appendToolEvent(context, ev.data as ToolEvent, locale);
-      break;
-    case "error":
-      appendErrorEvent(context, ev.data, locale);
-      break;
-    case "title":
-    case "plan":
-    case "wait":
-    case "done":
-      break;
-    default:
-      break;
-  }
+  visitSessionEvent(ev, {
+    message: (event) => appendMessageEvent(context, event.data as ChatMessage),
+    plan: (event) => reconcileStepsFromPlan(context, event.data as PlanEvent),
+    step: (event) => appendStepEvent(context, event.data as StepEvent),
+    tool: (event) => appendToolEvent(context, event.data as ToolEvent, locale),
+    error: (event) => appendErrorEvent(context, event.data, locale),
+  });
 }
 
 function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildContext {

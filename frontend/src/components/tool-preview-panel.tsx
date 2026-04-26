@@ -2,16 +2,23 @@
 
 import { useMemo } from "react"
 import Image from "next/image"
-import type { ToolEvent } from "@/lib/api/types"
+import type {
+  BrowserToolContent,
+  FetchPageToolContent,
+  SearchResultItem,
+  ToolEvent,
+} from "@/lib/api/types"
 import {
   getToolKind,
   getFriendlyToolLabel,
   getArg,
 } from "@/components/tool-use/utils"
 import type { ToolKind } from "@/components/tool-use/utils"
+import { getBrowserPreviewData, isBrowserToolContent } from "@/lib/browser-tool-preview"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Button } from "@/components/ui/button"
 import { useI18n, type Translate } from "@/lib/i18n"
+import { MarkdownContent } from "@/components/markdown-content"
 import {
   Maximize2,
   Monitor,
@@ -38,7 +45,17 @@ export interface ToolPreviewPanelProps {
 
 type ConsoleRecord = { ps1: string; command: string; output: string }
 
-type SearchResultItem = { url: string; title: string; snippet: string }
+function isFetchPageContent(content: Record<string, unknown> | null): content is FetchPageToolContent & Record<string, unknown> {
+  if (!content) return false
+  return (
+    typeof content.url === "string"
+    && (
+      typeof content.content === "string"
+      || typeof content.title === "string"
+      || typeof content.excerpt === "string"
+    )
+  )
+}
 
 /* ------------------------------------------------------------------ */
 /*  Content extractors                                                 */
@@ -166,9 +183,17 @@ function BrowserPreview({
   t: Translate
 }) {
   const content = getToolContent(tool)
-  const screenshot =
-    typeof content?.screenshot === "string" ? content.screenshot : null
-  const url = getArg(tool.args, "url", "href", "link")
+  const browserContent: BrowserToolContent | null = isBrowserToolContent(content) ? content : null
+  const preview = getBrowserPreviewData(tool)
+  const screenshot = preview.screenshot || null
+  const url = preview.url
+  const hasStateSummary = Boolean(preview.title || preview.pageType)
+  const hasMatchedLink = Boolean(
+    preview.matchedLinkText
+    || preview.matchedLinkUrl
+    || preview.matchedLinkSelector
+    || preview.matchedLinkIndex !== null,
+  )
 
   return (
     <div className="flex flex-col gap-3 p-4 h-full">
@@ -176,6 +201,71 @@ function BrowserPreview({
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-100 border text-sm text-gray-600 flex-shrink-0">
           <Globe size={14} className="text-gray-400 flex-shrink-0" />
           <span className="truncate">{url}</span>
+        </div>
+      )}
+      {preview.degradeReason && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 flex-shrink-0">
+          <div className="font-medium">{t("toolPreview.label.degradeReason")}</div>
+          <div className="mt-1 font-mono text-xs break-all">{preview.degradeReason}</div>
+        </div>
+      )}
+      {(hasStateSummary || hasMatchedLink) && (
+        <div className="grid gap-3 md:grid-cols-2 flex-shrink-0">
+          {hasStateSummary && (
+            <div className="rounded-lg border bg-gray-50 p-3 text-sm text-gray-700">
+              <div className="mb-2 text-xs text-gray-500 uppercase tracking-wide">
+                {t("toolPreview.section.browserState")}
+              </div>
+              {preview.title && (
+                <div>
+                  <span className="text-gray-500">{t("toolPreview.label.title")}</span>
+                  <span>{preview.title}</span>
+                </div>
+              )}
+              {preview.pageType && (
+                <div>
+                  <span className="text-gray-500">{t("toolPreview.label.pageType")}</span>
+                  <span>{preview.pageType}</span>
+                </div>
+              )}
+              {Boolean(browserContent?.main_content) && (
+                <div className="mt-1 text-xs text-gray-500">
+                  {t("toolPreview.browserMainContentReady")}
+                </div>
+              )}
+            </div>
+          )}
+          {hasMatchedLink && (
+            <div className="rounded-lg border bg-gray-50 p-3 text-sm text-gray-700">
+              <div className="mb-2 text-xs text-gray-500 uppercase tracking-wide">
+                {t("toolPreview.section.browserMatchedTarget")}
+              </div>
+              {preview.matchedLinkText && (
+                <div>
+                  <span className="text-gray-500">{t("toolPreview.label.matchedText")}</span>
+                  <span>{preview.matchedLinkText}</span>
+                </div>
+              )}
+              {preview.matchedLinkUrl && (
+                <div>
+                  <span className="text-gray-500">{t("toolPreview.label.matchedUrl")}</span>
+                  <span className="break-all">{preview.matchedLinkUrl}</span>
+                </div>
+              )}
+              {preview.matchedLinkIndex !== null && (
+                <div>
+                  <span className="text-gray-500">{t("toolPreview.label.matchedIndex")}</span>
+                  <span>{preview.matchedLinkIndex}</span>
+                </div>
+              )}
+              {preview.matchedLinkSelector && (
+                <div>
+                  <span className="text-gray-500">{t("toolPreview.label.matchedSelector")}</span>
+                  <span className="break-all font-mono text-xs">{preview.matchedLinkSelector}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
       <div className="flex-1 rounded-lg overflow-hidden border min-h-0 relative">
@@ -212,14 +302,33 @@ function BrowserPreview({
 
 function SearchPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const content = getToolContent(tool)
+  const isFetchPage = tool.function === "fetch_page" && isFetchPageContent(content)
   const rawResults = content?.results
-
-  const results: SearchResultItem[] = useMemo(() => {
-    if (Array.isArray(rawResults)) return rawResults as SearchResultItem[]
-    return []
-  }, [rawResults])
+  const results: SearchResultItem[] = Array.isArray(rawResults) ? [...rawResults] as SearchResultItem[] : []
 
   const query = getArg(tool.args, "query", "q")
+
+  if (isFetchPage) {
+    const pageContent = typeof content.content === "string" ? content.content : ""
+
+    return (
+      <div className="h-full min-h-0 p-4">
+        <div className="h-full min-h-0 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e]">
+          <ScrollArea className="h-full">
+            <div className="p-4">
+              <MarkdownContent
+                content={pageContent || t("toolPreview.fetchPage.waitingContent")}
+                format="auto"
+                tone="inverse"
+                preserveLineBreaks
+                className="font-mono"
+              />
+            </div>
+          </ScrollArea>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <ScrollArea className="h-full">
@@ -268,14 +377,14 @@ function FileToolPreview({ tool, t }: { tool: ToolEvent; t: Translate }) {
   const filepath = getArg(tool.args, "filepath", "path", "pathname")
 
   return (
-    <div className="flex flex-col gap-3 p-4 h-full">
-      <div className="flex-1 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col min-h-0">
+    <div className="h-full min-h-0 p-4">
+      <div className="h-full min-h-0 rounded-lg overflow-hidden border border-gray-700 bg-[#1e1e1e] flex flex-col">
         {filepath && (
           <div className="text-center text-xs text-gray-400 py-1.5 bg-[#2d2d2d] border-b border-gray-700 flex-shrink-0 truncate px-4">
             {filepath}
           </div>
         )}
-        <ScrollArea className="flex-1">
+        <ScrollArea className="h-full min-h-0">
           <pre className="p-4 font-mono text-sm text-gray-300 whitespace-pre-wrap break-words leading-relaxed">
             {fileContent ?? t("toolPreview.fileWaitingContent")}
           </pre>

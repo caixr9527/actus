@@ -1,0 +1,294 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""planner-react 运行链路统一日志工具。"""
+
+import json
+import logging
+import time
+import uuid
+from contextvars import ContextVar, Token
+from typing import Any, Dict, Mapping, Optional
+
+from app.domain.external import LLM
+from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
+
+LOG_PREFIX = "规划执行"
+LOG_VALUE_MAX_CHARS = 240
+FIELD_LABELS: dict[str, str] = {
+    "trace_id": "追踪ID",
+    "session_id": "会话ID",
+    "run_id": "运行ID",
+    "workspace_id": "工作区ID",
+    "previous_workspace_id": "历史工作区ID",
+    "fallback_workspace_id": "回退工作区ID",
+    "sandbox_id": "沙箱ID",
+    "task_id": "任务ID",
+    "thread_id": "线程ID",
+    "current_step_id": "当前步骤ID",
+    "execution_count": "执行次数",
+    "step_id": "步骤ID",
+    "next_step_id": "下一步骤ID",
+    "last_step_id": "最近步骤ID",
+    "waiting_step_id": "等待步骤ID",
+    "objective_key": "目标键",
+    "plan_title": "计划标题",
+    "step_title": "步骤标题",
+    "step_description": "步骤描述",
+    "step_count": "步骤数",
+    "new_step_count": "新增步骤数",
+    "total_step_count": "总步骤数",
+    "current_step_count": "当前步骤数",
+    "attachment_count": "附件数",
+    "artifact_count": "产物数",
+    "blocker_count": "阻塞数",
+    "open_question_count": "问题数",
+    "preference_count": "偏好数",
+    "memory_candidate_count": "记忆候选数",
+    "recalled_memory_count": "召回记忆数",
+    "existing_memory_count": "已有记忆数",
+    "pending_memory_write_count": "待写记忆数",
+    "remaining_memory_write_count": "剩余待写记忆数",
+    "persisted_memory_count": "写入记忆数",
+    "kept_candidate_count": "保留候选数",
+    "trimmed_message_count": "裁剪消息数",
+    "message_window_size": "消息窗口大小",
+    "compacted_message_window_size": "压缩后消息窗口大小",
+    "prior_turn_message_count": "历史消息数",
+    "runtime_tool_count": "运行时工具数",
+    "available_tool_count": "可用工具数",
+    "context_memory_count": "上下文记忆数",
+    "context_recent_run_count": "近期成功运行数",
+    "context_recent_attempt_count": "近期失败运行数",
+    "max_tool_iterations": "最大工具轮次",
+    # P3-2A 收敛修复：区分外部请求轮次与 task_mode 生效轮次，便于定位收敛是否生效。
+    "requested_max_tool_iterations": "请求工具轮次",
+    "max_execution_steps": "最大执行步数",
+    "iteration": "轮次",
+    "iteration_count": "轮次数",
+
+    # 工具调用
+    "tool_call_id": "工具调用ID",
+    "tool_name": "工具名",
+    "function_name": "函数名",
+    "requested_function_name": "原始函数名",
+    "final_function_name": "最终函数名",
+    "executed_function_name": "实际执行函数名",
+    "candidate_count": "候选数",
+    "selected_function": "选中函数",
+    "arg_keys": "参数键",
+
+    # 约束 / 改写 / 重复调用治理
+    "policy_name": "策略名",
+    "winning_policy": "命中策略",
+    "policy_trace": "策略轨迹",
+    "final_action": "最终动作",
+    "block_mode": "阻断模式",
+    "reason_code": "原因码",
+    "rewrite_reason": "改写原因",
+    "rewrite_applied": "是否改写",
+    "rewrite_metadata": "改写元数据",
+    "tool_call_fingerprint": "工具调用指纹",
+    "blocked_tool_count": "阻断工具数",
+    "same_tool_repeat_count": "同工具重复计数",
+    "repeat_count": "重复计数",
+
+    # research 进展
+    "query_count": "查询数",
+    "candidate_url_count": "候选链接数",
+    "fetched_url_count": "已抓取链接数",
+    "research_candidate_url_count": "研究候选链接数",
+    "research_fetched_url_count": "研究已抓取链接数",
+    "candidate_domain_count": "候选域名数",
+    "fetched_domain_count": "已抓取域名数",
+    "research_candidate_domain_count": "研究候选域名数",
+    "research_fetched_domain_count": "研究已抓取域名数",
+    "coverage_score": "覆盖评分",
+    "missing_signal_count": "缺失信号数",
+    "diagnosis_code": "诊断码",
+    "low_value_reason": "低价值原因",
+    "research_search_ready": "检索已就绪",
+    "research_fetch_completed": "抓取已完成",
+    "degrade_reason": "降级原因",
+    "search_query_preview": "检索查询预览",
+    "response_keys": "返回键",
+
+    # 运行阶段 / 输入输出
+    "event_type": "事件类型",
+    "language": "语言",
+    "stage_name": "阶段",
+    "model_name": "模型名",
+    "max_tokens": "最大Token",
+    "stage_llm_models": "阶段模型",
+    "fact_count": "事实数",
+    "raw_length": "原始长度",
+    "graph_input_type": "输入类型",
+
+    # wait / resume
+    "wait_event_count": "等待事件数",
+    "resume_value_type": "恢复值类型",
+    "confirmed_fact_keys": "确认事实键",
+    "status": "状态",
+    "success": "成功",
+    "error": "错误",
+    "reason": "原因",
+    "reason_codes": "原因码列表",
+    "interrupt_kind": "中断类型",
+    "has_interrupt": "是否中断",
+    "timeout_seconds": "超时秒数",
+    "message_length": "消息长度",
+    "content_length": "内容长度",
+    "resumed_message_length": "恢复消息长度",
+    "emitted_event_count": "已发事件数",
+    "has_prior_turn_context": "是否有历史轮次上下文",
+    "has_recent_run_brief": "是否有近期运行简报",
+    "entry_route": "入口路由",
+    "source_route": "来源入口路由",
+    "target_route": "目标入口路由",
+    "task_mode": "任务模式",
+    "context_profile": "上下文档位",
+    "tool_budget": "工具预算",
+    "plan_only": "仅规划",
+    "risk_level": "风险等级",
+    "complexity_score": "复杂度评分",
+    "tool_need_score": "工具需求评分",
+    "freshness_score": "时效需求评分",
+    "context_need_score": "上下文需求评分",
+    "has_input_parts": "是否有输入附件",
+    "has_active_plan": "是否有活跃计划",
+    "has_contextual_followup_anchor": "是否有追问锚点",
+    "upgrade_reason_code": "升级原因码",
+    "upgrade_evidence": "升级证据",
+    "direct_answer_context_has_conversation_summary": "直答上下文有会话摘要",
+    "direct_answer_context_has_recent_run_brief": "直答上下文有近期运行简报",
+    "direct_answer_context_has_prior_turn_context": "直答上下文有历史轮次上下文",
+    "direct_answer_context_prior_turn_message_count": "直答上下文历史消息数",
+    "direct_answer_context_topic_anchor_source": "直答主题锚点来源",
+    "direct_answer_context_topic_anchor_preview": "直答主题锚点预览",
+    "elapsed_ms": "耗时毫秒",
+    "llm_elapsed_ms": "模型耗时毫秒",
+    "tool_elapsed_ms": "工具耗时毫秒",
+    "skill_elapsed_ms": "技能耗时毫秒",
+    "write_elapsed_ms": "写入耗时毫秒",
+    "recall_elapsed_ms": "召回耗时毫秒",
+    "cleanup_elapsed_ms": "清理耗时毫秒",
+    "has_repository": "是否有仓储",
+    "has_checkpointer": "是否有检查点",
+    "has_skill_runtime": "是否有技能运行时",
+    "skill_id": "技能ID",
+    "source_run_id": "来源运行ID",
+    "source_step_id": "来源步骤ID",
+    "created_new_sandbox": "是否新建沙箱",
+}
+STATE_CONTEXT_KEYS: tuple[str, ...] = (
+    "session_id",
+    "run_id",
+    "thread_id",
+    "current_step_id",
+    "execution_count",
+)
+_TRACE_ID: ContextVar[Optional[str]] = ContextVar("planner_react_trace_id", default=None)
+
+
+def describe_llm_runtime(llm: Any) -> Dict[str, Any]:
+    """提取单个 LLM 的稳定日志字段。"""
+    return {
+        "model_name": str(getattr(llm, "model_name", "") or ""),
+        "max_tokens": int(getattr(llm, "max_tokens", 0) or 0),
+    }
+
+
+def describe_stage_llms(stage_llms: Optional[Dict[str, LLM]]) -> Dict[str, Dict[str, Any]]:
+    """提取阶段 LLM 配置，供运行图初始化日志统一复用。"""
+    summarized: Dict[str, Dict[str, Any]] = {}
+    for stage_name, llm in dict(stage_llms or {}).items():
+        summarized[str(stage_name)] = describe_llm_runtime(llm)
+    return summarized
+
+
+def _normalize_log_value(value: Any) -> str:
+    if isinstance(value, str):
+        normalized = " ".join(value.split())
+    elif isinstance(value, (int, float, bool)) or value is None:
+        normalized = value
+    else:
+        normalized = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    rendered = json.dumps(normalized, ensure_ascii=False, default=str)
+    if len(rendered) <= LOG_VALUE_MAX_CHARS:
+        return rendered
+    return json.dumps(f"{rendered[:LOG_VALUE_MAX_CHARS]}...", ensure_ascii=False)
+
+
+def _merge_log_fields(
+        *,
+        state: Optional[PlannerReActLangGraphState] = None,
+        fields: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged_fields: dict[str, Any] = {}
+    trace_id = _TRACE_ID.get()
+    if trace_id:
+        merged_fields["trace_id"] = trace_id
+    if isinstance(state, dict):
+        for key in STATE_CONTEXT_KEYS:
+            value = state.get(key)
+            if value is None or value == "":
+                continue
+            merged_fields[key] = value
+
+    for key, value in dict(fields or {}).items():
+        if value is None or value == "":
+            continue
+        merged_fields[str(key)] = value
+    return merged_fields
+
+
+def format_runtime_log(
+        event: str,
+        *,
+        state: Optional[PlannerReActLangGraphState] = None,
+        **fields: Any,
+) -> str:
+    merged_fields = _merge_log_fields(state=state, fields=fields)
+    ordered_parts = [f"{LOG_PREFIX} 事件={_normalize_log_value(event)}"]
+    for key in sorted(merged_fields.keys()):
+        rendered_key = FIELD_LABELS.get(key, key)
+        ordered_parts.append(f"{rendered_key}={_normalize_log_value(merged_fields[key])}")
+    return " ".join(ordered_parts)
+
+
+def log_runtime(
+        logger: logging.Logger,
+        level: int,
+        event: str,
+        *,
+        state: Optional[PlannerReActLangGraphState] = None,
+        exc_info: bool = False,
+        **fields: Any,
+) -> None:
+    logger.log(
+        level,
+        format_runtime_log(event, state=state, **fields),
+        exc_info=exc_info,
+    )
+
+
+def now_perf() -> float:
+    return time.perf_counter()
+
+
+def elapsed_ms(start_time: float) -> int:
+    return max(int((time.perf_counter() - start_time) * 1000), 0)
+
+
+def build_trace_id(session_id: str, run_id: Optional[str] = None) -> str:
+    trace_suffix = uuid.uuid4().hex[:8]
+    scope = str(run_id or session_id or "runtime").strip()[:16] or "runtime"
+    return f"{scope}-{trace_suffix}"
+
+
+def bind_trace_id(trace_id: str) -> Token:
+    return _TRACE_ID.set(str(trace_id).strip() or None)
+
+
+def reset_trace_id(token: Token) -> None:
+    _TRACE_ID.reset(token)

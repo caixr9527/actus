@@ -164,6 +164,49 @@ class Sandbox(Protocol):
         """
         ...
 
+    async def get_searxng_status(self) -> ToolResult:
+        """
+        获取沙箱内 SearXNG 服务状态
+        :return:
+        """
+        ...
+
+    async def search(
+            self,
+            query: str,
+            categories: Optional[str] = None,
+            engines: Optional[str] = None,
+            language: Optional[str] = None,
+            page: Optional[int] = None,
+            time_range: Optional[str] = None,
+            safesearch: Optional[int] = None,
+    ) -> ToolResult:
+        """
+        调用沙箱内 SearXNG 执行搜索
+        :param query: 搜索词
+        :param categories: 搜索分类
+        :param engines: 指定引擎
+        :param language: 搜索语言
+        :param page: 页码
+        :param time_range: 时间范围
+        :param safesearch: 安全搜索级别
+        :return:
+        """
+        ...
+
+    async def fetch_searxng_page(
+            self,
+            url: str,
+            max_chars: Optional[int] = None,
+    ) -> ToolResult:
+        """
+        调用沙箱内 SearXNG 页面读取接口
+        :param url: 页面地址
+        :param max_chars: 正文最大字符数
+        :return:
+        """
+        ...
+
     async def upload_file(
             self,
             file_data: BinaryIO,

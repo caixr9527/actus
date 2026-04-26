@@ -1,7 +1,7 @@
 'use client'
 
 import {useCallback} from 'react'
-import {CircuitBoard, Loader2, MoreHorizontal, Trash} from 'lucide-react'
+import {Ban, CircuitBoard, Loader2, MoreHorizontal, Trash, XCircle} from 'lucide-react'
 import {Button} from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -40,6 +40,8 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
   const description = session.latest_message || t('sessionItem.noMessage')
   const dateLabel = formatRelativeDate(session.latest_message_at, locale)
   const isRunning = session.status === 'running' || session.status === 'waiting'
+  const isFailed = session.status === 'failed'
+  const isCancelled = session.status === 'cancelled'
 
   return (
     <Item
@@ -52,6 +54,10 @@ export function SessionItem({session, isActive, onClick, onDelete}: SessionItemP
           <AvatarGroupCount>
             {isRunning
               ? <Loader2 className="animate-spin"/>
+              : isFailed
+                ? <XCircle/>
+              : isCancelled
+                ? <Ban/>
               : <CircuitBoard/>
             }
           </AvatarGroupCount>
