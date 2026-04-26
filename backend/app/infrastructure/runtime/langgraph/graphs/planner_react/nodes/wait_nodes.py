@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """节点层等待恢复节点。
 
-本模块只承载 human_wait/direct_wait 的恢复节点实现，不改等待恢复语义。
+本模块承载 human_wait 与入口 wait 的恢复节点实现。
 """
 
 import logging
@@ -32,7 +32,8 @@ from .confirmed_facts import (
     _normalize_confirmed_fact_map,
 )
 from .control_state import (
-    clear_direct_wait_control_state as _clear_direct_wait_control_state,
+    clear_wait_entry_runtime_state as _clear_wait_entry_runtime_state,
+    get_entry_contract_payload as _get_entry_contract_payload,
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
 )
@@ -174,8 +175,8 @@ async def wait_for_human_node(
             _ensure_working_memory(state),
             step=waiting_step,
         )
-        # direct_wait 已被用户取消，后续会转入新的重规划链路，必须清掉原链路的控制语义。
-        _clear_direct_wait_control_state(control)
+        # 入口等待被取消后，本轮后续由 Planner 重新判断；入口合同保留用于审计。
+        _clear_wait_entry_runtime_state(control)
         control["wait_resume_action"] = "replan"
         log_runtime(
             logger,
@@ -227,8 +228,12 @@ async def wait_for_human_node(
     if merged_confirmed_facts:
         working_memory["confirmed_facts"] = merged_confirmed_facts
     if str(waiting_step.id or "").strip() == "direct-wait-confirm":
-        # synthetic confirm 只负责授权继续执行，后续节点仍应保留原始请求作为当前任务。
-        next_user_message = str(control.get("direct_wait_original_message") or resumed_message).strip()
+        # synthetic confirm 只负责授权继续执行，后续节点仍应保留入口合同中的原始请求。
+        entry_contract_payload = _get_entry_contract_payload(control)
+        source_payload = entry_contract_payload.get("source") if isinstance(entry_contract_payload, dict) else {}
+        next_user_message = str(
+            source_payload.get("user_message") if isinstance(source_payload, dict) else ""
+        ).strip() or resumed_message
     elif next_step is None and merged_confirmed_facts:
         generated_next_step = _build_post_wait_execute_step(
             original_user_message=original_user_message,

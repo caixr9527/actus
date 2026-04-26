@@ -9,23 +9,47 @@ from app.domain.models import ExecutionStatus
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState, get_graph_control
 from app.domain.services.runtime.normalizers import normalize_controlled_value
+from app.domain.services.workspace_runtime.entry import EntryContract, EntryRoute
 
 logger = logging.getLogger(__name__)
 
 
 def route_after_entry(
         state: PlannerReActLangGraphState,
-) -> Literal["direct_answer", "direct_wait", "direct_execute", "create_plan_or_reuse", "recall_memory_context"]:
-    strategy = str(get_graph_control(state.get("graph_metadata")).get("entry_strategy") or "").strip().lower()
-    if strategy in {
-        "direct_answer",
-        "direct_wait",
-        "direct_execute",
-        "create_plan_or_reuse",
-        "recall_memory_context",
-    }:
-        return strategy  # type: ignore[return-value]
+) -> Literal["direct_answer", "direct_wait", "atomic_action", "create_plan_or_reuse", "recall_memory_context"]:
+    route = _get_entry_route(state)
+    if route == EntryRoute.ANSWER.value:
+        return "direct_answer"
+    if route == EntryRoute.WAIT.value:
+        return "direct_wait"
+    if route == EntryRoute.ATOMIC_ACTION.value:
+        return "atomic_action"
+    if route == EntryRoute.RESUME_PLAN.value:
+        return "create_plan_or_reuse"
     return "recall_memory_context"
+
+
+def _get_entry_contract_payload(state: PlannerReActLangGraphState) -> dict:
+    payload = get_graph_control(state.get("graph_metadata")).get("entry_contract")
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _get_entry_route(state: PlannerReActLangGraphState) -> str:
+    return str(_get_entry_contract_payload(state).get("route") or "").strip()
+
+
+def _get_entry_contract(state: PlannerReActLangGraphState) -> EntryContract | None:
+    payload = _get_entry_contract_payload(state)
+    if not payload:
+        return None
+    return EntryContract.model_validate(payload)
+
+
+def _should_summarize_after_plan_finished(state: PlannerReActLangGraphState) -> bool:
+    contract = _get_entry_contract(state)
+    if contract is None:
+        return False
+    return contract.needs_summary and contract.route in {EntryRoute.WAIT, EntryRoute.ATOMIC_ACTION}
 
 
 def _has_reached_execution_limit(state: PlannerReActLangGraphState) -> bool:
@@ -64,11 +88,11 @@ def _route_after_completed_step(
         )
         return "guard_step_reuse"
 
-    if bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
+    if _should_summarize_after_plan_finished(state):
         log_runtime(
             logger,
             logging.INFO,
-            "计划已完成，按直接路径收尾",
+            "计划已完成，按入口合同收尾",
             state=state,
         )
         return "summarize"
@@ -86,11 +110,11 @@ def route_after_plan(state: PlannerReActLangGraphState) -> Literal[
     "guard_step_reuse", "summarize", "consolidate_memory"]:
     """规划阶段后的分支路由。"""
     plan = state.get("plan")
-    control = get_graph_control(state.get("graph_metadata"))
+    contract = _get_entry_contract(state)
 
     if plan is None or plan.status == ExecutionStatus.COMPLETED:
         return "consolidate_memory"
-    if bool(control.get("plan_only")):
+    if contract is not None and contract.plan_only:
         log_runtime(
             logger,
             logging.INFO,
@@ -127,6 +151,16 @@ def route_after_execute(
     if isinstance(pending_interrupt, dict) and len(pending_interrupt) > 0:
         return "wait_for_human"
 
+    control = get_graph_control(state.get("graph_metadata"))
+    if isinstance(control.get("entry_upgrade"), dict) and control.get("entry_upgrade"):
+        log_runtime(
+            logger,
+            logging.INFO,
+            "原子动作触发入口升级，进入重规划",
+            state=state,
+        )
+        return "replan"
+
     last_step = state.get("last_executed_step")
     # P3-一次性收口：统一用受控枚举归一化，避免 Enum 字符串化导致 fail-fast 失效。
     last_step_status = normalize_controlled_value(
@@ -134,7 +168,7 @@ def route_after_execute(
         ExecutionStatus,
     )
     if last_step_status == ExecutionStatus.FAILED.value:
-        if not bool(get_graph_control(state.get("graph_metadata")).get("skip_replan_when_plan_finished")):
+        if not _should_summarize_after_plan_finished(state):
             log_runtime(
                 logger,
                 logging.INFO,

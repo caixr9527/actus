@@ -182,43 +182,6 @@ async def summarize_node(
     plan = state.get("plan")
     if plan is None:
         return state
-    control = _get_control_metadata(state)
-    if str(control.get("entry_strategy") or "").strip() == "direct_wait" and not bool(
-            control.get("direct_wait_original_task_executed")
-    ):
-        error_message = "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
-        plan.status = ExecutionStatus.FAILED
-        plan.error = error_message
-        final_stream_events = build_text_stream_events(
-            channel=TextStreamChannel.FINAL_MESSAGE,
-            text=error_message,
-            state=state,
-            stage="final",
-        )
-        final_events: List[Any] = [
-            ErrorEvent(error=error_message, error_key="direct_wait_unexecuted"),
-            MessageEvent(role="assistant", message=error_message, stage="final"),
-        ]
-        await _resolve_emit_live_events()(*final_stream_events, *final_events)
-        log_runtime(
-            logger,
-            logging.WARNING,
-            "阻断未执行原任务的 direct_wait 错误总结",
-            state=state,
-            error_key="direct_wait_unexecuted",
-            elapsed_ms=elapsed_ms(started_at),
-        )
-        return _reduce_state_with_events(
-            state,
-            updates={
-                "plan": plan,
-                "current_step_id": None,
-                "final_message": error_message,
-                # 错误总结分支同样要保持最终正文真相源一致，避免投影和跨轮锚点出现空值分叉。
-                "final_answer_text": error_message,
-            },
-            events=final_events,
-        )
     working_memory = _ensure_working_memory(state)
     last_executed_step = state.get("last_executed_step")
     summary_context_updates: Dict[str, Any] = {}

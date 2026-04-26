@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import List, Tuple
 
 from app.domain.models import (
@@ -19,8 +20,24 @@ from app.domain.models import (
     StepOutputMode,
     StepTaskModeHint,
 )
+from app.domain.services.runtime.contracts.langgraph_settings import EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN
 from app.domain.services.runtime.normalizers import normalize_controlled_value
 from .task_mode_policy import analyze_text_intent, build_step_candidate_text, has_environment_write_intent
+
+
+FINAL_USER_DELIVERY_STEP_PATTERN = re.compile(
+    r"(直接向用户输出|输出给用户|向用户(展示|呈现|交付)|展示给用户|等待用户最终确认|最终(回答|答案|说明|报告|正文|交付|确认)|完整(回答|攻略|方案|报告)|面向用户)",
+    re.IGNORECASE,
+)
+SUMMARY_ONLY_STEP_PATTERN = re.compile(
+    r"((基于|根据).{0,12}(已收集|全部已收集|已有|搜索摘要|检索结果).{0,30}(整理|归纳|汇总|总结|撰写|形成|输出).{0,20}(要点|方案|计划|回答|说明|报告|正文|成稿))"
+    r"|((整理|归纳|汇总|总结).{0,30}(为|成|出).{0,8}(\d+|[一二三四五六七八九十]+)\s*(条|个).{0,12}(要点|模式|方案|结论|建议))",
+    re.IGNORECASE,
+)
+SUMMARY_FILE_OUTPUT_STEP_PATTERN = re.compile(
+    r"((整理|归纳|汇总|总结).{0,30}(导出|保存|写入|生成).{0,12}(markdown|md|文件|文档|报告))",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -75,6 +92,26 @@ def collect_step_contract_hard_issues(*, steps: List[Step]) -> List[StepContract
                 )
             )
     return issues
+
+
+def filter_final_delivery_steps(
+    *,
+    steps: List[Step],
+    user_message: str,
+) -> Tuple[List[Step], int]:
+    """过滤最终交付型步骤。
+
+    业务含义：Planner/Replan 只能产出执行步骤；最终用户正文统一由 summary 阶段组织。
+    """
+    filtered_steps: List[Step] = []
+    dropped_count = 0
+    user_requests_file_output = bool(EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(str(user_message or "").strip()))
+    for step in list(steps or []):
+        if _is_final_delivery_step(step=step, user_requests_file_output=user_requests_file_output):
+            dropped_count += 1
+            continue
+        filtered_steps.append(step)
+    return filtered_steps, dropped_count
 
 
 def _compile_single_step_contract(
@@ -136,6 +173,24 @@ def _compile_single_step_contract(
         corrected_count += 1
 
     return compiled_step, issues, corrected_count
+
+
+def _is_final_delivery_step(*, step: Step, user_requests_file_output: bool) -> bool:
+    candidate_text = build_step_candidate_text(step)
+    if not candidate_text:
+        return False
+    if FINAL_USER_DELIVERY_STEP_PATTERN.search(candidate_text):
+        return True
+    if SUMMARY_ONLY_STEP_PATTERN.search(candidate_text):
+        return True
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) or ""
+    if (
+        not user_requests_file_output
+        and output_mode == StepOutputMode.FILE.value
+        and SUMMARY_FILE_OUTPUT_STEP_PATTERN.search(candidate_text)
+    ):
+        return True
+    return False
 
 
 def _normalize_step_contract_enum_fields(step: Step) -> Step:

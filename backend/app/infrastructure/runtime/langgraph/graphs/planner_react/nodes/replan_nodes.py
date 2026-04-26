@@ -32,6 +32,7 @@ from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     collect_step_contract_hard_issues,
     compile_step_contracts,
+    filter_final_delivery_steps,
 )
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import safe_parse_json
 from ..live_events import emit_live_events
@@ -197,6 +198,21 @@ async def replan_node(
                 attempt=attempt + 1,
             )
             candidate_steps = []
+        candidate_steps, dropped_final_delivery_steps = filter_final_delivery_steps(
+            steps=candidate_steps,
+            user_message=user_message,
+        )
+        if dropped_final_delivery_steps > 0:
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "重规划已过滤最终交付型步骤",
+                state=state,
+                dropped_step_count=dropped_final_delivery_steps,
+                success_criteria_missing_count=criteria_missing_count,
+                success_criteria_filtered_count=criteria_filtered_count,
+                attempt=attempt + 1,
+            )
         filtered_steps, dropped_drift_steps = _REPLAN_MERGE_ENGINE.filter_replan_drift_steps(
             candidate_steps,
             user_message=user_message,
@@ -243,6 +259,8 @@ async def replan_node(
     await emit_live_events(updated_event)
     control = _get_control_metadata(state)
     control.pop("wait_resume_action", None)
+    # entry_upgrade 是一次性运行态信号；进入 Planner 后即完成消费，避免后续步骤反复重规划。
+    control.pop("entry_upgrade", None)
     log_runtime(
         logger,
         logging.INFO,

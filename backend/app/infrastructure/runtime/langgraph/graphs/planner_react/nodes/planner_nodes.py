@@ -16,8 +16,13 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     PlanEventStatus,
+    Step,
+    StepArtifactPolicy,
+    StepOutputMode,
+    StepTaskModeHint,
     TextStreamChannel,
     TitleEvent,
+    build_step_objective_key,
 )
 from app.domain.services.prompts import (
     CREATE_PLAN_PROMPT,
@@ -30,12 +35,15 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     log_runtime,
     now_perf,
 )
+from app.domain.services.runtime.contracts.langgraph_settings import EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
-from app.domain.services.runtime.normalizers import normalize_success_criteria
+from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_success_criteria
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     collect_step_contract_hard_issues,
     compile_step_contracts,
+    filter_final_delivery_steps,
+    has_environment_write_intent,
 )
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     extract_text_outside_json_blocks,
@@ -46,6 +54,7 @@ from ..live_events import emit_live_events
 from ..parsers import build_fallback_plan_title, build_step_from_payload
 from ..streaming import build_text_stream_events
 from .control_state import (
+    get_entry_contract_payload as _get_entry_contract_payload,
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
 )
@@ -53,6 +62,36 @@ from .state_reducer import _reduce_state_with_events
 from .working_memory import _ensure_working_memory
 
 logger = logging.getLogger(__name__)
+
+
+def _build_fallback_execution_step(user_message: str, entry_contract_payload: Dict[str, Any]) -> Step:
+    """为必须执行的入口合同生成兜底步骤，避免 Planner 空步骤直接收尾。"""
+    description = str(user_message or "").strip() or "执行用户请求"
+    task_mode_value = normalize_controlled_value(
+        entry_contract_payload.get("task_mode"),
+        StepTaskModeHint,
+    ) or StepTaskModeHint.GENERAL.value
+    requires_file_output = bool(
+        has_environment_write_intent(description)
+        or EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(description)
+    )
+    task_mode = StepTaskModeHint.CODING if requires_file_output else StepTaskModeHint(task_mode_value)
+    output_mode = StepOutputMode.FILE if requires_file_output else StepOutputMode.NONE
+    artifact_policy = (
+        StepArtifactPolicy.ALLOW_FILE_OUTPUT
+        if requires_file_output
+        else StepArtifactPolicy.FORBID_FILE_OUTPUT
+    )
+    return Step(
+        id="fallback-execution-step",
+        title=description[:80],
+        description=description,
+        task_mode_hint=task_mode,
+        output_mode=output_mode,
+        artifact_policy=artifact_policy,
+        objective_key=build_step_objective_key(description[:80], description),
+        success_criteria=[description],
+    )
 
 
 async def _build_message(llm: LLM, user_message_prompt: str, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -123,7 +162,8 @@ async def create_or_reuse_plan_node(
     """创建计划或复用已有计划。"""
     started_at = now_perf()
     control = _get_control_metadata(state)
-    plan_only = bool(control.get("plan_only"))
+    entry_contract_payload = _get_entry_contract_payload(control)
+    plan_only = bool(entry_contract_payload.get("plan_only"))
     plan = state.get("plan")
     if plan is not None and len(plan.steps) > 0 and not plan.done:
         next_step = plan.get_next_step()
@@ -223,6 +263,67 @@ async def create_or_reuse_plan_node(
     working_memory["goal"] = goal
     raw_steps = parsed.get("steps")
     if not isinstance(raw_steps, list) or raw_steps is None or len(raw_steps) == 0:
+        if entry_contract_payload.get("route") == "planned_task" and not plan_only:
+            steps, contract_issues, corrected_count = compile_step_contracts(
+                steps=[_build_fallback_execution_step(user_message, entry_contract_payload)],
+                user_message=user_message,
+            )
+            contract_issues.extend(collect_step_contract_hard_issues(steps=steps))
+            if contract_issues:
+                log_runtime(
+                    logger,
+                    logging.WARNING,
+                    "兜底执行步骤契约校验失败",
+                    state=state,
+                    issue_count=len(contract_issues),
+                    issue_codes=[item.issue_code for item in contract_issues],
+                )
+                steps = []
+            log_runtime(
+                logger,
+                logging.WARNING,
+                "Planner 返回空步骤，按入口合同生成兜底执行步骤",
+                state=state,
+                entry_route=str(entry_contract_payload.get("route") or ""),
+                corrected_step_count=corrected_count,
+                step_count=len(steps),
+                llm_elapsed_ms=llm_cost_ms,
+                elapsed_ms=elapsed_ms(started_at),
+            )
+            plan = Plan(
+                title=title,
+                goal=goal,
+                language=language,
+                message=planner_message,
+                steps=steps,
+                status=ExecutionStatus.PENDING,
+            )
+            next_step = plan.get_next_step()
+            planner_events: List[Any] = [
+                TitleEvent(title=title),
+                PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
+                MessageEvent(role="assistant", message=planner_message),
+            ]
+            planner_stream_events = build_text_stream_events(
+                channel=TextStreamChannel.PLANNER_MESSAGE,
+                text=planner_message,
+                state=state,
+                stage="planner",
+            )
+            await _resolve_emit_live_events()(*planner_stream_events, *planner_events)
+            return _reduce_state_with_events(
+                state,
+                updates={
+                    "plan": plan,
+                    "working_memory": working_memory,
+                    **planner_context_updates,
+                    "current_step_id": next_step.id if next_step is not None else None,
+                    "final_message": "",
+                    "graph_metadata": _replace_control_metadata(state, control),
+                },
+                events=planner_events,
+            )
+
         extra_direct_answer_text = extract_text_outside_json_blocks(raw_llm_content)
         if extra_direct_answer_text:
             # planner 无步骤分支本质是直接答复兜底；若模型违约把正文写在 JSON 外，
@@ -306,6 +407,10 @@ async def create_or_reuse_plan_node(
         steps=steps,
         user_message=user_message,
     )
+    compiled_steps, dropped_final_delivery_steps = filter_final_delivery_steps(
+        steps=compiled_steps,
+        user_message=user_message,
+    )
     contract_issues.extend(collect_step_contract_hard_issues(steps=compiled_steps))
     if corrected_count > 0:
         log_runtime(
@@ -325,6 +430,23 @@ async def create_or_reuse_plan_node(
             issue_codes=[item.issue_code for item in contract_issues],
         )
         compiled_steps = []
+    if dropped_final_delivery_steps > 0:
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "计划已过滤最终交付型步骤",
+            state=state,
+            dropped_step_count=dropped_final_delivery_steps,
+        )
+        if len(compiled_steps) == 0 and not plan_only:
+            log_runtime(
+                logger,
+                logging.INFO,
+                "计划过滤后无执行步骤，将直接进入总结",
+                state=state,
+                original_step_count=len(steps),
+                dropped_step_count=dropped_final_delivery_steps,
+            )
     log_runtime(
         logger,
         logging.INFO,

@@ -804,7 +804,7 @@ class RuntimeContextService:
 
     def _build_topic_anchor(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:
         """为 direct_answer 生成显式主题锚点，避免追问时主题漂移。"""
-        conversation_summary = state.get("conversation_summary"),
+        conversation_summary = str(state.get("conversation_summary") or "").strip()
         if conversation_summary:
             return {
                 "source": "conversation_summary",
@@ -826,7 +826,7 @@ class RuntimeContextService:
                 "text": previous_final_message,
             }
 
-        final_message = state.get("final_answer_text") or state.get("final_message"),
+        final_message = str(state.get("final_answer_text") or state.get("final_message") or "").strip()
         if final_message:
             return {
                 "source": "final_answer_text" if state.get("final_answer_text") else "final_message",

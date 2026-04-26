@@ -6,8 +6,8 @@ from langgraph.types import interrupt
 
 from ..live_events import emit_live_events
 from .direct_nodes import (
+    atomic_action_node,
     direct_answer_node,
-    direct_execute_node,
     direct_wait_node,
     entry_router_node,
 )
@@ -32,10 +32,10 @@ __all__ = [
     "_append_prompt_context_to_prompt",
     "_build_prompt_context_packet_async",
     "_extract_prompt_context_state_updates",
+    "atomic_action_node",
     "consolidate_memory_node",
     "create_or_reuse_plan_node",
     "direct_answer_node",
-    "direct_execute_node",
     "direct_wait_node",
     "entry_router_node",
     "execute_step_node",

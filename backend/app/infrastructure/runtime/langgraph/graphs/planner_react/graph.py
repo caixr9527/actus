@@ -18,10 +18,10 @@ from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.graphs.skills.registry import build_default_skill_graph_registry
 from .nodes import (
+    atomic_action_node,
     consolidate_memory_node,
     create_or_reuse_plan_node,
     direct_answer_node,
-    direct_execute_node,
     direct_wait_node,
     entry_router_node,
     execute_step_node,
@@ -92,8 +92,8 @@ def build_planner_react_langgraph_graph(
     async def _direct_wait(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await direct_wait_node(state)
 
-    async def _direct_execute(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
-        return await direct_execute_node(state)
+    async def _atomic_action(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        return await atomic_action_node(state)
 
     async def _recall_memory_context(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
         return await recall_memory_context_node(
@@ -136,7 +136,7 @@ def build_planner_react_langgraph_graph(
     graph.add_node("entry_router", _entry_router)
     graph.add_node("direct_answer", _direct_answer)
     graph.add_node("direct_wait", _direct_wait)
-    graph.add_node("direct_execute", _direct_execute)
+    graph.add_node("atomic_action", _atomic_action)
     graph.add_node("recall_memory_context", _recall_memory_context)
     graph.add_node("create_plan_or_reuse", _create_plan_with_llm)
     graph.add_node("guard_step_reuse", guard_step_reuse_node)
@@ -154,7 +154,7 @@ def build_planner_react_langgraph_graph(
         {
             "direct_answer": "direct_answer",
             "direct_wait": "direct_wait",
-            "direct_execute": "direct_execute",
+            "atomic_action": "atomic_action",
             "create_plan_or_reuse": "create_plan_or_reuse",
             "recall_memory_context": "recall_memory_context",
         },
@@ -162,7 +162,7 @@ def build_planner_react_langgraph_graph(
     graph.add_edge("recall_memory_context", "create_plan_or_reuse")
     graph.add_edge("direct_answer", "consolidate_memory")
     graph.add_edge("direct_wait", "wait_for_human")
-    graph.add_edge("direct_execute", "guard_step_reuse")
+    graph.add_edge("atomic_action", "guard_step_reuse")
     graph.add_conditional_edges(
         "create_plan_or_reuse",
         route_after_plan,

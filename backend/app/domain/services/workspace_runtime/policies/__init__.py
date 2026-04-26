@@ -41,14 +41,15 @@ from .task_mode_policy import (
     classify_step_task_mode,
     has_environment_write_intent,
     has_explicit_wait_semantics,
-    infer_entry_strategy,
     is_allowed_in_task_mode,
-    requests_plan_only,
+    has_tool_execution_need,
+    should_force_planner_for_tool_task,
 )
 from .step_contract_policy import (
     StepContractCompilationIssue,
     collect_step_contract_hard_issues,
     compile_step_contracts,
+    filter_final_delivery_steps,
 )
 
 __all__ = [
@@ -83,16 +84,17 @@ __all__ = [
     "compact_tool_value",
     "extract_browser_tool_state",
     "has_explicit_wait_semantics",
+    "has_tool_execution_need",
     "hash_payload",
-    "infer_entry_strategy",
     "is_allowed_in_task_mode",
     "is_browser_high_level_temporarily_blocked",
     "normalize_browser_page_type",
     "normalize_execution_payload",
-    "requests_plan_only",
+    "should_force_planner_for_tool_task",
     "StepContractCompilationIssue",
     "collect_step_contract_hard_issues",
     "compile_step_contracts",
+    "filter_final_delivery_steps",
     "summarize_tool_result_data",
     "truncate_tool_text",
 ]

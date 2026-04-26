@@ -48,9 +48,9 @@ def build_direct_path_copy(language: str) -> Dict[str, str]:
     if language == "zh":
         return {
             "direct_answer_fallback": "直接回复",
-            "direct_execute_fallback": "直接执行",
-            "direct_execute_step_title": "直接执行用户请求",
-            "direct_execute_message": "已进入直接执行路径。",
+            "atomic_action_fallback": "原子动作",
+            "atomic_action_step_title": "执行用户请求",
+            "atomic_action_message": "已进入原子动作路径。",
             "direct_wait_fallback": "等待确认后执行",
             "direct_wait_title": "等待用户确认",
             "direct_wait_description": "在继续执行原始任务前，先等待用户确认是否继续",
@@ -62,9 +62,9 @@ def build_direct_path_copy(language: str) -> Dict[str, str]:
         }
     return {
         "direct_answer_fallback": "Direct answer",
-        "direct_execute_fallback": "Direct execution",
-        "direct_execute_step_title": "Execute the user request directly",
-        "direct_execute_message": "Entered direct execution path.",
+        "atomic_action_fallback": "Atomic action",
+        "atomic_action_step_title": "Execute the user request",
+        "atomic_action_message": "Entered atomic action path.",
         "direct_wait_fallback": "Wait for confirmation before execution",
         "direct_wait_title": "Wait for user confirmation",
         "direct_wait_description": "Wait for user confirmation before continuing the original task",

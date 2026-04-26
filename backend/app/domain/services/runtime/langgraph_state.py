@@ -46,8 +46,8 @@ from app.domain.services.runtime.normalizers import (
 logger = logging.getLogger(__name__)
 
 # BE-LG-04 契约版本。
-# v9 为 P3 增加 workspace_id 契约字段，graph state 只保留环境引用。
-GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v9"
+# v10 将入口路由状态收口为 EntryContract，删除旧 direct path 控制字段。
+GRAPH_STATE_CONTRACT_SCHEMA_VERSION = "be-lg-04.v10"
 
 
 class StepState(TypedDict, total=False):
@@ -94,15 +94,11 @@ class RuntimeDigestState(TypedDict, total=False):
 class GraphControlState(TypedDict, total=False):
     """图运行中的控制状态。"""
 
-    entry_strategy: str
-    plan_only: bool
-    skip_replan_when_plan_finished: bool
+    entry_contract: Dict[str, Any]
+    entry_upgrade: Dict[str, Any]
     step_reuse_hit: bool
     wait_resume_action: str
     continued_from_cancelled_plan: bool
-    direct_wait_original_message: str
-    direct_wait_execute_task_mode: str
-    direct_wait_original_task_executed: bool
 
 
 class GraphProjectionState(TypedDict, total=False):
@@ -127,13 +123,12 @@ def normalize_graph_metadata(raw: Any) -> GraphMetadataState:
     raw_control = raw.get("control")
     if isinstance(raw_control, dict):
         control: GraphControlState = {}
-        entry_strategy = str(raw_control.get("entry_strategy") or "").strip()
-        if entry_strategy:
-            control["entry_strategy"] = entry_strategy
-        if "plan_only" in raw_control:
-            control["plan_only"] = bool(raw_control.get("plan_only"))
-        if "skip_replan_when_plan_finished" in raw_control:
-            control["skip_replan_when_plan_finished"] = bool(raw_control.get("skip_replan_when_plan_finished"))
+        entry_contract = raw_control.get("entry_contract")
+        if isinstance(entry_contract, dict) and entry_contract:
+            control["entry_contract"] = dict(entry_contract)
+        entry_upgrade = raw_control.get("entry_upgrade")
+        if isinstance(entry_upgrade, dict) and entry_upgrade:
+            control["entry_upgrade"] = dict(entry_upgrade)
         if "step_reuse_hit" in raw_control:
             control["step_reuse_hit"] = bool(raw_control.get("step_reuse_hit"))
         wait_resume_action = str(raw_control.get("wait_resume_action") or "").strip()
@@ -141,14 +136,6 @@ def normalize_graph_metadata(raw: Any) -> GraphMetadataState:
             control["wait_resume_action"] = wait_resume_action
         if "continued_from_cancelled_plan" in raw_control:
             control["continued_from_cancelled_plan"] = bool(raw_control.get("continued_from_cancelled_plan"))
-        direct_wait_original_message = str(raw_control.get("direct_wait_original_message") or "").strip()
-        if direct_wait_original_message:
-            control["direct_wait_original_message"] = direct_wait_original_message
-        direct_wait_execute_task_mode = str(raw_control.get("direct_wait_execute_task_mode") or "").strip()
-        if direct_wait_execute_task_mode:
-            control["direct_wait_execute_task_mode"] = direct_wait_execute_task_mode
-        if "direct_wait_original_task_executed" in raw_control:
-            control["direct_wait_original_task_executed"] = bool(raw_control.get("direct_wait_original_task_executed"))
         if control:
             metadata["control"] = control
 
@@ -986,7 +973,8 @@ class GraphStateContractMapper:
         projection = dict(graph_metadata.get("projection") or {})
         pending_interrupt = cls._normalize_pending_interrupt(next_state.get("pending_interrupt"))
         waiting_for_replan = control.get("wait_resume_action") == "replan"
-        plan_only = bool(control.get("plan_only"))
+        entry_contract = control.get("entry_contract")
+        plan_only = bool(isinstance(entry_contract, dict) and entry_contract.get("plan_only"))
 
         for event in events:
             if isinstance(event, PlanEvent):

@@ -12,6 +12,7 @@
 - 本模块不直接决定 graph node 的流转，只给 execute_step_node 提供可复用的阶段 helper。
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +27,7 @@ from app.domain.models import (
 )
 from app.domain.services.prompts import EXECUTION_PROMPT
 from app.domain.services.runtime.langgraph_events import append_events
+from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_execution_response,
@@ -34,6 +36,7 @@ from app.domain.services.runtime.normalizers import (
     normalize_text_list,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.entry import EntryContract, EntryRoute
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
     format_attachments_for_prompt,
     normalize_attachments,
@@ -42,7 +45,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools i
     has_available_file_context,
 )
 from .confirmed_facts import _build_step_execution_text, _normalize_confirmed_fact_map
-from .control_state import replace_control_metadata
+from .control_state import get_entry_contract_payload, replace_control_metadata
 from .delivery_helpers import (
     _collect_available_file_context_refs,
     _infer_step_attachment_delivery_preference,
@@ -56,6 +59,8 @@ from .prompt_context_helpers import (
 from .wait_helpers import _build_step_label
 from .working_memory import _ensure_working_memory
 from ..parsers import extract_write_file_paths_from_tool_events, merge_attachment_paths
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -126,6 +131,187 @@ class ExecuteStepCompletedTransition:
     artifact_count: int
     blocker_count: int
     open_question_count: int
+
+
+def _tool_family(function_name: str) -> str:
+    normalized_name = str(function_name or "").strip().lower()
+    if not normalized_name:
+        return ""
+    if normalized_name.startswith("browser_"):
+        return "browser"
+    if normalized_name in {"search_web", "fetch_page"}:
+        return "web"
+    if normalized_name in {"read_file", "write_file", "list_files"}:
+        return "file"
+    if normalized_name.startswith("shell_"):
+        return "shell"
+    if normalized_name.startswith("message_") or normalized_name in {"ask_user", "notify_user"}:
+        return "human"
+    return normalized_name.split("_", 1)[0]
+
+
+def _called_tool_function_names(tool_events: List[ToolEvent]) -> List[str]:
+    function_names: List[str] = []
+    for event in tool_events:
+        event_status = getattr(event, "status", "")
+        normalized_status = str(getattr(event_status, "value", event_status) or "")
+        if normalized_status != "called":
+            continue
+        function_name = str(event.function_name or "").strip()
+        if function_name:
+            function_names.append(function_name)
+    return function_names
+
+
+def _build_entry_upgrade_payload(
+        *,
+        control: Dict[str, Any],
+        reason_code: str,
+        evidence: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    contract_payload = get_entry_contract_payload(control)
+    if not contract_payload:
+        return None
+    contract = EntryContract.model_validate(contract_payload)
+    if contract.route != EntryRoute.ATOMIC_ACTION or not contract.upgrade_policy.allow_upgrade:
+        return None
+    return {
+        "reason_code": reason_code,
+        "source_route": EntryRoute.ATOMIC_ACTION.value,
+        "target_route": EntryRoute.PLANNED_TASK.value,
+        "evidence": evidence,
+    }
+
+
+def _summarize_entry_upgrade_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    """压缩升级证据日志，保留定位信息，避免直接打印文件路径或问题原文。"""
+    summarized: Dict[str, Any] = {}
+    called_functions = evidence.get("called_functions")
+    if isinstance(called_functions, list):
+        summarized["called_functions"] = [str(item) for item in called_functions]
+        summarized["called_function_count"] = len(called_functions)
+    tool_families = evidence.get("tool_families")
+    if isinstance(tool_families, list):
+        summarized["tool_families"] = [str(item) for item in tool_families]
+    if "called_function_count" in evidence:
+        summarized["called_function_count"] = int(evidence.get("called_function_count") or 0)
+    if "max_tool_calls_before_upgrade" in evidence:
+        summarized["max_tool_calls_before_upgrade"] = int(evidence.get("max_tool_calls_before_upgrade") or 0)
+    produced_artifacts = evidence.get("produced_artifacts")
+    if isinstance(produced_artifacts, list):
+        summarized["produced_artifact_count"] = len(produced_artifacts)
+    open_questions = evidence.get("open_questions")
+    if isinstance(open_questions, list):
+        summarized["open_question_count"] = len(open_questions)
+    interrupt_kind = str(evidence.get("interrupt_kind") or "").strip()
+    if interrupt_kind:
+        summarized["interrupt_kind"] = interrupt_kind
+    return summarized
+
+
+def _write_entry_upgrade(
+        *,
+        updated_control: Dict[str, Any],
+        entry_upgrade: Optional[Dict[str, Any]],
+        state: PlannerReActLangGraphState,
+) -> None:
+    """写入 atomic_action 升级信号，并记录可追溯日志。"""
+    if entry_upgrade is None:
+        return
+    updated_control["entry_upgrade"] = entry_upgrade
+    log_runtime(
+        logger,
+        logging.INFO,
+        "入口原子动作升级信号写入",
+        state=state,
+        upgrade_reason_code=str(entry_upgrade.get("reason_code") or ""),
+        source_route=str(entry_upgrade.get("source_route") or ""),
+        target_route=str(entry_upgrade.get("target_route") or ""),
+        upgrade_evidence=_summarize_entry_upgrade_evidence(
+            entry_upgrade.get("evidence") if isinstance(entry_upgrade.get("evidence"), dict) else {}
+        ),
+    )
+
+
+def _resolve_completed_entry_upgrade(
+        *,
+        control: Dict[str, Any],
+        tool_events: List[ToolEvent],
+        produced_artifacts: List[str],
+        open_questions: List[str],
+        normalized_execution: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    contract_payload = get_entry_contract_payload(control)
+    if not contract_payload:
+        return None
+    contract = EntryContract.model_validate(contract_payload)
+    if contract.route != EntryRoute.ATOMIC_ACTION or not contract.upgrade_policy.allow_upgrade:
+        return None
+
+    called_functions = _called_tool_function_names(tool_events)
+    if (
+            contract.upgrade_policy.upgrade_on_user_confirmation_required
+            and any(function_name in {"message_ask_user", "ask_user"} for function_name in called_functions)
+    ):
+        return _build_entry_upgrade_payload(
+            control=control,
+            reason_code="user_confirmation_requires_planner",
+            evidence={
+                "called_functions": called_functions,
+            },
+        )
+    tool_families = [
+        family
+        for family in [_tool_family(function_name) for function_name in called_functions]
+        if family
+    ]
+    unique_tool_families = sorted(set(tool_families))
+    if (
+            contract.upgrade_policy.upgrade_on_second_tool_family
+            and len(unique_tool_families) >= 2
+    ):
+        return _build_entry_upgrade_payload(
+            control=control,
+            reason_code="second_tool_family_requires_planner",
+            evidence={
+                "tool_families": unique_tool_families,
+                "called_functions": called_functions,
+            },
+        )
+    if len(called_functions) > contract.upgrade_policy.max_tool_calls_before_upgrade:
+        return _build_entry_upgrade_payload(
+            control=control,
+            reason_code="tool_budget_exceeded_requires_planner",
+            evidence={
+                "called_function_count": len(called_functions),
+                "max_tool_calls_before_upgrade": contract.upgrade_policy.max_tool_calls_before_upgrade,
+                "called_functions": called_functions,
+            },
+        )
+    if (
+            contract.upgrade_policy.upgrade_on_file_output_required
+            and produced_artifacts
+    ):
+        return _build_entry_upgrade_payload(
+            control=control,
+            reason_code="file_output_requires_planner",
+            evidence={
+                "produced_artifacts": produced_artifacts,
+            },
+        )
+    if (
+            contract.upgrade_policy.upgrade_on_open_questions
+            and open_questions
+            and bool(normalized_execution.get("success", True))
+    ):
+        return _build_entry_upgrade_payload(
+            control=control,
+            reason_code="open_questions_require_planner",
+            evidence={
+                "open_questions": open_questions,
+            },
+        )
+    return None
 
 
 async def _build_message(
@@ -317,6 +503,19 @@ async def build_execute_interrupt_transition(
     )
     updated_control = dict(control)
     updated_control["step_reuse_hit"] = False
+    if interrupt_request:
+        entry_upgrade = _build_entry_upgrade_payload(
+            control=control,
+            reason_code="user_confirmation_requires_planner",
+            evidence={
+                "interrupt_kind": str(interrupt_request.get("kind") or ""),
+            },
+        )
+        _write_entry_upgrade(
+            updated_control=updated_control,
+            entry_upgrade=entry_upgrade,
+            state=state,
+        )
     return ExecuteStepInterruptTransition(
         updates={
             "plan": plan,
@@ -344,7 +543,7 @@ async def build_execute_completed_transition(
         tool_events: List[ToolEvent],
         user_message: str,
         working_memory: Dict[str, Any],
-        is_direct_wait_execute_step: bool,
+        is_entry_wait_execute_step: bool,
 ) -> ExecuteStepCompletedTransition:
     """构造 execute 节点 completed 分支的结果落账与状态写回。"""
     step_success = bool(normalized_execution.get("success", True))
@@ -362,13 +561,14 @@ async def build_execute_completed_transition(
     step_attachment_paths = normalize_file_path_list(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
     )
+    open_questions = normalize_text_list(normalized_execution.get("open_questions"))
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
         produced_artifacts=step_attachment_paths,
         blockers=normalize_text_list(normalized_execution.get("blockers")),
         facts_learned=normalize_text_list(normalized_execution.get("facts_learned")),
-        open_questions=normalize_text_list(normalized_execution.get("open_questions")),
+        open_questions=open_questions,
         deliver_result_as_attachment=step_deliver_result_as_attachment,
         next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),
     )
@@ -381,10 +581,18 @@ async def build_execute_completed_transition(
     next_step = plan.get_next_step()
     updated_control = dict(control)
     updated_control["step_reuse_hit"] = False
-    if is_direct_wait_execute_step:
-        updated_control["direct_wait_original_task_executed"] = True
-        updated_control.pop("direct_wait_execute_task_mode", None)
-        updated_control.pop("direct_wait_original_message", None)
+    entry_upgrade = _resolve_completed_entry_upgrade(
+        control=control,
+        tool_events=tool_events,
+        produced_artifacts=step_attachment_paths,
+        open_questions=open_questions,
+        normalized_execution=normalized_execution,
+    )
+    _write_entry_upgrade(
+        updated_control=updated_control,
+        entry_upgrade=entry_upgrade,
+        state=state,
+    )
     updated_working_memory = _merge_step_outcome_into_working_memory(
         working_memory,
         step=step,

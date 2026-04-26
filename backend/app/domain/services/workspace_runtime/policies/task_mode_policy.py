@@ -126,6 +126,15 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
             if str(segment).strip()
         ]
     )
+    has_write_action_signal = bool(
+        WRITE_ACTION_PATTERN.search(normalized_text)
+        and not WRITE_ACTION_DENY_PATTERN.search(normalized_text)
+    )
+    has_file_signal = bool(FILE_PATTERN.search(normalized_text))
+    if WRITE_ACTION_DENY_PATTERN.search(normalized_text):
+        # 用户明确否定写文件/改文件时，“文件”只是在描述禁止事项，不代表需要文件工具。
+        has_file_signal = False
+
     return {
         "text": normalized_text,
         "char_count": len(normalized_text),
@@ -145,21 +154,18 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
         "has_plan_only_signal": bool(PLAN_ONLY_PATTERN.search(normalized_text)),
         "has_synthesis_signal": bool(SYNTHESIS_PATTERN.search(normalized_text)),
         "has_comparison_signal": bool(COMPARISON_PATTERN.search(normalized_text)),
-        "has_file_signal": bool(FILE_PATTERN.search(normalized_text)),
+        "has_file_signal": has_file_signal,
         "has_coding_signal": bool(CODING_PATTERN.search(normalized_text)),
         "has_action_signal": bool(ACTION_PATTERN.search(normalized_text)),
         "has_contextual_followup_signal": bool(CONTEXTUAL_FOLLOWUP_PATTERN.search(normalized_text)),
         # P3-1A 收敛修复：统一识别“写入/改写/执行命令”等写副作用意图，供只读任务硬拦截复用。
-        "has_write_action_signal": bool(
-            WRITE_ACTION_PATTERN.search(normalized_text)
-            and not WRITE_ACTION_DENY_PATTERN.search(normalized_text)
-        ),
+        "has_write_action_signal": has_write_action_signal,
         "has_tool_reference": bool(TOOL_REFERENCE_PATTERN.search(normalized_text)),
         "clause_count": clause_count,
     }
 
 
-def _has_direct_execution_need(signals: Dict[str, Any]) -> bool:
+def has_tool_execution_need(signals: Dict[str, Any]) -> bool:
     return any(
         (
             signals["has_tool_reference"],
@@ -176,7 +182,7 @@ def _has_direct_execution_need(signals: Dict[str, Any]) -> bool:
     )
 
 
-def _should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
+def should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
     if signals["has_plan_only_signal"]:
         return True
     if signals["has_planning_signal"] or signals["has_comparison_signal"]:
@@ -197,63 +203,6 @@ def _should_force_planner_for_tool_task(signals: Dict[str, Any]) -> bool:
     ):
         return True
     return False
-
-
-def requests_plan_only(user_message: str) -> bool:
-    return bool(analyze_text_intent(user_message)["has_plan_only_signal"])
-
-
-def infer_entry_strategy(
-        *,
-        user_message: str,
-        has_input_parts: bool,
-        has_active_plan: bool,
-        has_contextual_followup_anchor: bool = False,
-) -> str:
-    if has_active_plan:
-        return "create_plan_or_reuse"
-    if has_input_parts:
-        return "recall_memory_context"
-
-    signals = analyze_text_intent(user_message)
-    if signals["char_count"] == 0:
-        return "recall_memory_context"
-    needs_planner = _should_force_planner_for_tool_task(signals)
-    is_structurally_multi_step = (
-            signals["has_numbered_list"]
-            or signals["has_sequence_marker"]
-            or signals["clause_count"] >= 3
-            or signals["char_count"] >= 120
-    )
-    has_direct_execution_need = _has_direct_execution_need(signals)
-    if signals["needs_human_wait"]:
-        # 复杂/规划型请求即便包含“先确认”语义，也应先走 planner 主链，
-        # 由 planner 决定是否进入 input_text/confirm 的 human_wait，而不是硬落 direct_wait。
-        if needs_planner:
-            return "recall_memory_context"
-        if has_direct_execution_need and (is_structurally_multi_step or signals["char_count"] >= 48):
-            return "recall_memory_context"
-        return "direct_wait"
-    if signals["is_phatic"] and not has_direct_execution_need:
-        return "direct_answer"
-    # 追问/展开类短消息在存在历史锚点时应继续走 direct_answer。
-    # 这里仍显式排除工具、文件、检索和复杂多步骤信号，避免把真实执行请求误降级成直答。
-    if (
-            has_contextual_followup_anchor
-            and signals["has_contextual_followup_signal"]
-            and not has_direct_execution_need
-            and not needs_planner
-            and not signals["needs_human_wait"]
-            and not signals["has_numbered_list"]
-            and signals["clause_count"] <= 2
-            and signals["char_count"] < 80
-    ):
-        return "direct_answer"
-    if needs_planner or is_structurally_multi_step:
-        return "recall_memory_context"
-    if has_direct_execution_need:
-        return "direct_execute"
-    return "direct_answer"
 
 
 def classify_task_mode_from_signals(signals: Dict[str, Any]) -> str:

@@ -20,8 +20,9 @@ from app.domain.services.workspace_runtime.policies import classify_step_task_mo
 from ..execution.tools import execute_step_with_prompt
 from ..live_events import emit_live_events
 from .control_state import (
+    get_entry_contract as _get_entry_contract,
     get_control_metadata as _get_control_metadata,
-    is_direct_wait_execute_step as _is_direct_wait_execute_step,
+    is_entry_wait_execute_step as _is_entry_wait_execute_step,
 )
 from .execute_helpers import (
     build_empty_execution_message,
@@ -68,19 +69,19 @@ async def execute_step_node(
         return state
 
     control = _get_control_metadata(state)
-    is_direct_wait_execute_step = _is_direct_wait_execute_step(step, control)
-    explicit_direct_wait_task_mode = str(control.get("direct_wait_execute_task_mode") or "").strip()
-    task_mode = explicit_direct_wait_task_mode if is_direct_wait_execute_step and explicit_direct_wait_task_mode else classify_step_task_mode(
-        step)
+    is_entry_wait_execute_step = _is_entry_wait_execute_step(step, control)
+    task_mode = classify_step_task_mode(step)
+    if is_entry_wait_execute_step:
+        task_mode = _get_entry_contract(control).task_mode.value
     step.status = ExecutionStatus.RUNNING
     started_event = StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED)
     emit_events = _resolve_emit_live_events()
     await emit_events(started_event)
 
     user_message = str(state.get("user_message", ""))
-    if is_direct_wait_execute_step:
+    if is_entry_wait_execute_step:
         # 确认后的执行阶段必须继续消费原始请求，而不是“继续/确认”这类恢复文本。
-        user_message = str(control.get("direct_wait_original_message") or user_message).strip()
+        user_message = _get_entry_contract(control).source.user_message
     prepared_execute_input = await prepare_execute_step_input(
         state=state,
         step=step,
@@ -226,6 +227,21 @@ async def execute_step_node(
             interrupt_request=interrupt_request,
             user_message=user_message,
         )
+        interrupt_control = _get_control_metadata(
+            {
+                **state,
+                **interrupt_transition.updates,
+            }
+        )
+        if isinstance(interrupt_control.get("entry_upgrade"), dict) and interrupt_control.get("entry_upgrade"):
+            return _reduce_state_with_events(
+                state,
+                updates={
+                    **interrupt_transition.updates,
+                    "pending_interrupt": {},
+                },
+                events=[started_event, *tool_events],
+            )
         return _reduce_state_with_events(
             state,
             updates=interrupt_transition.updates,
@@ -246,7 +262,7 @@ async def execute_step_node(
         tool_events=tool_events,
         user_message=user_message,
         working_memory=working_memory,
-        is_direct_wait_execute_step=is_direct_wait_execute_step,
+        is_entry_wait_execute_step=is_entry_wait_execute_step,
     )
     await emit_events(*completed_transition.events[len([started_event, *tool_events]):])
     log_runtime(

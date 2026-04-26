@@ -250,7 +250,7 @@ WRITE_ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 WRITE_ACTION_DENY_PATTERN = re.compile(
-    r"((不要|不需要|无需|别|禁止).{0,8}(写入|改写|修改|替换|删除|创建|执行命令|运行命令|落盘))"
+    r"((不要|不需要|无需|别|禁止).{0,8}(写入|写文件|改写|修改|替换|删除|创建|执行命令|运行命令|落盘))"
     r"|(\b(do not|don't|no need to)\s+(write|modify|replace|delete|create|save|execute)\b)",
     re.IGNORECASE,
 )
