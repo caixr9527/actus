@@ -22,6 +22,7 @@ from app.domain.models import (
     WorkspaceArtifact,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.entry import EntryCompiler
 from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.tools import BaseTool, MessageTool
 from app.domain.services.tools.base import tool
@@ -44,6 +45,23 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
 
 
 _TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+def _entry_contract_control(user_message: str):
+    contract = EntryCompiler().compile_state(
+        {
+            "user_message": user_message,
+            "input_parts": [],
+            "message_window": [],
+            "recent_run_briefs": [],
+            "conversation_summary": "",
+        }
+    )
+    return {"entry_contract": contract.model_dump(mode="json")}
+
+
+def _planned_entry_contract_control(user_message: str):
+    return _entry_contract_control(f"请规划并分阶段执行：{user_message}")
 
 
 async def execute_step_node(*args, **kwargs):
@@ -1452,6 +1470,56 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
     assert next_state["current_step_id"] == step_ids[1]
 
 
+def test_replan_node_should_clear_consumed_entry_upgrade_signal() -> None:
+    completed_step = Step(
+        id="atomic-action-step",
+        title="完成原子动作",
+        description="完成原子动作",
+        objective_key="objective-atomic-action",
+        success_criteria=["完成原子动作"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(done=True, summary="原子动作需要升级"),
+    )
+    plan = Plan(
+        title="重规划测试",
+        goal="验证 entry_upgrade 消费",
+        language="zh",
+        message="开始重规划",
+        steps=[completed_step],
+    )
+    state = {
+        "plan": plan,
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "graph_metadata": {
+            "control": {
+                **_planned_entry_contract_control("验证 entry_upgrade 消费"),
+                "entry_upgrade": {
+                    "reason_code": "open_questions_require_planner",
+                    "source_route": "atomic_action",
+                    "target_route": "planned_task",
+                    "evidence": {"open_questions": ["需要继续规划"]},
+                },
+            }
+        },
+        "emitted_events": [],
+    }
+
+    next_state = asyncio.run(
+        replan_node(
+            state,
+            _FakeReplanLLM(
+                steps=[
+                    {"id": "step-next", "description": "继续规划后的步骤"},
+                ]
+            ),
+        )
+    )
+
+    control = (next_state.get("graph_metadata") or {}).get("control") or {}
+    assert "entry_upgrade" not in control
+    assert next_state["current_step_id"] == "step-next"
+
+
 def test_replan_node_should_filter_meta_tool_validation_steps_and_retry_once() -> None:
     class _DriftThenValidReplanLLM:
         def __init__(self) -> None:
@@ -2121,7 +2189,7 @@ def test_summarize_should_emit_final_message_stream_before_final_message_event()
 
 
 def test_summarize_should_emit_final_message_stream_for_direct_wait_summary_error() -> None:
-    llm = _FailIfCalledSummaryLLM()
+    llm = _FakeLLM()
     captured_events = []
     state = {
         "session_id": "session-1",
@@ -2144,12 +2212,7 @@ def test_summarize_should_emit_final_message_stream_for_direct_wait_summary_erro
         },
         "pending_memory_writes": [],
         "message_window": [],
-        "graph_metadata": {
-            "control": {
-                "entry_strategy": "direct_wait",
-                "direct_wait_original_task_executed": False,
-            }
-        },
+        "graph_metadata": {"control": _entry_contract_control("先让我确认后再继续搜索课程")},
         "emitted_events": [],
         "final_message": "",
     }
@@ -2166,13 +2229,13 @@ def test_summarize_should_emit_final_message_stream_for_direct_wait_summary_erro
     assert isinstance(captured_events[0], TextStreamStartEvent)
     assert isinstance(captured_events[1], TextStreamDeltaEvent)
     assert isinstance(captured_events[2], TextStreamEndEvent)
-    assert any(getattr(event, "type", "") == "error" for event in captured_events)
+    assert not any(getattr(event, "type", "") == "error" for event in captured_events)
     assert any(
         getattr(event, "type", "") == "message"
         and getattr(event, "stage", "") == "final"
         for event in captured_events
     )
-    assert [event.type for event in summarized_state["emitted_events"]] == ["error", "message"]
+    assert [event.type for event in summarized_state["emitted_events"]] == ["message", "plan"]
 
 
 def test_summarize_should_build_summary_context_for_final_round(monkeypatch) -> None:
@@ -2752,7 +2815,7 @@ def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> 
 
 
 def test_summarize_should_block_direct_wait_without_original_execution(monkeypatch) -> None:
-    llm = _FailIfCalledSummaryLLM()
+    llm = _FakeLLM()
     captured_events = []
 
     async def _capture_events(*events):
@@ -2784,28 +2847,15 @@ def test_summarize_should_block_direct_wait_without_original_execution(monkeypat
         },
         "pending_memory_writes": [],
         "message_window": [],
-        "graph_metadata": {
-            "control": {
-                "entry_strategy": "direct_wait",
-                "direct_wait_original_task_executed": False,
-            }
-        },
+        "graph_metadata": {"control": _entry_contract_control("先让我确认后再继续搜索课程")},
         "emitted_events": [],
     }
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert llm.calls == 0
-    assert summarized_state["plan"].status == ExecutionStatus.FAILED
-    assert summarized_state["plan"].error == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
-    assert summarized_state["final_message"] == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
-    assert summarized_state["final_answer_text"] == "运行时异常：direct_wait 已完成确认，但原始任务尚未执行，已阻止错误总结。"
-    assert any(getattr(event, "type", "") == "error" for event in captured_events)
-    assert any(
-        getattr(event, "type", "") == "error"
-        and getattr(event, "error_key", "") == "direct_wait_unexecuted"
-        for event in captured_events
-    )
+    assert summarized_state["plan"].status == ExecutionStatus.COMPLETED
+    assert summarized_state["final_message"] == "最终总结"
+    assert not any(getattr(event, "type", "") == "error" for event in captured_events)
     assert any(
         getattr(event, "type", "") == "message"
         and getattr(event, "stage", "") == "final"
@@ -2828,7 +2878,7 @@ def test_summarize_should_not_block_after_direct_wait_cancel_and_replan(monkeypa
                 "run_id": "run-1",
                 "thread_id": "thread-1",
                 "user_message": "先让我确认后再继续搜索课程",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("先让我确认后再继续搜索课程")},
                 "message_window": [],
                 "working_memory": {},
                 "execution_count": 0,
@@ -3489,9 +3539,7 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     async def _entry_router(state):
         next_state = _append_trace(state, "entry_router")
         graph_metadata = {
-            "control": {
-                "entry_strategy": "recall_memory_context",
-            }
+            "control": _planned_entry_contract_control("验证长期记忆边界"),
         }
         return {
             **next_state,
@@ -3581,6 +3629,9 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     async def _finalize(state):
         return _append_trace(state, "finalize")
 
+    async def _direct_answer(state, _llm, runtime_context_service=None):
+        return _append_trace(state, "direct_answer")
+
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.entry_router_node",
         _entry_router,
@@ -3591,14 +3642,14 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
     )
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.direct_answer_node",
-        lambda state, llm: state,
+        _direct_answer,
     )
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.direct_wait_node",
         lambda state: state,
     )
     monkeypatch.setattr(
-        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.direct_execute_node",
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.graph.atomic_action_node",
         lambda state: state,
     )
     monkeypatch.setattr(

@@ -20,17 +20,22 @@ from app.domain.models import (
     ToolResult,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.entry import EntryCompiler
+from app.domain.services.workspace_runtime.entry import reason_codes as entry_reason_codes
 from app.domain.services.workspace_runtime.policies.task_mode_policy import (
     classify_confirmed_user_task_mode,
     classify_step_task_mode,
 )
-from app.domain.services.workspace_runtime.policies.step_contract_policy import compile_step_contracts
+from app.domain.services.workspace_runtime.policies.step_contract_policy import (
+    compile_step_contracts,
+    filter_final_delivery_steps,
+)
 from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
+    atomic_action_node,
     create_or_reuse_plan_node as _create_or_reuse_plan_node,
     direct_answer_node,
-    direct_execute_node,
     direct_wait_node,
     entry_router_node,
     execute_step_node as _execute_step_node,
@@ -47,6 +52,19 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools i
 
 
 _TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+def _entry_contract_control(user_message: str, **state_overrides):
+    state = {
+        "user_message": user_message,
+        "input_parts": [],
+        "message_window": [],
+        "recent_run_briefs": [],
+        "conversation_summary": "",
+        **state_overrides,
+    }
+    contract = EntryCompiler().compile_state(state)
+    return {"entry_contract": contract.model_dump(mode="json")}
 
 
 async def create_or_reuse_plan_node(*args, **kwargs):
@@ -744,7 +762,7 @@ def test_entry_router_node_should_route_direct_answer_for_greeting() -> None:
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "answer"
 
 
 def test_entry_router_node_should_keep_followup_on_original_direct_answer_route() -> None:
@@ -762,7 +780,7 @@ def test_entry_router_node_should_keep_followup_on_original_direct_answer_route(
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "answer"
 
 
 def test_entry_router_node_should_route_followup_with_run_brief_to_direct_answer() -> None:
@@ -787,7 +805,7 @@ def test_entry_router_node_should_route_followup_with_run_brief_to_direct_answer
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_answer"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "answer"
 
 
 def test_entry_router_node_should_route_direct_wait_for_preconfirm_request() -> None:
@@ -800,7 +818,7 @@ def test_entry_router_node_should_route_direct_wait_for_preconfirm_request() -> 
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_wait"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "wait"
 
 
 def test_entry_router_node_should_not_route_long_mixed_request_to_direct_wait() -> None:
@@ -813,7 +831,7 @@ def test_entry_router_node_should_not_route_long_mixed_request_to_direct_wait() 
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "planned_task"
 
 
 def test_entry_router_node_should_not_route_waiting_plan_request_to_direct_wait() -> None:
@@ -826,10 +844,10 @@ def test_entry_router_node_should_not_route_waiting_plan_request_to_direct_wait(
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "planned_task"
 
 
-def test_entry_router_node_should_route_direct_execute_for_simple_tool_task() -> None:
+def test_entry_router_node_should_route_atomic_action_for_simple_tool_task() -> None:
     state = asyncio.run(
         entry_router_node(
             {
@@ -839,10 +857,10 @@ def test_entry_router_node_should_route_direct_execute_for_simple_tool_task() ->
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "atomic_action"
 
 
-def test_entry_router_node_should_route_direct_execute_for_url_request_without_tool_name_hint() -> None:
+def test_entry_router_node_should_route_atomic_action_for_url_request_without_tool_name_hint() -> None:
     state = asyncio.run(
         entry_router_node(
             {
@@ -852,7 +870,7 @@ def test_entry_router_node_should_route_direct_execute_for_url_request_without_t
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "atomic_action"
 
 
 def test_entry_router_node_should_route_search_read_and_summarize_request_to_planner() -> None:
@@ -865,7 +883,7 @@ def test_entry_router_node_should_route_search_read_and_summarize_request_to_pla
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "planned_task"
 
 
 def test_entry_router_node_should_route_explicit_plan_request_to_planner() -> None:
@@ -878,7 +896,7 @@ def test_entry_router_node_should_route_explicit_plan_request_to_planner() -> No
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "planned_task"
 
 
 def test_entry_router_node_should_mark_plan_only_request_in_control_metadata() -> None:
@@ -891,11 +909,11 @@ def test_entry_router_node_should_mark_plan_only_request_in_control_metadata() -
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
-    assert state["graph_metadata"]["control"]["plan_only"] is True
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "planned_task"
+    assert state["graph_metadata"]["control"]["entry_contract"]["plan_only"] is True
 
 
-def test_entry_router_node_should_keep_single_file_read_request_on_direct_execute() -> None:
+def test_entry_router_node_should_keep_single_file_read_request_on_atomic_action() -> None:
     state = asyncio.run(
         entry_router_node(
             {
@@ -905,7 +923,7 @@ def test_entry_router_node_should_keep_single_file_read_request_on_direct_execut
         )
     )
 
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "direct_execute"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "atomic_action"
 
 
 def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> None:
@@ -998,9 +1016,9 @@ def test_language_checker_should_build_direct_path_copy_by_language() -> None:
     zh_copy = build_direct_path_copy("zh")
     en_copy = build_direct_path_copy("en")
 
-    assert zh_copy["direct_execute_message"] == "已进入直接执行路径。"
+    assert zh_copy["atomic_action_message"] == "已进入原子动作路径。"
     assert zh_copy["direct_wait_confirm_label"] == "继续"
-    assert en_copy["direct_execute_message"] == "Entered direct execution path."
+    assert en_copy["atomic_action_message"] == "Entered atomic action path."
     assert en_copy["direct_wait_confirm_label"] == "Continue"
 
 
@@ -1009,7 +1027,7 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
         direct_answer_node(
             {
                 "user_message": "你好",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("你好")},
             },
             _DirectAnswerLLM(),
             runtime_context_service=_TEST_RUNTIME_CONTEXT_SERVICE,
@@ -1020,7 +1038,7 @@ def test_direct_answer_node_should_build_completed_plan() -> None:
     assert state["plan"].status == ExecutionStatus.COMPLETED
     assert state["plan"].language == "zh"
     assert state["final_message"] == "你好，我在。"
-    assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "answer"
 
 
 def test_direct_answer_node_should_emit_final_message_stream_before_final_message_event() -> None:
@@ -1038,7 +1056,7 @@ def test_direct_answer_node_should_emit_final_message_stream_before_final_messag
                     "run_id": "run-1",
                     "thread_id": "thread-1",
                     "user_message": "你好",
-                    "graph_metadata": {},
+                    "graph_metadata": {"control": _entry_contract_control("你好")},
                     "message_window": [],
                 },
                 _DirectAnswerLLM(),
@@ -1064,7 +1082,16 @@ def test_direct_answer_node_should_append_history_context_to_prompt() -> None:
         direct_answer_node(
             {
                 "user_message": "不够详细，需要详细点4天3夜的攻略",
-                "graph_metadata": {},
+                "graph_metadata": {
+                    "control": _entry_contract_control(
+                        "不够详细，需要详细点4天3夜的攻略",
+                        conversation_summary="上一轮已讨论重庆旅游攻略",
+                        message_window=[
+                            {"role": "user", "message": "给我一份重庆的旅游攻略"},
+                            {"role": "assistant", "message": "这里是一份重庆旅游攻略"},
+                        ],
+                    )
+                },
                 "conversation_summary": "上一轮已讨论重庆旅游攻略",
                 "final_message": "重庆旅游攻略简版",
                 "message_window": [
@@ -1156,7 +1183,7 @@ def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
         direct_wait_node(
             {
                 "user_message": user_message,
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control(user_message)},
             }
         )
     )
@@ -1166,21 +1193,19 @@ def test_direct_wait_node_should_build_synthetic_wait_plan() -> None:
     assert [step.id for step in state["plan"].steps] == ["direct-wait-confirm", "direct-wait-execute"]
     assert state["plan"].steps[1].description == "执行原始任务"
     assert state["pending_interrupt"]["kind"] == "confirm"
-    assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
-    assert state["graph_metadata"]["control"]["direct_wait_original_message"] == user_message
-    assert state["graph_metadata"]["control"]["direct_wait_execute_task_mode"] == "research"
-    assert state["graph_metadata"]["control"]["direct_wait_original_task_executed"] is False
+    assert state["graph_metadata"]["control"]["entry_contract"]["source"]["user_message"] == user_message
+    assert state["graph_metadata"]["control"]["entry_contract"]["task_mode"] == "research"
     assert state["plan"].steps[1].task_mode_hint == "research"
     assert state["plan"].steps[1].output_mode == "none"
     assert state["plan"].steps[1].artifact_policy == "default"
 
 
-def test_direct_execute_node_should_build_single_step_plan() -> None:
+def test_atomic_action_node_should_build_single_step_plan() -> None:
     state = asyncio.run(
-        direct_execute_node(
+        atomic_action_node(
             {
                 "user_message": "搜索 OpenAI 官网",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("搜索 OpenAI 官网")},
             }
         )
     )
@@ -1188,8 +1213,8 @@ def test_direct_execute_node_should_build_single_step_plan() -> None:
     assert state["plan"] is not None
     assert state["plan"].language == "zh"
     assert len(state["plan"].steps) == 1
-    assert state["current_step_id"] == "direct-execute-step"
-    assert state["graph_metadata"]["control"]["skip_replan_when_plan_finished"] is True
+    assert state["current_step_id"] == "atomic-action-step"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "atomic_action"
     assert state["plan"].steps[0].task_mode_hint == "research"
     assert state["plan"].steps[0].output_mode == "none"
     assert state["plan"].steps[0].artifact_policy == "default"
@@ -1200,7 +1225,9 @@ def test_direct_wait_node_should_preserve_english_working_language() -> None:
         direct_wait_node(
             {
                 "user_message": "Ask me for confirmation before you search the OpenAI docs",
-                "graph_metadata": {},
+                "graph_metadata": {
+                    "control": _entry_contract_control("Ask me for confirmation before you search the OpenAI docs")
+                },
             }
         )
     )
@@ -1335,7 +1362,7 @@ def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -
     assert steps[0].output_mode == StepOutputMode.NONE
 
 
-def test_compile_step_contracts_should_not_block_summary_like_general_step() -> None:
+def test_filter_final_delivery_steps_should_drop_summary_like_general_step() -> None:
     steps, issues, corrected_count = compile_step_contracts(
         steps=[
             Step(
@@ -1348,10 +1375,15 @@ def test_compile_step_contracts_should_not_block_summary_like_general_step() -> 
         ],
         user_message="调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
     )
+    filtered_steps, dropped_count = filter_final_delivery_steps(
+        steps=steps,
+        user_message="调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
+    )
 
     assert corrected_count == 0
-    assert len(steps) == 1
     assert issues == []
+    assert filtered_steps == []
+    assert dropped_count == 1
 
 
 def test_compile_step_contracts_should_allow_execution_side_organization_step() -> None:
@@ -1371,6 +1403,195 @@ def test_compile_step_contracts_should_allow_execution_side_organization_step() 
     assert corrected_count == 0
     assert len(steps) == 1
     assert issues == []
+
+
+def test_entry_compiler_should_not_treat_denied_file_output_as_file_task() -> None:
+    contract = EntryCompiler().compile(
+        user_message="先给我一版团队 AI 编程规范草稿预览，不需要写文件。",
+        has_input_parts=False,
+        has_active_plan=False,
+        contextual_followup_anchor=False,
+    )
+
+    assert contract.route == "answer"
+    assert contract.task_mode == StepTaskModeHint.GENERAL
+    assert entry_reason_codes.SINGLE_FILE_READ_ATOMIC_ACTION not in contract.reason_codes
+
+
+def test_create_or_reuse_plan_node_should_build_fallback_step_when_planned_task_returns_empty_steps() -> None:
+    class _EmptyPlannerLLM:
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            return {
+                "content": json.dumps(
+                    {
+                        "message": "该任务为单步文件创建操作，无需多步骤规划。",
+                        "goal": "",
+                        "title": "",
+                        "language": "zh",
+                        "steps": [],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "创建文件 /home/ubuntu/workspace/p3-case-file/result.md，内容为 VERSION_1。",
+                "graph_metadata": {"control": _entry_contract_control(
+                    "创建文件 /home/ubuntu/workspace/p3-case-file/result.md，内容为 VERSION_1。"
+                )},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_paths": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _EmptyPlannerLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert state["plan"].status == ExecutionStatus.PENDING
+    assert len(state["plan"].steps) == 1
+    assert state["current_step_id"] == "fallback-execution-step"
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert state["final_message"] == ""
+
+
+def test_create_or_reuse_plan_node_should_build_non_file_fallback_step_for_research_task() -> None:
+    class _EmptyPlannerLLM:
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            return {
+                "content": json.dumps(
+                    {
+                        "message": "该任务可以直接检索处理。",
+                        "goal": "",
+                        "title": "",
+                        "language": "zh",
+                        "steps": [],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
+                "graph_metadata": {"control": _entry_contract_control(
+                    "调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接"
+                )},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_paths": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _EmptyPlannerLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert state["plan"].status == ExecutionStatus.PENDING
+    assert len(state["plan"].steps) == 1
+    assert state["current_step_id"] == "fallback-execution-step"
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.RESEARCH
+    assert state["plan"].steps[0].output_mode == StepOutputMode.NONE
+    assert state["plan"].steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_create_or_reuse_plan_node_should_route_to_summary_when_final_delivery_steps_are_filtered() -> None:
+    class _FinalDeliveryPlannerLLM:
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            return {
+                "content": json.dumps(
+                    {
+                        "message": "已生成调研计划。",
+                        "goal": "调研 LangGraph human-in-the-loop 常见实现模式",
+                        "title": "LangGraph HITL 调研",
+                        "language": "zh",
+                        "steps": [
+                            {
+                                "id": "1",
+                                "description": "整理 LangGraph human-in-the-loop 的常见实现模式，归纳为 5 条要点，并标注对应来源链接",
+                                "task_mode_hint": "general",
+                                "output_mode": "none",
+                                "artifact_policy": "forbid_file_output",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            }
+
+    state = asyncio.run(
+        create_or_reuse_plan_node(
+            {
+                "user_message": "调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
+                "graph_metadata": {"control": _entry_contract_control(
+                    "调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接"
+                )},
+                "working_memory": {},
+                "recent_run_briefs": [],
+                "recent_attempt_briefs": [],
+                "session_open_questions": [],
+                "session_blockers": [],
+                "selected_artifacts": [],
+                "historical_artifact_paths": [],
+                "input_parts": [],
+                "message_window": [],
+                "retrieved_memories": [],
+                "pending_memory_writes": [],
+                "current_step_id": None,
+                "execution_count": 0,
+                "max_execution_steps": 20,
+                "last_executed_step": None,
+                "pending_interrupt": {},
+                "emitted_events": [],
+                "final_message": "",
+                "thread_id": "thread-1",
+                "conversation_summary": "",
+            },
+            _FinalDeliveryPlannerLLM(),
+        )
+    )
+
+    assert state["plan"] is not None
+    assert state["plan"].status == ExecutionStatus.PENDING
+    assert state["plan"].steps == []
+    assert state["current_step_id"] is None
+    assert route_after_plan(state) == "summarize"
 
 
 def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enum() -> None:
@@ -1435,20 +1656,20 @@ def test_create_or_reuse_plan_node_should_keep_human_wait_contract_fields_as_enu
     assert step.artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
 
 
-def test_direct_execute_node_should_preserve_english_working_language() -> None:
+def test_atomic_action_node_should_preserve_english_working_language() -> None:
     state = asyncio.run(
-        direct_execute_node(
+        atomic_action_node(
             {
                 "user_message": "Read this file and summarize in English",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("Read this file and summarize in English")},
             }
         )
     )
 
     assert state["plan"] is not None
     assert state["plan"].language == "en"
-    assert state["plan"].message == "Entered direct execution path."
-    assert state["plan"].steps[0].title == "Execute the user request directly"
+    assert state["plan"].message == "Entered atomic action path."
+    assert state["plan"].steps[0].title == "Execute the user request"
 
 
 def test_create_or_reuse_plan_node_should_stop_after_planning_for_plan_only_request() -> None:
@@ -1456,7 +1677,9 @@ def test_create_or_reuse_plan_node_should_stop_after_planning_for_plan_only_requ
         create_or_reuse_plan_node(
             {
                 "user_message": "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。",
-                "graph_metadata": {"control": {"plan_only": True}},
+                "graph_metadata": {"control": _entry_contract_control(
+                    "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。"
+                )},
                 "working_memory": {},
                 "recent_run_briefs": [],
                 "recent_attempt_briefs": [],
@@ -1502,7 +1725,9 @@ def test_create_or_reuse_plan_node_should_emit_planner_message_stream_before_pla
                     "session_id": "session-1",
                     "run_id": "run-1",
                     "user_message": "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。",
-                    "graph_metadata": {"control": {"plan_only": True}},
+                    "graph_metadata": {"control": _entry_contract_control(
+                        "帮我规划一个北京 3 天旅游安排，先不要执行，只给步骤。"
+                    )},
                     "working_memory": {},
                     "recent_run_briefs": [],
                     "recent_attempt_briefs": [],
@@ -1821,7 +2046,7 @@ def test_has_available_file_context_should_not_treat_file_signal_as_real_file_co
     ) is True
 
 
-def test_execute_step_with_prompt_should_block_read_file_in_web_reading() -> None:
+def test_execute_step_with_prompt_should_fail_web_reading_when_file_tool_is_requested() -> None:
     llm = _ReadFileThenFinishLLM("/home/ubuntu/course-detail.md")
     file_tool = _ReadFileTool()
 
@@ -1837,8 +2062,9 @@ def test_execute_step_with_prompt_should_block_read_file_in_web_reading() -> Non
 
     payload, events = asyncio.run(_run())
 
-    assert payload["success"] is True
-    assert payload["result"] == "已结束步骤"
+    assert payload["success"] is False
+    assert payload["summary"] == "当前步骤暂时未能完成：读取当前课程页面详情"
+    assert payload["blockers"] == ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"]
     assert file_tool.invocations == []
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
@@ -1848,7 +2074,7 @@ def test_execute_step_with_prompt_should_block_read_file_in_web_reading() -> Non
     assert "网页读取任务" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_block_file_tools_for_inline_general_without_file_context() -> None:
+def test_execute_step_with_prompt_should_allow_general_file_tool_call_without_file_context_flag() -> None:
     llm = _ReadFileThenFinishLLM("/home/ubuntu/course-detail.md")
     file_tool = _ReadFileTool()
 
@@ -1870,13 +2096,12 @@ def test_execute_step_with_prompt_should_block_file_tools_for_inline_general_wit
 
     assert payload["success"] is True
     assert payload["result"] == "已结束步骤"
-    assert file_tool.invocations == []
+    assert file_tool.invocations == ["/home/ubuntu/course-detail.md"]
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
     assert called_events[0].function_name == "read_file"
     assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "当前步骤缺少可用文件上下文" in str(called_events[0].function_result.message or "")
+    assert called_events[0].function_result.success is True
 
 
 def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_with_file_context() -> None:
@@ -1909,7 +2134,7 @@ def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_wit
     assert called_events[0].function_result.success is True
 
 
-def test_execute_step_with_prompt_should_not_block_search_without_legacy_delivery_semantics() -> None:
+def test_execute_step_with_prompt_should_block_search_in_general_task_mode() -> None:
     llm = _SearchThenFinishLLM()
     search_tool = _SearchFetchTool()
 
@@ -1929,15 +2154,16 @@ def test_execute_step_with_prompt_should_not_block_search_without_legacy_deliver
     payload, events = asyncio.run(_run())
 
     assert payload["summary"] == "已完成当前步骤"
-    assert search_tool.invocations == ["search_web"]
+    assert search_tool.invocations == []
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
     assert called_events[0].function_name == "search_web"
     assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is True
+    assert called_events[0].function_result.success is False
+    assert "任务模式 general 不允许调用工具" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_not_block_search_for_web_reading_without_legacy_delivery_semantics() -> None:
+def test_execute_step_with_prompt_should_fail_web_reading_when_search_evidence_is_insufficient() -> None:
     llm = _SearchThenFinishLLM()
     search_tool = _SearchFetchTool()
 
@@ -1956,7 +2182,9 @@ def test_execute_step_with_prompt_should_not_block_search_for_web_reading_withou
 
     payload, events = asyncio.run(_run())
 
-    assert payload["summary"] == "已完成当前步骤"
+    assert payload["success"] is False
+    assert payload["summary"] == "当前步骤暂时未能完成：基于已有页面信息整理最终课程详情"
+    assert payload["blockers"] == ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"]
     assert search_tool.invocations == ["search_web"]
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
     assert len(called_events) == 1
@@ -2037,14 +2265,14 @@ def test_execute_step_with_prompt_should_allow_shell_for_file_processing_with_ex
     assert shell_tool.invoked == 1
 
 
-def test_direct_execute_step_should_allow_search_without_legacy_delivery_contract() -> None:
+def test_atomic_action_step_should_allow_search_without_legacy_delivery_contract() -> None:
     llm = _SearchThenFinishLLM()
     search_tool = _SearchTool()
     state = asyncio.run(
-        direct_execute_node(
+        atomic_action_node(
             {
                 "user_message": "搜索 OpenAI 官网",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("搜索 OpenAI 官网")},
             }
         )
     )
@@ -2065,7 +2293,7 @@ def test_direct_wait_execute_step_should_allow_search_without_legacy_delivery_co
         direct_wait_node(
             {
                 "user_message": "先让我确认后再继续搜索课程",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("先让我确认后再继续搜索课程")},
             }
         )
     )
@@ -2078,7 +2306,7 @@ def test_direct_wait_execute_step_should_allow_search_without_legacy_delivery_co
 
     assert search_tool.invoked == 1
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert next_state["graph_metadata"]["control"]["direct_wait_original_task_executed"] is True
+    assert "direct_wait_original_task_executed" not in next_state["graph_metadata"]["control"]
     assert next_state["final_message"] == ""
     assert next_state["last_executed_step"].outcome is not None
     assert next_state["last_executed_step"].outcome.summary == "已完成当前步骤"
@@ -2143,10 +2371,14 @@ def test_execute_step_node_should_treat_selected_artifacts_as_available_file_con
 def test_execute_step_node_should_store_attachment_delivery_preference_in_outcome_and_working_memory() -> None:
     llm = _NoAttachmentPreferenceLLM()
     state = asyncio.run(
-        direct_execute_node(
+        atomic_action_node(
             {
                 "user_message": "创建文件 /home/ubuntu/workspace/p3-artifact/result.md，内容为 VERSION_1。这一步不要作为最终附件返回。",
-                "graph_metadata": {},
+                "graph_metadata": {
+                    "control": _entry_contract_control(
+                        "创建文件 /home/ubuntu/workspace/p3-artifact/result.md，内容为 VERSION_1。这一步不要作为最终附件返回。"
+                    )
+                },
             }
         )
     )

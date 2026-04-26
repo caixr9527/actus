@@ -3,6 +3,7 @@ import json
 
 from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus, ToolResult
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.entry import EntryCompiler
 from app.domain.services.tools.base import BaseTool, tool
 from app.domain.services.tools.message import MessageTool
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
@@ -20,6 +21,19 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools i
 
 
 _TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+def _entry_contract_control(user_message: str):
+    contract = EntryCompiler().compile_state(
+        {
+            "user_message": user_message,
+            "input_parts": [],
+            "message_window": [],
+            "recent_run_briefs": [],
+            "conversation_summary": "",
+        }
+    )
+    return {"entry_contract": contract.model_dump(mode="json")}
 
 
 async def execute_step_node(*args, **kwargs):
@@ -70,6 +84,28 @@ class _SearchTool(BaseTool):
     )
     async def search_web(self, query: str):
         return ToolResult(success=True, data={"query": query, "results": [{"url": "https://example.com"}]})
+
+
+class _SearchAndFileTool(BaseTool):
+    name = "search-file"
+
+    @tool(
+        name="search_web",
+        description="search web",
+        parameters={"query": {"type": "string"}},
+        required=["query"],
+    )
+    async def search_web(self, query: str):
+        return ToolResult(success=True, data={"query": query, "results": [{"url": "https://example.com"}]})
+
+    @tool(
+        name="read_file",
+        description="read file",
+        parameters={"filepath": {"type": "string"}},
+        required=["filepath"],
+    )
+    async def read_file(self, filepath: str):
+        return ToolResult(success=True, data={"filepath": filepath, "content": "example"})
 
 
 class _NonInterruptMessageTool(BaseTool):
@@ -169,6 +205,115 @@ class _WriteFileAttemptLLM:
         return {
             "role": "assistant",
             "content": '{"success": true, "result": "当前步骤已改为直接返回文本结果", "attachments": []}',
+        }
+
+
+class _OpenQuestionLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "role": "assistant",
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "当前单步需要继续确认来源。",
+                    "open_questions": ["需要补充第二个来源进行核验"],
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+
+class _SearchThenReadThenFinishLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-search",
+                        "type": "function",
+                        "function": {
+                            "name": "search_web",
+                            "arguments": json.dumps({"query": "openai docs"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        if self.calls == 2:
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-read",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"filepath": "/tmp/result.md"}, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        return {
+            "role": "assistant",
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已完成当前步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+
+class _InterruptRequestLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "role": "assistant",
+            "content": json.dumps(
+                {
+                    "interrupt_request": {
+                        "kind": "confirm",
+                        "prompt": "是否继续？",
+                        "confirm_resume_value": True,
+                        "cancel_resume_value": False,
+                    }
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+
+class _AskUserToolCallLLM:
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-confirm",
+                    "type": "function",
+                    "function": {
+                        "name": "message_ask_user",
+                        "arguments": json.dumps(
+                            {
+                                "text": "是否继续？",
+                                "kind": "confirm",
+                                "confirm_label": "继续",
+                                "cancel_label": "取消",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            ],
         }
 
 
@@ -407,7 +552,7 @@ def test_execute_step_with_prompt_should_block_write_file_when_artifact_policy_f
     assert "结构化产物策略禁止文件产出" in str(called_events[0].function_result.message or "")
 
 
-def test_execute_step_with_prompt_should_block_write_file_for_none_output_by_default() -> None:
+def test_execute_step_with_prompt_should_allow_write_file_for_general_default_artifact_policy() -> None:
     llm = _WriteFileAttemptLLM()
 
     async def _run():
@@ -435,8 +580,7 @@ def test_execute_step_with_prompt_should_block_write_file_for_none_output_by_def
     assert len(called_events) == 1
     assert called_events[0].function_name == "write_file"
     assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "当前步骤未声明文件产出" in str(called_events[0].function_result.message or "")
+    assert called_events[0].function_result.success is True
 
 
 def test_execute_step_with_prompt_should_allow_write_file_when_user_explicitly_requests_file_delivery() -> None:
@@ -799,7 +943,7 @@ def test_direct_wait_cancel_should_clear_direct_wait_control_state(monkeypatch) 
         direct_wait_node(
             {
                 "user_message": "先让我确认后再继续搜索课程",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("先让我确认后再继续搜索课程")},
                 "message_window": [],
                 "working_memory": {},
                 "execution_count": 0,
@@ -831,7 +975,7 @@ def test_direct_wait_cancel_replan_execute_should_route_to_replan_instead_of_sum
         direct_wait_node(
             {
                 "user_message": "先让我确认后再继续搜索课程",
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control("先让我确认后再继续搜索课程")},
                 "message_window": [],
                 "working_memory": {},
                 "execution_count": 0,
@@ -865,15 +1009,15 @@ def test_direct_wait_cancel_replan_execute_should_route_to_replan_instead_of_sum
     assert route_after_execute(next_state) == "replan"
 
 
-def test_route_after_execute_should_fail_fast_to_summarize_on_direct_execute_failed() -> None:
+def test_route_after_execute_should_fail_fast_to_summarize_on_atomic_action_failed() -> None:
     failed_plan = Plan(
-        title="直接执行",
+        title="原子动作",
         goal="读取文件",
         language="zh",
         steps=[
             Step(
-                id="direct-execute-step",
-                title="直接执行用户请求",
+                id="atomic-action-step",
+                title="执行用户请求",
                 description="读取文件",
                 status=ExecutionStatus.FAILED,
             )
@@ -886,7 +1030,7 @@ def test_route_after_execute_should_fail_fast_to_summarize_on_direct_execute_fai
         "pending_interrupt": {},
         "execution_count": 1,
         "max_execution_steps": 20,
-        "graph_metadata": {"control": {"entry_strategy": "direct_execute", "skip_replan_when_plan_finished": True}},
+        "graph_metadata": {"control": _entry_contract_control("读取文件")},
     }
     assert route_after_execute(next_state) == "summarize"
 
@@ -950,6 +1094,176 @@ def test_route_after_execute_should_replan_when_plan_finished_without_direct_pat
     assert route_after_execute(next_state) == "replan"
 
 
+def test_atomic_action_should_upgrade_to_replan_when_open_questions_remain() -> None:
+    user_message = "搜索 OpenAI 官网"
+    plan = Plan(
+        title="原子动作",
+        goal=user_message,
+        language="zh",
+        steps=[
+            Step(
+                id="atomic-action-step",
+                title="执行用户请求",
+                description=user_message,
+                task_mode_hint="research",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "current_step_id": "atomic-action-step",
+        "pending_interrupt": {},
+        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "max_execution_steps": 20,
+        "user_message": user_message,
+        "input_parts": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            _OpenQuestionLLM(),
+            runtime_tools=[],
+        )
+    )
+
+    control = next_state["graph_metadata"]["control"]
+    assert control["entry_upgrade"]["reason_code"] == "open_questions_require_planner"
+    assert route_after_execute(next_state) == "replan"
+
+
+def test_atomic_action_should_upgrade_to_replan_when_second_tool_family_is_used() -> None:
+    user_message = "搜索 OpenAI 官网"
+    plan = Plan(
+        title="原子动作",
+        goal=user_message,
+        language="zh",
+        steps=[
+            Step(
+                id="atomic-action-step",
+                title="执行用户请求",
+                description=user_message,
+                task_mode_hint="research",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "current_step_id": "atomic-action-step",
+        "pending_interrupt": {},
+        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "max_execution_steps": 20,
+        "user_message": user_message,
+        "input_parts": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            _SearchThenReadThenFinishLLM(),
+            runtime_tools=[_SearchAndFileTool()],
+        )
+    )
+
+    control = next_state["graph_metadata"]["control"]
+    assert control["entry_upgrade"]["reason_code"] == "second_tool_family_requires_planner"
+    assert control["entry_upgrade"]["evidence"]["tool_families"] == ["file", "web"]
+    assert route_after_execute(next_state) == "replan"
+
+
+def test_atomic_action_should_upgrade_to_replan_when_file_output_is_produced() -> None:
+    user_message = "读取 /tmp/course.txt"
+    plan = Plan(
+        title="原子动作",
+        goal=user_message,
+        language="zh",
+        steps=[
+            Step(
+                id="atomic-action-step",
+                title="执行用户请求",
+                description=user_message,
+                task_mode_hint="file_processing",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "current_step_id": "atomic-action-step",
+        "pending_interrupt": {},
+        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "max_execution_steps": 20,
+        "user_message": user_message,
+        "input_parts": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            _WriteFileAttemptLLM(),
+            runtime_tools=[_WriteFileTool()],
+        )
+    )
+
+    control = next_state["graph_metadata"]["control"]
+    assert control["entry_upgrade"]["reason_code"] == "file_output_requires_planner"
+    assert route_after_execute(next_state) == "replan"
+
+
+def test_atomic_action_should_upgrade_to_replan_when_confirmation_is_required() -> None:
+    user_message = "搜索 OpenAI 官网"
+    plan = Plan(
+        title="原子动作",
+        goal=user_message,
+        language="zh",
+        steps=[
+            Step(
+                id="atomic-action-step",
+                title="执行用户请求",
+                description=user_message,
+                task_mode_hint="research",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "current_step_id": "atomic-action-step",
+        "pending_interrupt": {},
+        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "message_window": [],
+        "working_memory": {},
+        "execution_count": 0,
+        "max_execution_steps": 20,
+        "user_message": user_message,
+        "input_parts": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            _AskUserToolCallLLM(),
+            runtime_tools=[MessageTool()],
+        )
+    )
+
+    control = next_state["graph_metadata"]["control"]
+    assert next_state["pending_interrupt"] == {}
+    assert control["entry_upgrade"]["reason_code"] == "user_confirmation_requires_planner"
+    assert route_after_execute(next_state) == "replan"
+
+
 def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> None:
     user_message = "先让我确认后再继续搜索课程"
     llm = _IllegalAskUserLLM()
@@ -962,7 +1276,7 @@ def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> 
         direct_wait_node(
             {
                 "user_message": user_message,
-                "graph_metadata": {},
+                "graph_metadata": {"control": _entry_contract_control(user_message)},
                 "message_window": [],
                 "working_memory": {},
                 "execution_count": 0,
@@ -992,7 +1306,7 @@ def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> 
     assert executed_state["final_message"] == ""
     assert executed_state["last_executed_step"].id == "direct-wait-execute"
     assert executed_state["last_executed_step"].status == ExecutionStatus.COMPLETED
-    assert control["direct_wait_original_task_executed"] is True
+    assert "direct_wait_original_task_executed" not in control
     assert "wait_resume_action" not in control
     assert "direct_wait_execute_task_mode" not in control
     assert "direct_wait_original_message" not in control

@@ -31,6 +31,7 @@ from app.domain.services.runtime.langgraph_state import (
     GRAPH_STATE_CONTRACT_SCHEMA_VERSION,
     GraphStateContractMapper,
 )
+from app.domain.services.workspace_runtime.entry import EntryCompiler
 from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, unbind_live_event_sink
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     create_or_reuse_plan_node as _create_or_reuse_plan_node,
@@ -38,6 +39,19 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
 
 
 _TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+def _entry_contract_control(user_message: str):
+    contract = EntryCompiler().compile_state(
+        {
+            "user_message": user_message,
+            "input_parts": [],
+            "message_window": [],
+            "recent_run_briefs": [],
+            "conversation_summary": "",
+        }
+    )
+    return {"entry_contract": contract.model_dump(mode="json")}
 
 
 async def create_or_reuse_plan_node(*args, **kwargs):
@@ -135,7 +149,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
                         "attachments": ["/tmp/context.md"],
                         "response_key": "message",
                     },
-                    "metadata": {"control": {"entry_strategy": "recall_memory_context"}},
+                    "metadata": {"control": _entry_contract_control("你好")},
                     "step_states": [
                         {
                             "step_id": "step-1",
@@ -243,7 +257,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["step_states"][0]["task_mode_hint"] == StepTaskModeHint.RESEARCH.value
     assert sorted(state["retrieved_memories"][0].keys()) == ["content", "id", "memory_type", "summary", "tags"]
     assert state["pending_interrupt"]["prompt"] == "请补充上下文"
-    assert state["graph_metadata"]["control"]["entry_strategy"] == "recall_memory_context"
+    assert state["graph_metadata"]["control"]["entry_contract"]["route"] == "answer"
     runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
     assert runtime_metadata["graph_state_contract"]["graph_state"]["workspace_id"] == "workspace-1"
 
