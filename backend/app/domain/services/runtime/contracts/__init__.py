@@ -4,5 +4,6 @@
 
 # 统一通过同一 contracts 包导出，避免业务层感知基础设施目录结构。
 from .langgraph_settings import *  # noqa: F401,F403
+from .final_output_contract import *  # noqa: F401,F403
 from .runtime_logging import *  # noqa: F401,F403
 from .step_evidence_contracts import *  # noqa: F401,F403
