@@ -30,6 +30,7 @@ from app.domain.services.runtime.state_machine import (
     resolve_transition,
 )
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, get_graph_projection
+from app.domain.services.runtime.cancellation import build_cancelled_runtime_events
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,120 @@ class RuntimeStateCoordinator:
             actions=[],
             warnings=warnings,
         )
+
+    async def cancel_current_run(
+            self,
+            session_id: str,
+            *,
+            reason: str,
+    ) -> RuntimeEventPersistResult:
+        """取消当前运行，并统一收敛 run/session/未完成 step 为 cancelled。"""
+        async with self.uow_factory() as uow:
+            snapshot = await self._build_snapshot_in_uow(
+                uow=uow,
+                session_id=session_id,
+                source=RuntimeStateSource.CANCEL,
+            )
+            if snapshot.run_id is None:
+                await uow.session.update_runtime_state(
+                    session_id,
+                    status=SessionStatus.CANCELLED,
+                )
+                return RuntimeEventPersistResult(
+                    event_inserted=False,
+                    transition_applied=snapshot.session_status != SessionStatus.CANCELLED,
+                    from_session_status=snapshot.session_status,
+                    to_session_status=SessionStatus.CANCELLED,
+                    from_run_status=snapshot.run_status,
+                    to_run_status=snapshot.run_status,
+                    ignored_reason="cancel_without_current_run",
+                )
+
+            run = await uow.workflow_run.get_by_id_for_update(snapshot.run_id)
+            if run is None:
+                await uow.session.update_runtime_state(
+                    session_id,
+                    status=SessionStatus.CANCELLED,
+                )
+                return RuntimeEventPersistResult(
+                    event_inserted=False,
+                    transition_applied=snapshot.session_status != SessionStatus.CANCELLED,
+                    from_session_status=snapshot.session_status,
+                    to_session_status=SessionStatus.CANCELLED,
+                    from_run_status=snapshot.run_status,
+                    to_run_status=snapshot.run_status,
+                    ignored_reason="cancel_current_run_missing",
+                )
+
+            event_inserted = False
+            cancelled_plan_event = None
+            cancelled_step_event = None
+            should_write_cancel_events = (
+                    snapshot.run_status is not None
+                    and snapshot.run_status != WorkflowRunStatus.CANCELLED
+                    and not is_terminal(snapshot.run_status)
+                    and (
+                            not is_terminal(snapshot.session_status)
+                            or snapshot.session_status == SessionStatus.CANCELLED
+                    )
+            )
+            if should_write_cancel_events:
+                run_events = await uow.workflow_run.list_events(snapshot.run_id)
+                runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
+                cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
+                    runtime_metadata,
+                    run_events=run_events,
+                    current_step_id=run.current_step_id,
+                )
+                for event in [cancelled_step_event, cancelled_plan_event]:
+                    if event is None:
+                        continue
+                    inserted = await uow.workflow_run.add_event_record_if_absent(
+                        session_id=session_id,
+                        run_id=snapshot.run_id,
+                        event=event,
+                    )
+                    event_inserted = event_inserted or inserted
+                    await self._sync_step_projection(
+                        uow=uow,
+                        run_id=snapshot.run_id,
+                        event=event,
+                    )
+
+            result = await self._apply_command_transition_in_uow(
+                uow=uow,
+                session_id=session_id,
+                snapshot=snapshot,
+                command=RuntimeCommand.CANCEL,
+                projection=RuntimeEventProjection(),
+                event_inserted=event_inserted,
+                trigger_event=cancelled_plan_event or cancelled_step_event,
+            )
+            result.event_inserted = event_inserted
+            result.ignored_reason = result.ignored_reason or reason
+            should_cancel_unfinished_steps = (
+                    snapshot.run_status is not None
+                    and snapshot.run_status != WorkflowRunStatus.CANCELLED
+                    and not is_terminal(snapshot.run_status)
+            )
+            if should_cancel_unfinished_steps:
+                await uow.workflow_run.mark_unfinished_steps_cancelled(snapshot.run_id)
+            if snapshot.session_status == SessionStatus.CANCELLED and snapshot.run_status != WorkflowRunStatus.CANCELLED:
+                await uow.workflow_run.update_status(
+                    snapshot.run_id,
+                    status=WorkflowRunStatus.CANCELLED,
+                    current_step_id=None,
+                )
+                result.to_run_status = WorkflowRunStatus.CANCELLED
+                result.transition_applied = True
+            elif snapshot.run_status == WorkflowRunStatus.CANCELLED and snapshot.session_status != SessionStatus.CANCELLED:
+                await uow.session.update_runtime_state(
+                    session_id,
+                    status=SessionStatus.CANCELLED,
+                )
+                result.to_session_status = SessionStatus.CANCELLED
+                result.transition_applied = True
+            return result
 
     async def sync_graph_state(
             self,

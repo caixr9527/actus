@@ -82,6 +82,7 @@ class FakeWorkflowRunRepository:
     upserted_step_count: int = 0
     checkpoint_ref_updates: list[dict] = field(default_factory=list)
     runtime_metadata_updates: list[dict] = field(default_factory=list)
+    unfinished_steps_cancelled_count: int = 0
 
     async def get_by_id_for_update(self, run_id: str) -> WorkflowRun | None:
         return self.run if self.run.id == run_id else None
@@ -170,6 +171,16 @@ class FakeWorkflowRunRepository:
 
     async def upsert_step_from_event(self, run_id: str, event) -> None:
         self.upserted_step_count += 1
+
+    async def mark_unfinished_steps_cancelled(self, run_id: str) -> None:
+        self.unfinished_steps_cancelled_count += 1
+
+    async def list_events(self, run_id: str | None):
+        return [
+            record.event_payload
+            for record in self.event_records
+            if record.run_id == run_id
+        ]
 
     async def list_event_records_by_session(self, session_id: str) -> list[WorkflowRunEventRecord]:
         return [record for record in self.event_records if record.session_id == session_id]
@@ -465,6 +476,133 @@ def test_persist_runtime_event_should_not_override_cancelled_with_late_done() ->
     assert uow.workflow_run.status_updates == []
     assert uow.session.session.status == SessionStatus.CANCELLED
     assert uow.workflow_run.run.status == WorkflowRunStatus.CANCELLED
+
+
+def test_cancel_current_run_should_mark_run_session_and_unfinished_steps_cancelled() -> None:
+    plan_event = PlanEvent(
+        id="plan-event-1",
+        plan=Plan(
+            steps=[
+                Step(id="step-1", status=ExecutionStatus.COMPLETED),
+                Step(id="step-2", status=ExecutionStatus.RUNNING),
+            ],
+        ),
+    )
+    event_record = WorkflowRunEventRecord(
+        run_id="run-1",
+        session_id="session-1",
+        event_id=plan_event.id,
+        event_type=plan_event.type,
+        event_payload=plan_event,
+    )
+    uow = _build_uow(event_records=[event_record])
+    uow.workflow_run.run.current_step_id = "step-2"
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.cancel_current_run(
+            "session-1",
+            reason="test_cancel",
+        )
+    )
+
+    assert result.transition_applied is True
+    assert result.to_session_status == SessionStatus.CANCELLED
+    assert result.to_run_status == WorkflowRunStatus.CANCELLED
+    assert uow.session.session.status == SessionStatus.CANCELLED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.CANCELLED
+    assert uow.workflow_run.run.current_step_id is None
+    assert uow.workflow_run.upserted_step_count == 1
+    assert uow.workflow_run.replaced_plan_count == 1
+    assert uow.workflow_run.unfinished_steps_cancelled_count == 1
+    persisted_events = [record.event_payload for record in uow.workflow_run.event_records]
+    assert isinstance(persisted_events[-2], StepEvent)
+    assert persisted_events[-2].step.id == "step-2"
+    assert persisted_events[-2].step.status == ExecutionStatus.CANCELLED
+    assert isinstance(persisted_events[-1], PlanEvent)
+    assert [step.status for step in persisted_events[-1].plan.steps] == [
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.CANCELLED,
+    ]
+
+
+def test_cancel_current_run_should_fix_session_when_run_already_cancelled() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.RUNNING,
+        run_status=WorkflowRunStatus.CANCELLED,
+    )
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.cancel_current_run(
+            "session-1",
+            reason="test_cancel",
+        )
+    )
+
+    assert result.to_session_status == SessionStatus.CANCELLED
+    assert result.to_run_status == WorkflowRunStatus.CANCELLED
+    assert uow.session.session.status == SessionStatus.CANCELLED
+    assert uow.workflow_run.status_updates == []
+
+
+def test_cancel_current_run_should_fix_run_when_session_already_cancelled() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.CANCELLED,
+        run_status=WorkflowRunStatus.RUNNING,
+    )
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.cancel_current_run(
+            "session-1",
+            reason="test_cancel",
+        )
+    )
+
+    assert result.to_session_status == SessionStatus.CANCELLED
+    assert result.to_run_status == WorkflowRunStatus.CANCELLED
+    assert uow.session.session.status == SessionStatus.CANCELLED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.CANCELLED
+    assert uow.workflow_run.unfinished_steps_cancelled_count == 1
+
+
+def test_cancel_current_run_should_not_cancel_steps_when_run_completed() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.COMPLETED,
+        run_status=WorkflowRunStatus.COMPLETED,
+    )
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.cancel_current_run(
+            "session-1",
+            reason="late_cancel",
+        )
+    )
+
+    assert result.to_run_status == WorkflowRunStatus.COMPLETED
+    assert result.to_session_status == SessionStatus.COMPLETED
+    assert uow.workflow_run.unfinished_steps_cancelled_count == 0
+
+
+def test_cancel_current_run_should_not_cancel_steps_when_run_failed() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.FAILED,
+        run_status=WorkflowRunStatus.FAILED,
+    )
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.cancel_current_run(
+            "session-1",
+            reason="late_cancel",
+        )
+    )
+
+    assert result.to_run_status == WorkflowRunStatus.FAILED
+    assert result.to_session_status == SessionStatus.FAILED
+    assert uow.workflow_run.unfinished_steps_cancelled_count == 0
 
 
 def test_reconcile_current_run_should_warn_when_session_and_workspace_run_id_conflict() -> None:

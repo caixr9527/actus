@@ -32,7 +32,6 @@ from app.domain.models import (
     Event,
     DoneEvent,
     WaitEvent,
-    WorkflowRunStatus,
     validate_wait_resume_value,
     RuntimeInput,
     TaskStreamRecord,
@@ -47,9 +46,6 @@ from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRun
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
-from app.domain.services.runtime.cancellation import (
-    build_cancelled_runtime_events,
-)
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph import LangGraphRunEngine, get_langgraph_checkpointer
@@ -632,53 +628,11 @@ class AgentService:
         await self._persist_cancelled_session_state(session_id=session_id)
 
     async def _persist_cancelled_session_state(self, session_id: str) -> None:
-        """在没有活跃 task 实例时，直接收敛 session/run/step 为 cancelled。"""
-        async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=session_id)
-            if session is None:
-                return
-
-            await uow.session.update_status(
-                session_id=session_id,
-                status=SessionStatus.CANCELLED,
-            )
-
-            run_id = await self._get_workspace_manager().resolve_current_run_id(
-                session=session,
-                uow=uow,
-            )
-            if not run_id:
-                return
-
-            run = await uow.workflow_run.get_by_id(run_id)
-            if run is None:
-                return
-
-            if run.status == WorkflowRunStatus.CANCELLED:
-                return
-
-            run_events = await uow.workflow_run.list_events(run_id)
-            await uow.workflow_run.cancel_run(run_id)
-
-            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
-            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
-                runtime_metadata,
-                run_events=run_events,
-                current_step_id=run.current_step_id,
-            )
-
-            if cancelled_step_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=session_id,
-                    event=cancelled_step_event,
-                )
-
-            if cancelled_plan_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=session_id,
-                    event=cancelled_plan_event,
-                    status=SessionStatus.CANCELLED,
-                )
+        """在没有活跃 task 实例时，通过 coordinator 收敛 cancelled 状态。"""
+        await self._get_runtime_state_coordinator().cancel_current_run(
+            session_id=session_id,
+            reason="stop_session",
+        )
 
     async def shutdown(self) -> None:
         """关闭会话服务"""

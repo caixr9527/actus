@@ -107,6 +107,13 @@ class WorkflowRunRepository(Protocol):
         """将运行及其未完成步骤统一收敛为 cancelled。"""
         ...
 
+    async def mark_unfinished_steps_cancelled(
+            self,
+            run_id: str,
+    ) -> None:
+        """将运行下所有未完成步骤投影标记为 cancelled。"""
+        ...
+
     async def list_events(self, run_id: Optional[str]) -> List[Event]:
         """按运行ID读取事件列表；缺少运行ID时返回空列表"""
         ...

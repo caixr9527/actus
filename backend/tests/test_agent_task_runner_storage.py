@@ -1063,7 +1063,14 @@ class _CancellationSessionRepo:
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session if session_id == self._session.id else None
 
+    async def get_by_id_for_update(self, session_id: str):
+        return self._session if session_id == self._session.id else None
+
     async def update_status(self, session_id: str, status: SessionStatus) -> None:
+        self.updated_status = status
+        self._session.status = status
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, **_kwargs) -> None:
         self.updated_status = status
         self._session.status = status
 
@@ -1076,14 +1083,40 @@ class _CancellationWorkflowRunRepo:
         self._run = run
         self._events = list(events)
         self.cancelled_run_ids: list[str] = []
+        self.replaced_plan_count = 0
+        self.upserted_step_count = 0
+        self.unfinished_steps_cancelled_count = 0
 
     async def get_by_id(self, run_id: str):
         return self._run if run_id == self._run.id else None
+
+    async def get_by_id_for_update(self, run_id: str):
+        return await self.get_by_id(run_id)
+
+    async def update_status(self, run_id: str, *, status: WorkflowRunStatus, current_step_id=None, **_kwargs) -> None:
+        self._run.status = status
+        self._run.current_step_id = current_step_id
+
+    async def add_event_record_if_absent(self, session_id: str, run_id: str, event) -> bool:
+        self._events.append(event)
+        return True
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
     async def list_events(self, run_id: str | None):
         if run_id != self._run.id:
             return []
         return list(self._events)
+
+    async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
+        self.replaced_plan_count += 1
+
+    async def upsert_step_from_event(self, run_id: str, event) -> None:
+        self.upserted_step_count += 1
+
+    async def mark_unfinished_steps_cancelled(self, run_id: str) -> None:
+        self.unfinished_steps_cancelled_count += 1
 
     async def cancel_run(self, run_id: str) -> None:
         self.cancelled_run_ids.append(run_id)
@@ -1169,15 +1202,19 @@ def test_persist_cancellation_state_should_build_cancelled_events_from_run_histo
     asyncio.run(runner._persist_cancellation_state())
 
     assert session_repo.updated_status == SessionStatus.CANCELLED
-    assert workflow_run_repo.cancelled_run_ids == ["run-1"]
-    assert len(session_repo.added_events) == 2
+    assert run.status == WorkflowRunStatus.CANCELLED
+    assert workflow_run_repo.cancelled_run_ids == []
+    assert workflow_run_repo.upserted_step_count == 1
+    assert workflow_run_repo.replaced_plan_count == 1
+    assert workflow_run_repo.unfinished_steps_cancelled_count == 1
+    assert len(workflow_run_repo._events) == 5
 
-    cancelled_step_event = session_repo.added_events[0]
+    cancelled_step_event = workflow_run_repo._events[-2]
     assert isinstance(cancelled_step_event, StepEvent)
     assert cancelled_step_event.step.id == "step-2"
     assert cancelled_step_event.step.status == ExecutionStatus.CANCELLED
 
-    cancelled_plan_event = session_repo.added_events[1]
+    cancelled_plan_event = workflow_run_repo._events[-1]
     assert isinstance(cancelled_plan_event, PlanEvent)
     assert [step.status for step in cancelled_plan_event.plan.steps] == [
         ExecutionStatus.COMPLETED,

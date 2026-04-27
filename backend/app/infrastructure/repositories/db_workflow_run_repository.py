@@ -230,6 +230,10 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         run_record.finished_at = cancelled_at
         run_record.last_event_at = cancelled_at
         run_record.current_step_id = None
+        await self.mark_unfinished_steps_cancelled(run_id)
+
+    async def mark_unfinished_steps_cancelled(self, run_id: str) -> None:
+        """低层步骤投影兜底：只取消未完成 step，不推导 run 状态。"""
 
         stmt = (
             select(WorkflowRunStepModel)
@@ -265,7 +269,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         )
         if not inserted:
             return False
-        await self._refresh_run_status_by_event(run_id=run_id, event=event)
         # BE-LG-08：步骤投影同步策略统一收口到 run 仓库。
         if isinstance(event, PlanEvent):
             await self.replace_steps_from_plan(run_id=run_id, plan=event.plan)

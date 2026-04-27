@@ -41,7 +41,6 @@ from app.domain.models import (
     ContinueCancelledTaskInput,
     ResumeInput,
     RuntimeInput,
-    WorkflowRunStatus,
     TaskStreamEventRecord,
     TaskRequestStartedRecord,
     TaskRequestFinishedRecord,
@@ -50,9 +49,6 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
-from app.domain.services.runtime.cancellation import (
-    build_cancelled_runtime_events,
-)
 from app.domain.models import RuntimeEventProjection
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.projectors import (
@@ -420,53 +416,11 @@ class AgentTaskRunner(TaskRunner):
             logger.error(f"会话[{self._session_id}]在{scene}取消兜底失败: {fallback_err}")
 
     async def _persist_cancellation_state(self) -> None:
-        """将当前运行和未完成步骤统一收敛为 cancelled。"""
-        async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=self._session_id)
-            if session is None:
-                return
-
-            await uow.session.update_status(
-                session_id=self._session_id,
-                status=SessionStatus.CANCELLED,
-            )
-
-            run_id = await self._get_workspace_manager().resolve_current_run_id(
-                session=session,
-                uow=uow,
-            )
-            if not run_id:
-                return
-
-            run = await uow.workflow_run.get_by_id(run_id)
-            if run is None:
-                return
-
-            if run.status == WorkflowRunStatus.CANCELLED:
-                return
-
-            run_events = await uow.workflow_run.list_events(run_id)
-            await uow.workflow_run.cancel_run(run_id)
-
-            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
-            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
-                runtime_metadata,
-                run_events=run_events,
-                current_step_id=run.current_step_id,
-            )
-
-            if cancelled_step_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=self._session_id,
-                    event=cancelled_step_event,
-                )
-
-            if cancelled_plan_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=self._session_id,
-                    event=cancelled_plan_event,
-                    status=SessionStatus.CANCELLED,
-                )
+        """将取消状态收敛委托给 RuntimeStateCoordinator。"""
+        await self._get_runtime_state_coordinator().cancel_current_run(
+            session_id=self._session_id,
+            reason="task_cancelled",
+        )
 
     async def invoke(self, task: Task) -> None:
         active_request_id: Optional[str] = None

@@ -128,6 +128,9 @@ class _WorkflowRunRepo:
         self._run = run
         self._events = list(events or [])
         self.cancelled_run_ids: list[str] = []
+        self.replaced_plan_count = 0
+        self.upserted_step_count = 0
+        self.unfinished_steps_cancelled_count = 0
 
     async def get_by_id(self, run_id: str):
         if self._run is None:
@@ -144,6 +147,15 @@ class _WorkflowRunRepo:
     async def add_event_record_if_absent(self, session_id: str, run_id: str, event) -> bool:
         self._events.append(event)
         return True
+
+    async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
+        self.replaced_plan_count += 1
+
+    async def upsert_step_from_event(self, run_id: str, event) -> None:
+        self.upserted_step_count += 1
+
+    async def mark_unfinished_steps_cancelled(self, run_id: str) -> None:
+        self.unfinished_steps_cancelled_count += 1
 
     async def list_event_records_by_session(self, session_id: str):
         return [
@@ -684,12 +696,17 @@ def test_agent_service_stop_session_should_persist_cancelled_run_and_step_when_t
     asyncio.run(service.stop_session("session-1", "user-1"))
 
     assert session.status == SessionStatus.CANCELLED
-    assert workflow_run_repo.cancelled_run_ids == ["run-1"]
-    assert len(session_repo.added_events) == 2
-    assert isinstance(session_repo.added_events[0], StepEvent)
-    assert session_repo.added_events[0].status.value == "cancelled"
-    assert isinstance(session_repo.added_events[1], PlanEvent)
-    assert session_repo.added_events[1].status.value == "cancelled"
+    assert workflow_run.status == WorkflowRunStatus.CANCELLED
+    assert workflow_run_repo.cancelled_run_ids == []
+    assert workflow_run_repo.upserted_step_count == 1
+    assert workflow_run_repo.replaced_plan_count == 1
+    assert workflow_run_repo.unfinished_steps_cancelled_count == 1
+    inserted_events = workflow_run_repo._events
+    assert len(inserted_events) == 2
+    assert isinstance(inserted_events[0], StepEvent)
+    assert inserted_events[0].status.value == "cancelled"
+    assert isinstance(inserted_events[1], PlanEvent)
+    assert inserted_events[1].status.value == "cancelled"
 
 
 def test_agent_service_stop_session_should_build_cancelled_events_from_run_history_when_runtime_metadata_missing() -> None:
@@ -762,17 +779,19 @@ def test_agent_service_stop_session_should_build_cancelled_events_from_run_histo
     asyncio.run(service.stop_session("session-1", "user-1"))
 
     assert session.status == SessionStatus.CANCELLED
-    assert workflow_run_repo.cancelled_run_ids == ["run-1"]
-    assert len(session_repo.added_events) == 2
+    assert workflow_run.status == WorkflowRunStatus.CANCELLED
+    assert workflow_run_repo.cancelled_run_ids == []
+    assert workflow_run_repo.unfinished_steps_cancelled_count == 1
+    assert len(workflow_run_repo._events) == 6
 
-    cancelled_step_event = session_repo.added_events[0]
+    cancelled_step_event = workflow_run_repo._events[-2]
     assert isinstance(cancelled_step_event, StepEvent)
     assert cancelled_step_event.step.id == "step-2"
     assert cancelled_step_event.step.status == ExecutionStatus.CANCELLED
     assert cancelled_step_event.step.outcome is not None
     assert cancelled_step_event.step.outcome.summary == "任务已取消"
 
-    cancelled_plan_event = session_repo.added_events[1]
+    cancelled_plan_event = workflow_run_repo._events[-1]
     assert isinstance(cancelled_plan_event, PlanEvent)
     assert cancelled_plan_event.plan.status == ExecutionStatus.CANCELLED
     assert [step.status for step in cancelled_plan_event.plan.steps] == [

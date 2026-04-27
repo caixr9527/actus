@@ -59,6 +59,7 @@ def test_add_event_if_absent_should_sync_step_projection_for_step_event() -> Non
     )
 
     assert inserted is True
+    repo._refresh_run_status_by_event.assert_not_awaited()
     repo.upsert_step_from_event.assert_awaited_once()
     repo.replace_steps_from_plan.assert_not_awaited()
 
@@ -99,6 +100,7 @@ def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> Non
     )
 
     assert inserted is True
+    repo._refresh_run_status_by_event.assert_not_awaited()
     repo.replace_steps_from_plan.assert_awaited_once()
     repo.upsert_step_from_event.assert_not_awaited()
 
@@ -209,6 +211,32 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         "reused_from_run_id": None,
         "reused_from_step_id": None,
     }
+
+
+def test_mark_unfinished_steps_cancelled_should_only_cancel_non_terminal_steps() -> None:
+    repo = _build_repo(SimpleNamespace())
+    step_records = [
+        SimpleNamespace(status=ExecutionStatus.PENDING.value),
+        SimpleNamespace(status=ExecutionStatus.RUNNING.value),
+        SimpleNamespace(status=ExecutionStatus.COMPLETED.value),
+        SimpleNamespace(status=ExecutionStatus.FAILED.value),
+        SimpleNamespace(status=ExecutionStatus.CANCELLED.value),
+    ]
+    repo.db_session.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: step_records),
+        )
+    )
+
+    asyncio.run(repo.mark_unfinished_steps_cancelled(run_id="run-1"))
+
+    assert [record.status for record in step_records] == [
+        ExecutionStatus.CANCELLED.value,
+        ExecutionStatus.CANCELLED.value,
+        ExecutionStatus.COMPLETED.value,
+        ExecutionStatus.FAILED.value,
+        ExecutionStatus.CANCELLED.value,
+    ]
 
 
 def test_workflow_run_step_model_to_domain_should_filter_non_file_artifacts_from_outcome() -> None:
