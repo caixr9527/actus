@@ -1,6 +1,7 @@
 import asyncio
 
-from app.domain.models import Session, SessionStatus, WorkflowRun, Workspace
+from app.domain.models import Session, SessionStatus, WorkflowRun, WorkflowRunStatus, Workspace
+from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.domain.services.runtime.graph_runtime import DefaultGraphRuntime
 
 
@@ -69,24 +70,50 @@ class _TaskFactory:
 class _SessionRepo:
     def __init__(self) -> None:
         self.saved_sessions: list[Session] = []
+        self.sessions_by_id: dict[str, Session] = {}
 
     async def save(self, session: Session):
-        self.saved_sessions.append(session.model_copy(deep=True))
+        cloned = session.model_copy(deep=True)
+        self.saved_sessions.append(cloned)
+        self.sessions_by_id[cloned.id] = cloned
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self.sessions_by_id.get(session_id)
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, current_run_id=None, **_kwargs):
+        session = self.sessions_by_id[session_id]
+        session.status = status
+        if current_run_id is not None:
+            session.current_run_id = current_run_id
 
 
 class _WorkflowRunRepo:
     def __init__(self) -> None:
         self.created_for_session_ids: list[str] = []
+        self.runs_by_id: dict[str, WorkflowRun] = {}
+        self.status_updates: list[tuple[str, WorkflowRunStatus]] = []
 
     async def create_for_session(self, session: Session, *, status, thread_id=None):
         self.created_for_session_ids.append(session.id)
-        return WorkflowRun(
+        run = WorkflowRun(
             id="run-1",
             session_id=session.id,
             user_id=session.user_id,
             status=status,
             thread_id=thread_id,
         )
+        self.runs_by_id[run.id] = run
+        return run
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.runs_by_id.get(run_id)
+
+    async def update_status(self, run_id: str, *, status: WorkflowRunStatus, **_kwargs) -> None:
+        self.status_updates.append((run_id, status))
+        self.runs_by_id[run_id].status = status
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
 
 class _UoW:
@@ -134,6 +161,9 @@ def _build_runtime(
         task_cls=_TaskFactory,
         uow_factory=lambda: _UoW(session_repo, workflow_run_repo, workspace_repo),
         task_runner_factory=lambda **kwargs: object(),
+        runtime_state_coordinator=RuntimeStateCoordinator(
+            uow_factory=lambda: _UoW(session_repo, workflow_run_repo, workspace_repo),
+        ),
     )
 
 
@@ -145,6 +175,7 @@ def test_default_graph_runtime_create_task_should_persist_session_links() -> Non
     workspace_repo = _WorkspaceRepo()
     runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo)
     session = Session(id="session-a", user_id="user-a")
+    asyncio.run(session_repo.save(session))
 
     task = asyncio.run(runtime.create_task(session=session, llm=object()))
 
@@ -220,6 +251,12 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
         current_run_id="run-1",
         status=SessionStatus.WAITING,
     )
+    asyncio.run(session_repo.save(session))
+    workflow_run_repo.runs_by_id["run-1"] = WorkflowRun(
+        id="run-1",
+        session_id="session-a",
+        status=WorkflowRunStatus.WAITING,
+    )
 
     task = asyncio.run(runtime.resume_task(session=session, llm=object()))
 
@@ -227,7 +264,9 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
     assert session.current_run_id == "run-1"
     assert session.status == SessionStatus.RUNNING
     assert workflow_run_repo.created_for_session_ids == []
-    assert session_repo.saved_sessions[0].current_run_id == "run-1"
+    assert session_repo.sessions_by_id["session-a"].current_run_id == "run-1"
+    assert session_repo.sessions_by_id["session-a"].status == SessionStatus.RUNNING
+    assert workflow_run_repo.status_updates == [("run-1", WorkflowRunStatus.RUNNING)]
     assert session_repo.saved_sessions[0].status == SessionStatus.RUNNING
     workspace = workspace_repo.workspace_by_id["workspace-1"]
     assert workspace.task_id == "task-1"

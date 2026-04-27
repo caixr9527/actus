@@ -89,6 +89,8 @@ class AgentService:
         self._tool_runtime_adapter = ToolRuntimeAdapter(
             capability_registry=CapabilityRegistry.default_v1(),
         )
+        self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
+        self._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
         # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
         # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
         self._graph_runtime = graph_runtime or DefaultGraphRuntime(
@@ -96,9 +98,8 @@ class AgentService:
             task_cls=self._task_cls,
             uow_factory=self._uow_factory,
             task_runner_factory=self._build_task_runner,
+            runtime_state_coordinator=self._runtime_state_coordinator,
         )
-        self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
-        self._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
 
     def _get_workspace_manager(self) -> WorkspaceManager:
@@ -306,6 +307,23 @@ class AgentService:
             error_params={"session_id": session.id},
         )
 
+    @staticmethod
+    def _reject_unresolved_runtime_conflict(*, session: Session, reconcile_result: Any) -> None:
+        warnings = set(getattr(reconcile_result, "warnings", []) or [])
+        snapshot = getattr(reconcile_result, "snapshot_after", None)
+        if "session_status_mismatch_run_status" not in warnings:
+            return
+
+        session_status = getattr(snapshot, "session_status", session.status)
+        if session_status == SessionStatus.WAITING:
+            return
+
+        raise BadRequestError(
+            msg="当前运行状态不一致，请稍后重试",
+            error_key=error_keys.SESSION_RUNTIME_STATE_CONFLICT,
+            error_params={"session_id": session.id},
+        )
+
     async def chat(
             self,
             session_id: str,
@@ -330,6 +348,23 @@ class AgentService:
                     error_key=error_keys.SESSION_NOT_FOUND,
                     error_params={"session_id": session_id},
                 )
+            reconcile_result = await self._get_runtime_state_coordinator().reconcile_current_run(
+                session_id=session_id,
+                reason="before_chat",
+            )
+            async with self._uow_factory() as uow:
+                session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+            if not session:
+                logger.error(f"会话{session_id}不存在")
+                raise NotFoundError(
+                    msg=f"会话{session_id}不存在",
+                    error_key=error_keys.SESSION_NOT_FOUND,
+                    error_params={"session_id": session_id},
+                )
+            self._reject_unresolved_runtime_conflict(
+                session=session,
+                reconcile_result=reconcile_result,
+            )
             # Context: 高频事件流会导致“每条事件重置未读数”的写放大。
             # Decision: 未读数只在首条输出事件重置一次，finally 仅在 pending 时兜底。
             # Trade-off: 状态收敛略依赖流程标志位，但显著降低无效写入。

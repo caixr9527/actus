@@ -38,6 +38,9 @@ class FakeSessionRepository:
     async def get_by_id_for_update(self, session_id: str) -> Session | None:
         return self.session if self.session.id == session_id else None
 
+    async def save(self, session: Session) -> None:
+        self.session = session
+
     async def update_runtime_state(
             self,
             session_id: str,
@@ -83,12 +86,29 @@ class FakeWorkflowRunRepository:
     checkpoint_ref_updates: list[dict] = field(default_factory=list)
     runtime_metadata_updates: list[dict] = field(default_factory=list)
     unfinished_steps_cancelled_count: int = 0
+    created_runs: list[WorkflowRun] = field(default_factory=list)
 
     async def get_by_id_for_update(self, run_id: str) -> WorkflowRun | None:
         return self.run if self.run.id == run_id else None
 
     async def get_by_id(self, run_id: str) -> WorkflowRun | None:
         return self.run if self.run.id == run_id else None
+
+    async def create_for_session(
+            self,
+            session: Session,
+            status: WorkflowRunStatus = WorkflowRunStatus.RUNNING,
+            thread_id: str | None = None,
+    ) -> WorkflowRun:
+        self.run = WorkflowRun(
+            id="run-started-1",
+            session_id=session.id,
+            user_id=session.user_id,
+            status=status,
+            thread_id=thread_id,
+        )
+        self.created_runs.append(self.run)
+        return self.run
 
     async def update_status(
             self,
@@ -189,6 +209,9 @@ class FakeWorkflowRunRepository:
 @dataclass
 class FakeWorkspaceRepository:
     workspace: Workspace | None = None
+
+    async def save(self, workspace: Workspace) -> None:
+        self.workspace = workspace.model_copy(deep=True)
 
     async def get_by_id(self, workspace_id: str) -> Workspace | None:
         if self.workspace and self.workspace.id == workspace_id:
@@ -319,6 +342,59 @@ def test_build_snapshot_should_compute_continuable_cancelled_plan_from_latest_pl
     snapshot = asyncio.run(coordinator.build_snapshot("session-1"))
 
     assert snapshot.has_continuable_cancelled_plan is True
+
+
+def test_start_run_should_create_run_bind_workspace_and_mark_running() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.PENDING,
+        run_status=WorkflowRunStatus.PENDING,
+        workspace_run_id=None,
+    )
+    uow.session.session.current_run_id = None
+    coordinator = _coordinator_with_uow(uow)
+
+    snapshot = asyncio.run(
+        coordinator.start_run(
+            "session-1",
+            sandbox_id="sandbox-1",
+            task_id="task-1",
+            thread_id="thread-1",
+        )
+    )
+
+    assert snapshot.run_id == "run-started-1"
+    assert snapshot.session_status == SessionStatus.RUNNING
+    assert snapshot.run_status == WorkflowRunStatus.RUNNING
+    assert uow.session.session.current_run_id == "run-started-1"
+    assert uow.workspace.workspace.current_run_id == "run-started-1"
+    assert uow.workspace.workspace.sandbox_id == "sandbox-1"
+    assert uow.workspace.workspace.task_id == "task-1"
+
+
+def test_reopen_running_run_should_bind_environment_and_mark_running() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.WAITING,
+        run_status=WorkflowRunStatus.WAITING,
+    )
+    coordinator = _coordinator_with_uow(uow)
+
+    snapshot = asyncio.run(
+        coordinator.reopen_running_run(
+            "session-1",
+            run_id="run-1",
+            sandbox_id="sandbox-1",
+            task_id="task-1",
+        )
+    )
+
+    assert snapshot.run_id == "run-1"
+    assert snapshot.session_status == SessionStatus.RUNNING
+    assert snapshot.run_status == WorkflowRunStatus.RUNNING
+    assert uow.session.session.current_run_id == "run-1"
+    assert uow.workflow_run.run.status == WorkflowRunStatus.RUNNING
+    assert uow.workspace.workspace.current_run_id == "run-1"
+    assert uow.workspace.workspace.sandbox_id == "sandbox-1"
+    assert uow.workspace.workspace.task_id == "task-1"
 
 
 def test_persist_runtime_event_should_mark_waiting_in_one_transaction() -> None:
@@ -619,6 +695,30 @@ def test_reconcile_current_run_should_warn_when_session_and_workspace_run_id_con
 
     assert result.snapshot_after.run_id == "run-1"
     assert result.warnings == ["session_current_run_id_mismatch_workspace_current_run_id"]
+
+
+def test_reconcile_current_run_should_sync_session_to_waiting_when_run_waiting() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.RUNNING,
+        run_status=WorkflowRunStatus.WAITING,
+    )
+    uow.session.session.current_run_id = "run-1"
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.reconcile_current_run(
+            "session-1",
+            reason="before_chat",
+        )
+    )
+
+    assert result.snapshot_before.session_status == SessionStatus.RUNNING
+    assert result.snapshot_after.session_status == SessionStatus.WAITING
+    assert result.snapshot_after.run_status == WorkflowRunStatus.WAITING
+    assert uow.session.session.status == SessionStatus.WAITING
+    assert uow.workflow_run.run.status == WorkflowRunStatus.WAITING
+    assert result.actions == ["sync_session_status_from_run_waiting"]
+    assert result.warnings == ["session_status_mismatch_run_status"]
 
 
 def test_sync_graph_state_should_mark_waiting_and_update_metadata_checkpoint_ref() -> None:

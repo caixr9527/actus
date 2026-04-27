@@ -1,7 +1,7 @@
 import asyncio
 
 from app.application.service.agent_service import AgentService
-from app.domain.models import AgentConfig, MCPConfig, A2AConfig, Session, Workspace
+from app.domain.models import AgentConfig, MCPConfig, A2AConfig, Session, SessionStatus, WorkflowRun, Workspace
 
 
 class _DummyBrowser:
@@ -51,20 +51,39 @@ class _TaskFactory:
 class _SessionRepo:
     def __init__(self) -> None:
         self.saved_sessions: list[Session] = []
+        self.sessions_by_id: dict[str, Session] = {}
 
     async def save(self, session: Session) -> None:
-        self.saved_sessions.append(session)
+        cloned = session.model_copy(deep=True)
+        self.saved_sessions.append(cloned)
+        self.sessions_by_id[cloned.id] = cloned
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self.sessions_by_id.get(session_id)
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, current_run_id=None, **_kwargs):
+        session = self.sessions_by_id[session_id]
+        session.status = status
+        if current_run_id is not None:
+            session.current_run_id = current_run_id
 
 
 class _WorkflowRunRepo:
     def __init__(self) -> None:
         self.created_for_session_ids: list[str] = []
+        self.runs_by_id: dict[str, WorkflowRun] = {}
 
     async def create_for_session(self, session: Session, *, status, thread_id=None):
         self.created_for_session_ids.append(session.id)
-        from app.domain.models import WorkflowRun
+        run = WorkflowRun(id="run-1", session_id=session.id, user_id=session.user_id, status=status, thread_id=thread_id)
+        self.runs_by_id[run.id] = run
+        return run
 
-        return WorkflowRun(id="run-1", session_id=session.id, user_id=session.user_id, status=status, thread_id=thread_id)
+    async def get_by_id_for_update(self, run_id: str):
+        return self.runs_by_id.get(run_id)
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
 
 class _WorkspaceRepo:
@@ -176,6 +195,7 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
         run_engine_factory=_dummy_run_engine_factory,
     )
     session = Session(id="session-a", user_id="user-a", current_model_id="deepseek")
+    asyncio.run(session_repo.save(session))
 
     task = asyncio.run(service._create_task(session))
 
@@ -183,6 +203,6 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
     assert resolver.calls == ["deepseek"]
     assert llm_factory.configs[0].model_name == "gpt-5.4"
     assert llm_factory.configs[0].temperature == 0.3
-    assert session_repo.saved_sessions[0].workspace_id is not None
-    assert session_repo.saved_sessions[0].current_run_id == "run-1"
-    assert workspace_repo.saved_workspaces[0].task_id == "task-1"
+    assert session_repo.sessions_by_id["session-a"].workspace_id is not None
+    assert session_repo.sessions_by_id["session-a"].current_run_id == "run-1"
+    assert workspace_repo.workspace_by_session_id["session-a"].task_id == "task-1"

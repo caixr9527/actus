@@ -9,7 +9,7 @@ import logging
 from typing import Callable, Optional, Protocol, Type
 
 from app.domain.external import Browser, LLM, Sandbox, Task, TaskRunner
-from app.domain.models import Session, SessionStatus, WorkflowRunStatus, Workspace
+from app.domain.models import RuntimeStateSnapshot, Session, Workspace
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.workspace_runtime import WorkspaceManager
 
@@ -38,6 +38,30 @@ class TaskRunnerFactory(Protocol):
             browser: Browser,
     ) -> TaskRunner:
         """根据会话与运行时资源构建任务执行器。"""
+        ...
+
+
+class RuntimeStateCoordinatorPort(Protocol):
+    """GraphRuntime 依赖的 Runtime 状态协调端口。"""
+
+    async def start_run(
+            self,
+            session_id: str,
+            *,
+            sandbox_id: str,
+            task_id: str,
+            thread_id: str | None = None,
+    ) -> RuntimeStateSnapshot:
+        ...
+
+    async def reopen_running_run(
+            self,
+            session_id: str,
+            *,
+            run_id: str,
+            sandbox_id: str,
+            task_id: str,
+    ) -> RuntimeStateSnapshot:
         ...
 
 
@@ -80,12 +104,14 @@ class DefaultGraphRuntime(GraphRuntime):
             task_cls: Type[Task],
             uow_factory: Callable[[], IUnitOfWork],
             task_runner_factory: TaskRunnerFactory,
+            runtime_state_coordinator: RuntimeStateCoordinatorPort,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
         self._uow_factory = uow_factory
         self._task_runner_factory = task_runner_factory
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
+        self._runtime_state_coordinator = runtime_state_coordinator
 
     @staticmethod
     def _resolve_log_workspace_id(session: Session, workspace: Optional[Workspace]) -> str:
@@ -213,32 +239,22 @@ class DefaultGraphRuntime(GraphRuntime):
         previous_status = session.status
         previous_workspace = workspace.model_copy(deep=True)
 
-        # 在单一写回流程中完成 run 创建与会话关联落库，保证关联视图一致性。
-        # 会话启动新任务时同步切换为 RUNNING，确保前端可实时展示“思考中”与禁用输入态。
-        session.status = SessionStatus.RUNNING
         try:
-            async with self._uow_factory() as uow:
-                workspace = await self._workspace_manager.ensure_workspace(session=session, uow=uow)
-                run = await uow.workflow_run.create_for_session(
-                    session=session,
-                    status=WorkflowRunStatus.RUNNING,
-                    thread_id=session.id,
-                )
-                await self._workspace_manager.bind_run(workspace=workspace, run_id=run.id, uow=uow)
-                await self._workspace_manager.ensure_environment(
-                    workspace=workspace,
-                    sandbox_id=sandbox.id,
-                    task_id=task.id,
-                    uow=uow,
-                )
-                session.current_run_id = run.id
-                await uow.session.save(session=session)
+            snapshot = await self._runtime_state_coordinator.start_run(
+                session_id=session.id,
+                sandbox_id=sandbox.id,
+                task_id=task.id,
+                thread_id=session.id,
+            )
+            session.workspace_id = snapshot.workspace_id
+            session.current_run_id = snapshot.run_id
+            session.status = snapshot.session_status
             _log_core(
                 logging.INFO,
                 "创建任务完成",
                 session_id=session.id,
-                workspace_id=workspace.id,
-                run_id=run.id,
+                workspace_id=snapshot.workspace_id,
+                run_id=snapshot.run_id,
                 task_id=task.id,
                 sandbox_id=sandbox.id,
                 created_new_sandbox=created_new_sandbox,
@@ -308,24 +324,21 @@ class DefaultGraphRuntime(GraphRuntime):
         previous_status = session.status
         previous_workspace = workspace.model_copy(deep=True)
 
-        session.current_run_id = resolved_run_id
-        session.status = SessionStatus.RUNNING
         try:
-            async with self._uow_factory() as uow:
-                workspace = await self._workspace_manager.ensure_workspace(session=session, uow=uow)
-                await self._workspace_manager.bind_run(workspace=workspace, run_id=resolved_run_id, uow=uow)
-                await self._workspace_manager.ensure_environment(
-                    workspace=workspace,
-                    sandbox_id=sandbox.id,
-                    task_id=task.id,
-                    uow=uow,
-                )
-                await uow.session.save(session=session)
+            snapshot = await self._runtime_state_coordinator.reopen_running_run(
+                session_id=session.id,
+                run_id=resolved_run_id,
+                sandbox_id=sandbox.id,
+                task_id=task.id,
+            )
+            session.workspace_id = snapshot.workspace_id
+            session.current_run_id = snapshot.run_id
+            session.status = snapshot.session_status
             _log_core(
                 logging.INFO,
                 "恢复任务完成",
                 session_id=session.id,
-                workspace_id=workspace.id,
+                workspace_id=snapshot.workspace_id,
                 run_id=resolved_run_id,
                 task_id=task.id,
                 sandbox_id=sandbox.id,

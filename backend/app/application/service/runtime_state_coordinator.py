@@ -29,17 +29,20 @@ from app.domain.services.runtime.state_machine import (
     is_terminal,
     resolve_transition,
 )
+from app.domain.services.runtime.graph_runtime import RuntimeStateCoordinatorPort
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, get_graph_projection
 from app.domain.services.runtime.cancellation import build_cancelled_runtime_events
+from app.domain.services.workspace_runtime import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
 
-class RuntimeStateCoordinator:
+class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
     """Runtime 状态转移的应用层唯一业务入口。"""
 
     def __init__(self, uow_factory: Callable[[], IUnitOfWork]) -> None:
         self.uow_factory = uow_factory
+        self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
 
     async def build_snapshot(
             self,
@@ -158,30 +161,137 @@ class RuntimeStateCoordinator:
             *,
             reason: str,
     ) -> RuntimeReconcileResult:
-        """PR-2 只提供只读对账骨架，状态修复由后续 PR 接入。"""
-        snapshot = await self.build_snapshot(
-            session_id=session_id,
-            source=RuntimeStateSource.RECONCILE,
-        )
-        warnings = []
-        if snapshot.session_run_id and snapshot.workspace_run_id:
-            if snapshot.session_run_id != snapshot.workspace_run_id:
-                warnings.append("session_current_run_id_mismatch_workspace_current_run_id")
-        logger.info(
-            "运行状态对账完成",
-            extra={
-                "session_id": session_id,
-                "run_id": snapshot.run_id,
-                "trigger": reason,
-                "warnings": warnings,
-            },
-        )
-        return RuntimeReconcileResult(
-            snapshot_before=snapshot,
-            snapshot_after=snapshot,
-            actions=[],
-            warnings=warnings,
-        )
+        """请求前对账当前 run 指针和状态分叉，并修复可确定的非终态分叉。"""
+        async with self.uow_factory() as uow:
+            snapshot_before = await self._build_snapshot_in_uow(
+                uow=uow,
+                session_id=session_id,
+                source=RuntimeStateSource.RECONCILE,
+            )
+            warnings = []
+            actions = []
+            if snapshot_before.session_run_id and snapshot_before.workspace_run_id:
+                if snapshot_before.session_run_id != snapshot_before.workspace_run_id:
+                    warnings.append("session_current_run_id_mismatch_workspace_current_run_id")
+            if (
+                    snapshot_before.run_status is not None
+                    and snapshot_before.session_status.value != snapshot_before.run_status.value
+            ):
+                warnings.append("session_status_mismatch_run_status")
+
+            snapshot_after = snapshot_before
+            if (
+                    snapshot_before.run_status == WorkflowRunStatus.WAITING
+                    and snapshot_before.session_status != SessionStatus.WAITING
+                    and not is_terminal(snapshot_before.session_status)
+            ):
+                await uow.session.update_runtime_state(
+                    session_id,
+                    status=SessionStatus.WAITING,
+                )
+                actions.append("sync_session_status_from_run_waiting")
+                snapshot_after = await self._build_snapshot_in_uow(
+                    uow=uow,
+                    session_id=session_id,
+                    source=RuntimeStateSource.RECONCILE,
+                )
+
+            logger.info(
+                "运行状态对账完成",
+                extra={
+                    "session_id": session_id,
+                    "run_id": snapshot_after.run_id,
+                    "trigger": reason,
+                    "actions": actions,
+                    "warnings": warnings,
+                },
+            )
+            return RuntimeReconcileResult(
+                snapshot_before=snapshot_before,
+                snapshot_after=snapshot_after,
+                actions=actions,
+                warnings=warnings,
+            )
+
+    async def start_run(
+            self,
+            session_id: str,
+            *,
+            sandbox_id: str,
+            task_id: str,
+            thread_id: str | None = None,
+    ) -> RuntimeStateSnapshot:
+        """创建新 run，并统一绑定 workspace/task/sandbox 与 running 状态。"""
+        async with self.uow_factory() as uow:
+            session = await uow.session.get_by_id_for_update(session_id)
+            if session is None:
+                raise ValueError(f"会话[{session_id}]不存在，无法启动运行")
+
+            workspace = await self._workspace_manager.ensure_workspace(session=session, uow=uow)
+            run = await uow.workflow_run.create_for_session(
+                session=session,
+                status=WorkflowRunStatus.RUNNING,
+                thread_id=thread_id or session.id,
+            )
+            await self._workspace_manager.bind_run(workspace=workspace, run_id=run.id, uow=uow)
+            await self._workspace_manager.ensure_environment(
+                workspace=workspace,
+                sandbox_id=sandbox_id,
+                task_id=task_id,
+                uow=uow,
+            )
+            await uow.session.update_runtime_state(
+                session_id,
+                status=SessionStatus.RUNNING,
+                current_run_id=run.id,
+            )
+            return await self._build_snapshot_in_uow(
+                uow=uow,
+                session_id=session_id,
+                source=RuntimeStateSource.REQUEST,
+            )
+
+    async def reopen_running_run(
+            self,
+            session_id: str,
+            *,
+            run_id: str,
+            sandbox_id: str,
+            task_id: str,
+    ) -> RuntimeStateSnapshot:
+        """复用当前 run 重建 task/sandbox 绑定，并收敛到 running。"""
+        async with self.uow_factory() as uow:
+            session = await uow.session.get_by_id_for_update(session_id)
+            if session is None:
+                raise ValueError(f"会话[{session_id}]不存在，无法恢复运行")
+            run = await uow.workflow_run.get_by_id_for_update(run_id)
+            if run is None:
+                raise ValueError(f"运行[{run_id}]不存在，无法恢复运行")
+            if is_terminal(run.status):
+                raise RuntimeError(f"运行[{run_id}]已终态，无法恢复运行")
+
+            workspace = await self._workspace_manager.ensure_workspace(session=session, uow=uow)
+            await self._workspace_manager.bind_run(workspace=workspace, run_id=run_id, uow=uow)
+            await self._workspace_manager.ensure_environment(
+                workspace=workspace,
+                sandbox_id=sandbox_id,
+                task_id=task_id,
+                uow=uow,
+            )
+            await uow.workflow_run.update_status(
+                run_id,
+                status=WorkflowRunStatus.RUNNING,
+            )
+            await uow.session.update_runtime_state(
+                session_id,
+                status=SessionStatus.RUNNING,
+                current_run_id=run_id,
+            )
+            return await self._build_snapshot_in_uow(
+                uow=uow,
+                session_id=session_id,
+                source=RuntimeStateSource.REQUEST,
+            )
 
     async def cancel_current_run(
             self,
@@ -535,6 +645,20 @@ class RuntimeStateCoordinator:
             snapshot.has_checkpoint = True
         if snapshot.run_id is None:
             raise RuntimeError(f"会话[{session_id}]缺少current run，无法更新输入状态")
+        if (
+                command == RuntimeCommand.RESUME
+                and snapshot.session_status == SessionStatus.RUNNING
+                and snapshot.run_status == WorkflowRunStatus.RUNNING
+        ):
+            return RuntimeEventPersistResult(
+                event_inserted=False,
+                transition_applied=False,
+                from_session_status=snapshot.session_status,
+                to_session_status=snapshot.session_status,
+                from_run_status=snapshot.run_status,
+                to_run_status=snapshot.run_status,
+                ignored_reason=trigger,
+            )
         result = await self._apply_command_transition_in_uow(
             uow=uow,
             session_id=session_id,

@@ -3,7 +3,7 @@ import asyncio
 # 先初始化依赖模块，避免触发 app.application.service 的历史循环导入路径。
 from app.interfaces.dependencies.services import get_agent_service  # noqa: F401
 from app.application.service.agent_service import AgentService
-from app.domain.models import DoneEvent, MessageEvent, SessionStatus, TaskStreamEventRecord
+from app.domain.models import DoneEvent, MessageEvent, SessionStatus, TaskStreamEventRecord, WorkflowRun, WorkflowRunStatus, Workspace
 
 
 class _Session:
@@ -11,7 +11,10 @@ class _Session:
         self.id = "session-1"
         self.user_id = "user-1"
         self.task_id = "task-1"
+        self.workspace_id = "workspace-1"
+        self.current_run_id = "run-1"
         self.status = SessionStatus.RUNNING
+        self.unread_message_count = 0
 
 
 class _SessionRepo:
@@ -21,6 +24,12 @@ class _SessionRepo:
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self._session
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, **_kwargs) -> None:
+        self._session.status = status
 
     async def add_event_if_absent(self, session_id: str, event) -> bool:
         self.events_saved.append(event)
@@ -33,12 +42,36 @@ class _SessionRepo:
 class _UoW:
     def __init__(self, session_repo: _SessionRepo) -> None:
         self.session = session_repo
+        self.workflow_run = _WorkflowRunRepo()
+        self.workspace = _WorkspaceRepo()
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _WorkflowRunRepo:
+    def __init__(self) -> None:
+        self.run = WorkflowRun(id="run-1", session_id="session-1", status=WorkflowRunStatus.RUNNING)
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
+
+
+class _WorkspaceRepo:
+    def __init__(self) -> None:
+        self.workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+
+    async def get_by_id(self, workspace_id: str):
+        return self.workspace if workspace_id == self.workspace.id else None
+
+    async def get_by_session_id(self, session_id: str):
+        return self.workspace if session_id == self.workspace.session_id else None
 
 
 def _parse_stream_id(stream_id: str) -> tuple[int, int]:

@@ -59,6 +59,7 @@ SESSION_RESUME_CHECKPOINT_INVALID = "error.session.resume_checkpoint_invalid"
 SESSION_RESUME_VALUE_INVALID = "error.session.resume_value_invalid"
 SESSION_NOT_CANCELLED = "error.session.not_cancelled"
 SESSION_CANCELLED_CONTINUE_UNAVAILABLE = "error.session.cancelled_continue_unavailable"
+SESSION_RUNTIME_STATE_CONFLICT = "error.session.runtime_state_conflict"
 
 # 文件链路
 FILE_NOT_FOUND = "error.file.not_found"

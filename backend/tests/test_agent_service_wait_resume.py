@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.application.errors import error_keys
+from app.application.errors import BadRequestError, error_keys
+from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.service.agent_service import AgentService
 from app.domain.models import (
     ContinueCancelledTaskInput,
@@ -33,6 +34,15 @@ class _TaskFactory:
 class _NoTaskGraphRuntime:
     async def get_task(self, session: Session):
         return None
+
+
+class _ReconcileOnlyCoordinator:
+    def __init__(self) -> None:
+        self.reconcile_calls: list[tuple[str, str]] = []
+
+    async def reconcile_current_run(self, session_id: str, *, reason: str):
+        self.reconcile_calls.append((session_id, reason))
+        return SimpleNamespace(warnings=[], snapshot_after=None)
 
 
 class _InputStream:
@@ -247,6 +257,169 @@ def test_agent_service_chat_should_require_resume_when_session_waiting() -> None
 
     assert isinstance(first_event, ErrorEvent)
     assert first_event.error_key == error_keys.SESSION_RESUME_REQUIRED
+
+
+def test_agent_service_chat_should_reconcile_before_status_validation() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.RUNNING,
+    )
+    session_repo = _SessionRepo(session)
+    coordinator = _ReconcileOnlyCoordinator()
+
+    async def _reconcile_current_run(session_id: str, *, reason: str):
+        coordinator.reconcile_calls.append((session_id, reason))
+        session.status = SessionStatus.WAITING
+
+    coordinator.reconcile_current_run = _reconcile_current_run
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(session_repo)
+    service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
+    service._runtime_state_coordinator = coordinator
+
+    async def _collect_first_event():
+        async for event in service.chat(
+                session_id="session-1",
+                user_id="user-1",
+                message="继续执行",
+        ):
+            return event
+        return None
+
+    first_event = asyncio.run(_collect_first_event())
+
+    assert coordinator.reconcile_calls == [("session-1", "before_chat")]
+    assert isinstance(first_event, ErrorEvent)
+    assert first_event.error_key == error_keys.SESSION_RESUME_REQUIRED
+
+
+def test_agent_service_chat_should_reject_message_when_reconcile_finds_run_waiting() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.RUNNING,
+        workspace_id="workspace-1",
+        current_run_id="run-1",
+    )
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        status=WorkflowRunStatus.WAITING,
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        current_run_id="run-1",
+    )
+    session_repo = _SessionRepo(session)
+    workflow_run_repo = _WorkflowRunRepo(run)
+    workspace_repo = _WorkspaceRepo(workspace)
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(session_repo, workflow_run_repo, workspace_repo)
+    service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
+    service._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=service._uow_factory)
+
+    async def _collect_first_event():
+        async for event in service.chat(
+                session_id="session-1",
+                user_id="user-1",
+                message="普通消息",
+        ):
+            return event
+        return None
+
+    first_event = asyncio.run(_collect_first_event())
+
+    assert isinstance(first_event, ErrorEvent)
+    assert first_event.error_key == error_keys.SESSION_RESUME_REQUIRED
+    assert session.status == SessionStatus.WAITING
+
+
+def test_agent_service_chat_should_allow_resume_after_reconcile_syncs_run_waiting() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.RUNNING,
+        workspace_id="workspace-1",
+        current_run_id="run-1",
+    )
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        status=WorkflowRunStatus.WAITING,
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        current_run_id="run-1",
+    )
+    task = _IdleTask()
+    session_repo = _SessionRepo(session)
+    workflow_run_repo = _WorkflowRunRepo(run)
+    workspace_repo = _WorkspaceRepo(workspace)
+
+    service = object.__new__(AgentService)
+    service._uow_factory = lambda: _UoW(session_repo, workflow_run_repo, workspace_repo)
+    service._task_cls = _TaskFactory
+    service._graph_runtime = _NoTaskGraphRuntime()
+    service._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=service._uow_factory)
+
+    async def _get_task(_session: Session):
+        return task
+
+    async def _inspect_resume_checkpoint(_session: Session):
+        return SimpleNamespace(
+            is_resumable=True,
+            run_id="run-1",
+            has_checkpoint=True,
+            pending_interrupt={"kind": "input_text", "prompt": "请继续", "response_key": "message"},
+        )
+
+    service._get_task = _get_task
+    service._inspect_resume_checkpoint = _inspect_resume_checkpoint
+
+    async def _collect_events():
+        events = []
+        async for event in service.chat(
+                session_id="session-1",
+                user_id="user-1",
+                resume={"message": "继续执行"},
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_collect_events())
+
+    assert not [event for event in events if isinstance(event, ErrorEvent)]
+    assert task.input_stream.messages
+    assert task.invoked is True
+    assert session.status == SessionStatus.RUNNING
+    assert run.status == WorkflowRunStatus.RUNNING
+
+
+def test_agent_service_unresolved_runtime_conflict_should_use_error_key() -> None:
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        status=SessionStatus.RUNNING,
+    )
+    reconcile_result = SimpleNamespace(
+        warnings=["session_status_mismatch_run_status"],
+        snapshot_after=SimpleNamespace(session_status=SessionStatus.RUNNING),
+    )
+
+    with pytest.raises(BadRequestError) as exc_info:
+        AgentService._reject_unresolved_runtime_conflict(
+            session=session,
+            reconcile_result=reconcile_result,
+        )
+
+    assert exc_info.value.error_key == error_keys.SESSION_RUNTIME_STATE_CONFLICT
 
 
 def test_agent_service_chat_should_reject_resume_when_session_not_waiting() -> None:

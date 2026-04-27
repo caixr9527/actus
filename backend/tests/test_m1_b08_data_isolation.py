@@ -9,7 +9,7 @@ from app.application.errors import error_keys
 from app.application.service.agent_service import AgentService
 from app.application.service.file_service import FileService
 from app.application.service.session_service import SessionService
-from app.domain.models import ErrorEvent, Session, User
+from app.domain.models import ErrorEvent, Session, SessionStatus, User, WorkflowRun, WorkflowRunStatus, Workspace
 from app.interfaces.dependencies.auth import get_current_user
 from app.interfaces.dependencies.services import get_file_service, get_session_service
 from app.interfaces.endpoints.file_routes import router as file_router
@@ -93,12 +93,20 @@ class _OwnedSessionRepo:
             id="session-a",
             user_id="user-a",
             status="running",
+            workspace_id="workspace-a",
+            current_run_id="run-a",
         )
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         if session_id == self.session.id and user_id == self.session.user_id:
             return self.session
         return None
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self.session if session_id == self.session.id else None
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, **_kwargs) -> None:
+        self.session.status = status
 
     async def add_event(self, session_id: str, event) -> None:
         return None
@@ -111,12 +119,36 @@ class _AgentUoW:
     def __init__(self) -> None:
         self.session = _OwnedSessionRepo()
         self.file = _ForeignAttachmentFileRepo()
+        self.workflow_run = _OwnedWorkflowRunRepo()
+        self.workspace = _OwnedWorkspaceRepo()
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _OwnedWorkflowRunRepo:
+    def __init__(self) -> None:
+        self.run = WorkflowRun(id="run-a", session_id="session-a", status=WorkflowRunStatus.RUNNING)
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
+
+
+class _OwnedWorkspaceRepo:
+    def __init__(self) -> None:
+        self.workspace = Workspace(id="workspace-a", session_id="session-a", current_run_id="run-a")
+
+    async def get_by_id(self, workspace_id: str):
+        return self.workspace if workspace_id == self.workspace.id else None
+
+    async def get_by_session_id(self, session_id: str):
+        return self.workspace if session_id == self.workspace.session_id else None
 
 
 class _ExistingTask:
