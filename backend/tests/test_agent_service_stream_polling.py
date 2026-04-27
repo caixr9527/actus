@@ -10,6 +10,10 @@ from app.domain.models import (
     TaskStreamEventRecord,
     TextStreamChannel,
     TextStreamDeltaEvent,
+    WorkflowRun,
+    WorkflowRunEventRecord,
+    WorkflowRunStatus,
+    Workspace,
 )
 
 
@@ -18,6 +22,8 @@ class _Session:
         self.id = "session-1"
         self.user_id = "user-1"
         self.task_id = "task-1"
+        self.workspace_id = "workspace-1"
+        self.current_run_id = "run-1"
         self.status = SessionStatus.RUNNING
         self.unread_message_count = 0
 
@@ -32,6 +38,24 @@ class _SessionRepo:
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
 
+    async def get_by_id_for_update(self, session_id: str):
+        return self._session
+
+    async def update_runtime_state(
+            self,
+            session_id: str,
+            *,
+            status: SessionStatus,
+            current_run_id: str | None = None,
+            title: str | None = None,
+            latest_message: str | None = None,
+            latest_message_at=None,
+            increment_unread: bool = False,
+    ) -> None:
+        self._session.status = status
+        if current_run_id is not None:
+            self._session.current_run_id = current_run_id
+
     async def update_unread_message_count(self, session_id: str, count: int) -> None:
         self.unread_count_updated = True
         self.unread_update_calls += 1
@@ -44,12 +68,68 @@ class _SessionRepo:
 class _UoW:
     def __init__(self, session_repo: _SessionRepo) -> None:
         self.session = session_repo
+        self.workflow_run = _WorkflowRunRepo(session_repo)
+        self.workspace = _WorkspaceRepo()
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _WorkflowRunRepo:
+    def __init__(self, session_repo: _SessionRepo) -> None:
+        self._session_repo = session_repo
+        self.run = WorkflowRun(
+            id="run-1",
+            session_id="session-1",
+            status=WorkflowRunStatus.RUNNING,
+        )
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def add_event_record_if_absent(self, session_id: str, run_id: str, event) -> bool:
+        self._session_repo.events_saved.append(event)
+        return True
+
+    async def update_status(self, run_id: str, *, status: WorkflowRunStatus, **kwargs) -> None:
+        self.run.status = status
+
+    async def replace_steps_from_plan(self, run_id: str, plan) -> None:
+        return None
+
+    async def upsert_step_from_event(self, run_id: str, event) -> None:
+        return None
+
+    async def list_event_records_by_session(self, session_id: str):
+        return [
+            WorkflowRunEventRecord(
+                run_id=self.run.id,
+                session_id=session_id,
+                event_id=event.id,
+                event_type=event.type,
+                event_payload=event,
+                created_at=event.created_at,
+            )
+            for event in self._session_repo.events_saved
+        ]
+
+
+class _WorkspaceRepo:
+    def __init__(self) -> None:
+        self.workspace = Workspace(
+            id="workspace-1",
+            session_id="session-1",
+            current_run_id="run-1",
+        )
+
+    async def get_by_id(self, workspace_id: str):
+        return self.workspace if workspace_id == self.workspace.id else None
+
+    async def get_by_session_id(self, session_id: str):
+        return self.workspace if session_id == self.workspace.session_id else None
 
 
 class _GraphRuntime:

@@ -53,6 +53,7 @@ from app.domain.services.runtime.contracts.event_delivery_policy import should_p
 from app.domain.services.runtime.cancellation import (
     build_cancelled_runtime_events,
 )
+from app.domain.models import RuntimeEventProjection
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.projectors import (
     MessageAttachmentProjector,
@@ -85,6 +86,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox: Sandbox,
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
             tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
+            runtime_state_coordinator: Any = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -102,6 +104,7 @@ class AgentTaskRunner(TaskRunner):
             uow_factory=uow_factory,
         )
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
+        self._runtime_state_coordinator = runtime_state_coordinator
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -178,6 +181,17 @@ class AgentTaskRunner(TaskRunner):
             self._workspace_manager = manager
         return manager
 
+    def _get_runtime_state_coordinator(self):
+        coordinator = getattr(self, "_runtime_state_coordinator", None)
+        if coordinator is not None:
+            return coordinator
+        # 测试可通过 object.__new__ 构造 runner；此处延迟导入避免领域层顶层依赖应用层。
+        from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+
+        coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
+        self._runtime_state_coordinator = coordinator
+        return coordinator
+
     async def _put_stream_record(
             self,
             task: Task,
@@ -197,7 +211,7 @@ class AgentTaskRunner(TaskRunner):
             latest_message: Optional[str] = None,
             latest_message_at: Optional[datetime] = None,
             increment_unread: bool = False,
-            status: Optional[SessionStatus] = None,
+            allow_status_transition: bool = True,
     ) -> None:
         event_id = None
         try:
@@ -214,18 +228,18 @@ class AgentTaskRunner(TaskRunner):
             persisted_event = event.model_copy(deep=True)
             persisted_event.id = event_id
 
-            # 再把同一事件和会话投影在单事务内落库。
-            # 这样可以保证“事件历史”与“会话列表投影(latest/status/title/unread)”一致提交。
-            async with self._uow_factory() as uow:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=self._session_id,
-                    event=persisted_event,
-                    title=title,
-                    latest_message=latest_message,
-                    latest_message_at=latest_message_at,
-                    increment_unread=increment_unread,
-                    status=status,
-                )
+            projection = RuntimeEventProjection(
+                title=title,
+                latest_message=latest_message,
+                latest_message_at=latest_message_at,
+                increment_unread=increment_unread,
+            )
+            await self._get_runtime_state_coordinator().persist_runtime_event(
+                session_id=self._session_id,
+                event=persisted_event,
+                projection=projection,
+                allow_status_transition=allow_status_transition,
+            )
         except Exception as e:
             # 落库失败时补偿删除输出流，尽量降低Redis/DB分叉概率。
             logger.error(f"写入输出流后保存事件历史失败: {e}")
@@ -537,7 +551,6 @@ class AgentTaskRunner(TaskRunner):
                         await self._put_and_add_event(
                             task=task,
                             event=event,
-                            status=SessionStatus.WAITING,
                         )
                         terminal_session_status = SessionStatus.WAITING
                         if active_request_id is not None:
@@ -558,13 +571,12 @@ class AgentTaskRunner(TaskRunner):
                         # Done 事件先完成本轮终态投影，但不能立即 break；
                         # run_engine 还需要继续完成 finally 中的状态合同与上下文投影收尾。
                         has_more_input = not await task.input_stream.is_empty()
-                        done_status = None if has_more_input else SessionStatus.COMPLETED
                         await self._put_and_add_event(
                             task=task,
                             event=event,
-                            status=done_status,
+                            allow_status_transition=not has_more_input,
                         )
-                        terminal_session_status = done_status
+                        terminal_session_status = None if has_more_input else SessionStatus.COMPLETED
                         if active_request_id is not None:
                             await self._emit_request_finished(
                                 task=task,
@@ -580,7 +592,6 @@ class AgentTaskRunner(TaskRunner):
                             event=event,
                             latest_message=event.error,
                             latest_message_at=event.created_at,
-                            status=SessionStatus.FAILED,
                         )
                         terminal_session_status = SessionStatus.FAILED
                         if active_request_id is not None:
@@ -629,7 +640,6 @@ class AgentTaskRunner(TaskRunner):
                     event=error_event,
                     latest_message=error_event.error,
                     latest_message_at=error_event.created_at,
-                    status=SessionStatus.FAILED,
                 )
                 if active_request_id is not None:
                     await self._emit_request_finished(

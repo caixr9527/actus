@@ -14,6 +14,7 @@ from typing import AsyncGenerator, Optional, List, Type, Callable, Any
 from pydantic import TypeAdapter
 
 from app.application.errors import AppException, BadRequestError, NotFoundError
+from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage, Browser
 from app.domain.models import (
@@ -101,6 +102,7 @@ class AgentService:
             task_runner_factory=self._build_task_runner,
         )
         self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
+        self._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
 
     def _get_workspace_manager(self) -> WorkspaceManager:
@@ -109,6 +111,13 @@ class AgentService:
             manager = WorkspaceManager(uow_factory=self._uow_factory)
             self._workspace_manager = manager
         return manager
+
+    def _get_runtime_state_coordinator(self) -> RuntimeStateCoordinator:
+        coordinator = getattr(self, "_runtime_state_coordinator", None)
+        if coordinator is None:
+            coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
+            self._runtime_state_coordinator = coordinator
+        return coordinator
 
     def _build_task_runner(
             self,
@@ -133,13 +142,15 @@ class AgentService:
             sandbox=sandbox,
             run_engine_factory=self._run_engine_factory,
             tool_runtime_adapter=self._tool_runtime_adapter,
+            runtime_state_coordinator=self._get_runtime_state_coordinator(),
         )
 
     async def _get_task(self, session: Session) -> Optional[Task]:
         """读取会话任务实例。"""
         runtime = getattr(self, "_graph_runtime", None)
         if runtime is None:
-            raise RuntimeError("未配置GraphRuntime，无法读取会话任务")
+            # 历史单元测试会用 object.__new__ 构造服务，只注入 task_cls。
+            return self._task_cls.get(session.id)
         return await runtime.get_task(session=session)
 
     async def _resolve_runtime_llm(self, session: Session) -> LLM:
@@ -199,8 +210,10 @@ class AgentService:
         if not should_persist_event(event):
             return
         try:
-            async with self._uow_factory() as uow:
-                await uow.session.add_event_if_absent(session_id=session_id, event=event)
+            await self._get_runtime_state_coordinator().persist_runtime_event(
+                session_id=session_id,
+                event=event,
+            )
         except Exception as e:
             # 修复失败不影响当前SSE消息继续下发，避免用户流式体验被阻断。
             logger.warning(f"会话{session_id}输出流事件历史修复失败: {e}")
@@ -411,15 +424,12 @@ class AgentService:
                 event_id = await task.input_stream.put(runtime_input.model_dump_json())
                 message_event.id = event_id
                 try:
-                    async with self._uow_factory() as uow:
-                        await uow.session.add_event_with_snapshot_if_absent(
-                            session_id=session_id,
-                            event=message_event,
-                            latest_message=message,
-                            latest_message_at=timestamp or datetime.now(),
-                            # 用户发起新一轮输入后立即置为 RUNNING，避免前端切换会话后丢失运行态。
-                            status=SessionStatus.RUNNING,
-                        )
+                    await self._get_runtime_state_coordinator().accept_user_message(
+                        session_id=session_id,
+                        event=message_event,
+                        latest_message_at=timestamp or datetime.now(),
+                        stream_event_id=event_id,
+                    )
                 except Exception as add_err:
                     logger.error(f"会话{session_id}保存用户事件失败，开始补偿输入流消息: {add_err}")
                     try:
@@ -449,8 +459,11 @@ class AgentService:
                     ).model_dump_json()
                 )
                 try:
-                    async with self._uow_factory() as uow:
-                        await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                    await self._get_runtime_state_coordinator().mark_resume_requested(
+                        session_id=session_id,
+                        request_id=request_id,
+                        pending_interrupt=inspection.pending_interrupt,
+                    )
                 except Exception as update_err:
                     logger.error(f"会话{session_id}更新恢复状态失败，开始补偿输入流消息: {update_err}")
                     try:
@@ -476,8 +489,10 @@ class AgentService:
                     ).model_dump_json()
                 )
                 try:
-                    async with self._uow_factory() as uow:
-                        await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                    await self._get_runtime_state_coordinator().mark_continue_cancelled_requested(
+                        session_id=session_id,
+                        request_id=request_id,
+                    )
                 except Exception as update_err:
                     logger.error(f"会话{session_id}更新继续取消任务状态失败，开始补偿输入流消息: {update_err}")
                     try:

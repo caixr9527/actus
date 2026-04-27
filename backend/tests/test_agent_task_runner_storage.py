@@ -684,7 +684,7 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
     runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
-    emitted_pairs: list[tuple[str, Optional[SessionStatus]]] = []
+    emitted_events: list[tuple[str, bool]] = []
     processed_messages: list[str] = []
 
     async def _pop_event(_task):
@@ -705,8 +705,17 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
         )
         yield DoneEvent()
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        emitted_pairs.append((type(event).__name__, status))
+    async def _put_and_add_event(
+            *,
+            task,
+            event,
+            title=None,
+            latest_message=None,
+            latest_message_at=None,
+            increment_unread=False,
+            allow_status_transition=True,
+    ):
+        emitted_events.append((type(event).__name__, allow_status_transition))
 
     runner._pop_event = _pop_event
     runner._run_flow = _run_flow
@@ -715,11 +724,11 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
     asyncio.run(runner.invoke(task))
 
     assert processed_messages == ["first", "second"]
-    assert emitted_pairs == [
-        ("ToolEvent", None),
-        ("DoneEvent", None),
-        ("ToolEvent", None),
-        ("DoneEvent", SessionStatus.COMPLETED),
+    assert emitted_events == [
+        ("ToolEvent", True),
+        ("DoneEvent", False),
+        ("ToolEvent", True),
+        ("DoneEvent", True),
     ]
     assert session_repo.updated_status == SessionStatus.COMPLETED
     assert session_repo.updated_statuses == [SessionStatus.COMPLETED]
@@ -739,7 +748,7 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
     runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
-    emitted_pairs: list[tuple[str, Optional[SessionStatus], Optional[str]]] = []
+    emitted_pairs: list[tuple[str, Optional[str]]] = []
 
     async def _pop_event(_task):
         message_event = await _task.input_stream.pop_next()
@@ -751,11 +760,10 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
     async def _run_flow(_message):
         yield ErrorEvent(error="boom")
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        emitted_pairs.append((type(event).__name__, status, latest_message))
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False):
+        emitted_pairs.append((type(event).__name__, latest_message))
+        session_repo.updated_status = SessionStatus.FAILED
+        session_repo.updated_statuses.append(SessionStatus.FAILED)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -775,7 +783,7 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
 
     asyncio.run(runner.invoke(task))
 
-    assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "boom")]
+    assert emitted_pairs == [("ErrorEvent", "boom")]
     assert session_repo.updated_status == SessionStatus.FAILED
     assert session_repo.updated_statuses == [SessionStatus.FAILED]
 
@@ -807,10 +815,19 @@ def test_invoke_should_continue_consuming_stream_after_done_event() -> None:
         yield DoneEvent()
         continuation_markers.append("done-stream-drained")
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(
+            *,
+            task,
+            event,
+            title=None,
+            latest_message=None,
+            latest_message_at=None,
+            increment_unread=False,
+            allow_status_transition=True,
+    ):
+        if isinstance(event, DoneEvent):
+            session_repo.updated_status = SessionStatus.COMPLETED
+            session_repo.updated_statuses.append(SessionStatus.COMPLETED)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -857,10 +874,10 @@ def test_invoke_should_continue_consuming_stream_after_wait_event() -> None:
         yield WaitEvent()
         continuation_markers.append("wait-stream-drained")
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False):
+        if isinstance(event, WaitEvent):
+            session_repo.updated_status = SessionStatus.WAITING
+            session_repo.updated_statuses.append(SessionStatus.WAITING)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -899,7 +916,7 @@ def test_invoke_should_project_latest_message_when_exception_falls_back_to_error
     runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
-    emitted_pairs: list[tuple[str, Optional[SessionStatus], Optional[str]]] = []
+    emitted_pairs: list[tuple[str, Optional[str]]] = []
 
     async def _pop_event(_task):
         message_event = await _task.input_stream.pop_next()
@@ -912,11 +929,10 @@ def test_invoke_should_project_latest_message_when_exception_falls_back_to_error
         raise RuntimeError("fatal boom")
         yield  # pragma: no cover
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        emitted_pairs.append((type(event).__name__, status, latest_message))
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False):
+        emitted_pairs.append((type(event).__name__, latest_message))
+        session_repo.updated_status = SessionStatus.FAILED
+        session_repo.updated_statuses.append(SessionStatus.FAILED)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -936,7 +952,7 @@ def test_invoke_should_project_latest_message_when_exception_falls_back_to_error
 
     asyncio.run(runner.invoke(task))
 
-    assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "fatal boom")]
+    assert emitted_pairs == [("ErrorEvent", "fatal boom")]
     assert session_repo.updated_status == SessionStatus.FAILED
     assert session_repo.updated_statuses == [SessionStatus.FAILED]
 

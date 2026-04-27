@@ -11,6 +11,7 @@ from app.domain.models import (
     DoneEvent,
     ErrorEvent,
     ExecutionStatus,
+    MessageEvent,
     PlanEvent,
     RuntimeCommand,
     RuntimeEventPersistResult,
@@ -65,82 +66,87 @@ class RuntimeStateCoordinator:
             event: BaseEvent,
             *,
             projection: RuntimeEventProjection | None = None,
+            uow: IUnitOfWork | None = None,
+            allow_status_transition: bool = True,
     ) -> RuntimeEventPersistResult:
         """同事务持久化 Runtime 事件，并按状态机收敛 run/session 状态。"""
         projection = projection or RuntimeEventProjection()
+        if uow is not None:
+            return await self._persist_runtime_event_in_uow(
+                uow=uow,
+                session_id=session_id,
+                event=event,
+                projection=projection,
+                allow_status_transition=allow_status_transition,
+            )
+
         async with self.uow_factory() as uow:
-            snapshot = await self._build_snapshot_in_uow(
+            return await self._persist_runtime_event_in_uow(
                 uow=uow,
                 session_id=session_id,
-                source=RuntimeStateSource.STREAM_EVENT,
-            )
-            if snapshot.run_id is None:
-                raise RuntimeError(f"会话[{session_id}]缺少current run，无法写入Runtime事件")
-
-            event_inserted = await uow.workflow_run.add_event_record_if_absent(
-                session_id=session_id,
-                run_id=snapshot.run_id,
                 event=event,
+                projection=projection,
+                allow_status_transition=allow_status_transition,
             )
-            await self._sync_step_projection(
+
+    async def accept_user_message(
+            self,
+            session_id: str,
+            event: MessageEvent,
+            *,
+            latest_message_at,
+            stream_event_id: str,
+    ) -> RuntimeEventPersistResult:
+        """持久化用户输入事件，并把 run/session 收敛到 running。"""
+        persisted_event = event.model_copy(deep=True)
+        persisted_event.id = stream_event_id
+        projection = RuntimeEventProjection(
+            latest_message=event.message,
+            latest_message_at=latest_message_at,
+        )
+        async with self.uow_factory() as uow:
+            return await self._persist_user_input_in_uow(
                 uow=uow,
-                run_id=snapshot.run_id,
-                event=event,
+                session_id=session_id,
+                event=persisted_event,
+                command=RuntimeCommand.USER_MESSAGE,
+                projection=projection,
             )
 
-            command = self._command_from_event(event)
-            if command is None:
-                await self._update_session_projection(
-                    uow=uow,
-                    session_id=session_id,
-                    status=snapshot.session_status,
-                    projection=projection,
-                    event_inserted=event_inserted,
-                )
-                return RuntimeEventPersistResult(
-                    event_inserted=event_inserted,
-                    transition_applied=False,
-                    from_session_status=snapshot.session_status,
-                    to_session_status=snapshot.session_status,
-                    from_run_status=snapshot.run_status,
-                    to_run_status=snapshot.run_status,
-                    ignored_reason="event_has_no_runtime_status_effect",
-                )
-
-            transition = resolve_transition(snapshot, command)
-            transition_applied = (
-                    transition.to_session_status != transition.from_session_status
-                    or transition.to_run_status != transition.from_run_status
+    async def mark_resume_requested(
+            self,
+            session_id: str,
+            *,
+            request_id: str,
+            pending_interrupt: dict | None = None,
+    ) -> RuntimeEventPersistResult:
+        """恢复输入进入队列后，把等待态 run/session 收敛到 running。"""
+        async with self.uow_factory() as uow:
+            return await self._apply_input_transition_in_uow(
+                uow=uow,
+                session_id=session_id,
+                command=RuntimeCommand.RESUME,
+                trigger=request_id,
+                pending_interrupt=pending_interrupt,
             )
-            if transition_applied:
-                await self._apply_transition(
-                    uow=uow,
-                    snapshot=snapshot,
-                    session_id=session_id,
-                    run_id=snapshot.run_id,
-                    event=event,
-                    transition=transition,
-                    projection=projection,
-                    event_inserted=event_inserted,
-                )
-                self._log_transition(snapshot=snapshot, transition=transition)
-            else:
-                await self._update_session_projection(
-                    uow=uow,
-                    session_id=session_id,
-                    status=snapshot.session_status,
-                    projection=projection,
-                    event_inserted=event_inserted,
-                )
 
-            return RuntimeEventPersistResult(
-                event_inserted=event_inserted,
-                transition_applied=transition_applied,
-                from_session_status=transition.from_session_status,
-                to_session_status=transition.to_session_status,
-                from_run_status=transition.from_run_status,
-                to_run_status=transition.to_run_status,
-                ignored_reason="" if transition_applied else transition.reason,
+    async def mark_continue_cancelled_requested(
+            self,
+            session_id: str,
+            *,
+            request_id: str,
+    ) -> RuntimeEventPersistResult:
+        """继续已取消任务的新 run 已创建后，确认 run/session 为 running。
+
+        注意：该方法不负责 cancelled plan 可继续性的原始校验；
+        调用前必须已完成 continue_cancelled 可用性校验并创建新 run。
+        """
+        async with self.uow_factory() as uow:
+            return await self._apply_input_transition_in_uow(
+                uow=uow,
+                session_id=session_id,
+                command=RuntimeCommand.USER_MESSAGE,
+                trigger=request_id,
             )
 
     async def reconcile_current_run(
@@ -172,6 +178,207 @@ class RuntimeStateCoordinator:
             snapshot_after=snapshot,
             actions=[],
             warnings=warnings,
+        )
+
+    async def _persist_runtime_event_in_uow(
+            self,
+            *,
+            uow: IUnitOfWork,
+            session_id: str,
+            event: BaseEvent,
+            projection: RuntimeEventProjection,
+            allow_status_transition: bool,
+    ) -> RuntimeEventPersistResult:
+        snapshot = await self._build_snapshot_in_uow(
+            uow=uow,
+            session_id=session_id,
+            source=RuntimeStateSource.STREAM_EVENT,
+        )
+        if snapshot.run_id is None:
+            raise RuntimeError(f"会话[{session_id}]缺少current run，无法写入Runtime事件")
+
+        event_inserted = await uow.workflow_run.add_event_record_if_absent(
+            session_id=session_id,
+            run_id=snapshot.run_id,
+            event=event,
+        )
+        await self._sync_step_projection(
+            uow=uow,
+            run_id=snapshot.run_id,
+            event=event,
+        )
+
+        command = self._command_from_event(event)
+        if command is None or not allow_status_transition:
+            await self._update_session_projection(
+                uow=uow,
+                session_id=session_id,
+                status=snapshot.session_status,
+                projection=projection,
+                event_inserted=event_inserted,
+            )
+            return RuntimeEventPersistResult(
+                event_inserted=event_inserted,
+                transition_applied=False,
+                from_session_status=snapshot.session_status,
+                to_session_status=snapshot.session_status,
+                from_run_status=snapshot.run_status,
+                to_run_status=snapshot.run_status,
+                ignored_reason=(
+                    "status_transition_deferred"
+                    if command is not None and not allow_status_transition
+                    else "event_has_no_runtime_status_effect"
+                ),
+            )
+
+        transition = resolve_transition(snapshot, command)
+        transition_applied = (
+                transition.to_session_status != transition.from_session_status
+                or transition.to_run_status != transition.from_run_status
+        )
+        if transition_applied:
+            await self._apply_transition(
+                uow=uow,
+                snapshot=snapshot,
+                session_id=session_id,
+                run_id=snapshot.run_id,
+                event=event,
+                transition=transition,
+                projection=projection,
+                event_inserted=event_inserted,
+            )
+            self._log_transition(snapshot=snapshot, transition=transition)
+        else:
+            await self._update_session_projection(
+                uow=uow,
+                session_id=session_id,
+                status=snapshot.session_status,
+                projection=projection,
+                event_inserted=event_inserted,
+            )
+
+        return RuntimeEventPersistResult(
+            event_inserted=event_inserted,
+            transition_applied=transition_applied,
+            from_session_status=transition.from_session_status,
+            to_session_status=transition.to_session_status,
+            from_run_status=transition.from_run_status,
+            to_run_status=transition.to_run_status,
+            ignored_reason="" if transition_applied else transition.reason,
+        )
+
+    async def _persist_user_input_in_uow(
+            self,
+            *,
+            uow: IUnitOfWork,
+            session_id: str,
+            event: MessageEvent,
+            command: RuntimeCommand,
+            projection: RuntimeEventProjection,
+    ) -> RuntimeEventPersistResult:
+        snapshot = await self._build_snapshot_in_uow(
+            uow=uow,
+            session_id=session_id,
+            source=RuntimeStateSource.REQUEST,
+        )
+        if snapshot.run_id is None:
+            raise RuntimeError(f"会话[{session_id}]缺少current run，无法写入用户输入事件")
+
+        event_inserted = await uow.workflow_run.add_event_record_if_absent(
+            session_id=session_id,
+            run_id=snapshot.run_id,
+            event=event,
+        )
+        result = await self._apply_command_transition_in_uow(
+            uow=uow,
+            session_id=session_id,
+            snapshot=snapshot,
+            command=command,
+            projection=projection,
+            event_inserted=event_inserted,
+            trigger_event=event,
+        )
+        result.event_inserted = event_inserted
+        return result
+
+    async def _apply_input_transition_in_uow(
+            self,
+            *,
+            uow: IUnitOfWork,
+            session_id: str,
+            command: RuntimeCommand,
+            trigger: str,
+            pending_interrupt: dict | None = None,
+    ) -> RuntimeEventPersistResult:
+        snapshot = await self._build_snapshot_in_uow(
+            uow=uow,
+            session_id=session_id,
+            source=RuntimeStateSource.REQUEST,
+        )
+        if pending_interrupt is not None:
+            snapshot.pending_interrupt = pending_interrupt
+            snapshot.has_checkpoint = True
+        if snapshot.run_id is None:
+            raise RuntimeError(f"会话[{session_id}]缺少current run，无法更新输入状态")
+        result = await self._apply_command_transition_in_uow(
+            uow=uow,
+            session_id=session_id,
+            snapshot=snapshot,
+            command=command,
+            projection=RuntimeEventProjection(),
+            event_inserted=False,
+            trigger_event=None,
+        )
+        result.ignored_reason = result.ignored_reason or trigger
+        return result
+
+    async def _apply_command_transition_in_uow(
+            self,
+            *,
+            uow: IUnitOfWork,
+            session_id: str,
+            snapshot: RuntimeStateSnapshot,
+            command: RuntimeCommand,
+            projection: RuntimeEventProjection,
+            event_inserted: bool,
+            trigger_event: BaseEvent | None,
+    ) -> RuntimeEventPersistResult:
+        transition = resolve_transition(snapshot, command)
+        transition_applied = (
+                transition.to_session_status != transition.from_session_status
+                or transition.to_run_status != transition.from_run_status
+        )
+        if transition_applied:
+            if snapshot.run_id is None:
+                raise RuntimeError(f"会话[{session_id}]缺少current run，无法更新Runtime状态")
+            await self._apply_transition(
+                uow=uow,
+                snapshot=snapshot,
+                session_id=session_id,
+                run_id=snapshot.run_id,
+                event=trigger_event,
+                transition=transition,
+                projection=projection,
+                event_inserted=event_inserted,
+            )
+            self._log_transition(snapshot=snapshot, transition=transition)
+        else:
+            await self._update_session_projection(
+                uow=uow,
+                session_id=session_id,
+                status=snapshot.session_status,
+                projection=projection,
+                event_inserted=event_inserted,
+            )
+
+        return RuntimeEventPersistResult(
+            event_inserted=event_inserted,
+            transition_applied=transition_applied,
+            from_session_status=transition.from_session_status,
+            to_session_status=transition.to_session_status,
+            from_run_status=transition.from_run_status,
+            to_run_status=transition.to_run_status,
+            ignored_reason="" if transition_applied else transition.reason,
         )
 
     async def _build_snapshot_in_uow(
@@ -269,19 +476,20 @@ class RuntimeStateCoordinator:
             snapshot: RuntimeStateSnapshot,
             session_id: str,
             run_id: str,
-            event: BaseEvent,
+            event: BaseEvent | None,
             transition,
             projection: RuntimeEventProjection,
             event_inserted: bool,
     ) -> None:
-        finished_at = event.created_at if transition.to_run_status and is_terminal(transition.to_run_status) else None
+        event_created_at = event.created_at if event is not None else None
+        finished_at = event_created_at if transition.to_run_status and is_terminal(transition.to_run_status) else None
         current_step_id = None if transition.to_run_status and is_terminal(
             transition.to_run_status) else snapshot.current_step_id
         await uow.workflow_run.update_status(
             run_id,
             status=transition.to_run_status,
             finished_at=finished_at,
-            last_event_at=event.created_at,
+            last_event_at=event_created_at,
             current_step_id=current_step_id,
         )
         await self._update_session_projection(

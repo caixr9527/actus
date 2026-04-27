@@ -91,6 +91,9 @@ class _SessionRepo:
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
 
+    async def get_by_id_for_update(self, session_id: str):
+        return self._session
+
     async def add_event(self, session_id: str, event) -> None:
         return None
 
@@ -101,6 +104,23 @@ class _SessionRepo:
         if self._fail_on_update_status:
             raise RuntimeError("update status failed")
         self._session.status = status
+
+    async def update_runtime_state(
+            self,
+            session_id: str,
+            *,
+            status: SessionStatus,
+            current_run_id: str | None = None,
+            title: str | None = None,
+            latest_message: str | None = None,
+            latest_message_at=None,
+            increment_unread: bool = False,
+    ) -> None:
+        if self._fail_on_update_status:
+            raise RuntimeError("update status failed")
+        self._session.status = status
+        if current_run_id is not None:
+            self._session.current_run_id = current_run_id
 
 
 class _WorkflowRunRepo:
@@ -113,6 +133,29 @@ class _WorkflowRunRepo:
         if self._run is None:
             return None
         return self._run if self._run.id == run_id else None
+
+    async def get_by_id_for_update(self, run_id: str):
+        return await self.get_by_id(run_id)
+
+    async def update_status(self, run_id: str, *, status: WorkflowRunStatus, **_kwargs) -> None:
+        if self._run is not None and self._run.id == run_id:
+            self._run.status = status
+
+    async def add_event_record_if_absent(self, session_id: str, run_id: str, event) -> bool:
+        self._events.append(event)
+        return True
+
+    async def list_event_records_by_session(self, session_id: str):
+        return [
+            SimpleNamespace(
+                session_id=session_id,
+                run_id=self._run.id if self._run else "run-1",
+                event_id=getattr(event, "id", ""),
+                event_type=getattr(event, "type", ""),
+                event_payload=event,
+            )
+            for event in self._events
+        ]
 
     async def cancel_run(self, run_id: str) -> None:
         self.cancelled_run_ids.append(run_id)
@@ -226,12 +269,19 @@ def test_agent_service_chat_should_rollback_resume_input_when_status_update_fail
         id="session-1",
         user_id="user-1",
         status=SessionStatus.WAITING,
+        workspace_id="workspace-1",
         current_run_id="run-1",
     )
+    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    workflow_run = WorkflowRun(id="run-1", session_id="session-1", status=WorkflowRunStatus.WAITING)
     task = _Task()
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(_SessionRepo(session, fail_on_update_status=True))
+    service._uow_factory = lambda: _UoW(
+        _SessionRepo(session, fail_on_update_status=True),
+        _WorkflowRunRepo(workflow_run),
+        _WorkspaceRepo(workspace),
+    )
     service._task_cls = _TaskFactory
 
     async def _get_task(_session: Session):
@@ -360,13 +410,20 @@ def test_agent_service_chat_should_enqueue_continue_cancelled_task_command() -> 
     session = Session(
         id="session-1",
         user_id="user-1",
+        workspace_id="workspace-1",
+        current_run_id="run-1",
         status=SessionStatus.CANCELLED,
         events=[PlanEvent(plan=cancelled_plan, status=PlanEventStatus.CANCELLED)],
     )
+    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    workflow_run = WorkflowRun(id="run-1", session_id="session-1", status=WorkflowRunStatus.CANCELLED)
+    new_workflow_run = WorkflowRun(id="run-2", session_id="session-1", status=WorkflowRunStatus.RUNNING)
+    workflow_run_repo = _WorkflowRunRepo(workflow_run, events=list(session.events))
+    workspace_repo = _WorkspaceRepo(workspace)
     task = _IdleTask()
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(_SessionRepo(session))
+    service._uow_factory = lambda: _UoW(_SessionRepo(session), workflow_run_repo, workspace_repo)
     service._task_cls = _TaskFactory
     service._graph_runtime = _NoTaskGraphRuntime()
 
@@ -375,6 +432,10 @@ def test_agent_service_chat_should_enqueue_continue_cancelled_task_command() -> 
 
     async def _create_task(_session: Session, *, reuse_current_run: bool = False):
         assert reuse_current_run is False
+        _session.current_run_id = "run-2"
+        _session.status = SessionStatus.RUNNING
+        workspace.current_run_id = "run-2"
+        workflow_run_repo._run = new_workflow_run
         return task
 
     service._get_task = _get_task

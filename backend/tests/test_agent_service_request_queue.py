@@ -15,6 +15,10 @@ from app.domain.models import (
     TaskRequestStartedRecord,
     TaskStreamEventRecord,
     WaitEvent,
+    WorkflowRun,
+    WorkflowRunEventRecord,
+    WorkflowRunStatus,
+    Workspace,
 )
 
 
@@ -23,16 +27,44 @@ class _Session:
         self.id = "session-1"
         self.user_id = "user-1"
         self.task_id = "task-1"
+        self.workspace_id = "workspace-1"
+        self.current_run_id = "run-1"
         self.status = SessionStatus.RUNNING
         self.unread_message_count = 0
+        self.latest_message = ""
+        self.latest_message_at = None
 
 
 class _SessionRepo:
     def __init__(self, session: _Session) -> None:
         self._session = session
+        self.workflow_run = _WorkflowRunRepo()
+        self.workspace = _WorkspaceRepo()
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self._session
+
+    async def update_runtime_state(
+            self,
+            session_id: str,
+            *,
+            status: SessionStatus,
+            current_run_id: str | None = None,
+            title: str | None = None,
+            latest_message: str | None = None,
+            latest_message_at=None,
+            increment_unread: bool = False,
+    ) -> None:
+        self._session.status = status
+        if current_run_id is not None:
+            self._session.current_run_id = current_run_id
+        if latest_message is not None:
+            self._session.latest_message = latest_message
+        if latest_message_at is not None:
+            self._session.latest_message_at = latest_message_at
 
     async def add_event_if_absent(self, session_id: str, event) -> bool:
         return True
@@ -47,12 +79,70 @@ class _SessionRepo:
 class _UoW:
     def __init__(self, session_repo: _SessionRepo) -> None:
         self.session = session_repo
+        self.workflow_run = session_repo.workflow_run
+        self.workspace = session_repo.workspace
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _WorkflowRunRepo:
+    def __init__(self) -> None:
+        self.run = WorkflowRun(id="run-1", session_id="session-1", status=WorkflowRunStatus.RUNNING)
+        self.event_records: list[WorkflowRunEventRecord] = []
+        self.status_updates: list[WorkflowRunStatus] = []
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def add_event_record_if_absent(self, session_id: str, run_id: str, event) -> bool:
+        if any(record.event_id == event.id for record in self.event_records):
+            return False
+        self.event_records.append(
+            WorkflowRunEventRecord(
+                run_id=run_id,
+                session_id=session_id,
+                event_id=event.id,
+                event_type=event.type,
+                event_payload=event,
+            )
+        )
+        return True
+
+    async def update_status(
+            self,
+            run_id: str,
+            *,
+            status: WorkflowRunStatus,
+            finished_at=None,
+            last_event_at=None,
+            current_step_id=None,
+    ) -> None:
+        self.run.status = status
+        self.status_updates.append(status)
+
+    async def list_event_records_by_session(self, session_id: str):
+        return list(self.event_records)
+
+    async def replace_steps_from_plan(self, run_id: str, plan) -> None:
+        return None
+
+    async def upsert_step_from_event(self, run_id: str, event) -> None:
+        return None
+
+
+class _WorkspaceRepo:
+    def __init__(self) -> None:
+        self.workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+
+    async def get_by_id(self, workspace_id: str):
+        return self.workspace if workspace_id == self.workspace.id else None
+
+    async def get_by_session_id(self, session_id: str):
+        return self.workspace if session_id == self.workspace.session_id else None
 
 
 def _parse_stream_id(stream_id: str) -> tuple[int, int]:
@@ -254,6 +344,8 @@ def test_chat_should_wait_for_its_own_queued_request_boundary() -> None:
     assert [event.type for event in second_events] == ["message", "message", "done"]
     assert [event.message for event in first_events if event.type == "message"] == ["first", "reply:first"]
     assert [event.message for event in second_events if event.type == "message"] == ["second", "reply:second"]
+    assert session_repo.workflow_run.status_updates == [WorkflowRunStatus.COMPLETED]
+    assert session.status == SessionStatus.COMPLETED
 
 
 def test_chat_should_reject_queued_request_when_current_run_enters_wait() -> None:
@@ -295,3 +387,5 @@ def test_chat_should_reject_queued_request_when_current_run_enters_wait() -> Non
     assert [event.message for event in first_events if event.type == "message"] == ["first", "reply:first"]
     assert isinstance(second_events[-1], ErrorEvent)
     assert second_events[-1].error_key == error_keys.SESSION_RESUME_REQUIRED
+    assert session_repo.workflow_run.status_updates == [WorkflowRunStatus.WAITING]
+    assert session.status == SessionStatus.WAITING

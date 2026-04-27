@@ -11,6 +11,7 @@ from app.domain.models import (
     DoneEvent,
     ErrorEvent,
     ExecutionStatus,
+    MessageEvent,
     Plan,
     PlanEvent,
     StepEvent,
@@ -279,6 +280,51 @@ def test_persist_runtime_event_should_mark_waiting_in_one_transaction() -> None:
     assert uow.workflow_run.run.status == WorkflowRunStatus.WAITING
     assert uow.workflow_run.run.last_event_at == event.created_at
     assert uow.committed is True
+
+
+def test_accept_user_message_should_persist_with_stream_id_and_mark_running() -> None:
+    uow = _build_uow()
+    coordinator = _coordinator_with_uow(uow)
+    event = MessageEvent(id="original-event-id", role="user", message="hello")
+
+    result = asyncio.run(
+        coordinator.accept_user_message(
+            "session-1",
+            event,
+            latest_message_at=event.created_at,
+            stream_event_id="input-stream-1",
+        )
+    )
+
+    assert result.event_inserted is True
+    assert result.to_session_status == SessionStatus.RUNNING
+    assert result.to_run_status == WorkflowRunStatus.RUNNING
+    assert event.id == "original-event-id"
+    assert uow.workflow_run.event_records[0].event_id == "input-stream-1"
+    assert uow.workflow_run.event_records[0].event_payload.id == "input-stream-1"
+    assert uow.session.session.latest_message == "hello"
+
+
+def test_mark_resume_requested_should_use_pending_interrupt_to_mark_running() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.WAITING,
+        run_status=WorkflowRunStatus.WAITING,
+    )
+    coordinator = _coordinator_with_uow(uow)
+
+    result = asyncio.run(
+        coordinator.mark_resume_requested(
+            "session-1",
+            request_id="request-1",
+            pending_interrupt={"kind": "confirm"},
+        )
+    )
+
+    assert result.transition_applied is True
+    assert result.to_session_status == SessionStatus.RUNNING
+    assert result.to_run_status == WorkflowRunStatus.RUNNING
+    assert uow.session.session.status == SessionStatus.RUNNING
+    assert uow.workflow_run.run.status == WorkflowRunStatus.RUNNING
 
 
 def test_persist_runtime_event_should_mark_completed_and_update_projection() -> None:
