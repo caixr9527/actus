@@ -1758,9 +1758,11 @@ def test_create_or_reuse_plan_node_should_emit_planner_message_stream_before_pla
     assert isinstance(captured_events[0], TextStreamStartEvent)
     assert isinstance(captured_events[1], TextStreamDeltaEvent)
     assert isinstance(captured_events[2], TextStreamEndEvent)
-    assert captured_events[0].stream_id == "run-1:planner_message"
+    assert captured_events[0].stream_id == "run-1:final_message"
+    assert captured_events[0].stage == "final"
     assert isinstance(captured_events[-2], PlanEvent)
     assert isinstance(captured_events[-1], MessageEvent)
+    assert captured_events[-1].stage == "final"
     assert [event.type for event in state["emitted_events"]] == ["title", "plan", "message"]
 
 

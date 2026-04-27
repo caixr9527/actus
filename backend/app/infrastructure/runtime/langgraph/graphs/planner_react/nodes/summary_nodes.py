@@ -223,11 +223,12 @@ async def summarize_node(
     )
     llm_cost_ms = elapsed_ms(llm_started_at)
     parsed: Dict[str, Any] = safe_parse_json(llm_message.get("content"))
-    has_failed_last_step = bool(
+    has_failed_last_step = (
         last_executed_step is not None
-        and str(getattr(last_executed_step, "status", "") or "") == ExecutionStatus.FAILED.value
+        and normalize_controlled_value(getattr(last_executed_step, "status", ""), ExecutionStatus)
+        == ExecutionStatus.FAILED.value
     )
-    has_failed_plan = str(getattr(plan, "status", "") or "") == ExecutionStatus.FAILED.value
+    has_failed_plan = normalize_controlled_value(getattr(plan, "status", ""), ExecutionStatus) == ExecutionStatus.FAILED.value
     if has_failed_last_step or has_failed_plan:
         failure_text = _build_failure_final_answer_text(
             plan=plan,

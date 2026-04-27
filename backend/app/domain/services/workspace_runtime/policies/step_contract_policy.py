@@ -29,13 +29,61 @@ FINAL_USER_DELIVERY_STEP_PATTERN = re.compile(
     r"(直接向用户输出|输出给用户|向用户(展示|呈现|交付)|展示给用户|等待用户最终确认|最终(回答|答案|说明|报告|正文|交付|确认)|完整(回答|攻略|方案|报告)|面向用户)",
     re.IGNORECASE,
 )
+EN_FINAL_USER_DELIVERY_STEP_PATTERN = re.compile(
+    r"\b("
+    r"deliver|present|show|send|respond|reply"
+    r")\b.{0,24}\b("
+    r"to the user|final answer|final response|final summary|final report|final delivery"
+    r")\b"
+    r"|\b("
+    r"final answer|final response|final summary|final report|final delivery"
+    r")\b.{0,24}\b("
+    r"to the user|for the user"
+    r")\b",
+    re.IGNORECASE,
+)
 SUMMARY_ONLY_STEP_PATTERN = re.compile(
     r"((基于|根据).{0,12}(已收集|全部已收集|已有|搜索摘要|检索结果).{0,30}(整理|归纳|汇总|总结|撰写|形成|输出).{0,20}(要点|方案|计划|回答|说明|报告|正文|成稿))"
     r"|((整理|归纳|汇总|总结).{0,30}(为|成|出).{0,8}(\d+|[一二三四五六七八九十]+)\s*(条|个).{0,12}(要点|模式|方案|结论|建议))",
     re.IGNORECASE,
 )
+EN_SUMMARY_ONLY_STEP_PATTERN = re.compile(
+    r"\b("
+    r"summarize|organize|compile|synthesize|write|draft|compose"
+    r")\b.{0,36}\b("
+    r"collected|gathered|existing|search results|research findings|all findings"
+    r")\b.{0,36}\b("
+    r"answer|response|summary|report|recommendations|conclusion"
+    r")\b"
+    r"|\b("
+    r"based on|using"
+    r")\b.{0,36}\b("
+    r"collected|gathered|existing|search results|research findings|all findings"
+    r")\b.{0,36}\b("
+    r"summarize|organize|compile|synthesize|write|draft|compose"
+    r")\b",
+    re.IGNORECASE,
+)
 SUMMARY_FILE_OUTPUT_STEP_PATTERN = re.compile(
     r"((整理|归纳|汇总|总结).{0,30}(导出|保存|写入|生成).{0,12}(markdown|md|文件|文档|报告))",
+    re.IGNORECASE,
+)
+EN_SUMMARY_FILE_OUTPUT_STEP_PATTERN = re.compile(
+    r"\b("
+    r"summarize|organize|compile|synthesize"
+    r")\b.{0,36}\b("
+    r"export|save|write|generate"
+    r")\b.{0,20}\b("
+    r"markdown|md|file|document|report"
+    r")\b",
+    re.IGNORECASE,
+)
+FILE_OUTPUT_ACTION_PATTERN = re.compile(
+    r"(生成|写入|保存|导出|创建|产出).{0,24}(markdown|md|文件|文档|报告|report)",
+    re.IGNORECASE,
+)
+EN_FILE_OUTPUT_ACTION_PATTERN = re.compile(
+    r"\b(generate|write|save|export|create|produce)\b.{0,24}\b(markdown|md|file|document|report)\b",
     re.IGNORECASE,
 )
 
@@ -179,15 +227,39 @@ def _is_final_delivery_step(*, step: Step, user_requests_file_output: bool) -> b
     candidate_text = build_step_candidate_text(step)
     if not candidate_text:
         return False
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) or ""
+    artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy) or ""
+    if (
+        user_requests_file_output
+        and output_mode == StepOutputMode.FILE.value
+        and artifact_policy in {
+            StepArtifactPolicy.ALLOW_FILE_OUTPUT.value,
+            StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value,
+        }
+        and (
+            FILE_OUTPUT_ACTION_PATTERN.search(candidate_text)
+            or EN_FILE_OUTPUT_ACTION_PATTERN.search(candidate_text)
+        )
+    ):
+        return False
     if FINAL_USER_DELIVERY_STEP_PATTERN.search(candidate_text):
+        return True
+    if EN_FINAL_USER_DELIVERY_STEP_PATTERN.search(candidate_text):
         return True
     if SUMMARY_ONLY_STEP_PATTERN.search(candidate_text):
         return True
-    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) or ""
+    if EN_SUMMARY_ONLY_STEP_PATTERN.search(candidate_text):
+        return True
     if (
         not user_requests_file_output
         and output_mode == StepOutputMode.FILE.value
         and SUMMARY_FILE_OUTPUT_STEP_PATTERN.search(candidate_text)
+    ):
+        return True
+    if (
+        not user_requests_file_output
+        and output_mode == StepOutputMode.FILE.value
+        and EN_SUMMARY_FILE_OUTPUT_STEP_PATTERN.search(candidate_text)
     ):
         return True
     return False

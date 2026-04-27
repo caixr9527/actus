@@ -20,6 +20,7 @@ from app.domain.models import (
     StepArtifactPolicy,
     StepOutputMode,
     StepTaskModeHint,
+    StepOutcome,
     TextStreamChannel,
     TitleEvent,
     build_step_objective_key,
@@ -36,6 +37,10 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     now_perf,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_success_criteria
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -91,6 +96,32 @@ def _build_fallback_execution_step(user_message: str, entry_contract_payload: Di
         artifact_policy=artifact_policy,
         objective_key=build_step_objective_key(description[:80], description),
         success_criteria=[description],
+    )
+
+
+def _build_planner_failed_step(
+        *,
+        user_message: str,
+        contract_issues: List[Any],
+) -> Step:
+    """构造 planner 空步骤兜底失败态，让 summary 统一输出失败正文。"""
+    issue_messages = [
+        str(getattr(issue, "issue_message", "") or "").strip()
+        for issue in list(contract_issues or [])
+        if str(getattr(issue, "issue_message", "") or "").strip()
+    ]
+    blockers = ["Planner 未能生成可执行步骤", *issue_messages]
+    description = str(user_message or "").strip() or "执行用户请求"
+    return Step(
+        id="planner-failed-step",
+        title="Planner 未能生成可执行步骤",
+        description=description,
+        status=ExecutionStatus.FAILED,
+        outcome=StepOutcome(
+            done=False,
+            summary="Planner 未能生成可执行步骤",
+            blockers=blockers,
+        ),
     )
 
 
@@ -278,7 +309,42 @@ async def create_or_reuse_plan_node(
                     issue_count=len(contract_issues),
                     issue_codes=[item.issue_code for item in contract_issues],
                 )
-                steps = []
+                failed_step = _build_planner_failed_step(
+                    user_message=user_message,
+                    contract_issues=contract_issues,
+                )
+                failed_plan = Plan(
+                    title=title,
+                    goal=goal,
+                    language=language,
+                    message=planner_message,
+                    steps=[failed_step],
+                    status=ExecutionStatus.FAILED,
+                )
+                planner_events: List[Any] = [
+                    TitleEvent(title=title),
+                    PlanEvent(plan=failed_plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
+                ]
+                planner_stream_events = build_text_stream_events(
+                    channel=TextStreamChannel.PLANNER_MESSAGE,
+                    text=planner_message,
+                    state=state,
+                    stage="planner",
+                )
+                await _resolve_emit_live_events()(*planner_stream_events, *planner_events)
+                return _reduce_state_with_events(
+                    state,
+                    updates={
+                        "plan": failed_plan,
+                        "working_memory": working_memory,
+                        **planner_context_updates,
+                        "last_executed_step": failed_step.model_copy(deep=True),
+                        "current_step_id": None,
+                        "final_message": "",
+                        "graph_metadata": _replace_control_metadata(state, control),
+                    },
+                    events=planner_events,
+                )
             log_runtime(
                 logger,
                 logging.WARNING,
@@ -331,11 +397,12 @@ async def create_or_reuse_plan_node(
             planner_message = extra_direct_answer_text
         log_runtime(
             logger,
-            logging.INFO,
-            "计划创建完成，无需步骤",
+            logging.WARNING,
+            "Planner 空步骤命中过渡直答兜底",
             state=state,
             plan_title=title,
             language=language,
+            output_stage=RuntimeOutputStage.PLANNER_DIRECT_FALLBACK.value,
             message_length=len(planner_message),
             extra_direct_answer_text_length=len(extra_direct_answer_text),
             llm_elapsed_ms=llm_cost_ms,
@@ -351,15 +418,22 @@ async def create_or_reuse_plan_node(
         )
         planner_events: List[Any] = [
             TitleEvent(title=title),
-            MessageEvent(role="assistant", message=planner_message),
+            MessageEvent(role="assistant", message=planner_message, stage="final"),
         ]
-        # planner_message 流事件只做临时展示，不进入 state 的 emitted_events。
-        # 后续 MessageEvent 仍是历史落账和前端 timeline 的唯一真相源。
         planner_stream_events = build_text_stream_events(
-            channel=TextStreamChannel.PLANNER_MESSAGE,
+            channel=TextStreamChannel.FINAL_MESSAGE,
             text=planner_message,
             state=state,
-            stage="planner",
+            stage="final",
+        )
+        assert_state_update_allowed(
+            stage=RuntimeOutputStage.PLANNER_DIRECT_FALLBACK,
+            before_state=state,
+            updates={
+                "final_message": planner_message,
+                "final_answer_text": planner_message,
+                "selected_artifacts": list(state.get("selected_artifacts") or []),
+            },
         )
         await _resolve_emit_live_events()(*planner_stream_events, *planner_events)
         return _reduce_state_with_events(
@@ -370,6 +444,7 @@ async def create_or_reuse_plan_node(
                 **planner_context_updates,
                 "current_step_id": None,
                 "final_message": planner_message,
+                "final_answer_text": planner_message,
                 "graph_metadata": dict(state.get("graph_metadata") or {}),
                 "step_states": [],
             },
@@ -467,23 +542,46 @@ async def create_or_reuse_plan_node(
         language=language,
         message=planner_message,
         steps=compiled_steps,
-        status=ExecutionStatus.PENDING,
+        status=ExecutionStatus.COMPLETED if plan_only else ExecutionStatus.PENDING,
     )
     next_step = plan.get_next_step()
 
     planner_events: List[Any] = [
         TitleEvent(title=title),
         PlanEvent(plan=plan.model_copy(deep=True), status=PlanEventStatus.CREATED),
-        MessageEvent(role="assistant", message=planner_message),
     ]
-    # planner_message 使用回放式 text_stream 提前展示；
-    # PlanEvent/MessageEvent 仍保持原有顺序和最终真相源语义。
-    planner_stream_events = build_text_stream_events(
-        channel=TextStreamChannel.PLANNER_MESSAGE,
-        text=planner_message,
-        state=state,
-        stage="planner",
-    )
+    if plan_only:
+        # plan_only 是“计划交付终态”：
+        # - PlanEventStatus.CREATED 表示计划事件首次创建；
+        # - plan.status=COMPLETED 表示计划正文已作为最终结果交付；
+        # 二者语义不同，不能把 CREATED 改成 COMPLETED。
+        planner_events.append(MessageEvent(role="assistant", message=planner_message, stage="final"))
+        planner_stream_events = build_text_stream_events(
+            channel=TextStreamChannel.FINAL_MESSAGE,
+            text=planner_message,
+            state=state,
+            stage="final",
+        )
+        assert_state_update_allowed(
+            stage=RuntimeOutputStage.PLANNER,
+            before_state=state,
+            updates={
+                "final_message": planner_message,
+                "final_answer_text": planner_message,
+                "selected_artifacts": list(state.get("selected_artifacts") or []),
+            },
+            plan_only=True,
+        )
+    else:
+        planner_events.append(MessageEvent(role="assistant", message=planner_message))
+        # planner_message 使用回放式 text_stream 提前展示；
+        # PlanEvent/MessageEvent 仍保持原有顺序和最终真相源语义。
+        planner_stream_events = build_text_stream_events(
+            channel=TextStreamChannel.PLANNER_MESSAGE,
+            text=planner_message,
+            state=state,
+            stage="planner",
+        )
     await _resolve_emit_live_events()(*planner_stream_events, *planner_events)
     return _reduce_state_with_events(
         state,
@@ -493,6 +591,7 @@ async def create_or_reuse_plan_node(
             **planner_context_updates,
             "current_step_id": None if plan_only else next_step.id if next_step is not None else None,
             "final_message": planner_message if plan_only else "",
+            "final_answer_text": planner_message if plan_only else str(state.get("final_answer_text") or ""),
             "graph_metadata": _replace_control_metadata(state, control),
         },
         events=planner_events,

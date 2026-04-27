@@ -208,11 +208,34 @@ async def replan_node(
                 logging.WARNING,
                 "重规划已过滤最终交付型步骤",
                 state=state,
-                dropped_step_count=dropped_final_delivery_steps,
+                dropped_final_delivery_steps=dropped_final_delivery_steps,
+                remaining_step_count=len(candidate_steps),
                 success_criteria_missing_count=criteria_missing_count,
                 success_criteria_filtered_count=criteria_filtered_count,
                 attempt=attempt + 1,
             )
+            if len(candidate_steps) == 0:
+                next_step = plan.get_next_step()
+                control = _get_control_metadata(state)
+                control.pop("wait_resume_action", None)
+                control.pop("entry_upgrade", None)
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "重规划仅返回最终交付型步骤，保持原计划并交给后续路由",
+                    state=state,
+                    dropped_final_delivery_steps=dropped_final_delivery_steps,
+                    remaining_step_count=0,
+                    next_step_id=str(next_step.id or "") if next_step is not None else "",
+                    llm_elapsed_ms=llm_cost_ms_total,
+                    elapsed_ms=elapsed_ms(started_at),
+                )
+                return {
+                    **state,
+                    **replan_context_updates,
+                    "current_step_id": next_step.id if next_step is not None else None,
+                    "graph_metadata": _replace_control_metadata(state, control),
+                }
         filtered_steps, dropped_drift_steps = _REPLAN_MERGE_ENGINE.filter_replan_drift_steps(
             candidate_steps,
             user_message=user_message,
