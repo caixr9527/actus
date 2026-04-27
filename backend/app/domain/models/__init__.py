@@ -68,6 +68,17 @@ from .plan import (
 )
 from .runtime_input import ContinueCancelledTaskInput, ResumeInput, RuntimeInput, RuntimeInputPayload
 from .runtime_llm_config import RuntimeLLMConfig
+from .runtime_state import (
+    CheckpointRef,
+    RuntimeCommand,
+    RuntimeEventPersistResult,
+    RuntimeEventProjection,
+    RuntimeReconcileResult,
+    RuntimeStateSnapshot,
+    RuntimeStateSource,
+    RuntimeTransition,
+    ResumeGateInspection,
+)
 from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
@@ -143,6 +154,15 @@ __all__ = [
     "ContinueCancelledTaskInput",
     "RuntimeInput",
     "RuntimeInputPayload",
+    "CheckpointRef",
+    "RuntimeCommand",
+    "RuntimeEventPersistResult",
+    "RuntimeEventProjection",
+    "RuntimeReconcileResult",
+    "RuntimeStateSnapshot",
+    "RuntimeStateSource",
+    "RuntimeTransition",
+    "ResumeGateInspection",
     "File",
     "Message",
     "MessageCommand",
