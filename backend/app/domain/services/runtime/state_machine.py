@@ -32,9 +32,19 @@ def is_terminal(status: WorkflowRunStatus | SessionStatus) -> bool:
 def can_accept_user_message(snapshot: "RuntimeStateSnapshot") -> bool:
     """普通用户消息是否可以进入当前 Runtime。"""
 
+    if has_status_conflict(snapshot):
+        return False
     if _is_waiting(snapshot):
         return False
     return True
+
+
+def has_status_conflict(snapshot: "RuntimeStateSnapshot") -> bool:
+    """判断 session/run 状态是否出现需要对账的分叉。"""
+
+    if snapshot.run_status is None:
+        return False
+    return snapshot.session_status.value != snapshot.run_status.value
 
 
 def can_resume(snapshot: "RuntimeStateSnapshot") -> bool:
@@ -97,12 +107,16 @@ def resolve_transition(
 
 
 def _resolve_start(snapshot: "RuntimeStateSnapshot", command: RuntimeCommand) -> "RuntimeTransition":
+    if has_status_conflict(snapshot):
+        raise InvalidRuntimeTransition(command, "runtime_status_inconsistent")
     if _effective_status_value(snapshot) != SessionStatus.PENDING.value:
         raise InvalidRuntimeTransition(command, "start_requires_pending_status")
     return _transition(snapshot, command, SessionStatus.RUNNING, WorkflowRunStatus.RUNNING, "start_run")
 
 
 def _resolve_user_message(snapshot: "RuntimeStateSnapshot", command: RuntimeCommand) -> "RuntimeTransition":
+    if has_status_conflict(snapshot):
+        raise InvalidRuntimeTransition(command, "runtime_status_inconsistent")
     if _is_waiting(snapshot):
         raise InvalidRuntimeTransition(command, "session_resume_required")
     if _is_running(snapshot):
@@ -115,6 +129,8 @@ def _resolve_user_message(snapshot: "RuntimeStateSnapshot", command: RuntimeComm
 
 
 def _resolve_resume(snapshot: "RuntimeStateSnapshot", command: RuntimeCommand) -> "RuntimeTransition":
+    if has_status_conflict(snapshot):
+        raise InvalidRuntimeTransition(command, "runtime_status_inconsistent")
     if can_resume(snapshot):
         return _transition(snapshot, command, SessionStatus.RUNNING, WorkflowRunStatus.RUNNING, "resume_from_interrupt")
     if _is_waiting(snapshot):
@@ -128,6 +144,8 @@ def _resolve_continue_cancelled(
         snapshot: "RuntimeStateSnapshot",
         command: RuntimeCommand,
 ) -> "RuntimeTransition":
+    if has_status_conflict(snapshot):
+        raise InvalidRuntimeTransition(command, "runtime_status_inconsistent")
     if can_continue_cancelled(snapshot):
         return _transition(
             snapshot,
@@ -147,6 +165,8 @@ def _resolve_runtime_event(
         to_session_status: SessionStatus,
         to_run_status: WorkflowRunStatus,
 ) -> "RuntimeTransition":
+    if has_status_conflict(snapshot):
+        raise InvalidRuntimeTransition(command, "runtime_status_inconsistent")
     if _run_is_terminal(snapshot):
         return _noop(snapshot, command, "terminal_run_ignores_late_event")
     if is_terminal(snapshot.session_status):

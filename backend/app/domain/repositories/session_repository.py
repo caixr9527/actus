@@ -27,6 +27,10 @@ class SessionRepository(Protocol):
         """根据传递的会话id查询会话"""
         ...
 
+    async def get_by_id_for_update(self, session_id: str) -> Optional[Session]:
+        """按会话id加锁查询会话，用于Runtime状态事务收敛"""
+        ...
+
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的会话id删除会话"""
         ...
@@ -53,6 +57,20 @@ class SessionRepository(Protocol):
 
     async def update_status(self, session_id: str, status: SessionStatus) -> None:
         """根据传递的会话id更新会话状态"""
+        ...
+
+    async def update_runtime_state(
+            self,
+            session_id: str,
+            *,
+            status: SessionStatus,
+            current_run_id: Optional[str] = None,
+            title: Optional[str] = None,
+            latest_message: Optional[str] = None,
+            latest_message_at: Optional[datetime] = None,
+            increment_unread: bool = False,
+    ) -> None:
+        """原子更新Runtime状态与会话列表投影字段"""
         ...
 
     async def update_current_model_id(self, session_id: str, current_model_id: Optional[str]) -> None:

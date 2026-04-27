@@ -16,6 +16,7 @@ from app.domain.services.runtime.state_machine import (
     can_cancel,
     can_continue_cancelled,
     can_resume,
+    has_status_conflict,
     is_terminal,
     resolve_transition,
 )
@@ -99,8 +100,43 @@ def test_resolve_transition_should_reject_user_message_when_session_waiting_but_
     with pytest.raises(InvalidRuntimeTransition) as exc_info:
         resolve_transition(snapshot, RuntimeCommand.USER_MESSAGE)
 
-    assert exc_info.value.reason == "session_resume_required"
+    assert exc_info.value.reason == "runtime_status_inconsistent"
     assert can_accept_user_message(snapshot) is False
+    assert has_status_conflict(snapshot) is True
+
+
+def test_resolve_transition_should_reject_user_message_when_session_running_but_run_waiting() -> None:
+    snapshot = _snapshot(SessionStatus.RUNNING, WorkflowRunStatus.WAITING)
+
+    with pytest.raises(InvalidRuntimeTransition) as exc_info:
+        resolve_transition(snapshot, RuntimeCommand.USER_MESSAGE)
+
+    assert exc_info.value.reason == "runtime_status_inconsistent"
+    assert can_accept_user_message(snapshot) is False
+    assert has_status_conflict(snapshot) is True
+
+
+def test_resolve_transition_should_reject_resume_when_session_waiting_but_run_running() -> None:
+    snapshot = _snapshot(
+        SessionStatus.WAITING,
+        WorkflowRunStatus.RUNNING,
+        has_checkpoint=True,
+        pending_interrupt={"value": {"kind": "confirm"}},
+    )
+
+    with pytest.raises(InvalidRuntimeTransition) as exc_info:
+        resolve_transition(snapshot, RuntimeCommand.RESUME)
+
+    assert exc_info.value.reason == "runtime_status_inconsistent"
+
+
+def test_resolve_transition_should_reject_runtime_event_when_session_completed_but_run_running() -> None:
+    snapshot = _snapshot(SessionStatus.COMPLETED, WorkflowRunStatus.RUNNING)
+
+    with pytest.raises(InvalidRuntimeTransition) as exc_info:
+        resolve_transition(snapshot, RuntimeCommand.WAIT)
+
+    assert exc_info.value.reason == "runtime_status_inconsistent"
 
 
 def test_resolve_transition_should_resume_waiting_runtime_with_interrupt_checkpoint() -> None:

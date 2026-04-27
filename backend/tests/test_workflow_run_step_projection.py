@@ -17,6 +17,7 @@ from app.domain.models import (
     StepOutputMode,
     StepTaskModeHint,
     WorkflowRunEventRecord,
+    WorkflowRunStatus,
 )
 from app.infrastructure.models.workflow_run_step import WorkflowRunStepModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
@@ -256,6 +257,51 @@ def test_list_events_should_return_empty_when_run_id_missing() -> None:
 
     assert events == []
     repo._list_events_by_run_id.assert_not_awaited()
+
+
+def test_update_status_should_not_clear_current_step_when_current_step_is_unset() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+    run_record = SimpleNamespace(
+        status=WorkflowRunStatus.RUNNING.value,
+        finished_at=None,
+        last_event_at=None,
+        current_step_id="step-1",
+    )
+    repo._get_record_with_lock = AsyncMock(return_value=run_record)
+
+    asyncio.run(
+        repo.update_status(
+            "run-1",
+            status=WorkflowRunStatus.WAITING,
+        )
+    )
+
+    assert run_record.status == WorkflowRunStatus.WAITING.value
+    assert run_record.current_step_id == "step-1"
+
+
+def test_update_status_should_clear_current_step_when_current_step_is_explicit_none() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+    run_record = SimpleNamespace(
+        status=WorkflowRunStatus.RUNNING.value,
+        finished_at=None,
+        last_event_at=None,
+        current_step_id="step-1",
+    )
+    repo._get_record_with_lock = AsyncMock(return_value=run_record)
+
+    asyncio.run(
+        repo.update_status(
+            "run-1",
+            status=WorkflowRunStatus.COMPLETED,
+            current_step_id=None,
+        )
+    )
+
+    assert run_record.status == WorkflowRunStatus.COMPLETED.value
+    assert run_record.current_step_id is None
 
 
 def test_list_events_should_return_workflow_run_events() -> None:

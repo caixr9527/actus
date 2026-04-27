@@ -5,6 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : workflow_run_repository.py
 """
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol
 
 from app.domain.models import (
@@ -17,6 +18,10 @@ from app.domain.models import (
     WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
+
+
+UNSET_CURRENT_STEP_ID = object()
+CurrentStepIdUpdate = str | None | object
 
 
 class WorkflowRunRepository(Protocol):
@@ -33,6 +38,22 @@ class WorkflowRunRepository(Protocol):
 
     async def get_by_id(self, run_id: str) -> Optional[WorkflowRun]:
         """根据运行ID查询运行主记录"""
+        ...
+
+    async def get_by_id_for_update(self, run_id: str) -> Optional[WorkflowRun]:
+        """按运行ID加锁查询运行主记录"""
+        ...
+
+    async def update_status(
+            self,
+            run_id: str,
+            *,
+            status: WorkflowRunStatus,
+            finished_at: Optional[datetime] = None,
+            last_event_at: Optional[datetime] = None,
+            current_step_id: CurrentStepIdUpdate = UNSET_CURRENT_STEP_ID,
+    ) -> None:
+        """原子更新运行状态、完成时间和当前步骤指针"""
         ...
 
     async def update_checkpoint_ref(
@@ -60,6 +81,15 @@ class WorkflowRunRepository(Protocol):
             event: BaseEvent,
     ) -> bool:
         """按事件ID幂等写入运行事件"""
+        ...
+
+    async def add_event_record_if_absent(
+            self,
+            session_id: str,
+            run_id: str,
+            event: BaseEvent,
+    ) -> bool:
+        """按事件ID幂等写入运行事件，不进行业务状态推导"""
         ...
 
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:

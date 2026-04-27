@@ -26,7 +26,11 @@ from app.domain.models import (
     WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
-from app.domain.repositories import WorkflowRunRepository
+from app.domain.repositories.workflow_run_repository import (
+    CurrentStepIdUpdate,
+    UNSET_CURRENT_STEP_ID,
+    WorkflowRunRepository,
+)
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.normalizers import normalize_step_outcome_payload
 from app.infrastructure.models import WorkflowRunModel, WorkflowRunEventModel, WorkflowRunStepModel
@@ -60,6 +64,32 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         result = await self.db_session.execute(stmt)
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
+
+    async def get_by_id_for_update(self, run_id: str) -> Optional[WorkflowRun]:
+        record = await self._get_record_with_lock(run_id=run_id)
+        return record.to_domain() if record is not None else None
+
+    async def update_status(
+            self,
+            run_id: str,
+            *,
+            status: WorkflowRunStatus,
+            finished_at: Optional[datetime] = None,
+            last_event_at: Optional[datetime] = None,
+            current_step_id: CurrentStepIdUpdate = UNSET_CURRENT_STEP_ID,
+    ) -> None:
+        """原子更新运行状态，不做状态合法性判断。"""
+        record = await self._get_record_with_lock(run_id=run_id)
+        if record is None:
+            raise ValueError(f"运行[{run_id}]不存在，请核实后重试")
+
+        record.status = status.value
+        if finished_at is not None:
+            record.finished_at = finished_at
+        if last_event_at is not None:
+            record.last_event_at = last_event_at
+        if current_step_id is not UNSET_CURRENT_STEP_ID:
+            record.current_step_id = current_step_id
 
     async def update_checkpoint_ref(
             self,
@@ -228,6 +258,33 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         if not run_id:
             return False
 
+        inserted = await self.add_event_record_if_absent(
+            session_id=session_id,
+            run_id=run_id,
+            event=event,
+        )
+        if not inserted:
+            return False
+        await self._refresh_run_status_by_event(run_id=run_id, event=event)
+        # BE-LG-08：步骤投影同步策略统一收口到 run 仓库。
+        if isinstance(event, PlanEvent):
+            await self.replace_steps_from_plan(run_id=run_id, plan=event.plan)
+        elif isinstance(event, StepEvent):
+            await self.upsert_step_from_event(run_id=run_id, event=event)
+        return True
+
+    async def add_event_record_if_absent(
+            self,
+            session_id: str,
+            run_id: str,
+            event: BaseEvent,
+    ) -> bool:
+        """按事件ID幂等写入事件记录，不刷新运行状态。"""
+        if not should_persist_event(event):
+            return False
+        if not run_id:
+            return False
+
         stmt = select(WorkflowRunEventModel.id).where(
             WorkflowRunEventModel.run_id == run_id,
             WorkflowRunEventModel.event_id == str(event.id),
@@ -245,12 +302,6 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             created_at=event.created_at,
         )
         self.db_session.add(event_record)
-        await self._refresh_run_status_by_event(run_id=run_id, event=event)
-        # BE-LG-08：步骤投影同步策略统一收口到 run 仓库。
-        if isinstance(event, PlanEvent):
-            await self.replace_steps_from_plan(run_id=run_id, plan=event.plan)
-        elif isinstance(event, StepEvent):
-            await self.upsert_step_from_event(run_id=run_id, event=event)
         return True
 
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
