@@ -3,7 +3,7 @@
 """Runtime 状态一致性协调服务。"""
 
 import logging
-from typing import Callable
+from typing import Any, Callable
 
 from app.domain.models import (
     BaseEvent,
@@ -22,12 +22,14 @@ from app.domain.models import (
     SessionStatus,
     StepEvent,
     WaitEvent,
+    WorkflowRunStatus,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.state_machine import (
     is_terminal,
     resolve_transition,
 )
+from app.domain.services.runtime.langgraph_state import GraphStateContractMapper, get_graph_projection
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +181,104 @@ class RuntimeStateCoordinator:
             actions=[],
             warnings=warnings,
         )
+
+    async def sync_graph_state(
+            self,
+            run_id: str,
+            state: dict[str, Any],
+            *,
+            checkpoint_ref: CheckpointRef | None = None,
+            source: RuntimeStateSource = RuntimeStateSource.GRAPH_STATE,
+    ) -> RuntimeStateSnapshot:
+        """同步 graph state 投影，并按统一规则对账 run/session 状态。"""
+        runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
+        current_step_id = state.get("current_step_id")
+        pending_interrupt = GraphStateContractMapper.get_pending_interrupt(state)
+        graph_projection_status = self._resolve_graph_projection_status(state)
+
+        async with self.uow_factory() as uow:
+            run = await uow.workflow_run.get_by_id_for_update(run_id)
+            if run is None:
+                raise ValueError(f"运行[{run_id}]不存在，无法同步graph state")
+
+            snapshot = await self._build_snapshot_in_uow(
+                uow=uow,
+                session_id=run.session_id,
+                source=source,
+            )
+            if snapshot.run_id != run_id:
+                logger.warning(
+                    "graph state同步目标不是当前运行",
+                    extra={
+                        "session_id": run.session_id,
+                        "run_id": run_id,
+                        "current_run_id": snapshot.run_id,
+                        "trigger": source.value,
+                    },
+                )
+                return snapshot
+
+            if checkpoint_ref is not None:
+                await uow.workflow_run.update_checkpoint_ref(
+                    run_id=run_id,
+                    checkpoint_namespace=checkpoint_ref.namespace,
+                    checkpoint_id=checkpoint_ref.checkpoint_id,
+                )
+
+            await uow.workflow_run.update_runtime_metadata(
+                run_id=run_id,
+                runtime_metadata=runtime_metadata,
+                current_step_id=(
+                    None
+                    if snapshot.run_status is not None and is_terminal(snapshot.run_status)
+                    else current_step_id
+                ),
+            )
+
+            to_run_status = self._resolve_graph_reconciled_run_status(
+                snapshot=snapshot,
+                pending_interrupt=pending_interrupt,
+                graph_projection_status=graph_projection_status,
+            )
+            to_session_status = SessionStatus(to_run_status.value) if to_run_status is not None else None
+            run_status_changed = to_run_status is not None and to_run_status != snapshot.run_status
+            session_status_changed = to_session_status is not None and to_session_status != snapshot.session_status
+            if run_status_changed or session_status_changed:
+                if run_status_changed:
+                    await uow.workflow_run.update_status(
+                        run_id,
+                        status=to_run_status,
+                        current_step_id=(
+                            None
+                            if is_terminal(to_run_status)
+                            else current_step_id
+                        ),
+                    )
+                await uow.session.update_runtime_state(
+                    run.session_id,
+                    status=to_session_status,
+                )
+                logger.info(
+                    "graph state对账完成",
+                    extra={
+                        "session_id": run.session_id,
+                        "run_id": run_id,
+                        "from_status": snapshot.run_status.value if snapshot.run_status else None,
+                        "to_status": to_run_status.value if to_run_status else None,
+                        "trigger": source.value,
+                        "checkpoint_id": checkpoint_ref.checkpoint_id if checkpoint_ref else None,
+                        "pending_interrupt": bool(pending_interrupt),
+                    },
+                )
+
+            after_snapshot = await self._build_snapshot_in_uow(
+                uow=uow,
+                session_id=run.session_id,
+                source=source,
+            )
+            after_snapshot.pending_interrupt = pending_interrupt
+            after_snapshot.graph_projection_status = graph_projection_status
+            return after_snapshot
 
     async def _persist_runtime_event_in_uow(
             self,
@@ -455,6 +555,46 @@ class RuntimeStateCoordinator:
             return RuntimeCommand.FAIL
         if isinstance(event, PlanEvent) and event.plan.status == ExecutionStatus.CANCELLED:
             return RuntimeCommand.CANCEL
+        return None
+
+    @staticmethod
+    def _resolve_graph_projection_status(state: dict[str, Any]) -> WorkflowRunStatus | None:
+        raw_status = str(get_graph_projection(state.get("graph_metadata")).get("run_status") or "").strip()
+        if not raw_status:
+            return None
+        try:
+            return WorkflowRunStatus(raw_status)
+        except ValueError:
+            logger.warning(
+                "graph projection状态无效",
+                extra={"graph_projection_status": raw_status},
+            )
+            return None
+
+    @staticmethod
+    def _resolve_graph_reconciled_run_status(
+            *,
+            snapshot: RuntimeStateSnapshot,
+            pending_interrupt: dict[str, Any],
+            graph_projection_status: WorkflowRunStatus | None,
+    ) -> WorkflowRunStatus | None:
+        if snapshot.run_status is None:
+            return None
+        if is_terminal(snapshot.run_status):
+            return snapshot.run_status
+        if is_terminal(snapshot.session_status):
+            return WorkflowRunStatus(snapshot.session_status.value)
+        if graph_projection_status is not None and is_terminal(graph_projection_status):
+            return graph_projection_status
+        if pending_interrupt:
+            return WorkflowRunStatus.WAITING
+        if graph_projection_status in {
+            WorkflowRunStatus.WAITING,
+            WorkflowRunStatus.RUNNING,
+        }:
+            return graph_projection_status
+        if snapshot.run_status == WorkflowRunStatus.WAITING:
+            return WorkflowRunStatus.WAITING
         return None
 
     async def _sync_step_projection(

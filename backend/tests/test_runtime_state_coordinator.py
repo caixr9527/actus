@@ -8,6 +8,7 @@ from datetime import datetime
 
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.domain.models import (
+    CheckpointRef,
     DoneEvent,
     ErrorEvent,
     ExecutionStatus,
@@ -79,8 +80,13 @@ class FakeWorkflowRunRepository:
     status_updates: list[dict] = field(default_factory=list)
     replaced_plan_count: int = 0
     upserted_step_count: int = 0
+    checkpoint_ref_updates: list[dict] = field(default_factory=list)
+    runtime_metadata_updates: list[dict] = field(default_factory=list)
 
     async def get_by_id_for_update(self, run_id: str) -> WorkflowRun | None:
+        return self.run if self.run.id == run_id else None
+
+    async def get_by_id(self, run_id: str) -> WorkflowRun | None:
         return self.run if self.run.id == run_id else None
 
     async def update_status(
@@ -126,6 +132,38 @@ class FakeWorkflowRunRepository:
             )
         )
         return True
+
+    async def update_checkpoint_ref(
+            self,
+            run_id: str,
+            checkpoint_namespace: str | None,
+            checkpoint_id: str | None,
+    ) -> None:
+        self.run.checkpoint_namespace = checkpoint_namespace
+        self.run.checkpoint_id = checkpoint_id
+        self.checkpoint_ref_updates.append(
+            {
+                "run_id": run_id,
+                "checkpoint_namespace": checkpoint_namespace,
+                "checkpoint_id": checkpoint_id,
+            }
+        )
+
+    async def update_runtime_metadata(
+            self,
+            run_id: str,
+            runtime_metadata: dict,
+            current_step_id: str | None,
+    ) -> None:
+        self.run.runtime_metadata.update(runtime_metadata)
+        self.run.current_step_id = current_step_id
+        self.runtime_metadata_updates.append(
+            {
+                "run_id": run_id,
+                "runtime_metadata": runtime_metadata,
+                "current_step_id": current_step_id,
+            }
+        )
 
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
         self.replaced_plan_count += 1
@@ -222,6 +260,13 @@ def _build_uow(
 
 def _coordinator_with_uow(uow: FakeUnitOfWork) -> RuntimeStateCoordinator:
     return RuntimeStateCoordinator(uow_factory=lambda: uow)
+
+
+def _confirm_interrupt() -> dict:
+    return {
+        "kind": "confirm",
+        "prompt": "是否继续？",
+    }
 
 
 def test_build_snapshot_should_use_workspace_run_id_as_current_run() -> None:
@@ -436,3 +481,205 @@ def test_reconcile_current_run_should_warn_when_session_and_workspace_run_id_con
 
     assert result.snapshot_after.run_id == "run-1"
     assert result.warnings == ["session_current_run_id_mismatch_workspace_current_run_id"]
+
+
+def test_sync_graph_state_should_mark_waiting_and_update_metadata_checkpoint_ref() -> None:
+    uow = _build_uow()
+    uow.workflow_run.run.current_step_id = "step-old"
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-1",
+        "pending_interrupt": _confirm_interrupt(),
+        "graph_metadata": {"projection": {"run_status": "running"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(
+        coordinator.sync_graph_state(
+            "run-1",
+            state,
+            checkpoint_ref=CheckpointRef(namespace="", checkpoint_id="cp-new"),
+        )
+    )
+
+    assert snapshot.run_status == WorkflowRunStatus.WAITING
+    assert snapshot.session_status == SessionStatus.WAITING
+    assert snapshot.pending_interrupt == {
+        "kind": "confirm",
+        "title": "",
+        "prompt": "是否继续？",
+        "details": "",
+        "attachments": [],
+        "suggest_user_takeover": "none",
+        "confirm_label": "继续",
+        "cancel_label": "取消",
+        "confirm_resume_value": True,
+        "cancel_resume_value": False,
+        "emphasis": "default",
+    }
+    assert snapshot.graph_projection_status == WorkflowRunStatus.RUNNING
+    assert uow.workflow_run.run.status == WorkflowRunStatus.WAITING
+    assert uow.session.session.status == SessionStatus.WAITING
+    assert uow.workflow_run.run.checkpoint_id == "cp-new"
+    assert uow.workflow_run.run.current_step_id == "step-1"
+    assert uow.workflow_run.runtime_metadata_updates[0]["runtime_metadata"]["graph_state_contract"]["graph_state"][
+               "pending_interrupt"
+           ] == {
+               "kind": "confirm",
+               "title": "",
+               "prompt": "是否继续？",
+               "details": "",
+               "attachments": [],
+               "suggest_user_takeover": "none",
+               "confirm_label": "继续",
+               "cancel_label": "取消",
+               "confirm_resume_value": True,
+               "cancel_resume_value": False,
+               "emphasis": "default",
+           }
+
+
+def test_sync_graph_state_should_not_regress_completed_with_stale_pending_interrupt() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.COMPLETED,
+        run_status=WorkflowRunStatus.COMPLETED,
+    )
+    uow.workflow_run.run.current_step_id = "step-old"
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-stale",
+        "pending_interrupt": _confirm_interrupt(),
+        "graph_metadata": {"projection": {"run_status": "waiting"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(
+        coordinator.sync_graph_state(
+            "run-1",
+            state,
+            checkpoint_ref=CheckpointRef(namespace="", checkpoint_id="cp-new"),
+        )
+    )
+
+    assert snapshot.run_status == WorkflowRunStatus.COMPLETED
+    assert snapshot.session_status == SessionStatus.COMPLETED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.COMPLETED
+    assert uow.session.session.status == SessionStatus.COMPLETED
+    assert uow.workflow_run.status_updates == []
+    assert uow.workflow_run.run.checkpoint_id == "cp-new"
+    assert uow.workflow_run.run.current_step_id is None
+
+
+def test_sync_graph_state_should_fix_session_when_run_already_waiting() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.RUNNING,
+        run_status=WorkflowRunStatus.WAITING,
+    )
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-1",
+        "pending_interrupt": _confirm_interrupt(),
+        "graph_metadata": {"projection": {"run_status": "waiting"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(coordinator.sync_graph_state("run-1", state))
+
+    assert snapshot.run_status == WorkflowRunStatus.WAITING
+    assert snapshot.session_status == SessionStatus.WAITING
+    assert uow.workflow_run.status_updates == []
+    assert uow.session.session.status == SessionStatus.WAITING
+
+
+def test_sync_graph_state_should_prefer_terminal_graph_projection_over_stale_pending_interrupt() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.RUNNING,
+        run_status=WorkflowRunStatus.RUNNING,
+    )
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-stale",
+        "pending_interrupt": _confirm_interrupt(),
+        "graph_metadata": {"projection": {"run_status": "completed"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(coordinator.sync_graph_state("run-1", state))
+
+    assert snapshot.run_status == WorkflowRunStatus.COMPLETED
+    assert snapshot.session_status == SessionStatus.COMPLETED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.COMPLETED
+    assert uow.session.session.status == SessionStatus.COMPLETED
+    assert uow.workflow_run.run.current_step_id is None
+
+
+def test_sync_graph_state_should_not_regress_terminal_session_with_stale_pending_interrupt() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.COMPLETED,
+        run_status=WorkflowRunStatus.RUNNING,
+    )
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-stale",
+        "pending_interrupt": _confirm_interrupt(),
+        "graph_metadata": {"projection": {"run_status": "running"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(coordinator.sync_graph_state("run-1", state))
+
+    assert snapshot.run_status == WorkflowRunStatus.COMPLETED
+    assert snapshot.session_status == SessionStatus.COMPLETED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.COMPLETED
+    assert uow.session.session.status == SessionStatus.COMPLETED
+    assert uow.workflow_run.run.current_step_id is None
+
+
+def test_sync_graph_state_should_not_override_failed_with_graph_completed() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.FAILED,
+        run_status=WorkflowRunStatus.FAILED,
+    )
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-stale",
+        "graph_metadata": {"projection": {"run_status": "completed"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(coordinator.sync_graph_state("run-1", state))
+
+    assert snapshot.run_status == WorkflowRunStatus.FAILED
+    assert snapshot.session_status == SessionStatus.FAILED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.FAILED
+    assert uow.workflow_run.status_updates == []
+    assert uow.workflow_run.run.current_step_id is None
+
+
+def test_sync_graph_state_should_not_override_cancelled_with_graph_completed() -> None:
+    uow = _build_uow(
+        session_status=SessionStatus.CANCELLED,
+        run_status=WorkflowRunStatus.CANCELLED,
+    )
+    coordinator = _coordinator_with_uow(uow)
+    state = {
+        "run_id": "run-1",
+        "current_step_id": "step-stale",
+        "pending_interrupt": _confirm_interrupt(),
+        "graph_metadata": {"projection": {"run_status": "completed"}},
+        "emitted_events": [],
+    }
+
+    snapshot = asyncio.run(coordinator.sync_graph_state("run-1", state))
+
+    assert snapshot.run_status == WorkflowRunStatus.CANCELLED
+    assert snapshot.session_status == SessionStatus.CANCELLED
+    assert uow.workflow_run.run.status == WorkflowRunStatus.CANCELLED
+    assert uow.workflow_run.status_updates == []
+    assert uow.workflow_run.run.current_step_id is None

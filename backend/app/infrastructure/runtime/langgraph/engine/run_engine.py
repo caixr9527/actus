@@ -19,6 +19,7 @@ from langgraph.types import Command
 from app.domain.external import LLM, FileStorage
 from app.domain.models import (
     BaseEvent,
+    CheckpointRef,
     Message,
     File,
     Workspace,
@@ -171,6 +172,18 @@ class LangGraphRunEngine(RunEngine):
             if uow_factory is not None
             else None
         )
+        self._runtime_state_coordinator = (
+            self._build_runtime_state_coordinator(uow_factory=uow_factory)
+            if uow_factory is not None
+            else None
+        )
+
+    @staticmethod
+    def _build_runtime_state_coordinator(uow_factory: Callable[[], IUnitOfWork]) -> Any:
+        # 延迟导入避免 application.service 包导出 AgentService 时反向导入 LangGraphRunEngine。
+        from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+
+        return RuntimeStateCoordinator(uow_factory=uow_factory)
 
     @staticmethod
     def _build_graph(
@@ -426,6 +439,13 @@ class LangGraphRunEngine(RunEngine):
             run: Any,
             state: PlannerReActLangGraphState,
     ) -> WorkflowRunStatus:
+        if run.status in {
+            WorkflowRunStatus.COMPLETED,
+            WorkflowRunStatus.FAILED,
+            WorkflowRunStatus.CANCELLED,
+        }:
+            return run.status
+
         pending_interrupt = GraphStateContractMapper.get_pending_interrupt(state)
         if pending_interrupt:
             return WorkflowRunStatus.WAITING
@@ -587,17 +607,22 @@ class LangGraphRunEngine(RunEngine):
             self,
             run_id: Optional[str],
             state: Optional[PlannerReActLangGraphState],
+            checkpoint_ref: CheckpointRef | None = None,
     ) -> None:
-        """回写 BE-LG-04 graph state contract 到 runtime_metadata。"""
-        if self._uow_factory is None or state is None:
+        """通过 coordinator 回写 graph state contract 并执行 runtime 状态对账。"""
+        if self._uow_factory is None or self._runtime_state_coordinator is None or state is None:
             return
 
         resolved_run_id = run_id or state.get("run_id")
         if not resolved_run_id:
             return
 
-        runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
         try:
+            snapshot = await self._runtime_state_coordinator.sync_graph_state(
+                run_id=resolved_run_id,
+                state=state,
+                checkpoint_ref=checkpoint_ref,
+            )
             async with self._uow_factory() as uow:
                 run = await uow.workflow_run.get_by_id(resolved_run_id)
                 if run is None:
@@ -609,11 +634,6 @@ class LangGraphRunEngine(RunEngine):
                         run_id=resolved_run_id,
                     )
                     return
-                await uow.workflow_run.update_runtime_metadata(
-                    run_id=resolved_run_id,
-                    runtime_metadata=runtime_metadata,
-                    current_step_id=state.get("current_step_id"),
-                )
                 await self._sync_context_projections(
                     run=run,
                     state=state,
@@ -625,6 +645,7 @@ class LangGraphRunEngine(RunEngine):
                     "状态合同回写完成",
                     state=state,
                     run_id=resolved_run_id,
+                    status=snapshot.run_status.value if snapshot.run_status else None,
                 )
         except Exception as e:
             log_runtime(
@@ -857,9 +878,10 @@ class LangGraphRunEngine(RunEngine):
                 with suppress(Exception):
                     await graph_task
 
+            checkpoint_ref: CheckpointRef | None = None
             if self._checkpoint_adapter is not None:
                 # 无论图执行成功或失败，都尝试同步最新 checkpoint 引用，保证恢复点尽量前移。
-                await self._checkpoint_adapter.sync_latest_checkpoint_ref(
+                checkpoint_ref = await self._checkpoint_adapter.sync_latest_checkpoint_ref(
                     run_id=run_id,
                     checkpointer=getattr(self._graph, "checkpointer", None),
                     invoke_config=invoke_config,
@@ -868,6 +890,7 @@ class LangGraphRunEngine(RunEngine):
             await self._sync_graph_state_contract(
                 run_id=run_id,
                 state=state or fallback_state,
+                checkpoint_ref=checkpoint_ref,
             )
             log_runtime(
                 logger,

@@ -17,8 +17,10 @@ from app.domain.models import (
     SessionContextSnapshot,
     Plan,
     Step,
+    StepOutcome,
     ExecutionStatus,
     Workspace,
+    SessionStatus,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.engine.run_engine import LangGraphRunEngine
@@ -78,6 +80,53 @@ class _FakeUoW:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return None
+
+
+class _CoordinatorSessionRepo:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.update_runtime_state = AsyncMock(side_effect=self._update_runtime_state)
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self.session if session_id == self.session.id else None
+
+    async def _update_runtime_state(self, session_id: str, *, status: SessionStatus, **kwargs) -> None:
+        self.session.status = status
+
+
+class _CoordinatorWorkflowRunRepo:
+    def __init__(self, run: WorkflowRun) -> None:
+        self.run = run
+        self.update_status = AsyncMock(side_effect=self._update_status)
+        self.update_runtime_metadata = AsyncMock(side_effect=self._update_runtime_metadata)
+        self.update_checkpoint_ref = AsyncMock(side_effect=self._update_checkpoint_ref)
+
+    async def get_by_id(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def _update_status(self, run_id: str, *, status: WorkflowRunStatus, **kwargs) -> None:
+        self.run.status = status
+        if "current_step_id" in kwargs:
+            self.run.current_step_id = kwargs["current_step_id"]
+
+    async def _update_runtime_metadata(self, run_id: str, runtime_metadata: dict, current_step_id: str | None) -> None:
+        self.run.runtime_metadata.update(runtime_metadata)
+        self.run.current_step_id = current_step_id
+
+    async def _update_checkpoint_ref(
+            self,
+            run_id: str,
+            checkpoint_namespace: str | None,
+            checkpoint_id: str | None,
+    ) -> None:
+        self.run.checkpoint_namespace = checkpoint_namespace
+        self.run.checkpoint_id = checkpoint_id
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
 
 def _build_stage_llms(llm=object()) -> dict[str, object]:
@@ -680,9 +729,23 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
         thread_id="thread-1",
         status=WorkflowRunStatus.RUNNING,
     )
-    workflow_run_repo = SimpleNamespace(
-        get_by_id=AsyncMock(return_value=run),
-        update_runtime_metadata=AsyncMock(),
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        workspace_id="workspace-1",
+        current_run_id="run-1",
+        status=SessionStatus.RUNNING,
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        current_run_id="run-1",
+    )
+    session_repo = _CoordinatorSessionRepo(session)
+    workflow_run_repo = _CoordinatorWorkflowRunRepo(run)
+    workspace_repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=workspace),
+        get_by_session_id=AsyncMock(return_value=workspace),
     )
     first_summary = WorkflowRunSummary(
         run_id="run-1",
@@ -707,10 +770,11 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
         session_id="session-1",
         stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
-            session_repo=SimpleNamespace(),
+            session_repo=session_repo,
             workflow_run_repo=workflow_run_repo,
             workflow_run_summary_repo=workflow_run_summary_repo,
             session_context_snapshot_repo=session_context_snapshot_repo,
+            workspace_repo=workspace_repo,
         ),
     )
 
@@ -784,6 +848,10 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
     asyncio.run(engine._sync_graph_state_contract(run_id="run-1", state=state))
 
     workflow_run_repo.update_runtime_metadata.assert_awaited_once()
+    workflow_run_repo.update_status.assert_awaited_once()
+    session_repo.update_runtime_state.assert_awaited_once()
+    assert run.status == WorkflowRunStatus.COMPLETED
+    assert session.status == SessionStatus.COMPLETED
     workflow_run_summary_repo.upsert.assert_awaited_once()
     session_context_snapshot_repo.upsert.assert_awaited_once()
 

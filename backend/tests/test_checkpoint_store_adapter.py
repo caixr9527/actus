@@ -1,7 +1,7 @@
 import asyncio
 from typing import Optional
 
-from app.domain.models import Session, WorkflowRun, Workspace
+from app.domain.models import CheckpointRef, Session, WorkflowRun, Workspace
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 
 
@@ -138,7 +138,7 @@ def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
     )
     checkpointer = _FakeCheckpointer(checkpoint_id="cp-new")
 
-    asyncio.run(
+    checkpoint_ref = asyncio.run(
         adapter.sync_latest_checkpoint_ref(
             run_id="run-1",
             checkpointer=checkpointer,
@@ -149,8 +149,9 @@ def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
     assert checkpointer.lookup_configs == [
         {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
     ]
-    assert workflow_run_repo.updated_refs == [("run-1", "", "cp-new")]
-    assert run.checkpoint_id == "cp-new"
+    assert checkpoint_ref == CheckpointRef(namespace="", checkpoint_id="cp-new")
+    assert workflow_run_repo.updated_refs == []
+    assert run.checkpoint_id == "cp-old"
 
 
 def test_checkpoint_store_adapter_should_not_fallback_to_session_current_run_id() -> None:
