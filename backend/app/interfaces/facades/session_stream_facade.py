@@ -15,6 +15,9 @@ from sse_starlette import ServerSentEvent
 
 from app.application.errors import NotFoundError, error_keys
 from app.application.service import AgentService, RuntimeObservationService, SessionService
+from app.application.service.runtime_observation_service import RuntimeObservationContextResult
+from app.domain.models import SessionStatus
+from app.domain.models import WorkflowRunEventRecord
 from app.infrastructure.storage import get_redis_client
 from app.interfaces.schemas import (
     ChatRequest,
@@ -110,8 +113,42 @@ class SessionStreamFacade:
                 error_key=error_keys.SESSION_NOT_FOUND,
                 error_params={"session_id": session_id},
             )
+        is_empty_stream_request = (
+                request.message is None
+                and request.resume is None
+                and request.command is None
+        )
 
         async def _event_generator() -> AsyncGenerator[ServerSentEvent, None]:
+            observation_context = None
+            live_attach_after_event_id = request.event_id
+            if is_empty_stream_request:
+                observation_context = await runtime_observation_service.build_event_context(
+                    user_id=user_id,
+                    session_id=session_id,
+                    reconcile_reason="before_chat",
+                )
+                replay = await runtime_observation_service.list_persistent_events_after_cursor(
+                    user_id=user_id,
+                    session_id=session_id,
+                    cursor_event_id=request.event_id,
+                )
+                live_attach_after_event_id = replay.live_attach_after_event_id
+                replay_context = observation_context.model_copy(update={"current_step_id": None})
+                replayed_any = False
+                async for sse_event, replay_context in self._iter_observable_records(
+                        runtime_observation_service=runtime_observation_service,
+                        session_id=session_id,
+                        records=replay.records,
+                        observation_context=replay_context,
+                ):
+                    replayed_any = True
+                    yield sse_event
+                if replayed_any:
+                    observation_context = replay_context
+                if observation_context.status not in {SessionStatus.RUNNING, SessionStatus.WAITING}:
+                    return
+
             async for event in agent_service.chat(
                     session_id=session_id,
                     user_id=user_id,
@@ -119,20 +156,26 @@ class SessionStreamFacade:
                     attachments=request.attachments,
                     resume=request.resume.value if request.resume is not None else None,
                     command=request.command.model_dump(mode="json") if request.command is not None else None,
-                    latest_event_id=request.event_id,
+                    latest_event_id=live_attach_after_event_id,
                     timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
             ):
-                runtime = await runtime_observation_service.build_session_observation(
-                    user_id=user_id,
-                    session_id=session_id,
-                )
+                if observation_context is None:
+                    observation_context = await runtime_observation_service.build_event_context(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
                 envelope = await runtime_observation_service.build_observable_event(
                     session_id=session_id,
                     event=event,
-                    run_id=runtime.run_id,
+                    run_id=observation_context.run_id,
                     source_event_id=event.id,
                     cursor_event_id=event.id,
                     source="sse",
+                    context=observation_context,
+                )
+                observation_context = runtime_observation_service.advance_event_context(
+                    observation_context,
+                    event,
                 )
                 sse_event = EventMapper.observable_event_to_sse_event(envelope)
                 if sse_event:
@@ -142,3 +185,37 @@ class SessionStreamFacade:
                     )
 
         return _event_generator()
+
+    async def _iter_observable_records(
+            self,
+            *,
+            runtime_observation_service: RuntimeObservationService,
+            session_id: str,
+            records: list[WorkflowRunEventRecord],
+            observation_context: RuntimeObservationContextResult,
+    ) -> AsyncGenerator[tuple[ServerSentEvent, RuntimeObservationContextResult], None]:
+        """将 DB persistent records 映射为 SSE；调用方负责维护连接级 context。"""
+        for record in records:
+            envelope = await runtime_observation_service.build_observable_event(
+                session_id=session_id,
+                event=record.event_payload,
+                run_id=record.run_id,
+                source_event_id=record.event_id,
+                cursor_event_id=record.event_id,
+                source="sse",
+                context=observation_context,
+            )
+            next_context = runtime_observation_service.advance_event_context(
+                observation_context,
+                record.event_payload,
+            )
+            sse_event = EventMapper.observable_event_to_sse_event(envelope)
+            if sse_event:
+                yield (
+                    ServerSentEvent(
+                        event=sse_event.event,
+                        data=sse_event.data.model_dump_json(),
+                    ),
+                    next_context,
+                )
+            observation_context = next_context

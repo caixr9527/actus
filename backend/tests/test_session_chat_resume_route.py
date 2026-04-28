@@ -8,6 +8,7 @@ from app.application.service.runtime_observation_service import (
     RuntimeCursorResult,
     RuntimeEventMetaResult,
     RuntimeInteractionResult,
+    RuntimeObservationContextResult,
     RuntimeObservableEventResult,
     RuntimeObservationResult,
 )
@@ -57,6 +58,18 @@ class _RouteRuntimeObservationService:
             interaction=RuntimeInteractionResult(kind="wait"),
         )
 
+    async def build_event_context(
+            self,
+            user_id: str,
+            session_id: str,
+            reconcile_reason: str | None = None,
+    ):
+        return RuntimeObservationContextResult(
+            session_id=session_id,
+            run_id="run-1",
+            status=SessionStatus.WAITING,
+        )
+
     async def build_observable_event(
             self,
             *,
@@ -66,6 +79,7 @@ class _RouteRuntimeObservationService:
             source_event_id: str | None,
             cursor_event_id: str | None,
             source: str,
+            context=None,
     ):
         return RuntimeObservableEventResult(
             event=event,
@@ -76,6 +90,9 @@ class _RouteRuntimeObservationService:
                 cursor_event_id=cursor_event_id,
             ),
         )
+
+    def advance_event_context(self, context, event):
+        return context
 
 
 def _build_current_user() -> User:

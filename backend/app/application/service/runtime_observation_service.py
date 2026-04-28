@@ -22,12 +22,13 @@ from app.domain.models import (
     PlanEvent,
     SessionStatus,
     StepEvent,
-    TextStreamDeltaEvent,
-    TextStreamEndEvent,
-    TextStreamStartEvent,
     WaitEvent,
+    RuntimeStateSnapshot,
+    RuntimeStateSource,
+    WorkflowRunEventRecord,
 )
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,25 @@ class RuntimeObservableEventResult(BaseModel):
     runtime: RuntimeEventMetaResult
 
 
+class RuntimeObservationContextResult(BaseModel):
+    """单次事件流内复用的 runtime 投影上下文。"""
+
+    session_id: str
+    run_id: str | None = None
+    status: SessionStatus
+    current_step_id: str | None = None
+    has_current_run: bool = True
+    has_continuable_cancelled_plan: bool = False
+
+
+class RuntimeReplayResult(BaseModel):
+    """基于 persistent cursor 的 DB 历史回放结果。"""
+
+    records: list[WorkflowRunEventRecord] = Field(default_factory=list)
+    cursor_invalid: bool = False
+    live_attach_after_event_id: str | None = None
+
+
 class RuntimeObservationService:
     """构建 runtime observation 快照与事件 envelope 的应用层入口。"""
 
@@ -166,6 +186,77 @@ class RuntimeObservationService:
             interaction=interaction,
         )
 
+    async def build_event_context(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            reconcile_reason: str | None = None,
+    ) -> RuntimeObservationContextResult:
+        """构建 SSE 事件流内可复用的轻量投影上下文。
+
+        空监听 SSE 没有用户输入，不一定会进入 AgentService.chat() 的对账路径，
+        因此调用方可显式传入 before_chat，让 replay 前先完成请求前状态修复。
+        """
+        await self._ensure_owned_session(user_id=user_id, session_id=session_id)
+        if reconcile_reason is not None:
+            reconcile_result = await self._runtime_state_coordinator.reconcile_current_run(
+                session_id=session_id,
+                reason=reconcile_reason,
+            )
+            return self._context_from_snapshot(reconcile_result.snapshot_after)
+
+        snapshot = await self._runtime_state_coordinator.build_snapshot(
+            session_id=session_id,
+            source=RuntimeStateSource.RECONCILE,
+        )
+        return self._context_from_snapshot(snapshot)
+
+    async def list_persistent_events_after_cursor(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            cursor_event_id: str | None,
+    ) -> RuntimeReplayResult:
+        """按 DB persistent cursor 回放历史事件；Redis stream 不参与历史回放。"""
+        await self._ensure_owned_session(user_id=user_id, session_id=session_id)
+        async with self._uow_factory() as uow:
+            records = await uow.workflow_run.list_event_records_by_session(session_id)
+
+        requested_cursor = str(cursor_event_id or "").strip()
+        persistent_records = self._persistent_records(records)
+        if not requested_cursor:
+            return RuntimeReplayResult(
+                records=persistent_records,
+                live_attach_after_event_id=self._latest_persistent_record_event_id(records),
+            )
+
+        for index, record in enumerate(persistent_records):
+            if record.event_id == requested_cursor:
+                replay_records = persistent_records[index + 1:]
+                return RuntimeReplayResult(
+                    records=replay_records,
+                    live_attach_after_event_id=(
+                        self._latest_record_event_id(replay_records)
+                        or requested_cursor
+                    ),
+                )
+
+        logger.warning(
+            "persistent replay cursor无效，降级回放当前session可用历史事件",
+            extra={
+                "session_id": session_id,
+                "requested_event_id": requested_cursor,
+                "reason": "cursor_invalid",
+            },
+        )
+        return RuntimeReplayResult(
+            records=persistent_records,
+            cursor_invalid=True,
+            live_attach_after_event_id=self._latest_persistent_record_event_id(records),
+        )
+
     async def build_observable_event(
             self,
             *,
@@ -175,11 +266,12 @@ class RuntimeObservationService:
             source_event_id: str | None,
             cursor_event_id: str | None,
             source: Literal["snapshot", "sse"],
+            context: RuntimeObservationContextResult | None = None,
     ) -> RuntimeObservableEventResult:
         """为历史详情或 SSE 事件补充 runtime 元数据。"""
         durability: Literal["persistent", "live_only"] = "persistent"
         visibility: Literal["timeline", "draft", "control", "hidden"] = "timeline"
-        if isinstance(event, (TextStreamStartEvent, TextStreamDeltaEvent, TextStreamEndEvent)):
+        if not should_persist_event(event):
             durability = "live_only"
             visibility = "draft"
             source_event_id = None
@@ -191,12 +283,34 @@ class RuntimeObservationService:
                 session_id=session_id,
                 run_id=run_id,
                 status_after_event=self._resolve_status_after_event(event),
-                current_step_id=self._resolve_current_step_id(event),
+                current_step_id=self._resolve_current_step_id(event, context=context),
                 source_event_id=source_event_id,
                 cursor_event_id=cursor_event_id if durability == "persistent" else None,
                 durability=durability,
                 visibility=visibility,
             ),
+        )
+
+    def advance_event_context(
+            self,
+            context: RuntimeObservationContextResult,
+            event: Event,
+    ) -> RuntimeObservationContextResult:
+        """按已投影事件推进请求内上下文，避免每条 SSE 重新查询 runtime 快照。"""
+        next_status = self._resolve_status_after_event(event) or context.status
+        next_current_step_id = context.current_step_id
+        if isinstance(event, StepEvent):
+            next_current_step_id = event.step.id
+        if isinstance(event, (DoneEvent, ErrorEvent)):
+            next_current_step_id = None
+        if isinstance(event, PlanEvent) and event.plan.status == ExecutionStatus.CANCELLED:
+            next_current_step_id = None
+
+        return context.model_copy(
+            update={
+                "status": next_status,
+                "current_step_id": next_current_step_id,
+            }
         )
 
     async def build_capabilities(
@@ -254,6 +368,41 @@ class RuntimeObservationService:
             disabled_reasons=reasons,
         )
 
+    @staticmethod
+    def context_from_observation(
+            observation: RuntimeObservationResult,
+    ) -> RuntimeObservationContextResult:
+        """把详情快照转成事件序列投影上下文。"""
+        return RuntimeObservationContextResult(
+            session_id=observation.session_id,
+            run_id=observation.run_id,
+            status=observation.status,
+            current_step_id=None,
+            has_current_run=observation.run_id is not None,
+            has_continuable_cancelled_plan=observation.capabilities.can_continue_cancelled,
+        )
+
+    @classmethod
+    def _context_from_snapshot(
+            cls,
+            snapshot: RuntimeStateSnapshot,
+    ) -> RuntimeObservationContextResult:
+        status = cls._resolve_status_from_snapshot(snapshot)
+        return RuntimeObservationContextResult(
+            session_id=snapshot.session_id,
+            run_id=snapshot.run_id if snapshot.run_status is not None else None,
+            status=status,
+            current_step_id=snapshot.current_step_id,
+            has_current_run=snapshot.run_status is not None,
+            has_continuable_cancelled_plan=snapshot.has_continuable_cancelled_plan,
+        )
+
+    @staticmethod
+    def _resolve_status_from_snapshot(snapshot: RuntimeStateSnapshot) -> SessionStatus:
+        if snapshot.run_status is not None:
+            return SessionStatus(snapshot.run_status.value)
+        return snapshot.session_status
+
     async def _ensure_owned_session(self, *, user_id: str, session_id: str) -> None:
         async with self._uow_factory() as uow:
             session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
@@ -273,9 +422,10 @@ class RuntimeObservationService:
         async with self._uow_factory() as uow:
             records = await uow.workflow_run.list_event_records_by_session(session_id)
 
-        latest_event_id = records[-1].event_id if records else None
+        persistent_records = self._persistent_records(records)
+        latest_event_id = self._latest_record_event_id(persistent_records)
         latest_wait_event = None
-        for record in reversed(records):
+        for record in reversed(persistent_records):
             if run_id is not None and record.run_id != run_id:
                 continue
             if isinstance(record.event_payload, WaitEvent):
@@ -310,7 +460,43 @@ class RuntimeObservationService:
         return None
 
     @staticmethod
-    def _resolve_current_step_id(event: Event) -> str | None:
+    def filter_persistent_records(
+            records: list[WorkflowRunEventRecord],
+    ) -> list[WorkflowRunEventRecord]:
+        """按统一投递策略过滤可进入历史详情和 DB replay 的 persistent records。"""
+        return RuntimeObservationService._persistent_records(records)
+
+    @staticmethod
+    def _persistent_records(
+            records: list[WorkflowRunEventRecord],
+    ) -> list[WorkflowRunEventRecord]:
+        return [
+            record
+            for record in records
+            if should_persist_event(record.event_payload)
+        ]
+
+    @staticmethod
+    def _latest_record_event_id(records: list[WorkflowRunEventRecord]) -> str | None:
+        if not records:
+            return None
+        return records[-1].event_id
+
+    @classmethod
+    def _latest_persistent_record_event_id(
+            cls,
+            records: list[WorkflowRunEventRecord],
+    ) -> str | None:
+        return cls._latest_record_event_id(cls._persistent_records(records))
+
+    @staticmethod
+    def _resolve_current_step_id(
+            event: Event,
+            *,
+            context: RuntimeObservationContextResult | None = None,
+    ) -> str | None:
         if isinstance(event, StepEvent):
             return event.step.id
+        if context is not None:
+            return context.current_step_id
         return None

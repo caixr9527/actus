@@ -204,8 +204,9 @@ async def get_session(
         user_id=current_user.id,
         session_id=session_id,
     )
+    observation_context = runtime_observation_service.context_from_observation(runtime)
     events = []
-    for event_record in event_records:
+    for event_record in runtime_observation_service.filter_persistent_records(event_records):
         envelope = await runtime_observation_service.build_observable_event(
             session_id=session.id,
             event=event_record.event_payload,
@@ -213,8 +214,13 @@ async def get_session(
             source_event_id=event_record.event_id,
             cursor_event_id=event_record.event_id,
             source="snapshot",
+            context=observation_context,
         )
         events.append(EventMapper.observable_event_to_sse_event(envelope))
+        observation_context = runtime_observation_service.advance_event_context(
+            observation_context,
+            event_record.event_payload,
+        )
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(
