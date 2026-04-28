@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildResumeValueFromWaitPayload, normalizeWaitPayload, parseWaitEventContext } from '../src/lib/wait-event'
+import {
+  buildResumeValueFromWaitPayload,
+  normalizeWaitPayload,
+  parseWaitEventContext,
+  waitEventContextFromRuntimeInteraction,
+} from '../src/lib/wait-event'
 
 const runtime = {
   session_id: 'session-1',
@@ -62,6 +67,43 @@ test('parseWaitEventContext should expose structured payload fields', () => {
   assert.deepEqual(context?.attachments, ['/tmp/spec.md'])
   assert.equal(context?.suggestUserTakeover, true)
   assert.equal(context?.payload?.kind, 'select')
+})
+
+test('waitEventContextFromRuntimeInteraction should expose wait snapshot payload fields', () => {
+  const context = waitEventContextFromRuntimeInteraction({
+    kind: 'wait',
+    interrupt_id: 'interrupt-snapshot',
+    payload: {
+      kind: 'input_text',
+      title: '补充目标',
+      prompt: '请输入目标网站',
+      response_key: 'website',
+      suggest_user_takeover: 'browser',
+      attachments: ['/tmp/brief.md'],
+    },
+  })
+
+  assert.ok(context)
+  assert.equal(context?.interruptId, 'interrupt-snapshot')
+  assert.equal(context?.title, '补充目标')
+  assert.equal(context?.prompt, '请输入目标网站')
+  assert.deepEqual(context?.attachments, ['/tmp/brief.md'])
+  assert.equal(context?.suggestUserTakeover, true)
+  assert.equal(context?.payload?.kind, 'input_text')
+})
+
+test('waitEventContextFromRuntimeInteraction should reject non-wait or invalid payload interaction', () => {
+  assert.equal(waitEventContextFromRuntimeInteraction({
+    kind: 'none',
+    interrupt_id: null,
+    payload: {},
+  }), null)
+
+  assert.equal(waitEventContextFromRuntimeInteraction({
+    kind: 'wait',
+    interrupt_id: 'interrupt-invalid',
+    payload: { kind: 'input_text' },
+  }), null)
 })
 
 test('buildResumeValueFromWaitPayload should respect response_key for text input', () => {

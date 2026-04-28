@@ -1,4 +1,7 @@
-import type { SessionStatus, StepEvent } from './api/types'
+import type { RuntimeCapabilities, RuntimeInteraction, SessionStatus, StepEvent } from './api/types'
+import type { SSEEventData } from './api/types'
+import { findLatestWaitEventContext } from './run-timeline'
+import { waitEventContextFromRuntimeInteraction, type WaitEventContext } from './wait-event'
 
 export type SessionScopedDetailViewState<TFile = unknown, TTool = unknown> = {
   fileListOpen: boolean
@@ -13,6 +16,13 @@ export type SessionScopedRuntimeState = {
   previousToolCount: number
   hasAutoScrolled: boolean
   previousSessionStatus: SessionStatus | null
+}
+
+export type SessionActionAvailability = {
+  canSendMessage: boolean
+  canResume: boolean
+  canCancel: boolean
+  canContinueCancelled: boolean
 }
 
 export function createSessionScopedDetailViewState<TFile = unknown, TTool = unknown>(): SessionScopedDetailViewState<TFile, TTool> {
@@ -31,6 +41,17 @@ export function createSessionScopedRuntimeState(): SessionScopedRuntimeState {
     previousToolCount: 0,
     hasAutoScrolled: false,
     previousSessionStatus: null,
+  }
+}
+
+export function resolveSessionActionAvailability(
+  capabilities: RuntimeCapabilities | null | undefined,
+): SessionActionAvailability {
+  return {
+    canSendMessage: Boolean(capabilities?.can_send_message),
+    canResume: Boolean(capabilities?.can_resume),
+    canCancel: Boolean(capabilities?.can_cancel),
+    canContinueCancelled: Boolean(capabilities?.can_continue_cancelled),
   }
 }
 
@@ -113,4 +134,16 @@ export function shouldResetWaitResumePending(params: {
   if (!waitResumePending) return false
   if (sessionStatus !== 'waiting') return true
   return !streaming
+}
+
+export function resolveWaitResumeContext(params: {
+  canResume: boolean
+  runtimeInteraction: RuntimeInteraction | null | undefined
+  events: SSEEventData[]
+}): WaitEventContext | null {
+  if (!params.canResume) return null
+  return (
+    waitEventContextFromRuntimeInteraction(params.runtimeInteraction)
+    ?? findLatestWaitEventContext(params.events)
+  )
 }

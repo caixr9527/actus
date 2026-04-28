@@ -17,11 +17,13 @@ import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
 } from '@/lib/session-events'
-import { buildStepViewState, findLatestWaitEventContext } from '@/lib/run-timeline'
+import { buildStepViewState } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import {
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
+  resolveSessionActionAvailability,
+  resolveWaitResumeContext,
   shouldAutoCloseTaskPreview,
   shouldAutoScrollToLatest,
   shouldHideWaitResumeCard,
@@ -129,8 +131,18 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const hasRunningStep = useMemo(() => {
     return stepView.steps.some((step) => step.status === 'running')
   }, [stepView.steps])
-  const waitContext = useMemo(() => findLatestWaitEventContext(events), [events])
-  const isWaitingForResume = session?.status === 'waiting'
+  const runtimeStatus = session?.runtime.status
+  const actionAvailability = useMemo(
+    () => resolveSessionActionAvailability(session?.runtime.capabilities),
+    [session?.runtime.capabilities],
+  )
+  const { canSendMessage, canResume, canCancel, canContinueCancelled } = actionAvailability
+  const waitContext = useMemo(() => resolveWaitResumeContext({
+    canResume,
+    runtimeInteraction: session?.runtime.interaction,
+    events,
+  }), [canResume, events, session?.runtime.interaction])
+  const isWaitingForResume = runtimeStatus === 'waiting' && canResume
 
   const [sessionUiState, setSessionUiState] = useState<SessionScopedDetailViewState<AttachmentFile, ToolEvent>>(
     () => createSessionScopedDetailViewState<AttachmentFile, ToolEvent>(),
@@ -153,10 +165,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     if (!waitResumePending) return false
     return !shouldResetWaitResumePending({
       waitResumePending,
-      sessionStatus: session?.status,
+      sessionStatus: runtimeStatus,
       streaming,
     })
-  }, [waitResumePending, session?.status, streaming])
+  }, [waitResumePending, runtimeStatus, streaming])
   const showFullTimeline = timelineExpanded
   const visibleTimeline = useMemo(() => {
     if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
@@ -189,7 +201,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   // 任务运行中自动追踪最新工具预览（VNC 打开时暂停）
   // 该副作用职责是将流式事件同步到预览 UI。
   useEffect(() => {
-    if (session?.status !== 'running' || vncOpen) return
+    if (runtimeStatus !== 'running' || vncOpen) return
 
     if (toolCount > sessionRuntimeRef.current.previousToolCount && latestTool) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -201,7 +213,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
     }
     sessionRuntimeRef.current.previousToolCount = toolCount
-  }, [latestTool, session?.status, toolCount, vncOpen])
+  }, [latestTool, runtimeStatus, toolCount, vncOpen])
 
   useEffect(() => {
     if (!initialMessage || sessionRuntimeRef.current.initialMessageSent || !session || loading || streaming) {
@@ -316,7 +328,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const handleCloseVNC = useCallback(() => {
     setSessionUiState((prev) => ({ ...prev, vncOpen: false }))
     // 关闭 VNC 后跳转到最新工具
-    if (latestTool && session?.status === 'running') {
+    if (latestTool && runtimeStatus === 'running') {
       setSessionUiState((prev) => ({
         ...prev,
         previewTool: latestTool,
@@ -327,7 +339,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
         scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
       }, 100)
     }
-  }, [latestTool, session?.status])
+  }, [latestTool, runtimeStatus])
 
   const handleStop = useCallback(async () => {
     if (!session) return
@@ -343,8 +355,6 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const handleRealtimeRecover = useCallback(() => {
     void refresh({ resetRealtime: true })
   }, [refresh])
-  const isSessionRunning = session?.status === 'running'
-
   const isSessionNotFoundError = Boolean(
     error &&
     (
@@ -356,7 +366,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
   const shouldShowThinking = shouldShowSessionThinking({
     streaming,
-    sessionStatus: session?.status,
+    sessionStatus: runtimeStatus,
     hasInitialMessage: Boolean(hasInitialMessage),
     timelineLength: timeline.length,
     hasError: Boolean(error),
@@ -386,7 +396,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
   useEffect(() => {
     const previousStatus = sessionRuntimeRef.current.previousSessionStatus
-    const nextStatus = session?.status ?? null
+    const nextStatus = runtimeStatus ?? null
     if (shouldAutoCloseTaskPreview(previousStatus, nextStatus)) {
       // 任务从 running 收敛到 completed/cancelled 时，预览面板必须立即清空，避免显示过期执行态内容。
       // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -397,7 +407,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       }))
     }
     sessionRuntimeRef.current.previousSessionStatus = nextStatus
-  }, [session?.status])
+  }, [runtimeStatus])
 
   if (!isHydrated) {
     return (
@@ -622,27 +632,27 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                 stepView={stepView}
               />
               {isWaitingForResume && waitContext && !shouldHideWaitResumeCard({
-                sessionStatus: session.status,
+                sessionStatus: runtimeStatus,
                 waitContextAvailable: Boolean(waitContext),
                 waitResumePending: effectiveWaitResumePending,
               }) ? (
                 <WaitResumeCard
                   className="mb-2"
                   waitContext={waitContext}
-                  busy={streaming || effectiveWaitResumePending}
+                  busy={streaming || effectiveWaitResumePending || !canResume}
                   onResume={handleResume}
                   onOpenTakeover={waitContext.suggestUserTakeover ? handleOpenVNC : undefined}
                 />
               ) : (
                 <>
-                  {session.status === 'cancelled' && (
+                  {runtimeStatus === 'cancelled' && canContinueCancelled && (
                     <div className="mb-2 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                       <span>{t('sessionDetail.cancelledContinueHint')}</span>
                       <Button
                         type="button"
                         size="sm"
                         className="cursor-pointer"
-                        disabled={streaming}
+                        disabled={streaming || !canContinueCancelled}
                         onClick={() => {
                           void handleContinueCancelledRun()
                         }}
@@ -654,9 +664,9 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                   <ChatInput
                     onSend={handleSend}
                     sessionId={sessionId}
-                    isRunning={isSessionRunning}
-                    disabled={streaming || isSessionRunning}
-                    onStop={handleStop}
+                    isRunning={canCancel}
+                    disabled={!canSendMessage || streaming || runtimeStatus === 'running'}
+                    onStop={canCancel ? handleStop : undefined}
                     modelOptions={availableModels}
                     currentModelId={session.current_model_id}
                     defaultModelId={defaultModelId}

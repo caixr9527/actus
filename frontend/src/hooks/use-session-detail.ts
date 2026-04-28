@@ -18,6 +18,12 @@ import {
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '@/lib/session-detail-runtime'
 import {
+  createRuntimeObservationFromSnapshot,
+  projectRuntimeCapabilitiesForStatus,
+  reduceRuntimeObservationOnEvent,
+  type RuntimeObservationViewState,
+} from '@/lib/runtime-observation'
+import {
   getLatestActiveStreamByChannel,
   isTextStreamEvent,
   reduceTextStreamState,
@@ -135,12 +141,13 @@ export function useSessionDetail(
   const emptyStreamRetryCountRef = useRef(0)
   const emptyStreamInstanceIdRef = useRef(0)
   const messageStreamInstanceIdRef = useRef(0)
-  const seenEventIdsRef = useRef<Set<string>>(new Set())
+  const seenPersistentCursorIdsRef = useRef<Set<string>>(new Set())
   const isSendMessageRef = useRef(false)
   const lastEventIdRef = useRef<string | null>(null)
   const sessionEpochRef = useRef(0)
   const currentSessionIdRef = useRef<string | null>(sessionId)
   const sessionStatusRef = useRef<SessionStatus | null>(null)
+  const runtimeObservationRef = useRef<RuntimeObservationViewState | null>(null)
   const streamingRef = useRef(false)
   currentSessionIdRef.current = sessionId
 
@@ -192,7 +199,7 @@ export function useSessionDetail(
       (state, event) => reduceTextStreamState(state, event),
       {},
     )
-    seenEventIdsRef.current = collectSessionEventIds(persistentEvents)
+    seenPersistentCursorIdsRef.current = collectSessionEventIds(persistentEvents)
     setEvents(persistentEvents)
     setTextStreams(rebuiltTextStreams)
     setDisplayedTextStreams(rebuiltTextStreams)
@@ -202,11 +209,11 @@ export function useSessionDetail(
     const evToAppend = unwrapNestedEvent(ev)
     const isTemporaryTextStreamEvent = isTextStreamEvent(evToAppend)
     const eventId = getSessionEventId(evToAppend)
-    if (eventId && !isTemporaryTextStreamEvent) {
-      if (seenEventIdsRef.current.has(eventId)) {
+    if (eventId) {
+      if (seenPersistentCursorIdsRef.current.has(eventId)) {
         return
       }
-      seenEventIdsRef.current.add(eventId)
+      seenPersistentCursorIdsRef.current.add(eventId)
       lastEventIdRef.current = eventId
     }
 
@@ -230,6 +237,30 @@ export function useSessionDetail(
       },
     })
 
+    if (runtimeObservationRef.current) {
+      runtimeObservationRef.current = reduceRuntimeObservationOnEvent(
+        runtimeObservationRef.current,
+        evToAppend,
+      )
+      const runtimeObservation = runtimeObservationRef.current
+      setSession((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          status: runtimeObservation.status,
+          runtime: {
+            ...prev.runtime,
+            run_id: runtimeObservation.runId,
+            status: runtimeObservation.status,
+            current_step_id: runtimeObservation.currentStepId,
+            cursor: runtimeObservation.cursor,
+            capabilities: runtimeObservation.capabilities,
+            interaction: runtimeObservation.interaction,
+          },
+        }
+      })
+    }
+
     // 统一运行时状态迁移（status + streaming）
     const nextRuntime = reduceSessionRuntimeStateOnEvent(
       { status: sessionStatusRef.current, streaming: streamingRef.current },
@@ -245,18 +276,6 @@ export function useSessionDetail(
     }
     if (nextRuntime.status !== sessionStatusRef.current) {
       sessionStatusRef.current = nextRuntime.status
-      setSession((prev) => {
-        if (!prev || !nextRuntime.status) return prev
-        if (prev.status === nextRuntime.status && prev.runtime.status === nextRuntime.status) return prev
-        return {
-          ...prev,
-          status: nextRuntime.status,
-          runtime: {
-            ...prev.runtime,
-            status: nextRuntime.status,
-          },
-        }
-      })
     }
   }, [setStreamingState, stopEmptyStream])
 
@@ -385,19 +404,24 @@ export function useSessionDetail(
       }
 
       const normalizedDetail = normalizeSessionDetailRuntimeStatus(detail)
+      const runtimeObservation = createRuntimeObservationFromSnapshot(normalizedDetail)
+      runtimeObservationRef.current = runtimeObservation
       setError(null)
       setSession(normalizedDetail)
-      sessionStatusRef.current = normalizedDetail.runtime.status
+      sessionStatusRef.current = runtimeObservation.status
       setFiles(normalizeFileList(fileListRaw))
       const rawEvents = (normalizedDetail as { events?: unknown }).events
       if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
         const normalized = normalizeEvents(rawEvents)
         replaceEvents(normalized)
-        const lastEvId = getSessionEventId(normalized[normalized.length - 1] as SSEEventData)
-        if (lastEvId) lastEventIdRef.current = lastEvId
+        const lastPersistentEventId = normalized
+          .map((event) => getSessionEventId(event))
+          .filter((eventId): eventId is string => Boolean(eventId))
+          .at(-1)
+        lastEventIdRef.current = lastPersistentEventId ?? normalizedDetail.runtime.cursor.latest_event_id
       } else {
         replaceEvents([])
-        lastEventIdRef.current = null
+        lastEventIdRef.current = normalizedDetail.runtime.cursor.latest_event_id
       }
       return normalizedDetail
     } catch (e) {
@@ -482,6 +506,7 @@ export function useSessionDetail(
       setModelsLoading(false)
       setSession(null)
       sessionStatusRef.current = null
+      runtimeObservationRef.current = null
       setFiles([])
       setAvailableModels([])
       setDefaultModelId(null)
@@ -495,6 +520,7 @@ export function useSessionDetail(
       setModelsLoading(false)
       setSession(null)
       sessionStatusRef.current = null
+      runtimeObservationRef.current = null
       setFiles([])
       setAvailableModels([])
       setDefaultModelId(null)
@@ -507,6 +533,7 @@ export function useSessionDetail(
     setModelsLoading(true)
     setSession(null)
     sessionStatusRef.current = null
+    runtimeObservationRef.current = null
     setFiles([])
     setAvailableModels([])
     setDefaultModelId(null)
@@ -571,12 +598,43 @@ export function useSessionDetail(
       // 因此前端不能在请求发出前抢先改成本地 running。
       if ('message' in chatParams || 'command' in chatParams) {
         sessionStatusRef.current = 'running'
+        if (runtimeObservationRef.current) {
+          const nextInteraction = {
+            kind: 'none' as const,
+            interrupt_id: null,
+            payload: {},
+          }
+          runtimeObservationRef.current = {
+            ...runtimeObservationRef.current,
+            status: 'running',
+            capabilities: projectRuntimeCapabilitiesForStatus(
+              'running',
+              runtimeObservationRef.current.capabilities,
+              nextInteraction,
+            ),
+            interaction: nextInteraction,
+          }
+        }
         setSession((prev) => prev ? {
           ...prev,
           status: 'running',
           runtime: {
             ...prev.runtime,
             status: 'running',
+            capabilities: projectRuntimeCapabilitiesForStatus(
+              'running',
+              prev.runtime.capabilities,
+              {
+                kind: 'none',
+                interrupt_id: null,
+                payload: {},
+              },
+            ),
+            interaction: {
+              kind: 'none',
+              interrupt_id: null,
+              payload: {},
+            },
           },
         } : null)
       }

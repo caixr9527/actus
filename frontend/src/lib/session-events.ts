@@ -69,7 +69,6 @@ function stableId(prefix: string, index: number, suffix: string): string {
 
 export type TimelineBuildContext = {
   list: TimelineItem[];
-  lastStepId: string | null;
   messageIndex: number;
   toolIndex: number;
   stepIndex: number;
@@ -82,7 +81,6 @@ export type TimelineBuildContext = {
 export function createTimelineBuildContext(): TimelineBuildContext {
   return {
     list: [],
-    lastStepId: null,
     messageIndex: 0,
     toolIndex: 0,
     stepIndex: 0,
@@ -94,7 +92,6 @@ export function createTimelineBuildContext(): TimelineBuildContext {
 }
 
 function resetStepTurnContext(context: TimelineBuildContext): void {
-  context.lastStepId = null;
   context.stepIndexById.clear();
   context.stepToolIndexByStepId.clear();
 }
@@ -230,13 +227,6 @@ function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
     // 相同 step.id 在新轮次中可能复用，需要清理旧索引
     context.stepToolIndexByStepId.set(step.id, new Map<string, number>());
   }
-
-  // completed/failed/cancelled 都表示当前步骤已收敛，后续工具事件不应再挂到它身上。
-  if (step.status === "completed" || step.status === "failed" || step.status === "cancelled") {
-    context.lastStepId = null;
-  } else {
-    context.lastStepId = step.id;
-  }
 }
 
 function reconcileStepsFromPlan(context: TimelineBuildContext, plan: PlanEvent): void {
@@ -259,12 +249,6 @@ function reconcileStepsFromPlan(context: TimelineBuildContext, plan: PlanEvent):
         outcome: step.outcome ?? existing.data.outcome,
       },
     }
-
-    if (step.status === 'completed' || step.status === 'failed' || step.status === 'cancelled') {
-      if (context.lastStepId === step.id) {
-        context.lastStepId = null
-      }
-    }
   }
 }
 
@@ -274,7 +258,7 @@ function appendToolEvent(
   locale: AppLocale,
 ): void {
   const toolTimelineKey = buildToolTimelineKey(tool);
-  const activeStepId = context.lastStepId;
+  const activeStepId = tool.runtime.current_step_id;
 
   if (activeStepId !== null) {
     const stepIdx = context.stepIndexById.get(activeStepId);
@@ -379,7 +363,6 @@ export function appendTimelineEvent(
 function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildContext {
   return {
     list: [...source.list],
-    lastStepId: source.lastStepId,
     messageIndex: source.messageIndex,
     toolIndex: source.toolIndex,
     stepIndex: source.stepIndex,

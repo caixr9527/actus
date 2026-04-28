@@ -1,6 +1,7 @@
 'use client'
 
 import type {
+  RuntimeInteraction,
   WaitChoice,
   WaitConfirmPayload,
   WaitEventData,
@@ -127,6 +128,23 @@ export function parseWaitEventContext(data: WaitEventData): WaitEventContext | n
   if (!payload) return null
   return {
     interruptId: toText(data.interrupt_id) || null,
+    payload,
+    title: payload.title || null,
+    prompt: payload.prompt || null,
+    details: payload.details || null,
+    attachments: payload.attachments ?? [],
+    suggestUserTakeover: payload.suggest_user_takeover === 'browser',
+  }
+}
+
+export function waitEventContextFromRuntimeInteraction(
+  interaction: RuntimeInteraction | null | undefined,
+): WaitEventContext | null {
+  if (!interaction || interaction.kind !== 'wait') return null
+  const payload = normalizeWaitPayload(interaction.payload)
+  if (!payload) return null
+  return {
+    interruptId: toText(interaction.interrupt_id) || null,
     payload,
     title: payload.title || null,
     prompt: payload.prompt || null,

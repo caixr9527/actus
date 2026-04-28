@@ -6,10 +6,38 @@ import {
   createTimelineBuildContext,
   eventsToTimeline,
 } from '../src/lib/session-events'
-import type { SSEEventData } from '../src/lib/api/types'
+import type { RuntimeEventMeta, SSEEventData } from '../src/lib/api/types'
 
-function eventOf(type: SSEEventData['type'], data: unknown): SSEEventData {
-  return { type, data } as SSEEventData
+let runtimeEventSequence = 0
+
+function runtime(overrides: Partial<RuntimeEventMeta> = {}): RuntimeEventMeta {
+  runtimeEventSequence += 1
+  const eventId = `evt-${runtimeEventSequence}`
+  return {
+    session_id: 'session-1',
+    run_id: 'run-1',
+    status_after_event: null,
+    current_step_id: null,
+    source_event_id: eventId,
+    cursor_event_id: eventId,
+    durability: 'persistent',
+    visibility: 'timeline',
+    ...overrides,
+  }
+}
+
+function eventOf(
+  type: SSEEventData['type'],
+  data: Record<string, unknown>,
+  runtimeOverrides: Partial<RuntimeEventMeta> = {},
+): SSEEventData {
+  return {
+    type,
+    data: {
+      runtime: runtime(runtimeOverrides),
+      ...data,
+    },
+  } as SSEEventData
 }
 
 test('eventsToTimeline should merge tool updates and reset step context across user turns', () => {
@@ -26,7 +54,7 @@ test('eventsToTimeline should merge tool updates and reset step context across u
       function: 'browser_open',
       args: { url: 'https://example.com' },
       status: 'calling',
-    }),
+    }, { current_step_id: 'step-1' }),
     eventOf('tool', {
       tool_call_id: 'tool-1',
       name: 'browser',
@@ -34,7 +62,7 @@ test('eventsToTimeline should merge tool updates and reset step context across u
       args: { url: 'https://example.com' },
       status: 'called',
       content: 'ok',
-    }),
+    }, { current_step_id: 'step-1' }),
     eventOf('step', { id: 'step-1', status: 'completed', description: 'phase 1' }),
     eventOf('message', { role: 'user', message: 'second question' }),
     eventOf('step', {
@@ -99,7 +127,7 @@ test('appendTimelineEvent should match full timeline build in append-only stream
       function: 'search_web',
       args: { q: 'hello' },
       status: 'calling',
-    }),
+    }, { current_step_id: 's-1' }),
     eventOf('tool', {
       tool_call_id: 'tool-1',
       name: 'search',
@@ -107,7 +135,7 @@ test('appendTimelineEvent should match full timeline build in append-only stream
       args: { q: 'hello' },
       status: 'called',
       content: { results: [] },
-    }),
+    }, { current_step_id: 's-1' }),
     eventOf('step', { id: 's-1', status: 'completed', description: 'step 1 done' }),
     eventOf('message', { role: 'assistant', message: 'answer' }),
     eventOf('message', { role: 'user', message: 'q2' }),
@@ -122,6 +150,32 @@ test('appendTimelineEvent should match full timeline build in append-only stream
 
   const full = eventsToTimeline(events)
   assert.deepEqual(context.list, full)
+})
+
+test('tool events without runtime current step id should remain standalone', () => {
+  const events: SSEEventData[] = [
+    eventOf('message', { role: 'user', message: 'q1' }),
+    eventOf('step', { id: 's-1', status: 'running', description: 'running step' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-standalone',
+      name: 'search',
+      function: 'search_web',
+      args: { q: 'hello' },
+      status: 'calling',
+    }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+  const standaloneTools = timeline.filter((item) => item.kind === 'tool')
+
+  assert.equal(stepItems.length, 1)
+  assert.equal(standaloneTools.length, 1)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.tools.length, 0)
+  }
 })
 
 test('plan event should reconcile existing running step card to cancelled', () => {
