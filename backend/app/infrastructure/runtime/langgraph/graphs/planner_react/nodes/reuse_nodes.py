@@ -6,6 +6,10 @@ import logging
 import sys
 
 from app.domain.models import ExecutionStatus, StepEvent, StepEventStatus
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import normalize_step_result_text
@@ -106,19 +110,25 @@ async def guard_step_reuse_node(state: PlannerReActLangGraphState) -> PlannerReA
         artifact_count=len(list(step.outcome.produced_artifacts or [])),
     )
 
+    updates = {
+        "plan": plan,
+        "last_executed_step": step.model_copy(deep=True),
+        "execution_count": int(state.get("execution_count", 0)) + 1,
+        "current_step_id": next_step.id if next_step is not None else None,
+        "working_memory": working_memory,
+        "graph_metadata": _replace_control_metadata(state, control),
+        # 复用命中只补执行事实，不应把复用摘要写成最终正文；保留 final_message 键的稳定状态合同。
+        "final_message": str(state.get("final_message") or ""),
+        "selected_artifacts": list(state.get("selected_artifacts") or []),
+        "pending_interrupt": {},
+    }
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.REUSE,
+        before_state=state,
+        updates=updates,
+    )
     return _reduce_state_with_events(
         state,
-        updates={
-            "plan": plan,
-            "last_executed_step": step.model_copy(deep=True),
-            "execution_count": int(state.get("execution_count", 0)) + 1,
-            "current_step_id": next_step.id if next_step is not None else None,
-            "working_memory": working_memory,
-            "graph_metadata": _replace_control_metadata(state, control),
-            # 复用命中只补执行事实，不应把复用摘要写成最终正文；保留 final_message 键的稳定状态合同。
-            "final_message": str(state.get("final_message") or ""),
-            "selected_artifacts": list(state.get("selected_artifacts") or []),
-            "pending_interrupt": {},
-        },
+        updates=updates,
         events=[completed_event],
     )

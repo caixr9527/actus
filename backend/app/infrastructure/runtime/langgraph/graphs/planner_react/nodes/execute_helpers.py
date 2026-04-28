@@ -27,6 +27,10 @@ from app.domain.models import (
 )
 from app.domain.services.prompts import EXECUTION_PROMPT
 from app.domain.services.runtime.langgraph_events import append_events
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
@@ -625,21 +629,27 @@ async def build_execute_completed_transition(
         runtime_recent_action=runtime_recent_action,
     )
     next_step_id = str(next_step.id or "") if next_step is not None else ""
+    updates = {
+        "plan": plan,
+        **completed_context_updates,
+        "last_executed_step": step.model_copy(deep=True),
+        "execution_count": int(state.get("execution_count", 0)) + 1,
+        "current_step_id": next_step.id if next_step is not None else None,
+        "user_message": user_message,
+        "working_memory": updated_working_memory,
+        "graph_metadata": replace_control_metadata(state, updated_control),
+        # Step 语义已收紧为执行摘要，不再覆盖最终正文；但 final_message 状态键仍需稳定保留。
+        "final_message": str(state.get("final_message") or ""),
+        "selected_artifacts": list(state.get("selected_artifacts") or []),
+        "pending_interrupt": {},
+    }
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.EXECUTE,
+        before_state=state,
+        updates=updates,
+    )
     return ExecuteStepCompletedTransition(
-        updates={
-            "plan": plan,
-            **completed_context_updates,
-            "last_executed_step": step.model_copy(deep=True),
-            "execution_count": int(state.get("execution_count", 0)) + 1,
-            "current_step_id": next_step.id if next_step is not None else None,
-            "user_message": user_message,
-            "working_memory": updated_working_memory,
-            "graph_metadata": replace_control_metadata(state, updated_control),
-            # Step 语义已收紧为执行摘要，不再覆盖最终正文；但 final_message 状态键仍需稳定保留。
-            "final_message": str(state.get("final_message") or ""),
-            "selected_artifacts": list(state.get("selected_artifacts") or []),
-            "pending_interrupt": {},
-        },
+        updates=updates,
         events=events,
         next_step_id=next_step_id or None,
         step_success=step_success,
