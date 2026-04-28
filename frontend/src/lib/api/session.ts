@@ -1,5 +1,6 @@
 import { get, post, createSSEStream, parseSSEStream } from "./fetch";
 import { translateRuntime } from "../i18n/runtime";
+import { normalizeEvent } from "../session-event-adapter";
 import type {
   Session,
   SessionDetail,
@@ -9,7 +10,6 @@ import type {
   SessionFile,
   ViewFileParams,
   ViewShellParams,
-  SSEEventData,
   SSEEventHandler,
   UpdateSessionModelParams,
   UpdateSessionModelResponse,
@@ -177,10 +177,14 @@ export const sessionApi = {
                 ? JSON.parse(messageEvent.data)
                 : messageEvent.data;
             
-            onEvent({
-              type: messageEvent.type as SSEEventData["type"],
+            const event = normalizeEvent({
+              type: messageEvent.type,
               data,
-            } as SSEEventData);
+            });
+            if (!event) {
+              throw new Error("SSE_EVENT_RUNTIME_CONTRACT_INVALID");
+            }
+            onEvent(event);
           },
           (error) => {
             if (!controller.signal.aborted) {

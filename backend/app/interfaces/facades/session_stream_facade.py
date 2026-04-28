@@ -14,7 +14,7 @@ from redis.exceptions import RedisError
 from sse_starlette import ServerSentEvent
 
 from app.application.errors import NotFoundError, error_keys
-from app.application.service import AgentService, SessionService
+from app.application.service import AgentService, RuntimeObservationService, SessionService
 from app.infrastructure.storage import get_redis_client
 from app.interfaces.schemas import (
     ChatRequest,
@@ -96,6 +96,7 @@ class SessionStreamFacade:
             request: ChatRequest,
             session_service: SessionService,
             agent_service: AgentService,
+            runtime_observation_service: RuntimeObservationService,
     ) -> AsyncGenerator[ServerSentEvent, None]:
         """收敛 chat SSE 映射编排（会话校验 + runtime context + EventMapper）。"""
         # Context: FastAPI 只有在构造 EventSourceResponse 前抛错，才能稳定返回 HTTP 404。
@@ -121,7 +122,19 @@ class SessionStreamFacade:
                     latest_event_id=request.event_id,
                     timestamp=datetime.fromtimestamp(request.timestamp) if request.timestamp else None,
             ):
-                sse_event = EventMapper.event_to_sse_event(event)
+                runtime = await runtime_observation_service.build_session_observation(
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                envelope = await runtime_observation_service.build_observable_event(
+                    session_id=session_id,
+                    event=event,
+                    run_id=runtime.run_id,
+                    source_event_id=event.id,
+                    cursor_event_id=event.id,
+                    source="sse",
+                )
+                sse_event = EventMapper.observable_event_to_sse_event(envelope)
                 if sse_event:
                     yield ServerSentEvent(
                         event=sse_event.event,

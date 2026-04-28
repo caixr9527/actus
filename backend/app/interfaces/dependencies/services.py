@@ -18,6 +18,7 @@ from app.application.service import (
     FileService,
     ModelConfigService,
     ModelRuntimeResolver,
+    RuntimeObservationService,
     StatusService,
     AgentService,
     AuthService,
@@ -166,6 +167,12 @@ def get_user_service() -> UserService:
 def get_session_stream_facade() -> SessionStreamFacade:
     """获取会话流式 facade。"""
     return SessionStreamFacade()
+
+
+@lru_cache()
+def get_runtime_observation_service() -> RuntimeObservationService:
+    """获取 Runtime Observation 应用服务。"""
+    return RuntimeObservationService(uow_factory=get_uow)
 
 
 def get_access_token_blacklist_store() -> RedisAccessTokenBlacklistStore:

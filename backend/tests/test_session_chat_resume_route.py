@@ -3,10 +3,22 @@ import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.application.service.runtime_observation_service import (
+    RuntimeCapabilityResult,
+    RuntimeCursorResult,
+    RuntimeEventMetaResult,
+    RuntimeInteractionResult,
+    RuntimeObservableEventResult,
+    RuntimeObservationResult,
+)
 from app.application.errors import error_keys
 from app.domain.models import ErrorEvent, Session, SessionStatus, User
 from app.interfaces.dependencies.auth import get_current_user
-from app.interfaces.dependencies.services import get_agent_service, get_session_service
+from app.interfaces.dependencies.services import (
+    get_agent_service,
+    get_runtime_observation_service,
+    get_session_service,
+)
 from app.interfaces.endpoints.session_routes import router as session_router
 from app.interfaces.errors.exception_handlers import register_exception_handlers
 
@@ -34,6 +46,38 @@ class _RouteResumeInvalidAgentService:
         )
 
 
+class _RouteRuntimeObservationService:
+    async def build_session_observation(self, user_id: str, session_id: str):
+        return RuntimeObservationResult(
+            session_id=session_id,
+            run_id="run-1",
+            status=SessionStatus.WAITING,
+            cursor=RuntimeCursorResult(),
+            capabilities=RuntimeCapabilityResult(can_resume=True, can_cancel=True),
+            interaction=RuntimeInteractionResult(kind="wait"),
+        )
+
+    async def build_observable_event(
+            self,
+            *,
+            session_id: str,
+            event,
+            run_id: str | None,
+            source_event_id: str | None,
+            cursor_event_id: str | None,
+            source: str,
+    ):
+        return RuntimeObservableEventResult(
+            event=event,
+            runtime=RuntimeEventMetaResult(
+                session_id=session_id,
+                run_id=run_id,
+                source_event_id=source_event_id,
+                cursor_event_id=cursor_event_id,
+            ),
+        )
+
+
 def _build_current_user() -> User:
     return User(
         id="user-1",
@@ -50,6 +94,7 @@ def test_session_chat_route_should_stream_error_event_when_resume_value_invalid(
     agent_service = _RouteResumeInvalidAgentService()
     app.dependency_overrides[get_session_service] = lambda: _RouteWaitingSessionService()
     app.dependency_overrides[get_agent_service] = lambda: agent_service
+    app.dependency_overrides[get_runtime_observation_service] = lambda: _RouteRuntimeObservationService()
     app.dependency_overrides[get_current_user] = _build_current_user
 
     with TestClient(app) as client:
@@ -71,3 +116,5 @@ def test_session_chat_route_should_stream_error_event_when_resume_value_invalid(
     payload = json.loads(data_line[6:])
     assert payload["error_key"] == error_keys.SESSION_RESUME_VALUE_INVALID
     assert payload["error_params"] == {"session_id": "session-1"}
+    assert payload["runtime"]["session_id"] == "session-1"
+    assert payload["runtime"]["run_id"] == "run-1"

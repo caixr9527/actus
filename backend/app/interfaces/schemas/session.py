@@ -11,6 +11,9 @@ from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models import SessionStatus, File
+from app.application.service.runtime_observation_service import (
+    RuntimeObservationResult,
+)
 from app.interfaces.schemas import AgentSSEEvent
 
 
@@ -32,6 +35,71 @@ class ListSessionItem(BaseModel):
 class ListSessionResponse(BaseModel):
     """获取会话列表基础信息响应结构"""
     sessions: List[ListSessionItem]
+
+
+class RuntimeCursorResponse(BaseModel):
+    """会话详情 runtime 持久游标。"""
+
+    latest_event_id: Optional[str] = None
+    has_more: bool = False
+
+
+class RuntimeCapabilityResponse(BaseModel):
+    """会话详情 runtime 用户动作能力。"""
+
+    can_send_message: bool = True
+    can_resume: bool = False
+    can_cancel: bool = False
+    can_continue_cancelled: bool = False
+    disabled_reasons: dict[str, str] = Field(default_factory=dict)
+
+
+class RuntimeInteractionResponse(BaseModel):
+    """会话详情 runtime 当前交互上下文。"""
+
+    kind: Literal["none", "wait"] = "none"
+    interrupt_id: Optional[str] = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeObservationResponse(BaseModel):
+    """会话详情 runtime 观察快照。"""
+
+    session_id: str
+    run_id: Optional[str] = None
+    status: SessionStatus
+    current_step_id: Optional[str] = None
+    cursor: RuntimeCursorResponse
+    capabilities: RuntimeCapabilityResponse
+    interaction: RuntimeInteractionResponse
+
+    @classmethod
+    def from_result(cls, result: RuntimeObservationResult) -> "RuntimeObservationResponse":
+        return cls(
+            session_id=result.session_id,
+            run_id=result.run_id,
+            status=result.status,
+            current_step_id=result.current_step_id,
+            cursor=RuntimeCursorResponse(
+                latest_event_id=result.cursor.latest_event_id,
+                has_more=result.cursor.has_more,
+            ),
+            capabilities=RuntimeCapabilityResponse(
+                can_send_message=result.capabilities.can_send_message,
+                can_resume=result.capabilities.can_resume,
+                can_cancel=result.capabilities.can_cancel,
+                can_continue_cancelled=result.capabilities.can_continue_cancelled,
+                disabled_reasons={
+                    (action.value if hasattr(action, "value") else str(action)): reason
+                    for action, reason in result.capabilities.disabled_reasons.items()
+                },
+            ),
+            interaction=RuntimeInteractionResponse(
+                kind=result.interaction.kind,
+                interrupt_id=result.interaction.interrupt_id,
+                payload=dict(result.interaction.payload or {}),
+            ),
+        )
 
 
 class ChatRequest(BaseModel):
@@ -74,6 +142,7 @@ class GetSessionResponse(BaseModel):
     title: Optional[str] = None
     status: SessionStatus
     current_model_id: Optional[str] = None
+    runtime: RuntimeObservationResponse
     events: List[AgentSSEEvent] = Field(default_factory=list)
 
 

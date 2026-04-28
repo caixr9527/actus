@@ -3,6 +3,17 @@ import test from 'node:test'
 
 import { buildResumeValueFromWaitPayload, normalizeWaitPayload, parseWaitEventContext } from '../src/lib/wait-event'
 
+const runtime = {
+  session_id: 'session-1',
+  run_id: 'run-1',
+  status_after_event: 'waiting',
+  current_step_id: null,
+  source_event_id: 'evt-wait-1',
+  cursor_event_id: 'evt-wait-1',
+  durability: 'persistent',
+  visibility: 'timeline',
+} as const
+
 test('normalizeWaitPayload should parse input text payload', () => {
   const payload = normalizeWaitPayload({
     kind: 'input_text',
@@ -30,6 +41,7 @@ test('normalizeWaitPayload should parse input text payload', () => {
 
 test('parseWaitEventContext should expose structured payload fields', () => {
   const context = parseWaitEventContext({
+    runtime,
     interrupt_id: 'interrupt-1',
     payload: {
       kind: 'select',

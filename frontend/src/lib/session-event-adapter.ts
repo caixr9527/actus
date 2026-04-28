@@ -1,4 +1,4 @@
-import type { SSEEventData, SSEEventType } from './api/types'
+import type { SessionDetail, SessionStatus, SSEEventData, SSEEventType } from './api/types'
 
 type RawSessionEvent = {
   event?: string
@@ -26,8 +26,21 @@ const KNOWN_SSE_EVENT_TYPES: ReadonlySet<SSEEventType> = new Set<SSEEventType>([
   'text_stream_end',
 ])
 
+const SESSION_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
+  'pending',
+  'running',
+  'waiting',
+  'completed',
+  'failed',
+  'cancelled',
+])
+
 function isKnownSSEEventType(type: unknown): type is SSEEventType {
   return typeof type === 'string' && KNOWN_SSE_EVENT_TYPES.has(type as SSEEventType)
+}
+
+function isSessionStatus(status: unknown): status is SessionStatus {
+  return typeof status === 'string' && SESSION_STATUSES.has(status as SessionStatus)
 }
 
 function isNestedRawEvent(value: unknown): value is RawSessionEvent {
@@ -37,6 +50,33 @@ function isNestedRawEvent(value: unknown): value is RawSessionEvent {
   return hasRawType && 'data' in rawEvent
 }
 
+export function hasRuntimeMeta(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false
+  const runtime = (data as { runtime?: unknown }).runtime
+  if (typeof runtime !== 'object' || runtime === null) return false
+  return typeof (runtime as { session_id?: unknown }).session_id === 'string'
+}
+
+export function assertSessionDetailRuntime(detail: SessionDetail): void {
+  if (typeof detail.runtime !== 'object' || detail.runtime === null) {
+    throw new Error('SESSION_DETAIL_RUNTIME_CONTRACT_MISSING')
+  }
+  if (typeof detail.runtime.session_id !== 'string') {
+    throw new Error('SESSION_DETAIL_RUNTIME_CONTRACT_INVALID')
+  }
+  if (!isSessionStatus(detail.runtime.status)) {
+    throw new Error('SESSION_DETAIL_RUNTIME_CONTRACT_INVALID')
+  }
+}
+
+export function normalizeSessionDetailRuntimeStatus(detail: SessionDetail): SessionDetail {
+  assertSessionDetailRuntime(detail)
+  return {
+    ...detail,
+    status: detail.runtime.status,
+  }
+}
+
 /**
  * 将后端单条事件转为前端统一 SSEEventData（仅接受已知事件类型）。
  */
@@ -44,6 +84,7 @@ export function normalizeEvent(raw: RawSessionEvent): SSEEventData | null {
   const type = raw.type ?? raw.event
   if (!isKnownSSEEventType(type)) return null
   if (!('data' in raw)) return null
+  if (!hasRuntimeMeta(raw.data)) return null
   return {
     type,
     data: raw.data,

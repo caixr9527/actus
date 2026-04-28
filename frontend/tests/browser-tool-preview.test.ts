@@ -5,8 +5,20 @@ import type { ToolEvent } from '../src/lib/api/types'
 import { getBrowserPreviewData } from '../src/lib/browser-tool-preview'
 import { getFriendlyToolLabel } from '../src/components/tool-use/utils'
 
+const runtime = {
+  session_id: 'session-1',
+  run_id: 'run-1',
+  status_after_event: null,
+  current_step_id: null,
+  source_event_id: 'evt-1',
+  cursor_event_id: 'evt-1',
+  durability: 'persistent',
+  visibility: 'timeline',
+} as const
+
 test('getBrowserPreviewData should expose browser degrade and matched target fields', () => {
   const tool = {
+    runtime,
     name: 'browser',
     function: 'browser_find_link_by_text',
     args: { text: 'Execution Model' },
@@ -40,11 +52,13 @@ test('getBrowserPreviewData should expose browser degrade and matched target fie
 
 test('getFriendlyToolLabel should describe browser high level routing actions', () => {
   const findLinkTool = {
+    runtime,
     name: 'browser',
     function: 'browser_find_link_by_text',
     args: { text: 'Execution Model' },
   } as ToolEvent
   const clickTool = {
+    runtime,
     name: 'browser',
     function: 'browser_click',
     args: { index: 0 },

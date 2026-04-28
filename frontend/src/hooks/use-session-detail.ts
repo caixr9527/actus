@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { configApi } from '@/lib/api/config'
 import { sessionApi } from '@/lib/api/session'
-import { normalizeEvents, unwrapNestedEvent, visitSessionEvent } from '@/lib/session-event-adapter'
+import {
+  normalizeSessionDetailRuntimeStatus,
+  normalizeEvents,
+  unwrapNestedEvent,
+  visitSessionEvent,
+} from '@/lib/session-event-adapter'
 import { canRetry, computeRetryDelayMs, shouldStartEmptySessionStream, type RetryPolicy } from '@/lib/session-stream-policy'
 import {
   classifyMessageStreamCloseReason,
@@ -241,8 +246,16 @@ export function useSessionDetail(
     if (nextRuntime.status !== sessionStatusRef.current) {
       sessionStatusRef.current = nextRuntime.status
       setSession((prev) => {
-        if (!prev || !nextRuntime.status || prev.status === nextRuntime.status) return prev
-        return { ...prev, status: nextRuntime.status }
+        if (!prev || !nextRuntime.status) return prev
+        if (prev.status === nextRuntime.status && prev.runtime.status === nextRuntime.status) return prev
+        return {
+          ...prev,
+          status: nextRuntime.status,
+          runtime: {
+            ...prev.runtime,
+            status: nextRuntime.status,
+          },
+        }
       })
     }
   }, [setStreamingState, stopEmptyStream])
@@ -371,11 +384,12 @@ export function useSessionDetail(
         return null
       }
 
+      const normalizedDetail = normalizeSessionDetailRuntimeStatus(detail)
       setError(null)
-      setSession(detail)
-      sessionStatusRef.current = detail.status
+      setSession(normalizedDetail)
+      sessionStatusRef.current = normalizedDetail.runtime.status
       setFiles(normalizeFileList(fileListRaw))
-      const rawEvents = (detail as { events?: unknown }).events
+      const rawEvents = (normalizedDetail as { events?: unknown }).events
       if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
         const normalized = normalizeEvents(rawEvents)
         replaceEvents(normalized)
@@ -385,7 +399,7 @@ export function useSessionDetail(
         replaceEvents([])
         lastEventIdRef.current = null
       }
-      return detail
+      return normalizedDetail
     } catch (e) {
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
         return null
@@ -412,7 +426,7 @@ export function useSessionDetail(
       detail &&
       targetEpoch === sessionEpochRef.current &&
       sessionId === currentSessionIdRef.current &&
-      shouldStartEmptySessionStream(detail.status, isSendMessageRef.current, skipEmptyStream)
+      shouldStartEmptySessionStream(detail.runtime.status, isSendMessageRef.current, skipEmptyStream)
     ) {
       startEmptyStream(targetEpoch)
     }
@@ -509,7 +523,7 @@ export function useSessionDetail(
   }, [enabled, initialSkipEmptyStream, loadModels, loadSessionSnapshot, replaceEvents, resetRealtimeStreams, sessionId])
 
   useEffect(() => {
-    const status = session?.status
+    const status = session?.runtime.status
     if (!sessionId || !enabled) return
     const currentEpoch = sessionEpochRef.current
     if (shouldStartEmptySessionStream(status, isSendMessageRef.current, skipEmptyStream)) {
@@ -519,7 +533,7 @@ export function useSessionDetail(
       if (sessionEpochRef.current !== currentEpoch) return
       stopEmptyStream()
     }
-  }, [enabled, sessionId, session?.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
+  }, [enabled, sessionId, session?.runtime.status, skipEmptyStream, startEmptyStream, stopEmptyStream])
 
   // 组件卸载时清理所有流，避免连接泄漏
   useEffect(() => {
@@ -557,7 +571,14 @@ export function useSessionDetail(
       // 因此前端不能在请求发出前抢先改成本地 running。
       if ('message' in chatParams || 'command' in chatParams) {
         sessionStatusRef.current = 'running'
-        setSession((prev) => prev ? { ...prev, status: 'running' } : null)
+        setSession((prev) => prev ? {
+          ...prev,
+          status: 'running',
+          runtime: {
+            ...prev.runtime,
+            status: 'running',
+          },
+        } : null)
       }
 
       const finalizeMessageStream = () => {

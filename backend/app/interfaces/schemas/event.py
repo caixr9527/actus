@@ -22,13 +22,33 @@ from app.domain.models import (
     PlanEventStatus,
     StepEvent,
     TextStreamChannel,
+    SessionStatus,
 )
+from app.application.service.runtime_observation_service import RuntimeObservableEventResult
 from app.domain.services.runtime.normalizers import normalize_event_payload
+
+
+class RuntimeEventMeta(BaseModel):
+    """运行观察元数据，是前端判断运行态、游标和展示层级的唯一事件上下文。"""
+
+    session_id: str
+    run_id: Optional[str] = None
+    status_after_event: Optional[SessionStatus] = None
+    current_step_id: Optional[str] = None
+    source_event_id: Optional[str] = None
+    cursor_event_id: Optional[str] = None
+    durability: Literal["persistent", "live_only"] = "persistent"
+    visibility: Literal["timeline", "draft", "control", "hidden"] = "timeline"
+
+    @classmethod
+    def from_result(cls, envelope: RuntimeObservableEventResult) -> "RuntimeEventMeta":
+        return cls.model_validate(envelope.runtime.model_dump(mode="json"))
 
 class BaseEventData(BaseModel):
     """基础事件数据"""
     event_id: Optional[str] = None  # 事件id
     created_at: datetime = Field(default_factory=datetime.now)  # 事件时间
+    runtime: RuntimeEventMeta  # Runtime 观察元数据
 
     @field_serializer("created_at", when_used="json")
     def serialize_created_at(self, value: datetime) -> int:
@@ -36,18 +56,20 @@ class BaseEventData(BaseModel):
         return int(value.timestamp())
 
     @classmethod
-    def base_event_data(cls, event: Event) -> Dict[str, Any]:
+    def base_event_data(cls, event: Event, runtime: RuntimeEventMeta) -> Dict[str, Any]:
         """类方法，用于将事件Domain模型转换成基础事件数据字典"""
+        event_id = None if runtime.durability == "live_only" else event.id
         return {
-            "event_id": event.id,
+            "event_id": event_id,
             "created_at": int(event.created_at.timestamp()),
+            "runtime": runtime,
         }
 
     @classmethod
-    def from_event(cls, event: Event) -> Self:
+    def from_event(cls, event: Event, runtime: RuntimeEventMeta) -> Self:
         """从事件Domain模型中构建基础事件数据"""
         return cls(
-            **cls.base_event_data(event),
+            **cls.base_event_data(event, runtime),
             **event.model_dump(mode="json", exclude={"id", "type", "created_at"}),
         )
 
@@ -58,7 +80,7 @@ class BaseSSEEvent(BaseModel):
     data: BaseEventData  # 数据
 
     @classmethod
-    def from_event(cls, event: Event) -> Self:
+    def from_event(cls, event: Event, runtime: RuntimeEventMeta) -> Self:
         """将事件Domain模型转换成基础流式事件"""
         # 获取data字段的类型注解，如果不存在则默认使用BaseEventData
         data_class: Type[BaseEventData] = cls.__annotations__.get("data", BaseEventData)
@@ -66,7 +88,7 @@ class BaseSSEEvent(BaseModel):
         # 构造SSE事件对象，设置事件类型和数据
         return cls(
             event=event.type,
-            data=data_class.from_event(event),
+            data=data_class.from_event(event, runtime),
         )
 
 
@@ -95,10 +117,10 @@ class MessageSSEEvent(BaseSSEEvent):
     data: MessageEventData
 
     @classmethod
-    def from_event(cls, event: Event) -> Self:
+    def from_event(cls, event: Event, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=MessageEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 role=event.role,
                 message=event.message,
                 attachments=event.attachments,
@@ -145,10 +167,10 @@ class StepSSEEvent(BaseSSEEvent):
     data: StepEventData
 
     @classmethod
-    def from_event(cls, event: StepEvent) -> Self:
+    def from_event(cls, event: StepEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=StepEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 status=event.step.status,
                 id=event.step.id,
                 description=event.step.description,
@@ -178,13 +200,13 @@ class PlanSSEEvent(BaseSSEEvent):
     data: PlanEventData
 
     @classmethod
-    def from_event(cls, event: PlanEvent) -> Self:
+    def from_event(cls, event: PlanEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=PlanEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 steps=[
                     StepEventData(
-                        **BaseEventData.base_event_data(event),
+                        **BaseEventData.base_event_data(event, runtime),
                         id=step.id,
                         status=step.status,
                         description=step.description,
@@ -222,10 +244,10 @@ class ToolSSEEvent(BaseSSEEvent):
     data: ToolEventData
 
     @classmethod
-    def from_event(cls, event: ToolEvent) -> Self:
+    def from_event(cls, event: ToolEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=ToolEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 tool_call_id=event.tool_call_id,
                 name=event.tool_name,
                 status=event.status,
@@ -254,10 +276,10 @@ class WaitSSEEvent(BaseSSEEvent):
     data: WaitEventData
 
     @classmethod
-    def from_event(cls, event: WaitEvent) -> Self:
+    def from_event(cls, event: WaitEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=WaitEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 interrupt_id=event.interrupt_id,
                 payload=dict(event.payload or {}),
             )
@@ -398,8 +420,8 @@ class EventMapper:
         return mapping
 
     @staticmethod
-    def event_to_sse_event(event: Event) -> AgentSSEEvent:
-        """将领域事件转换为Agent流式事件模型"""
+    def _event_to_sse_event(event: Event, runtime: RuntimeEventMeta) -> AgentSSEEvent:
+        """将领域事件和运行观察元数据转换为 SSE schema。"""
         # live SSE 与历史回放统一吃同一份干净事件，避免再出现事件层 outcome 旁路。
         event = normalize_event_payload(event)
         # 获取事件类型到SSE事件类的映射关系
@@ -410,15 +432,16 @@ class EventMapper:
 
         # 如果找到匹配的事件映射，则使用对应SSE事件类构建流式事件
         if event_mapping:
-            sse_event = event_mapping.sse_event_class.from_event(event)
+            sse_event = event_mapping.sse_event_class.from_event(event, runtime)
         else:
             # 如果未找到匹配的事件映射，则使用通用SSE事件类进行转换
-            sse_event = CommonSSEEvent.from_event(event)
+            sse_event = CommonSSEEvent.from_event(event, runtime)
         return sse_event
 
     @staticmethod
-    def events_to_sse_events(events: List[Event]) -> List[AgentSSEEvent]:
-        """将领域事件模型列表转换为SSE流式事件列表"""
-        return list(filter(lambda x: x is not None, [
-            EventMapper.event_to_sse_event(event) for event in events
-        ]))
+    def observable_event_to_sse_event(envelope: RuntimeObservableEventResult) -> AgentSSEEvent:
+        """将 RuntimeObservableEventResult envelope 转换为前端统一事件结构。"""
+        return EventMapper._event_to_sse_event(
+            envelope.event,
+            RuntimeEventMeta.from_result(envelope),
+        )
