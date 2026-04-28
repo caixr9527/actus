@@ -965,7 +965,7 @@ def test_direct_wait_cancel_should_clear_direct_wait_control_state(monkeypatch) 
     assert route_after_wait(cancelled_state) == "replan"
 
 
-def test_direct_wait_cancel_replan_execute_should_route_to_replan_instead_of_summarize(monkeypatch) -> None:
+def test_direct_wait_cancel_replan_execute_should_route_to_summarize_after_new_plan_finishes(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.interrupt",
         lambda payload: False,
@@ -1006,7 +1006,7 @@ def test_direct_wait_cancel_replan_execute_should_route_to_replan_instead_of_sum
         "final_message": "新的计划批次已完成",
     }
 
-    assert route_after_execute(next_state) == "replan"
+    assert route_after_execute(next_state) == "summarize"
 
 
 def test_route_after_execute_should_fail_fast_to_summarize_on_atomic_action_failed() -> None:
@@ -1306,6 +1306,7 @@ def test_direct_wait_should_execute_original_task_after_confirm(monkeypatch) -> 
     assert executed_state["final_message"] == ""
     assert executed_state["last_executed_step"].id == "direct-wait-execute"
     assert executed_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert route_after_execute(executed_state) == "summarize"
     assert "direct_wait_original_task_executed" not in control
     assert "wait_resume_action" not in control
     assert "direct_wait_execute_task_mode" not in control

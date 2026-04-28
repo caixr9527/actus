@@ -294,7 +294,7 @@ class EntryCompiler:
                 task_mode=task_mode,
                 context_profile=EntryContextProfile.WORKSPACE if tool_need_score > 0 else EntryContextProfile.MINIMAL_HISTORY,
                 tool_budget=EntryToolBudget.SMALL_LOOP if tool_need_score > 0 else EntryToolBudget.NONE,
-                needs_summary=False,
+                needs_summary=True,
                 plan_only=False,
                 risk_level=risk_level,
                 complexity_score=complexity_score,

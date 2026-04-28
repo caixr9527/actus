@@ -152,7 +152,7 @@ def test_compile_should_route_preconfirm_request_to_wait() -> None:
     assert contract.route == EntryRoute.WAIT
     assert contract.context_profile == EntryContextProfile.WORKSPACE
     assert contract.tool_budget == EntryToolBudget.SMALL_LOOP
-    assert contract.needs_summary is False
+    assert contract.needs_summary is True
     assert contract.plan_only is False
     assert rc.WAIT_BEFORE_ACTION in contract.reason_codes
 
