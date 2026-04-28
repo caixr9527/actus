@@ -583,6 +583,55 @@ def test_replay_should_return_all_records_for_empty_or_invalid_cursor(caplog) ->
     )
 
 
+def test_replay_should_not_leak_records_when_cursor_belongs_to_another_session(caplog) -> None:
+    records = [
+        WorkflowRunEventRecord(
+            run_id="run-1",
+            session_id="session-1",
+            event_id="evt-1",
+            event_type="wait",
+            event_payload=WaitEvent(id="evt-1"),
+        ),
+        WorkflowRunEventRecord(
+            run_id="run-1",
+            session_id="session-1",
+            event_id="evt-2",
+            event_type="done",
+            event_payload=DoneEvent(id="evt-2"),
+        ),
+        WorkflowRunEventRecord(
+            run_id="run-other",
+            session_id="session-other",
+            event_id="evt-other",
+            event_type="done",
+            event_payload=DoneEvent(id="evt-other"),
+        ),
+    ]
+    service = _build_service(_UoW(
+        session=Session(id="session-1", user_id="user-1"),
+        run=None,
+        workspace=None,
+        records=records,
+    ))
+
+    with caplog.at_level(logging.WARNING):
+        replay = asyncio.run(service.list_persistent_events_after_cursor(
+            user_id="user-1",
+            session_id="session-1",
+            cursor_event_id="evt-other",
+        ))
+
+    assert replay.cursor_invalid is True
+    assert [record.event_id for record in replay.records] == ["evt-1", "evt-2"]
+    assert replay.live_attach_after_event_id == "evt-2"
+    assert all(record.session_id == "session-1" for record in replay.records)
+    assert any(
+        record.__dict__.get("reason") == "cursor_invalid"
+        and record.__dict__.get("requested_event_id") == "evt-other"
+        for record in caplog.records
+    )
+
+
 def test_replay_should_use_valid_cursor_as_live_attach_boundary_when_no_new_records() -> None:
     records = [
         WorkflowRunEventRecord(

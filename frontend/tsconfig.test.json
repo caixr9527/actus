@@ -22,6 +22,7 @@
     "src/lib/session-model-selection.ts",
     "src/lib/session-stream-policy.ts",
     "src/lib/session-detail-runtime.ts",
+    "src/lib/session-realtime-events.ts",
     "src/lib/session-text-stream-state.ts",
     "src/lib/session-text-stream-playback.ts",
     "src/lib/markdown-content-utils.ts",

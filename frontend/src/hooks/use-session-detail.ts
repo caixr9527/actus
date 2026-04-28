@@ -5,15 +5,11 @@ import { configApi } from '@/lib/api/config'
 import { sessionApi } from '@/lib/api/session'
 import {
   normalizeSessionDetailRuntimeStatus,
-  normalizeEvents,
-  unwrapNestedEvent,
   visitSessionEvent,
 } from '@/lib/session-event-adapter'
 import { canRetry, computeRetryDelayMs, shouldStartEmptySessionStream, type RetryPolicy } from '@/lib/session-stream-policy'
 import {
   classifyMessageStreamCloseReason,
-  collectSessionEventIds,
-  getSessionEventId,
   reduceSessionRuntimeStateOnEvent,
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '@/lib/session-detail-runtime'
@@ -25,11 +21,14 @@ import {
 } from '@/lib/runtime-observation'
 import {
   getLatestActiveStreamByChannel,
-  isTextStreamEvent,
-  reduceTextStreamState,
   type ActiveTextStream,
   type TextStreamState,
 } from '@/lib/session-text-stream-state'
+import {
+  appendSessionRealtimeEvent,
+  buildSessionRealtimeStateFromSnapshot,
+  type SessionRealtimeState,
+} from '@/lib/session-realtime-events'
 import {
   advanceDisplayedTextStreams,
   syncDisplayedTextStreams,
@@ -148,6 +147,7 @@ export function useSessionDetail(
   const currentSessionIdRef = useRef<string | null>(sessionId)
   const sessionStatusRef = useRef<SessionStatus | null>(null)
   const runtimeObservationRef = useRef<RuntimeObservationViewState | null>(null)
+  const realtimeStateRef = useRef<SessionRealtimeState | null>(null)
   const streamingRef = useRef(false)
   currentSessionIdRef.current = sessionId
 
@@ -185,48 +185,48 @@ export function useSessionDetail(
     stopEmptyStream()
     emptyStreamRetryCountRef.current = 0
     isSendMessageRef.current = false
+    realtimeStateRef.current = null
     setStreamingState(false)
     setTextStreams({})
     setDisplayedTextStreams({})
   }, [setStreamingState, stopEmptyStream, stopMessageStream])
 
   const replaceEvents = useCallback((nextEvents: SSEEventData[]) => {
-    // 快照替换时必须同步重建草稿流状态，避免事件列表与前端播放层状态漂移，
-    // 否则会出现刷新后残留旧草稿、或正式消息已落地但草稿仍继续显示的问题。
-    // text_stream_* 是 live-only 临时展示事件，即使异常出现在快照中也不能进入主事件列表。
-    const persistentEvents = nextEvents.filter((event) => !isTextStreamEvent(event))
-    const rebuiltTextStreams = persistentEvents.reduce<TextStreamState>(
-      (state, event) => reduceTextStreamState(state, event),
-      {},
-    )
-    seenPersistentCursorIdsRef.current = collectSessionEventIds(persistentEvents)
-    setEvents(persistentEvents)
-    setTextStreams(rebuiltTextStreams)
-    setDisplayedTextStreams(rebuiltTextStreams)
+    const nextRealtimeState = buildSessionRealtimeStateFromSnapshot({
+      rawEvents: nextEvents,
+      snapshotLatestEventId: null,
+    })
+    realtimeStateRef.current = nextRealtimeState
+    seenPersistentCursorIdsRef.current = nextRealtimeState.seenPersistentCursorIds
+    lastEventIdRef.current = nextRealtimeState.lastEventId
+    setEvents(nextRealtimeState.events)
+    setTextStreams(nextRealtimeState.textStreams)
+    setDisplayedTextStreams(nextRealtimeState.displayedTextStreams)
   }, [])
 
   const appendEvent = useCallback((ev: SSEEventData) => {
-    const evToAppend = unwrapNestedEvent(ev)
-    const isTemporaryTextStreamEvent = isTextStreamEvent(evToAppend)
-    const eventId = getSessionEventId(evToAppend)
-    if (eventId) {
-      if (seenPersistentCursorIdsRef.current.has(eventId)) {
-        return
-      }
-      seenPersistentCursorIdsRef.current.add(eventId)
-      lastEventIdRef.current = eventId
+    const baseRealtimeState = realtimeStateRef.current ?? {
+      events: [],
+      seenPersistentCursorIds: seenPersistentCursorIdsRef.current,
+      lastEventId: lastEventIdRef.current,
+      textStreams: {},
+      displayedTextStreams: {},
+    }
+    const appendResult = appendSessionRealtimeEvent(baseRealtimeState, ev)
+    if (appendResult.duplicatePersistentEvent) return
+
+    realtimeStateRef.current = appendResult.state
+    seenPersistentCursorIdsRef.current = appendResult.state.seenPersistentCursorIds
+    lastEventIdRef.current = appendResult.state.lastEventId
+    if (appendResult.appendedToTimeline) {
+      setEvents(appendResult.state.events)
+    }
+    setTextStreams(appendResult.state.textStreams)
+    if (appendResult.shouldUpdateDisplayedTextStreams) {
+      setDisplayedTextStreams(appendResult.state.displayedTextStreams)
     }
 
-    if (!isTemporaryTextStreamEvent) {
-      setEvents((prev) => [...prev, evToAppend])
-    }
-    setTextStreams((prev) => reduceTextStreamState(prev, evToAppend))
-    // 正式 message/done/error 到达时，需要同步清理前端正在播放的草稿流，
-    // 不能只等 textStreams -> displayedTextStreams 的 effect 下一拍再收敛，
-    // 否则界面会短暂同时出现“草稿消息 + 正式消息”的重复展示。
-    if (evToAppend.type === 'message' || evToAppend.type === 'done' || evToAppend.type === 'error') {
-      setDisplayedTextStreams((prev) => reduceTextStreamState(prev, evToAppend))
-    }
+    const evToAppend = appendResult.event
 
     // 更新会话标题（通过统一事件分发表驱动）
     visitSessionEvent(evToAppend, {
@@ -410,19 +410,16 @@ export function useSessionDetail(
       setSession(normalizedDetail)
       sessionStatusRef.current = runtimeObservation.status
       setFiles(normalizeFileList(fileListRaw))
-      const rawEvents = (normalizedDetail as { events?: unknown }).events
-      if (rawEvents && Array.isArray(rawEvents) && rawEvents.length > 0) {
-        const normalized = normalizeEvents(rawEvents)
-        replaceEvents(normalized)
-        const lastPersistentEventId = normalized
-          .map((event) => getSessionEventId(event))
-          .filter((eventId): eventId is string => Boolean(eventId))
-          .at(-1)
-        lastEventIdRef.current = lastPersistentEventId ?? normalizedDetail.runtime.cursor.latest_event_id
-      } else {
-        replaceEvents([])
-        lastEventIdRef.current = normalizedDetail.runtime.cursor.latest_event_id
-      }
+      const nextRealtimeState = buildSessionRealtimeStateFromSnapshot({
+        rawEvents: normalizedDetail.events,
+        snapshotLatestEventId: normalizedDetail.runtime.cursor.latest_event_id,
+      })
+      realtimeStateRef.current = nextRealtimeState
+      seenPersistentCursorIdsRef.current = nextRealtimeState.seenPersistentCursorIds
+      lastEventIdRef.current = nextRealtimeState.lastEventId
+      setEvents(nextRealtimeState.events)
+      setTextStreams(nextRealtimeState.textStreams)
+      setDisplayedTextStreams(nextRealtimeState.displayedTextStreams)
       return normalizedDetail
     } catch (e) {
       if (targetEpoch !== sessionEpochRef.current || targetSessionId !== currentSessionIdRef.current) {
@@ -435,7 +432,7 @@ export function useSessionDetail(
         setLoading(false)
       }
     }
-  }, [normalizeFileList, replaceEvents, t])
+  }, [normalizeFileList, t])
 
   const refresh = useCallback(async (options?: { resetRealtime?: boolean }) => {
     if (!sessionId || !enabled) return
@@ -507,6 +504,7 @@ export function useSessionDetail(
       setSession(null)
       sessionStatusRef.current = null
       runtimeObservationRef.current = null
+      realtimeStateRef.current = null
       setFiles([])
       setAvailableModels([])
       setDefaultModelId(null)
@@ -521,6 +519,7 @@ export function useSessionDetail(
       setSession(null)
       sessionStatusRef.current = null
       runtimeObservationRef.current = null
+      realtimeStateRef.current = null
       setFiles([])
       setAvailableModels([])
       setDefaultModelId(null)
@@ -534,6 +533,7 @@ export function useSessionDetail(
     setSession(null)
     sessionStatusRef.current = null
     runtimeObservationRef.current = null
+    realtimeStateRef.current = null
     setFiles([])
     setAvailableModels([])
     setDefaultModelId(null)
