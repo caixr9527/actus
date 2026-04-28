@@ -503,7 +503,11 @@ class LangGraphRunEngine(RunEngine):
 
         # final_message 是轻量摘要；final_answer_text 才是 summary/direct 阶段产出的最终正文真相源。
         final_message = str(state.get("final_message") or "").strip()
-        final_answer_text = str(state.get("final_answer_text") or "").strip() or final_message
+        if "final_answer_text" in state:
+            final_answer_text = str(state.get("final_answer_text") or "").strip()
+        else:
+            # 历史 checkpoint 可能只有旧 final_message；仅缺字段的恢复态保留兼容 fallback。
+            final_answer_text = final_message
 
         # 运行摘要状态必须从当前 graph state 真实语义推导，不能依赖外部事件是否已先落库。
         run_status = cls._resolve_run_status_for_projection(run=run, state=state)

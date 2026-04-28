@@ -285,7 +285,7 @@ def test_direct_answer_node_should_follow_final_output_contract() -> None:
     before_state = {
         "user_message": "你好",
         "graph_metadata": {"control": _entry_contract_control("你好")},
-        "selected_artifacts": [],
+        "selected_artifacts": ["/tmp/existing-final.md"],
     }
 
     state = asyncio.run(
@@ -307,7 +307,6 @@ def test_direct_answer_node_should_follow_final_output_contract() -> None:
         updates={
             "final_message": state["final_message"],
             "final_answer_text": state["final_answer_text"],
-            "selected_artifacts": state.get("selected_artifacts", []),
         },
     )
 

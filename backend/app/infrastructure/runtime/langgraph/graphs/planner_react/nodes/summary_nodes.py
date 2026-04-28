@@ -31,6 +31,10 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     log_runtime,
     now_perf,
 )
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
@@ -325,17 +329,23 @@ async def summarize_node(
         llm_elapsed_ms=llm_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
     )
+    updates = {
+        "plan": plan,
+        **summary_context_updates,
+        "current_step_id": None,
+        "final_message": summary_message,
+        # 最终正文真相源只允许来自 summary/direct 阶段，不再借道 working_memory。
+        "final_answer_text": final_answer_text_to_emit,
+        "working_memory": working_memory,
+        "selected_artifacts": list(summary_attachment_refs),
+    }
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.SUMMARY,
+        before_state=state,
+        updates=updates,
+    )
     return _reduce_state_with_events(
         state,
-        updates={
-            "plan": plan,
-            **summary_context_updates,
-            "current_step_id": None,
-            "final_message": summary_message,
-            # 最终正文真相源只允许来自 summary/direct 阶段，不再借道 working_memory。
-            "final_answer_text": final_answer_text_to_emit,
-            "working_memory": working_memory,
-            "selected_artifacts": list(summary_attachment_refs),
-        },
+        updates=updates,
         events=final_events,
     )

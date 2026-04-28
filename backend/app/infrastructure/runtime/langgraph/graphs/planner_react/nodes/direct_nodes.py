@@ -27,6 +27,10 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     log_runtime,
     now_perf,
 )
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.entry import EntryCompiler
@@ -190,16 +194,27 @@ async def direct_answer_node(
         direct_answer_context_topic_anchor_source=topic_anchor_source or "none",
         direct_answer_context_topic_anchor_preview=topic_anchor_text[:160],
     )
+    updates = {
+        "plan": plan,
+        "current_step_id": None,
+        "final_message": final_message,
+        # direct_answer 直接产生最终面向用户的正文，因此同步更新最终正文真相源。
+        "final_answer_text": final_message,
+        "graph_metadata": _replace_control_metadata(state, control),
+    }
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.DIRECT_ANSWER,
+        before_state=state,
+        updates=updates,
+    )
+    updates = {
+        **updates,
+        # direct_answer 不选择最终附件；清空槽位避免旧 run 附件污染当前简单直答。
+        "selected_artifacts": [],
+    }
     return _reduce_state_with_events(
         state,
-        updates={
-            "plan": plan,
-            "current_step_id": None,
-            "final_message": final_message,
-            # direct_answer 直接产生最终面向用户的正文，因此同步更新最终正文真相源。
-            "final_answer_text": final_message,
-            "graph_metadata": _replace_control_metadata(state, control),
-        },
+        updates=updates,
         events=events,
     )
 
