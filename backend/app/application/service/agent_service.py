@@ -16,6 +16,7 @@ from pydantic import TypeAdapter
 from app.application.errors import AppException, BadRequestError, NotFoundError
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage, Browser
 from app.domain.models import (
@@ -245,6 +246,7 @@ class AgentService:
                 workspace_runtime_service=workspace_runtime_service,
             ),
             checkpointer=get_langgraph_checkpointer().get_checkpointer(),
+            data_retention_policy_service=DataRetentionPolicyService(),
         )
         return await inspector.inspect_resume_checkpoint()
 

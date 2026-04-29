@@ -10,6 +10,7 @@
 
 import json
 import logging
+import re
 import sys
 from typing import Any, Dict, List
 
@@ -113,6 +114,40 @@ def _resolve_emit_live_events():
     return emit_live_events
 
 
+def _resolve_build_prompt_context_packet_async():
+    """从 nodes 包级入口解析上下文构建函数，便于节点级测试和图装配统一替换。"""
+    package_module = sys.modules.get(
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes"
+    )
+    if package_module is not None:
+        package_builder = getattr(package_module, "_build_prompt_context_packet_async", None)
+        if callable(package_builder):
+            return package_builder
+    return _build_prompt_context_packet_async
+
+
+def _sanitize_final_answer_attachment_paths(
+        *,
+        text: str,
+        attachment_refs: List[str],
+) -> str:
+    """最终正文不直接暴露 sandbox 绝对路径；附件本身通过 MessageEvent.attachments 交付。"""
+    sanitized_text = str(text or "")
+    for ref in attachment_refs:
+        path = str(ref or "").strip()
+        if not path:
+            continue
+        sanitized_text = sanitized_text.replace(path, "")
+    sanitized_text = re.sub(r"[ \t]+(\n|$)", r"\1", sanitized_text).strip()
+    if sanitized_text == str(text or "").strip():
+        return sanitized_text
+    if "完整内容已作为附件交付。" in sanitized_text:
+        return sanitized_text
+    if sanitized_text:
+        return f"{sanitized_text}\n\n完整内容已作为附件交付。"
+    return "完整内容已作为附件交付。"
+
+
 def _build_summary_message_fallback(
         *,
         state: PlannerReActLangGraphState,
@@ -190,7 +225,7 @@ async def summarize_node(
     last_executed_step = state.get("last_executed_step")
     summary_context_updates: Dict[str, Any] = {}
     summary_context_packet: Dict[str, Any] = {}
-    summary_context_packet = await _build_prompt_context_packet_async(
+    summary_context_packet = await _resolve_build_prompt_context_packet_async()(
         stage="summary",
         state=state,
         runtime_context_service=runtime_context_service,
@@ -297,7 +332,10 @@ async def summarize_node(
             final_attachment_paths=summary_attachment_refs,
         )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
-    final_answer_text_to_emit = final_answer_text
+    final_answer_text_to_emit = _sanitize_final_answer_attachment_paths(
+        text=final_answer_text,
+        attachment_refs=summary_attachment_refs,
+    )
     # final_message 流事件只做临时展示，不进入 state 的 emitted_events。
     # 最终 MessageEvent(stage="final") 仍是历史落账和前端 timeline 的唯一真相源。
     final_stream_events = build_text_stream_events(

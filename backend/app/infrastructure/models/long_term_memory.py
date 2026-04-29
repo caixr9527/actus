@@ -21,7 +21,7 @@ class LongTermMemoryModel(Base):
     __tablename__ = "long_term_memories"
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_long_term_memories_id"),
-        UniqueConstraint("namespace", "dedupe_key", name="uq_long_term_memories_namespace_dedupe_key"),
+        UniqueConstraint("user_id", "namespace", "dedupe_key", name="uq_long_term_memories_user_namespace_dedupe_key"),
         Index("ix_long_term_memories_user_scope", "user_id", "scope"),
         Index("ix_long_term_memories_namespace", "namespace"),
         Index("ix_long_term_memories_memory_type", "memory_type"),

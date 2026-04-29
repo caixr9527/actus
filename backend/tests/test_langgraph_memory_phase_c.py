@@ -32,6 +32,13 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.graph import (
     build_planner_react_langgraph_graph as _build_planner_react_langgraph_graph,
 )
 from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataClassificationResult,
+    DataOrigin,
+    DataTrustLevel,
+    PrivacyLevel,
+    RetentionPolicyKind,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     consolidate_memory_node,
     direct_wait_node,
@@ -45,6 +52,54 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
 
 
 _TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+
+
+class _FakeDataRetentionPolicyService:
+    def __init__(
+            self,
+            *,
+            tenant_id: str | None = None,
+            trust_level: DataTrustLevel = DataTrustLevel.SYSTEM_GENERATED,
+            privacy_level: PrivacyLevel = PrivacyLevel.SENSITIVE,
+            retention_policy: RetentionPolicyKind = RetentionPolicyKind.USER_MEMORY,
+    ) -> None:
+        self.tenant_id = tenant_id
+        self.trust_level = trust_level
+        self.privacy_level = privacy_level
+        self.retention_policy = retention_policy
+        self.calls = []
+
+    def classify_data(
+            self,
+            *,
+            tenant_id: str,
+            origin: DataOrigin,
+            requested_privacy_level: PrivacyLevel | None = None,
+            retention_policy: RetentionPolicyKind | None = None,
+    ) -> DataClassificationResult:
+        self.calls.append(
+            {
+                "tenant_id": tenant_id,
+                "origin": origin,
+                "requested_privacy_level": requested_privacy_level,
+                "retention_policy": retention_policy,
+            }
+        )
+        return DataClassificationResult(
+            tenant_id=self.tenant_id or tenant_id,
+            origin=origin,
+            trust_level=self.trust_level,
+            privacy_level=self.privacy_level,
+            retention_policy=self.retention_policy,
+        )
+
+
+_FAKE_RETENTION_POLICY_SERVICE = _FakeDataRetentionPolicyService()
+
+
+async def _consolidate_memory_node(*args, **kwargs):
+    kwargs.setdefault("data_retention_policy_service", _FAKE_RETENTION_POLICY_SERVICE)
+    return await consolidate_memory_node(*args, **kwargs)
 
 
 def _entry_contract_control(user_message: str):
@@ -495,6 +550,7 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
         search_results_by_type={
             "profile": [
                 LongTermMemory(
+                    user_id="user-1",
                     id="mem-1",
                     namespace="user/user-1/profile",
                     memory_type="profile",
@@ -504,6 +560,7 @@ def test_recall_memory_context_node_should_search_long_term_memory() -> None:
             ],
             "instruction": [
                 LongTermMemory(
+                    user_id="user-1",
                     id="mem-2",
                     namespace="agent/planner_react/instruction",
                     memory_type="instruction",
@@ -554,6 +611,7 @@ def test_recall_memory_context_node_should_skip_long_term_memory_for_first_turn_
     repository = _FakeLongTermMemoryRepository(
         search_results=[
             LongTermMemory(
+                user_id="user-1",
                 id="mem-1",
                 namespace="user/user-1/fact",
                 memory_type="fact",
@@ -1736,7 +1794,7 @@ def test_summarize_should_not_generate_memory_candidates_and_consolidate_should_
     assert summarized_state["selected_artifacts"] == []
 
     consolidated_state = asyncio.run(
-        consolidate_memory_node(
+        _consolidate_memory_node(
             summarized_state,
             long_term_memory_repository=repository,
         )
@@ -2506,15 +2564,9 @@ def test_summarize_should_use_current_run_artifacts_as_attachment_truth_source()
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == [
-        "/home/ubuntu/final-output.md",
-        "/home/ubuntu/final-checklist.md",
-    ]
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == [
-        "/home/ubuntu/final-output.md",
-        "/home/ubuntu/final-checklist.md",
-    ]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 def test_summarize_should_not_fallback_to_last_step_artifacts_without_final_delivery_source_refs() -> None:
@@ -2568,9 +2620,9 @@ def test_summarize_should_not_fallback_to_last_step_artifacts_without_final_deli
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/intermediate.md"]
+    assert summarized_state["selected_artifacts"] == []
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/intermediate.md"]
+    assert [attachment.filepath for attachment in message_event.attachments] == []
 
 
 def test_summarize_should_filter_non_file_refs_from_final_delivery_source_refs() -> None:
@@ -2948,7 +3000,7 @@ def test_consolidate_memory_should_trim_message_window_and_update_summary() -> N
         "final_message": long_final_message,
     }
 
-    consolidated_state = asyncio.run(consolidate_memory_node(state))
+    consolidated_state = asyncio.run(_consolidate_memory_node(state))
 
     assert len(consolidated_state["message_window"]) == 100
     assert "裁剪:6条消息" in consolidated_state["conversation_summary"]
@@ -3026,7 +3078,7 @@ def test_consolidate_memory_should_govern_candidates_before_persisting() -> None
     }
 
     consolidated_state = asyncio.run(
-        consolidate_memory_node(
+        _consolidate_memory_node(
             state,
             long_term_memory_repository=repository,
         )
@@ -3040,6 +3092,161 @@ def test_consolidate_memory_should_govern_candidates_before_persisting() -> None
         "response_style": "concise",
     }
     assert persisted_fact.content == {"text": "当前任务只关注 backend"}
+    assert consolidated_state["pending_memory_writes"] == []
+
+
+def test_consolidate_memory_should_redact_pii_and_write_memory_governance_fields() -> None:
+    repository = _FakeLongTermMemoryRepository()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请整理记忆",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [
+            {
+                "step_id": "step-1",
+                "status": ExecutionStatus.COMPLETED.value,
+            }
+        ],
+        "working_memory": {
+            "goal": "验证隐私治理",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [
+            {
+                "namespace": "user/user-1/profile",
+                "memory_type": "profile",
+                "summary": "用户邮箱 test@example.com",
+                "content": {"email": "test@example.com", "phone": "13812345678"},
+                "tags": ["contact"],
+                "confidence": 0.9,
+                "source": {"kind": "summary"},
+            },
+        ],
+        "message_window": [],
+        "conversation_summary": "",
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最终总结",
+    }
+
+    consolidated_state = asyncio.run(
+        _consolidate_memory_node(
+            state,
+            long_term_memory_repository=repository,
+        )
+    )
+
+    assert consolidated_state["pending_memory_writes"] == []
+    assert len(repository.upserted) == 1
+    persisted_memory = repository.upserted[0]
+    assert persisted_memory.user_id == "user-1"
+    assert persisted_memory.tenant_id == "user-1"
+    assert persisted_memory.source == {"kind": "summary"}
+    assert persisted_memory.privacy_level == PrivacyLevel.SENSITIVE
+    assert persisted_memory.trust_level == DataTrustLevel.SYSTEM_GENERATED
+    assert persisted_memory.retention_policy == RetentionPolicyKind.USER_MEMORY
+    assert "test@example.com" not in persisted_memory.summary
+    assert persisted_memory.content == {
+        "email": "[REDACTED_EMAIL]",
+        "phone": "[REDACTED_PHONE]",
+    }
+
+
+def test_consolidate_memory_should_use_injected_data_retention_policy_service() -> None:
+    repository = _FakeLongTermMemoryRepository()
+    policy_service = _FakeDataRetentionPolicyService(
+        tenant_id="tenant-from-policy",
+        trust_level=DataTrustLevel.EXTERNAL_UNTRUSTED,
+        privacy_level=PrivacyLevel.INTERNAL,
+        retention_policy=RetentionPolicyKind.SESSION_BOUND,
+    )
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请整理记忆",
+        "plan": _build_plan(),
+        "working_memory": {"goal": "验证分类策略注入"},
+        "pending_memory_writes": [
+            {
+                "namespace": "user/user-1/fact",
+                "memory_type": "fact",
+                "summary": "策略注入事实",
+                "content": {"text": "策略注入事实"},
+                "confidence": 0.9,
+            },
+        ],
+        "message_window": [],
+        "conversation_summary": "",
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最终总结",
+    }
+
+    asyncio.run(
+        _consolidate_memory_node(
+            state,
+            long_term_memory_repository=repository,
+            data_retention_policy_service=policy_service,
+        )
+    )
+
+    assert len(policy_service.calls) == 1
+    assert policy_service.calls[0]["tenant_id"] == "user-1"
+    assert policy_service.calls[0]["origin"] == DataOrigin.LONG_TERM_MEMORY
+    persisted_memory = repository.upserted[0]
+    assert persisted_memory.tenant_id == "tenant-from-policy"
+    assert persisted_memory.trust_level == DataTrustLevel.EXTERNAL_UNTRUSTED
+    assert persisted_memory.privacy_level == PrivacyLevel.INTERNAL
+    assert persisted_memory.retention_policy == RetentionPolicyKind.SESSION_BOUND
+
+
+def test_consolidate_memory_should_not_write_plain_secret_memory_body() -> None:
+    repository = _FakeLongTermMemoryRepository()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "请整理记忆",
+        "plan": _build_plan(),
+        "execution_count": 1,
+        "step_states": [],
+        "working_memory": {
+            "goal": "验证 secret 拒写",
+            "user_preferences": {},
+            "facts_in_session": [],
+        },
+        "pending_memory_writes": [
+            {
+                "namespace": "user/user-1/fact",
+                "memory_type": "fact",
+                "summary": "用户 API key",
+                "content": {"text": "api_key=abcdefghi123456789"},
+                "confidence": 0.9,
+            },
+        ],
+        "message_window": [],
+        "conversation_summary": "",
+        "graph_metadata": {},
+        "emitted_events": [],
+        "final_message": "最终总结",
+    }
+
+    consolidated_state = asyncio.run(
+        _consolidate_memory_node(
+            state,
+            long_term_memory_repository=repository,
+        )
+    )
+
+    assert repository.upserted == []
     assert consolidated_state["pending_memory_writes"] == []
 
 
@@ -3621,9 +3828,16 @@ def test_planner_react_graph_should_only_inject_repository_into_boundary_nodes(m
             "final_message": "最终总结",
         }
 
-    async def _consolidate(state, long_term_memory_repository=None, memory_consolidation_service=None):
+    async def _consolidate(
+            state,
+            long_term_memory_repository=None,
+            memory_consolidation_service=None,
+            data_retention_policy_service=None,
+    ):
         assert long_term_memory_repository is repository
         assert memory_consolidation_service is None
+        assert data_retention_policy_service is not None
+        assert callable(data_retention_policy_service.classify_data)
         return _append_trace(state, "consolidate")
 
     async def _finalize(state):

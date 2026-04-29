@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.services.memory_consolidation.contracts import (
@@ -25,7 +26,20 @@ from app.domain.services.memory_consolidation.settings import (
     MESSAGE_WINDOW_MAX_ITEMS,
     MESSAGE_WINDOW_MAX_MESSAGE_CHARS,
 )
-from app.domain.services.runtime.normalizers import normalize_message_window_entry, truncate_text
+from app.domain.services.runtime.contracts.sensitive_data_policy import (
+    assert_memory_content_safe,
+    assert_memory_payload_safe,
+    detect_sensitive_text,
+)
+from app.domain.services.runtime.normalizers import normalize_message_window_entry
+
+_MEMORY_SOURCE_ALLOWLIST = {"kind", "stage", "run_id", "step_id", "session_id", "thread_id"}
+
+
+@dataclass(frozen=True)
+class _MemoryCandidateGovernanceResult:
+    candidate: Optional[Dict[str, Any]] = None
+    reason: str = ""
 
 
 class MemoryConsolidationService:
@@ -71,6 +85,7 @@ class MemoryConsolidationService:
             input_candidate_count=candidate_stats["input_count"],
             kept_candidate_count=candidate_stats["kept_count"],
             dropped_invalid_count=candidate_stats["dropped_invalid_count"],
+            dropped_sensitive_count=candidate_stats["dropped_sensitive_count"],
             dropped_low_confidence_count=candidate_stats["dropped_low_confidence_count"],
             deduped_count=candidate_stats["deduped_count"],
             merged_profile_count=candidate_stats["merged_profile_count"],
@@ -108,27 +123,32 @@ class MemoryConsolidationService:
                 "input_candidate_count": merged_stats["input_count"],
                 "kept_candidate_count": merged_stats["kept_count"],
                 "dropped_invalid_count": (
-                    baseline_result.stats.dropped_invalid_count
-                    + candidate_stats["dropped_invalid_count"]
-                    + merged_stats["dropped_invalid_count"]
+                        baseline_result.stats.dropped_invalid_count
+                        + candidate_stats["dropped_invalid_count"]
+                        + merged_stats["dropped_invalid_count"]
+                ),
+                "dropped_sensitive_count": (
+                        baseline_result.stats.dropped_sensitive_count
+                        + candidate_stats["dropped_sensitive_count"]
+                        + merged_stats["dropped_sensitive_count"]
                 ),
                 "dropped_low_confidence_count": (
-                    baseline_result.stats.dropped_low_confidence_count
-                    + candidate_stats["dropped_low_confidence_count"]
-                    + merged_stats["dropped_low_confidence_count"]
+                        baseline_result.stats.dropped_low_confidence_count
+                        + candidate_stats["dropped_low_confidence_count"]
+                        + merged_stats["dropped_low_confidence_count"]
                 ),
                 "deduped_count": baseline_result.stats.deduped_count + merged_stats["deduped_count"],
                 "merged_profile_count": (
-                    baseline_result.stats.merged_profile_count
-                    + candidate_stats["merged_profile_count"]
-                    + merged_stats["merged_profile_count"]
+                        baseline_result.stats.merged_profile_count
+                        + candidate_stats["merged_profile_count"]
+                        + merged_stats["merged_profile_count"]
                 ),
             }
         )
         return baseline_result.model_copy(
             update={
                 "conversation_summary": provider_result.conversation_summary
-                or baseline_result.conversation_summary,
+                                        or baseline_result.conversation_summary,
                 "facts_in_session": list(provider_result.facts_in_session or baseline_result.facts_in_session),
                 "user_preferences": dict(provider_result.user_preferences or baseline_result.user_preferences),
                 "memory_candidates": merged_candidates,
@@ -241,22 +261,71 @@ class MemoryConsolidationService:
         )
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
-    def _normalize_memory_candidate(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _normalize_sensitive_string(value: Any) -> str:
+        return assert_memory_content_safe(str(value or "").strip())
+
+    @staticmethod
+    def _truncate_memory_summary(value: Any) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _normalize_memory_tags(cls, raw_tags: Any) -> List[str]:
+        normalized_tags: List[str] = []
+        for raw_tag in list(raw_tags or []):
+            normalized_tag = cls._normalize_sensitive_string(raw_tag)
+            if normalized_tag:
+                normalized_tags.append(normalized_tag)
+        return list(dict.fromkeys(normalized_tags))
+
+    @classmethod
+    def _normalize_memory_source(cls, raw_source: Any) -> Dict[str, str]:
+        if not isinstance(raw_source, dict):
+            return {}
+        # source 只允许少量结构化上下文字段落库；但拒写判断必须先覆盖完整 provider payload。
+        try:
+            serialized_source = json.dumps(raw_source, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            raise ValueError("长期记忆 source 包含不可序列化元数据")
+        if detect_sensitive_text(serialized_source).has_secret:
+            raise ValueError("长期记忆 source 包含不允许保存的敏感凭证")
+        normalized_source: Dict[str, str] = {}
+        for key in _MEMORY_SOURCE_ALLOWLIST:
+            raw_value = raw_source.get(key)
+            if raw_value is None:
+                continue
+            normalized_value = cls._normalize_sensitive_string(raw_value)
+            if normalized_value:
+                normalized_source[key] = normalized_value
+        return normalized_source
+
+    def _normalize_memory_candidate(self, item: Dict[str, Any]) -> _MemoryCandidateGovernanceResult:
         """规整长期记忆候选，过滤缺少命名空间、类型或内容的无效项。"""
         if not isinstance(item, dict):
-            return None
+            return _MemoryCandidateGovernanceResult(reason="invalid")
 
         namespace = str(item.get("namespace") or "").strip()
         memory_type = str(item.get("memory_type") or "").strip().lower()
         if not namespace or memory_type not in {"profile", "fact", "instruction"}:
-            return None
+            return _MemoryCandidateGovernanceResult(reason="invalid")
 
         content = item.get("content") if isinstance(item.get("content"), dict) else {}
-        summary = truncate_text(item.get("summary"), max_chars=120)
+        try:
+            safe_content = assert_memory_payload_safe(content)
+            safe_summary = assert_memory_content_safe(str(item.get("summary") or ""))
+            normalized_tags = self._normalize_memory_tags(item.get("tags"))
+            normalized_source = self._normalize_memory_source(item.get("source"))
+            raw_dedupe_key = str(item.get("dedupe_key") or "").strip()
+            safe_dedupe_key = assert_memory_content_safe(raw_dedupe_key) if raw_dedupe_key else ""
+        except ValueError:
+            return _MemoryCandidateGovernanceResult(reason="sensitive")
+
+        content = safe_content if isinstance(safe_content, dict) else {}
+        summary = self._truncate_memory_summary(safe_summary)
         if not summary and isinstance(content.get("text"), str):
-            summary = truncate_text(content.get("text"), max_chars=120)
+            summary = self._truncate_memory_summary(content.get("text"))
         if not summary and len(content) == 0:
-            return None
+            return _MemoryCandidateGovernanceResult(reason="invalid")
 
         try:
             confidence = float(item.get("confidence")) if item.get("confidence") is not None else 0.6
@@ -264,11 +333,7 @@ class MemoryConsolidationService:
             confidence = 0.6
         confidence = max(0.0, min(confidence, 1.0))
 
-        tags = [str(tag).strip() for tag in list(item.get("tags") or []) if str(tag).strip()]
-        normalized_tags = list(dict.fromkeys(tags))[:8]
-        source = item.get("source") if isinstance(item.get("source"), dict) else {}
-
-        dedupe_key = str(item.get("dedupe_key") or "").strip()
+        dedupe_key = safe_dedupe_key
         if not dedupe_key:
             dedupe_key = self._build_memory_dedupe_key(
                 namespace=namespace,
@@ -282,13 +347,13 @@ class MemoryConsolidationService:
             "summary": summary,
             "content": content,
             "tags": normalized_tags,
-            "source": source,
+            "source": normalized_source,
             "confidence": confidence,
             "dedupe_key": dedupe_key,
         }
         if item.get("id"):
             normalized_candidate["id"] = str(item.get("id"))
-        return normalized_candidate
+        return _MemoryCandidateGovernanceResult(candidate=normalized_candidate)
 
     def _merge_profile_candidates(
             self,
@@ -312,14 +377,16 @@ class MemoryConsolidationService:
             **dict(base_item.get("source") or {}),
             **dict(incoming_item.get("source") or {}),
         }
-        merged_summary = str(incoming_item.get("summary") or base_item.get("summary") or "用户偏好")
+        merged_summary = self._truncate_memory_summary(
+            incoming_item.get("summary") or base_item.get("summary") or "用户偏好"
+        )
         merged_confidence = max(
             float(base_item.get("confidence") or 0.0),
             float(incoming_item.get("confidence") or 0.0),
         )
         return {
             **base_item,
-            "summary": truncate_text(merged_summary or "用户偏好", max_chars=120),
+            "summary": merged_summary or "用户偏好",
             "content": merged_content,
             "tags": merged_tags,
             "source": merged_source,
@@ -340,6 +407,7 @@ class MemoryConsolidationService:
             "input_count": len(list(candidates or [])),
             "kept_count": 0,
             "dropped_invalid_count": 0,
+            "dropped_sensitive_count": 0,
             "dropped_low_confidence_count": 0,
             "deduped_count": 0,
             "merged_profile_count": 0,
@@ -349,10 +417,14 @@ class MemoryConsolidationService:
         profile_index_by_namespace: Dict[str, int] = {}
 
         for raw_item in list(candidates or []):
-            normalized_item = self._normalize_memory_candidate(raw_item)
-            if normalized_item is None:
-                stats["dropped_invalid_count"] += 1
+            governance_result = self._normalize_memory_candidate(raw_item)
+            if governance_result.candidate is None:
+                if governance_result.reason == "sensitive":
+                    stats["dropped_sensitive_count"] += 1
+                else:
+                    stats["dropped_invalid_count"] += 1
                 continue
+            normalized_item = governance_result.candidate
             if float(normalized_item.get("confidence") or 0.0) < MEMORY_CANDIDATE_MIN_CONFIDENCE:
                 stats["dropped_low_confidence_count"] += 1
                 continue

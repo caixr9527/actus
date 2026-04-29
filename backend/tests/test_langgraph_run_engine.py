@@ -1,5 +1,6 @@
 import asyncio
 import io
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -72,6 +73,7 @@ class _FakeUoW:
         self.session_context_snapshot = session_context_snapshot_repo
         self.workspace = workspace_repo or SimpleNamespace(
             get_by_id=AsyncMock(return_value=None),
+            get_by_id_for_user=AsyncMock(return_value=None),
             get_by_session_id=AsyncMock(return_value=None),
         )
 
@@ -595,7 +597,10 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
     assert state["current_step_id"] is None
 
 
-def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_and_completed_summaries(monkeypatch) -> None:
+def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_and_completed_summaries(
+        monkeypatch,
+        caplog,
+) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
@@ -612,14 +617,15 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
             )
         )
     )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        user_id="user-1",
+        current_run_id="run-1",
+    )
     workspace_repo = SimpleNamespace(
-        get_by_id=AsyncMock(
-            return_value=Workspace(
-                id="workspace-1",
-                session_id="session-1",
-                current_run_id="run-1",
-            )
-        ),
+        get_by_id=AsyncMock(return_value=workspace),
+        get_by_id_for_user=AsyncMock(return_value=workspace),
         get_by_session_id=AsyncMock(return_value=None),
     )
     workflow_run_repo = SimpleNamespace(
@@ -687,16 +693,22 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
         ),
     )
 
-    state = asyncio.run(
-        engine._build_graph_input_state(
-            message=Message(message="hello"),
-            run_id="run-1",
-            invoke_config={"configurable": {"thread_id": "session-1"}},
+    with caplog.at_level(logging.WARNING):
+        state = asyncio.run(
+            engine._build_graph_input_state(
+                message=Message(message="hello"),
+                run_id="run-1",
+                invoke_config={"configurable": {"thread_id": "session-1"}},
+            )
         )
-    )
 
     assert state["conversation_summary"] == "跨轮会话摘要"
     assert state["workspace_id"] == "workspace-1"
+    workspace_repo.get_by_id_for_user.assert_awaited_once_with(
+        workspace_id="workspace-1",
+        user_id="user-1",
+    )
+    assert "构建初始状态失败，回退最小输入" not in caplog.text
     assert workflow_run_summary_repo.list_by_session_id.await_args_list[0].kwargs["statuses"] == [WorkflowRunStatus.COMPLETED]
     assert workflow_run_summary_repo.list_by_session_id.await_args_list[1].kwargs["statuses"] == [
         WorkflowRunStatus.FAILED,
@@ -745,6 +757,7 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
     workflow_run_repo = _CoordinatorWorkflowRunRepo(run)
     workspace_repo = SimpleNamespace(
         get_by_id=AsyncMock(return_value=workspace),
+        get_by_id_for_user=AsyncMock(return_value=workspace),
         get_by_session_id=AsyncMock(return_value=workspace),
     )
     first_summary = WorkflowRunSummary(
@@ -1099,6 +1112,14 @@ def test_langgraph_run_engine_should_not_fallback_to_session_current_run_id_when
             return_value=Workspace(
                 id="workspace-1",
                 session_id="session-1",
+                current_run_id=None,
+            )
+        ),
+        get_by_id_for_user=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                user_id="user-1",
                 current_run_id=None,
             )
         ),

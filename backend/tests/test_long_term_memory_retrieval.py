@@ -5,11 +5,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy import UniqueConstraint
 from pydantic import ValidationError
 
 from app.domain.models import LongTermMemory, LongTermMemorySearchMode, LongTermMemorySearchQuery
 from app.domain.models.long_term_memory import LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataTrustLevel,
+    PrivacyLevel,
+    RetentionPolicyKind,
+)
 from app.infrastructure.repositories.db_long_term_memory_repository import DBLongTermMemoryRepository
+from app.infrastructure.models.long_term_memory import LongTermMemoryModel
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
 from core.config import Settings
 
@@ -265,6 +272,35 @@ def test_pr2_migration_should_backfill_memory_user_id_from_user_namespace() -> N
     assert "AND user_id IS NULL" in migration_source
 
 
+def test_pr4_migration_should_scope_memory_dedupe_constraint_by_user_id() -> None:
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "1a2b3c4d5e6f_p0_4_memory_user_dedupe_constraint.py"
+    )
+    migration_source = migration_path.read_text(encoding="utf-8")
+
+    assert "uq_long_term_memories_namespace_dedupe_key" in migration_source
+    assert "uq_long_term_memories_user_namespace_dedupe_key" in migration_source
+    assert '["user_id", "namespace", "dedupe_key"]' in migration_source
+
+
+def test_long_term_memory_model_should_scope_dedupe_constraint_by_user_id() -> None:
+    constraints = [
+        constraint
+        for constraint in LongTermMemoryModel.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+    target = next(
+        constraint
+        for constraint in constraints
+        if constraint.name == "uq_long_term_memories_user_namespace_dedupe_key"
+    )
+
+    assert [column.name for column in target.columns] == ["user_id", "namespace", "dedupe_key"]
+
+
 def test_db_long_term_memory_repository_should_reject_invalid_query_embedding_dimensions() -> None:
     repository = DBLongTermMemoryRepository(
         db_session=SimpleNamespace(execute=AsyncMock()),
@@ -359,6 +395,50 @@ def test_db_long_term_memory_repository_should_inject_memory_embedding_on_upsert
     assert persisted.embedding == [0.2] * LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS
 
 
+def test_db_long_term_memory_repository_should_persist_memory_governance_fields() -> None:
+    captured_records = []
+    db_session = SimpleNamespace(
+        execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None)),
+        add=lambda record: captured_records.append(record),
+        flush=AsyncMock(),
+    )
+    repository = DBLongTermMemoryRepository(
+        db_session=db_session,
+        embedding_service=SimpleNamespace(embed_texts=AsyncMock()),
+    )
+
+    persisted = asyncio.run(
+        repository.upsert(
+            LongTermMemory(
+                user_id="user-1",
+                tenant_id="user-1",
+                id="mem-1",
+                namespace="user/user-1/fact",
+                memory_type="fact",
+                summary="用户偏好中文",
+                content={"language": "zh"},
+                content_text="用户偏好中文",
+                embedding=[0.3] * LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS,
+                source={"kind": "memory_consolidation"},
+                trust_level=DataTrustLevel.SYSTEM_GENERATED,
+                privacy_level=PrivacyLevel.SENSITIVE,
+                retention_policy=RetentionPolicyKind.USER_MEMORY,
+            )
+        )
+    )
+
+    assert len(captured_records) == 1
+    record = captured_records[0]
+    assert record.source == {"kind": "memory_consolidation"}
+    assert record.trust_level == DataTrustLevel.SYSTEM_GENERATED.value
+    assert record.privacy_level == PrivacyLevel.SENSITIVE.value
+    assert record.retention_policy == RetentionPolicyKind.USER_MEMORY.value
+    assert persisted.source == {"kind": "memory_consolidation"}
+    assert persisted.trust_level == DataTrustLevel.SYSTEM_GENERATED
+    assert persisted.privacy_level == PrivacyLevel.SENSITIVE
+    assert persisted.retention_policy == RetentionPolicyKind.USER_MEMORY
+
+
 def test_db_long_term_memory_repository_should_reject_empty_user_id_on_upsert() -> None:
     repository = DBLongTermMemoryRepository(
         db_session=SimpleNamespace(execute=AsyncMock()),
@@ -377,6 +457,72 @@ def test_db_long_term_memory_repository_should_reject_empty_user_id_on_upsert() 
                 )
             )
         )
+
+
+def test_db_long_term_memory_repository_should_scope_upsert_lookup_by_user_id() -> None:
+    existing_memory = LongTermMemory(
+        user_id="user-1",
+        tenant_id="user-1",
+        id="mem-existing",
+        namespace="shared/profile",
+        memory_type="profile",
+        summary="旧偏好",
+        content={"language": "zh"},
+        content_text="旧偏好",
+        embedding=[0.4] * LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS,
+        dedupe_key="shared-dedupe",
+    )
+    existing_record = LongTermMemoryModel.from_domain(existing_memory)
+    execute_results = [
+        SimpleNamespace(scalar_one_or_none=lambda: None),
+        SimpleNamespace(scalar_one_or_none=lambda: None),
+        SimpleNamespace(scalar_one_or_none=lambda: existing_record),
+    ]
+    added_records = []
+    db_session = SimpleNamespace(
+        execute=AsyncMock(side_effect=execute_results),
+        add=lambda record: added_records.append(record),
+        flush=AsyncMock(),
+    )
+    repository = DBLongTermMemoryRepository(
+        db_session=db_session,
+        embedding_service=SimpleNamespace(embed_texts=AsyncMock()),
+    )
+
+    user2_memory = LongTermMemory(
+        user_id="user-2",
+        tenant_id="user-2",
+        id="mem-user-2",
+        namespace="shared/profile",
+        memory_type="profile",
+        summary="用户2偏好",
+        content={"language": "en"},
+        content_text="用户2偏好",
+        embedding=[0.5] * LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS,
+        dedupe_key="shared-dedupe",
+    )
+    user1_update = LongTermMemory(
+        user_id="user-1",
+        tenant_id="user-1",
+        id="",
+        namespace="shared/profile",
+        memory_type="profile",
+        summary="新偏好",
+        content={"language": "zh", "style": "concise"},
+        content_text="新偏好",
+        embedding=[0.6] * LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS,
+        dedupe_key="shared-dedupe",
+    )
+
+    persisted_user2 = asyncio.run(repository.upsert(user2_memory))
+    persisted_user1 = asyncio.run(repository.upsert(user1_update))
+
+    assert len(added_records) == 1
+    assert added_records[0].user_id == "user-2"
+    assert persisted_user2.user_id == "user-2"
+    assert persisted_user1.id == "mem-existing"
+    assert persisted_user1.user_id == "user-1"
+    assert persisted_user1.summary == "新偏好"
 
 
 def test_settings_should_reject_embedding_dimensions_mismatch() -> None:

@@ -13,13 +13,12 @@ from app.application.service.data_retention_policy_service import DataRetentionP
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.contracts.data_access_contract import (
     DataAccessAction,
+    DataClassificationResult,
     DataOrigin,
     DataResourceKind,
     DataTrustLevel,
     PrivacyLevel,
     RetentionPolicyKind,
-    default_privacy_level,
-    default_trust_level,
     normalize_tenant_id,
 )
 
@@ -44,15 +43,6 @@ class AccessDecisionResult(BaseModel):
     resource_kind: DataResourceKind
     action: DataAccessAction
     reason_code: str = ""
-
-
-class DataClassificationResult(BaseModel):
-    """数据分类结果。"""
-
-    origin: DataOrigin
-    trust_level: DataTrustLevel
-    privacy_level: PrivacyLevel
-    retention_policy: RetentionPolicyKind
 
 
 class RetentionPolicyResult(BaseModel):
@@ -435,21 +425,16 @@ class RuntimeAccessControlService:
     def classify_data(
             self,
             *,
+            tenant_id: str,
             origin: DataOrigin,
             requested_privacy_level: PrivacyLevel | None = None,
             retention_policy: RetentionPolicyKind | None = None,
     ) -> DataClassificationResult:
-        tenant_id = normalize_tenant_id("classification-default")
-        policy = self._retention_policy_service.default_policy_for_origin(
+        return self._retention_policy_service.classify_data(
             tenant_id=tenant_id,
             origin=origin,
-            requested_policy=retention_policy,
-        )
-        return DataClassificationResult(
-            origin=origin,
-            trust_level=default_trust_level(origin),
-            privacy_level=requested_privacy_level or default_privacy_level(origin),
-            retention_policy=policy.policy_kind,
+            requested_privacy_level=requested_privacy_level,
+            retention_policy=retention_policy,
         )
 
     @staticmethod

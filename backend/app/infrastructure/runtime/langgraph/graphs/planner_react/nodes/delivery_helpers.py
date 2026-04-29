@@ -149,6 +149,24 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
     )
 
 
+def _collect_completed_step_state_artifacts(state: PlannerReActLangGraphState) -> List[str]:
+    artifact_groups: List[List[str]] = []
+    for step_state in list(state.get("step_states") or []):
+        if not isinstance(step_state, dict):
+            continue
+        artifact_groups.append(
+            _normalize_successful_outcome_artifacts(
+                step_state.get("status"),
+                step_state.get("outcome"),
+            )
+        )
+    return _filter_runtime_temp_attachment_refs(
+        normalize_file_path_list(
+            merge_attachment_paths(*artifact_groups),
+        )
+    )
+
+
 def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> List[str]:
     """统一收口当前运行里可直接消费的文件路径，供执行器判断是否允许文件工具。"""
     return normalize_file_path_list(
@@ -200,6 +218,24 @@ def _filter_attachment_refs_by_authoritative_paths(
     return _filter_runtime_temp_attachment_refs([ref for ref in normalized_refs if ref in allowed_paths])
 
 
+def _resolve_summary_authoritative_paths(
+        *,
+        workspace_artifact_paths: List[str],
+        current_run_artifact_refs: List[str],
+) -> List[str]:
+    if len(workspace_artifact_paths) > 0:
+        return workspace_artifact_paths
+    return current_run_artifact_refs
+
+
+def _has_explicit_attachment_payload(parsed_attachments: Any) -> bool:
+    if isinstance(parsed_attachments, str):
+        return bool(parsed_attachments.strip())
+    if isinstance(parsed_attachments, list):
+        return len(parsed_attachments) > 0
+    return False
+
+
 async def _resolve_summary_attachment_refs(
         state: PlannerReActLangGraphState,
         parsed_attachments: Any,
@@ -209,28 +245,38 @@ async def _resolve_summary_attachment_refs(
     if runtime_context_service is not None:
         workspace_artifact_paths = await runtime_context_service.list_workspace_artifact_paths()
 
+    selected_attachment_refs = _filter_runtime_temp_attachment_refs(
+        normalize_file_path_list(state.get("selected_artifacts"), max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
+    )
+    current_run_artifact_refs = _collect_completed_step_state_artifacts(state)
+    authoritative_paths = _resolve_summary_authoritative_paths(
+        workspace_artifact_paths=workspace_artifact_paths,
+        current_run_artifact_refs=current_run_artifact_refs,
+    )
     explicit_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
         normalize_attachments(parsed_attachments),
-        workspace_artifact_paths,
+        authoritative_paths,
     )
-    current_run_artifact_refs = _filter_attachment_refs_by_authoritative_paths(
-        _resolve_current_run_attachment_candidates(state),
-        workspace_artifact_paths,
-    )
-    # Phase B：summary 附件只允许来自当前运行可验证产物，避免外部伪路径或陈旧附件污染最终结果。
-    known_attachment_refs = normalize_file_path_list(
-        current_run_artifact_refs,
-        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-    )
+    known_attachment_refs = normalize_file_path_list(authoritative_paths, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
     if len(explicit_attachment_refs) > 0:
-        resolved_explicit_refs = [ref for ref in explicit_attachment_refs if ref in known_attachment_refs]
+        selected_paths = set(selected_attachment_refs)
+        resolved_explicit_refs = [
+            ref for ref in explicit_attachment_refs
+            if ref in known_attachment_refs and ref in selected_paths
+        ]
         if len(resolved_explicit_refs) > 0:
             return resolved_explicit_refs
 
-    if len(current_run_artifact_refs) > 0:
-        return _filter_runtime_temp_attachment_refs(current_run_artifact_refs)
+    if _has_explicit_attachment_payload(parsed_attachments):
+        return []
 
-    return []
+    if len(authoritative_paths) == 0:
+        return []
+
+    return _filter_attachment_refs_by_authoritative_paths(
+        selected_attachment_refs,
+        authoritative_paths,
+    )
 
 
 def _filter_runtime_temp_attachment_refs(refs: List[str]) -> List[str]:

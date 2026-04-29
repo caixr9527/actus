@@ -13,6 +13,7 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     DataResourceKind,
     PrivacyLevel,
     RetentionPolicyKind,
+    default_retention_policy,
     default_privacy_level,
     default_trust_level,
     normalize_tenant_id,
@@ -133,6 +134,7 @@ def test_data_access_contract_defaults_should_follow_p0_4_rules() -> None:
     assert default_privacy_level(DataOrigin.LONG_TERM_MEMORY) == PrivacyLevel.SENSITIVE
     assert default_privacy_level(DataOrigin.SYSTEM_OPERATIONAL) == PrivacyLevel.INTERNAL
     assert default_trust_level(DataOrigin.EXTERNAL_WEB).value == "external_untrusted"
+    assert default_retention_policy(DataOrigin.LONG_TERM_MEMORY) == RetentionPolicyKind.USER_MEMORY
 
 
 def test_resolve_session_scope_should_build_owned_scope() -> None:
@@ -276,11 +278,13 @@ def test_classify_data_should_use_default_retention_policy() -> None:
     service = _build_service(_UoW(session=None))
 
     result = service.classify_data(
+        tenant_id="user-a",
         origin=DataOrigin.LONG_TERM_MEMORY,
         requested_privacy_level=None,
         retention_policy=None,
     )
 
+    assert result.tenant_id == "user-a"
     assert result.privacy_level == PrivacyLevel.SENSITIVE
     assert result.retention_policy == RetentionPolicyKind.USER_MEMORY
 

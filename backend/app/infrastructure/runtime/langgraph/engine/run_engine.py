@@ -31,6 +31,10 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.memory_consolidation import MemoryConsolidationService
 from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataClassificationPolicy,
+    DefaultDataClassificationPolicy,
+)
 from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
     build_trace_id,
@@ -138,14 +142,17 @@ class LangGraphRunEngine(RunEngine):
             runtime_context_service: RuntimeContextService,
             max_tool_iterations: Optional[int] = None,
             checkpointer: Any | None = None,
+            data_retention_policy_service: DataClassificationPolicy | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
+        effective_data_retention_policy_service = data_retention_policy_service or DefaultDataClassificationPolicy()
         self._session_id = session_id
         self._file_storage = file_storage
         self._user_id = user_id
         self._uow_factory = uow_factory
         self._checkpointer = checkpointer
+        self._data_retention_policy_service = effective_data_retention_policy_service
         normalized_stage_llms = ensure_required_stage_llms(stage_llms)
         self._long_term_memory_repository = (
             LangGraphLongTermMemoryRepository(uow_factory=uow_factory)
@@ -166,6 +173,7 @@ class LangGraphRunEngine(RunEngine):
             checkpointer=self._checkpointer,
             long_term_memory_repository=self._long_term_memory_repository,
             memory_consolidation_service=self._memory_consolidation_service,
+            data_retention_policy_service=self._data_retention_policy_service,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -195,12 +203,14 @@ class LangGraphRunEngine(RunEngine):
             checkpointer: Any,
             long_term_memory_repository: Any,
             memory_consolidation_service: MemoryConsolidationService,
+            data_retention_policy_service: DataClassificationPolicy | None,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
             "checkpointer": checkpointer,
             "long_term_memory_repository": long_term_memory_repository,
             "memory_consolidation_service": memory_consolidation_service,
+            "data_retention_policy_service": data_retention_policy_service,
         }
         if runtime_tools is not None or max_tool_iterations is not None:
             graph_kwargs["runtime_tools"] = runtime_tools
@@ -218,6 +228,7 @@ class LangGraphRunEngine(RunEngine):
             has_checkpointer=checkpointer is not None,
             has_repository=long_term_memory_repository is not None,
             has_memory_consolidation_service=memory_consolidation_service is not None,
+            has_data_retention_policy_service=data_retention_policy_service is not None,
         )
         return build_planner_react_langgraph_graph(**graph_kwargs)
 

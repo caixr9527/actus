@@ -1099,6 +1099,8 @@ class RuntimeContextService:
                     "final_answer_text_excerpt": item.get("final_answer_text_excerpt"),
                 }
             )
+            if len(briefs) >= _BRIEF_LIMIT:
+                break
         return briefs
 
     def _build_plan_snapshot(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:

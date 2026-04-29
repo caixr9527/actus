@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """长期记忆写入前使用的敏感信息纯规则。"""
 
+import json
 import re
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -17,10 +19,10 @@ class SensitiveDataDetectionResult(BaseModel):
 
 
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("token", re.compile(r"(?i)\b(?:access|refresh|id)?_?token\s*[:=]\s*['\"]?[^'\"\s]{8,}")),
-    ("api_key", re.compile(r"(?i)\b(?:api[_-]?key|secret[_-]?key)\s*[:=]\s*['\"]?[^'\"\s]{8,}")),
-    ("password", re.compile(r"(?i)\bpassword\s*[:=]\s*['\"]?[^'\"\s]{4,}")),
-    ("cookie", re.compile(r"(?i)\bcookie\s*[:=]\s*[^;\n]{8,}")),
+    ("token", re.compile(r"(?i)['\"]?\b(?:access|refresh|id)?_?token\b['\"]?\s*[:=]\s*['\"]?[^'\"\s,}]{8,}")),
+    ("api_key", re.compile(r"(?i)['\"]?\b(?:api[_-]?key|secret[_-]?key)\b['\"]?\s*[:=]\s*['\"]?[^'\"\s,}]{8,}")),
+    ("password", re.compile(r"(?i)['\"]?\bpassword\b['\"]?\s*[:=]\s*['\"]?[^'\"\s,}]{4,}")),
+    ("cookie", re.compile(r"(?i)['\"]?\bcookie\b['\"]?\s*[:=]\s*['\"]?[^'\"\n,}]{8,}")),
 )
 
 _PII_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -69,3 +71,33 @@ def assert_memory_content_safe(text: str) -> str:
     if result.has_secret:
         raise ValueError("长期记忆内容包含不允许保存的敏感凭证")
     return result.redacted_text
+
+
+def assert_memory_payload_safe(payload: Any) -> Any:
+    """递归治理长期记忆正文载荷，确保 secret 拒写、PII 脱敏。"""
+    if isinstance(payload, (dict, list)):
+        serialized_payload = str(payload)
+        try:
+            serialized_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            pass
+        if detect_sensitive_text(serialized_payload).has_secret:
+            raise ValueError("长期记忆内容包含不允许保存的敏感凭证")
+    if isinstance(payload, str):
+        return assert_memory_content_safe(payload)
+    if isinstance(payload, dict):
+        normalized_payload: dict[Any, Any] = {}
+        for key, value in payload.items():
+            safe_key = assert_memory_content_safe(str(key))
+            normalized_payload[safe_key] = assert_memory_payload_safe(value)
+        return normalized_payload
+    if isinstance(payload, list):
+        return [assert_memory_payload_safe(item) for item in payload]
+    if isinstance(payload, (int, float)):
+        normalized_value = str(payload)
+        result = detect_sensitive_text(normalized_value)
+        if result.has_secret:
+            raise ValueError("长期记忆内容包含不允许保存的敏感凭证")
+        if result.has_pii:
+            return result.redacted_text
+    return payload

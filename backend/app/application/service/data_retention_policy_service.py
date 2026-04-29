@@ -7,8 +7,15 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from app.domain.services.runtime.contracts.data_access_contract import (
+    DataClassificationResult,
+    DefaultDataClassificationPolicy,
     DataOrigin,
+    PrivacyLevel,
     RetentionPolicyKind,
+    default_retention_policy,
+    default_privacy_level,
+    default_trust_level,
+    normalize_tenant_id,
 )
 
 
@@ -21,7 +28,7 @@ class RetentionPolicyResult(BaseModel):
     delete_after_days: int | None = None
 
 
-class DataRetentionPolicyService:
+class DataRetentionPolicyService(DefaultDataClassificationPolicy):
     """集中提供 P0-4 默认保留策略，避免业务服务散落硬编码。"""
 
     def default_policy_for_origin(
@@ -31,15 +38,30 @@ class DataRetentionPolicyService:
             origin: DataOrigin,
             requested_policy: RetentionPolicyKind | None = None,
     ) -> RetentionPolicyResult:
+        normalized_tenant_id = normalize_tenant_id(tenant_id)
         if requested_policy is not None:
-            return RetentionPolicyResult(tenant_id=tenant_id, policy_kind=requested_policy)
+            return RetentionPolicyResult(tenant_id=normalized_tenant_id, policy_kind=requested_policy)
 
-        if origin == DataOrigin.LONG_TERM_MEMORY:
-            policy_kind = RetentionPolicyKind.USER_MEMORY
-        elif origin in {DataOrigin.USER_UPLOAD, DataOrigin.AGENT_GENERATED, DataOrigin.SANDBOX_STATE}:
-            policy_kind = RetentionPolicyKind.WORKSPACE_BOUND
-        elif origin == DataOrigin.SYSTEM_OPERATIONAL:
-            policy_kind = RetentionPolicyKind.EPHEMERAL
-        else:
-            policy_kind = RetentionPolicyKind.SESSION_BOUND
-        return RetentionPolicyResult(tenant_id=tenant_id, policy_kind=policy_kind)
+        policy_kind = default_retention_policy(origin)
+        return RetentionPolicyResult(tenant_id=normalized_tenant_id, policy_kind=policy_kind)
+
+    def classify_data(
+            self,
+            *,
+            tenant_id: str,
+            origin: DataOrigin,
+            requested_privacy_level: PrivacyLevel | None = None,
+            retention_policy: RetentionPolicyKind | None = None,
+    ) -> DataClassificationResult:
+        policy = self.default_policy_for_origin(
+            tenant_id=tenant_id,
+            origin=origin,
+            requested_policy=retention_policy,
+        )
+        return DataClassificationResult(
+            tenant_id=policy.tenant_id,
+            origin=origin,
+            trust_level=default_trust_level(origin),
+            privacy_level=requested_privacy_level or default_privacy_level(origin),
+            retention_policy=policy.policy_kind,
+        )

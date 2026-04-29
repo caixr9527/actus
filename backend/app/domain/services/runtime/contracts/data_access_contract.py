@@ -3,6 +3,9 @@
 """Runtime 数据访问治理的纯领域契约。"""
 
 from enum import Enum
+from typing import Protocol
+
+from pydantic import BaseModel
 
 
 class DataResourceKind(str, Enum):
@@ -82,6 +85,52 @@ class RetentionPolicyKind(str, Enum):
     LEGAL_HOLD = "legal_hold"
 
 
+class DataClassificationResult(BaseModel):
+    """数据分类结果，供应用层策略服务与运行时写入链路共享。"""
+
+    tenant_id: str
+    origin: DataOrigin
+    trust_level: DataTrustLevel
+    privacy_level: PrivacyLevel
+    retention_policy: RetentionPolicyKind
+
+
+class DataClassificationPolicy(Protocol):
+    """运行时数据分类策略端口。"""
+
+    def classify_data(
+            self,
+            *,
+            tenant_id: str,
+            origin: DataOrigin,
+            requested_privacy_level: PrivacyLevel | None = None,
+            retention_policy: RetentionPolicyKind | None = None,
+    ) -> DataClassificationResult:
+        """返回指定来源的信任等级、隐私等级和保留策略。"""
+        ...
+
+
+class DefaultDataClassificationPolicy:
+    """领域默认数据分类策略，供直接构图等无应用服务注入场景使用。"""
+
+    def classify_data(
+            self,
+            *,
+            tenant_id: str,
+            origin: DataOrigin,
+            requested_privacy_level: PrivacyLevel | None = None,
+            retention_policy: RetentionPolicyKind | None = None,
+    ) -> DataClassificationResult:
+        normalized_tenant_id = normalize_tenant_id(tenant_id)
+        return DataClassificationResult(
+            tenant_id=normalized_tenant_id,
+            origin=origin,
+            trust_level=default_trust_level(origin),
+            privacy_level=requested_privacy_level or default_privacy_level(origin),
+            retention_policy=retention_policy or default_retention_policy(origin),
+        )
+
+
 def normalize_tenant_id(user_id: str) -> str:
     """当前组织模型上线前，租户边界固定为 user_id。"""
     tenant_id = str(user_id or "").strip()
@@ -108,6 +157,17 @@ def default_trust_level(origin: DataOrigin) -> DataTrustLevel:
     if origin in {DataOrigin.EXTERNAL_WEB, DataOrigin.EXTERNAL_TOOL}:
         return DataTrustLevel.EXTERNAL_UNTRUSTED
     return DataTrustLevel.SYSTEM_GENERATED
+
+
+def default_retention_policy(origin: DataOrigin) -> RetentionPolicyKind:
+    """按来源返回默认保留策略，具体配置入口由应用层服务统一封装。"""
+    if origin == DataOrigin.LONG_TERM_MEMORY:
+        return RetentionPolicyKind.USER_MEMORY
+    if origin in {DataOrigin.USER_UPLOAD, DataOrigin.AGENT_GENERATED, DataOrigin.SANDBOX_STATE}:
+        return RetentionPolicyKind.WORKSPACE_BOUND
+    if origin == DataOrigin.SYSTEM_OPERATIONAL:
+        return RetentionPolicyKind.EPHEMERAL
+    return RetentionPolicyKind.SESSION_BOUND
 
 
 def is_cross_scope_access_allowed(
