@@ -208,12 +208,14 @@ def _build_tool_event_projector(
 def _build_user_input_attachment_projector(
         *,
         session_id: str = "session-1",
+        user_id: str = "user-1",
         sandbox=None,
         file_storage=None,
         uow_factory=None,
 ) -> UserInputAttachmentProjector:
     return UserInputAttachmentProjector(
         session_id=session_id,
+        user_id=user_id,
         sandbox=sandbox or _SandboxUploadFail(),
         file_storage=file_storage or _SandboxSyncFileStorage(),
         uow_factory=uow_factory or (lambda: _SandboxSyncUoW()),
@@ -241,7 +243,11 @@ class _SandboxUploadSuccess:
 
 
 class _SandboxSyncFileStorage:
-    async def download_file(self, file_id: str):
+    def __init__(self) -> None:
+        self.download_calls: list[tuple[str, str | None]] = []
+
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
         return io.BytesIO(b"hello"), File(id=file_id, filename="a.txt")
 
 
@@ -291,10 +297,12 @@ def test_user_input_attachment_projector_should_re_raise_when_upload_unsuccessfu
 
 def test_user_input_attachment_projector_should_sync_attachments_to_sandbox_and_session() -> None:
     sandbox = _SandboxUploadSuccess()
+    file_storage = _SandboxSyncFileStorage()
     file_repo = _SandboxSyncFileRepo()
     session_repo = _SandboxSyncSessionRepo()
     projector = _build_user_input_attachment_projector(
         sandbox=sandbox,
+        file_storage=file_storage,
         uow_factory=lambda: _SandboxSyncUoW(file_repo=file_repo, session_repo=session_repo),
     )
     event = MessageEvent(
@@ -317,6 +325,22 @@ def test_user_input_attachment_projector_should_sync_attachments_to_sandbox_and_
         ("session-1", "/home/ubuntu/upload/file-1/a.txt")
     ]
     assert [attachment.filepath for attachment in event.attachments] == ["/home/ubuntu/upload/file-1/a.txt"]
+    assert file_storage.download_calls == [("file-1", "user-1")]
+
+
+def test_user_input_attachment_projector_should_require_user_id() -> None:
+    with pytest.raises(ValueError, match="必须提供 user_id"):
+        _build_user_input_attachment_projector(user_id="")
+
+
+def test_user_input_attachment_projector_should_not_download_without_user_id_for_foreign_file() -> None:
+    file_storage = _ForeignFileStorage()
+    projector = _build_user_input_attachment_projector(file_storage=file_storage)
+
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(projector.sync_file_to_sandbox(file_id="file-foreign"))
+
+    assert file_storage.download_calls == [("file-foreign", "user-1")]
 
 
 class _SameNameFileStorage:
@@ -325,19 +349,33 @@ class _SameNameFileStorage:
             "file-1": File(id="file-1", filename="same.txt"),
             "file-2": File(id="file-2", filename="same.txt"),
         }
+        self.download_calls: list[tuple[str, str | None]] = []
 
-    async def download_file(self, file_id: str):
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
         file = self._files[file_id].model_copy(deep=True)
         return io.BytesIO(file_id.encode("utf-8")), file
 
 
+class _ForeignFileStorage:
+    def __init__(self) -> None:
+        self.download_calls: list[tuple[str, str | None]] = []
+
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
+        if user_id != "user-1":
+            raise AssertionError("UserInputAttachmentProjector 不应无 user_id 下载文件")
+        raise FileNotFoundError(file_id)
+
+
 def test_user_input_attachment_projector_should_not_override_same_name_attachments() -> None:
     sandbox = _SandboxUploadSuccess()
+    file_storage = _SameNameFileStorage()
     file_repo = _SandboxSyncFileRepo()
     session_repo = _SandboxSyncSessionRepo()
     projector = _build_user_input_attachment_projector(
         sandbox=sandbox,
-        file_storage=_SameNameFileStorage(),
+        file_storage=file_storage,
         uow_factory=lambda: _SandboxSyncUoW(file_repo=file_repo, session_repo=session_repo),
     )
     event = MessageEvent(
@@ -371,6 +409,7 @@ def test_user_input_attachment_projector_should_not_override_same_name_attachmen
         "/home/ubuntu/upload/file-1/same.txt",
         "/home/ubuntu/upload/file-2/same.txt",
     ]
+    assert file_storage.download_calls == [("file-1", "user-1"), ("file-2", "user-1")]
 
 
 def test_sync_file_to_storage_should_skip_when_file_not_exists() -> None:

@@ -95,6 +95,7 @@ def get_file_service(
     return FileService(
         uow_factory=get_uow,
         file_storage=file_storage,
+        access_control_service=get_runtime_access_control_service(),
     )
 
 

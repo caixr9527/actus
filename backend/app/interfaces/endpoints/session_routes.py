@@ -376,13 +376,12 @@ async def vnc_websocket(
     elif "base64" in protocols:
         selected_protocol = "base64"
 
-    # 记录日志并接受WebSocket连接
-    logger.info(f"为会话[{session_id}]开启WebSocket连接")
-    await websocket.accept(subprotocol=selected_protocol)
-
     try:
         # 获取沙箱环境的VNC URL并建立连接
         sandbox_vnc_url = await session_service.get_vnc_url(user_id=current_user.id, session_id=session_id)
+        # 鉴权与 VNC URL 解析必须在 accept 前完成，避免失败请求建立 WebSocket。
+        logger.info(f"为会话[{session_id}]开启WebSocket连接")
+        await websocket.accept(subprotocol=selected_protocol)
         logger.info(f"连接WebSocket VNC： {sandbox_vnc_url}")
 
         # 建立到沙箱VNC服务器的WebSocket连接
@@ -435,6 +434,9 @@ async def vnc_websocket(
         # 处理连接沙箱环境失败的情况
         logger.error(f"连接沙箱环境失败: {str(connection_e)}")
         await websocket.close(code=1011, reason=f"连接沙箱环境失败: {str(connection_e)}")
+    except NotFoundError as e:
+        logger.info("VNC WebSocket 鉴权失败: session_id=%s error_key=%s", session_id, e.error_key)
+        await websocket.close(code=1008, reason=e.msg or "无权访问会话 VNC")
     except Exception as e:
         # 处理其他WebSocket异常
         logger.error(f"WebSocket异常: {str(e)}")

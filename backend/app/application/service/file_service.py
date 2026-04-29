@@ -11,9 +11,11 @@ from fastapi import UploadFile
 
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.domain.external import FileStorage, FileUploadPayload
 from app.domain.models import File
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 
 
 class FileService:
@@ -23,10 +25,14 @@ class FileService:
             self,
             uow_factory: Callable[[], IUnitOfWork],
             file_storage: FileStorage,
+            access_control_service: RuntimeAccessControlService | None = None,
     ) -> None:
         """构造函数，完成文件服务的初始化"""
         self.file_storage = file_storage
         self._uow_factory = uow_factory
+        self._access_control_service = access_control_service or RuntimeAccessControlService(
+            uow_factory=uow_factory,
+        )
 
     async def upload_file(self, user_id: str, upload_file: UploadFile) -> File:
         """将传递的文件上传到腾讯云cos并记录上传数据"""
@@ -42,6 +48,11 @@ class FileService:
 
     async def get_file_info(self, user_id: str, file_id: str) -> File:
         """根据传递的文件id获取文件信息"""
+        await self._access_control_service.assert_file_access(
+            user_id=user_id,
+            file_id=file_id,
+            action=DataAccessAction.READ,
+        )
         # 查询使用短生命周期UoW，避免服务级别缓存事务对象。
         async with self._uow_factory() as uow:
             file = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
@@ -55,4 +66,9 @@ class FileService:
 
     async def download_file(self, user_id: str, file_id: str) -> Tuple[BinaryIO, File]:
         """根据传递的文件id下载文件"""
+        await self._access_control_service.assert_file_access(
+            user_id=user_id,
+            file_id=file_id,
+            action=DataAccessAction.DOWNLOAD,
+        )
         return await self.file_storage.download_file(file_id=file_id, user_id=user_id)

@@ -21,11 +21,15 @@ class UserInputAttachmentProjector:
             self,
             *,
             session_id: str,
+            user_id: str,
             sandbox: Sandbox,
             file_storage: FileStorage,
             uow_factory: Callable[[], IUnitOfWork],
     ) -> None:
         self._session_id = session_id
+        self._user_id = str(user_id or "").strip()
+        if not self._user_id:
+            raise ValueError("UserInputAttachmentProjector 必须提供 user_id")
         self._sandbox = sandbox
         self._file_storage = file_storage
         self._uow_factory = uow_factory
@@ -38,7 +42,10 @@ class UserInputAttachmentProjector:
 
     async def sync_file_to_sandbox(self, *, file_id: str) -> File:
         try:
-            file_data, file = await self._file_storage.download_file(file_id=file_id)
+            file_data, file = await self._file_storage.download_file(
+                file_id=file_id,
+                user_id=self._user_id,
+            )
             resolved_file_id = str(file.id or file_id).strip() or str(file_id or "").strip()
             file_path = self._build_sandbox_file_path(
                 file_id=resolved_file_id,

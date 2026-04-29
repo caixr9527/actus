@@ -120,6 +120,7 @@ class AgentTaskRunner(TaskRunner):
         )
         self._user_input_attachment_projector = UserInputAttachmentProjector(
             session_id=session_id,
+            user_id=user_id,
             sandbox=sandbox,
             file_storage=file_storage,
             uow_factory=uow_factory,
