@@ -141,6 +141,12 @@ class _OwnedWorkflowRunRepo:
     async def get_by_id(self, run_id: str):
         return self.run if run_id == self.run.id else None
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        run = await self.get_by_id(run_id)
+        if run is None or run.user_id != user_id:
+            return None
+        return run
+
     async def get_by_id_for_update(self, run_id: str):
         return self.run if run_id == self.run.id else None
 
@@ -150,13 +156,30 @@ class _OwnedWorkflowRunRepo:
 
 class _OwnedWorkspaceRepo:
     def __init__(self) -> None:
-        self.workspace = Workspace(id="workspace-a", session_id="session-a", current_run_id="run-a")
+        self.workspace = Workspace(
+            id="workspace-a",
+            session_id="session-a",
+            user_id="user-a",
+            current_run_id="run-a",
+        )
 
     async def get_by_id(self, workspace_id: str):
         return self.workspace if workspace_id == self.workspace.id else None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        workspace = await self.get_by_id(workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace if session_id == self.workspace.session_id else None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        workspace = await self.get_by_session_id(session_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
 
     async def list_by_session_id(self, session_id: str):
         return [self.workspace] if session_id == self.workspace.session_id else []

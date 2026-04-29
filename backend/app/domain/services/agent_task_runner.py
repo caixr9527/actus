@@ -97,6 +97,7 @@ class AgentTaskRunner(TaskRunner):
         self._uow_factory = uow_factory
         self._workspace_runtime_service = WorkspaceRuntimeService(
             session_id=session_id,
+            user_id=user_id,
             uow_factory=uow_factory,
         )
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)

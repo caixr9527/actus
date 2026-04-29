@@ -114,7 +114,10 @@ class RuntimeAccessControlService:
             workspace = None
             workspace_id = str(session.workspace_id or "").strip()
             if workspace_id:
-                workspace = await uow.workspace.get_by_id(workspace_id=workspace_id)
+                workspace = await uow.workspace.get_by_id_for_user(
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                )
                 if workspace is None:
                     self._log_denied(
                         user_id=user_id,
@@ -155,12 +158,37 @@ class RuntimeAccessControlService:
                     raise self._session_not_found(session_id)
                 if len(workspaces) == 1:
                     workspace = workspaces[0]
+                    workspace_user_id = str(workspace.user_id or "").strip()
+                    if not workspace_user_id:
+                        self._log_denied(
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            resource_kind=DataResourceKind.WORKSPACE,
+                            action=DataAccessAction.READ,
+                            resource_id=workspace.id,
+                            session_id=session.id,
+                            workspace_id=workspace.id,
+                            reason_code="workspace_owner_missing",
+                        )
+                        raise self._session_not_found(session_id)
+                    if workspace_user_id != user_id:
+                        self._log_denied(
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            resource_kind=DataResourceKind.WORKSPACE,
+                            action=DataAccessAction.READ,
+                            resource_id=workspace.id,
+                            session_id=session.id,
+                            workspace_id=workspace.id,
+                            reason_code="workspace_owner_mismatch",
+                        )
+                        raise self._session_not_found(session_id)
                     workspace_id = workspace.id
 
             run = None
             run_id = str(getattr(workspace, "current_run_id", None) or session.current_run_id or "").strip()
             if run_id:
-                run = await uow.workflow_run.get_by_id(run_id=run_id)
+                run = await uow.workflow_run.get_by_id_for_user(run_id=run_id, user_id=user_id)
                 if run is None or run.session_id != session.id or run.user_id != user_id:
                     self._log_denied(
                         user_id=user_id,
@@ -203,7 +231,10 @@ class RuntimeAccessControlService:
     ) -> AccessScopeResult:
         tenant_id = normalize_tenant_id(user_id)
         async with self._uow_factory() as uow:
-            workspace = await uow.workspace.get_by_id(workspace_id=workspace_id)
+            workspace = await uow.workspace.get_by_id_for_user(
+                workspace_id=workspace_id,
+                user_id=user_id,
+            )
             if workspace is None:
                 self._log_denied(
                     user_id=user_id,
@@ -253,8 +284,8 @@ class RuntimeAccessControlService:
     ) -> AccessScopeResult:
         tenant_id = normalize_tenant_id(user_id)
         async with self._uow_factory() as uow:
-            run = await uow.workflow_run.get_by_id(run_id=run_id)
-        if run is None or run.user_id != user_id:
+            run = await uow.workflow_run.get_by_id_for_user(run_id=run_id, user_id=user_id)
+        if run is None:
             self._log_denied(
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -349,7 +380,8 @@ class RuntimeAccessControlService:
             raise self._session_not_found(session_id)
 
         async with self._uow_factory() as uow:
-            artifacts = await uow.workspace_artifact.list_by_workspace_id_and_paths(
+            artifacts = await uow.workspace_artifact.list_by_user_workspace_id_and_paths(
+                user_id=user_id,
                 workspace_id=scope.workspace_id,
                 paths=[path],
             )

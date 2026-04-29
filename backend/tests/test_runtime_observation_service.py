@@ -72,6 +72,9 @@ class _WorkflowRunRepo:
     async def get_by_id(self, run_id: str):
         return self.run if self.run and self.run.id == run_id else None
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        return self.run if self.run and self.run.id == run_id and self.run.user_id == user_id else None
+
     async def get_by_id_for_update(self, run_id: str):
         return self.run if self.run and self.run.id == run_id else None
 
@@ -103,8 +106,18 @@ class _WorkspaceRepo:
             return self.workspace
         return None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        if self.workspace and self.workspace.id == workspace_id and self.workspace.user_id == user_id:
+            return self.workspace
+        return None
+
     async def get_by_session_id(self, session_id: str):
         if self.workspace and self.workspace.session_id == session_id:
+            return self.workspace
+        return None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        if self.workspace and self.workspace.session_id == session_id and self.workspace.user_id == user_id:
             return self.workspace
         return None
 
@@ -181,7 +194,7 @@ def test_session_observation_should_return_wait_interaction_and_capabilities() -
         status=SessionStatus.WAITING,
     )
     run = WorkflowRun(id="run-1", session_id="session-1", user_id="user-1", status=WorkflowRunStatus.WAITING)
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id="run-1")
     uow = _UoW(session=session, run=run, workspace=workspace, records=[record])
     service = _build_service(uow)
 
@@ -221,7 +234,7 @@ def test_session_observation_should_expose_continue_cancelled_capability() -> No
         status=SessionStatus.CANCELLED,
     )
     run = WorkflowRun(id="run-1", session_id="session-1", user_id="user-1", status=WorkflowRunStatus.CANCELLED)
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id="run-1")
     uow = _UoW(session=session, run=run, workspace=workspace, records=[record])
     service = _build_service(uow)
 
@@ -382,7 +395,7 @@ def test_observable_event_should_project_runtime_metadata_from_context() -> None
         status=WorkflowRunStatus.RUNNING,
         current_step_id="step-1",
     )
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id="run-1")
     service = _build_service(_UoW(session=session, run=run, workspace=workspace))
     context = asyncio.run(service.build_event_context(user_id="user-1", session_id="session-1"))
 
@@ -451,7 +464,7 @@ def test_observable_event_should_keep_plain_message_without_completed_status() -
         user_id="user-1",
         status=WorkflowRunStatus.COMPLETED,
     )
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id="run-1")
     service = _build_service(_UoW(session=session, run=run, workspace=workspace))
     context = asyncio.run(service.build_event_context(user_id="user-1", session_id="session-1"))
     envelope = asyncio.run(service.build_observable_event(

@@ -40,6 +40,10 @@ class WorkflowRunRepository(Protocol):
         """根据运行ID查询运行主记录"""
         ...
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str) -> Optional[WorkflowRun]:
+        """根据运行ID与用户归属查询运行主记录"""
+        ...
+
     async def get_by_id_for_update(self, run_id: str) -> Optional[WorkflowRun]:
         """按运行ID加锁查询运行主记录"""
         ...

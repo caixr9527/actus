@@ -136,6 +136,8 @@ class _SessionRepo:
 class _WorkflowRunRepo:
     def __init__(self, run: WorkflowRun | None = None, *, events: list[object] | None = None) -> None:
         self._run = run
+        if self._run is not None and self._run.user_id is None:
+            self._run.user_id = "user-1"
         self._events = list(events or [])
         self.cancelled_run_ids: list[str] = []
         self.replaced_plan_count = 0
@@ -146,6 +148,12 @@ class _WorkflowRunRepo:
         if self._run is None:
             return None
         return self._run if self._run.id == run_id else None
+
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        run = await self.get_by_id(run_id)
+        if run is None or run.user_id != user_id:
+            return None
+        return run
 
     async def get_by_id_for_update(self, run_id: str):
         return await self.get_by_id(run_id)
@@ -193,16 +201,34 @@ class _WorkflowRunRepo:
 class _WorkspaceRepo:
     def __init__(self, workspace: Workspace | None = None) -> None:
         self._workspace = workspace
+        if self._workspace is not None and self._workspace.user_id is None:
+            self._workspace.user_id = "user-1"
 
     async def get_by_id(self, workspace_id: str):
         if self._workspace is None or workspace_id != self._workspace.id:
             return None
         return self._workspace
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        workspace = await self.get_by_id(workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
     async def get_by_session_id(self, session_id: str):
         if self._workspace is None or session_id != self._workspace.session_id:
             return None
         return self._workspace
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        workspace = await self.get_by_session_id(session_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
+    async def list_by_session_id(self, session_id: str):
+        workspace = await self.get_by_session_id(session_id)
+        return [workspace] if workspace is not None else []
 
 
 class _StopSessionRepo(_SessionRepo):
@@ -506,9 +532,15 @@ def test_agent_service_chat_should_reject_resume_when_checkpoint_invalid() -> No
         status=SessionStatus.WAITING,
         current_run_id="run-1",
     )
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        user_id="user-1",
+        status=WorkflowRunStatus.WAITING,
+    )
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(_SessionRepo(session))
+    service._uow_factory = lambda: _UoW(_SessionRepo(session), _WorkflowRunRepo(run))
     service._task_cls = _TaskFactory
     service._graph_runtime = _NoTaskGraphRuntime()
 
@@ -750,10 +782,16 @@ def test_agent_service_chat_should_reject_resume_when_value_invalid(
         status=SessionStatus.WAITING,
         current_run_id="run-1",
     )
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        user_id="user-1",
+        status=WorkflowRunStatus.WAITING,
+    )
     task = _Task()
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(_SessionRepo(session))
+    service._uow_factory = lambda: _UoW(_SessionRepo(session), _WorkflowRunRepo(run))
     service._task_cls = _TaskFactory
 
     async def _get_task(_session: Session):
@@ -795,11 +833,17 @@ def test_agent_service_stop_session_should_mark_active_task_as_cancelled() -> No
         status=SessionStatus.RUNNING,
         current_run_id="run-1",
     )
+    run = WorkflowRun(
+        id="run-1",
+        session_id="session-1",
+        user_id="user-1",
+        status=WorkflowRunStatus.RUNNING,
+    )
     task = _CancellableTask(session)
     session_repo = _StopSessionRepo(session)
 
     service = object.__new__(AgentService)
-    service._uow_factory = lambda: _UoW(session_repo)
+    service._uow_factory = lambda: _UoW(session_repo, _WorkflowRunRepo(run))
     service._task_cls = _TaskFactory
 
     async def _get_task(_session: Session):

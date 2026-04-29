@@ -84,8 +84,12 @@ class _WorkflowRunRepo:
         self.run = WorkflowRun(
             id="run-1",
             session_id="session-1",
+            user_id="user-1",
             status=WorkflowRunStatus.RUNNING,
         )
+
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        return self.run if run_id == self.run.id and user_id == self.run.user_id else None
 
     async def get_by_id_for_update(self, run_id: str):
         return self.run if run_id == self.run.id else None
@@ -122,14 +126,24 @@ class _WorkspaceRepo:
         self.workspace = Workspace(
             id="workspace-1",
             session_id="session-1",
+            user_id="user-1",
             current_run_id="run-1",
         )
 
     async def get_by_id(self, workspace_id: str):
         return self.workspace if workspace_id == self.workspace.id else None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        return self.workspace if workspace_id == self.workspace.id and user_id == self.workspace.user_id else None
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace if session_id == self.workspace.session_id else None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        return self.workspace if session_id == self.workspace.session_id and user_id == self.workspace.user_id else None
+
+    async def list_by_session_id(self, session_id: str):
+        return [self.workspace] if session_id == self.workspace.session_id else []
 
 
 class _GraphRuntime:

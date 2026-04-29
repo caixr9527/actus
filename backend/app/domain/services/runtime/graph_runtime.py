@@ -218,7 +218,7 @@ class DefaultGraphRuntime(GraphRuntime):
         """创建任务并在单一流程内完成会话关联写回与异常补偿。"""
         workspace = await self._get_workspace(session=session)
         if workspace is None:
-            workspace = Workspace(session_id=session.id)
+            workspace = Workspace(session_id=session.id, user_id=session.user_id)
         _log_core(
             logging.INFO,
             "创建任务开始",

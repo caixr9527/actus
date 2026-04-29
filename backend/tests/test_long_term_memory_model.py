@@ -4,6 +4,8 @@ from app.infrastructure.models.long_term_memory import LongTermMemoryModel
 
 def test_long_term_memory_model_should_derive_content_text_from_summary_content_and_tags() -> None:
     memory = LongTermMemory(
+        user_id="user-1",
+        tenant_id="user-1",
         namespace="user/user-1/profile",
         memory_type="profile",
         summary="用户偏好",

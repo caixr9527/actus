@@ -63,20 +63,24 @@ def _build_memory_recall_queries(state: PlannerReActLangGraphState) -> List[Long
     """按记忆类型拆分召回策略，避免一个 search 兜底所有长期记忆。"""
     namespace_prefixes = _build_memory_namespace_prefixes(state)
     recall_query = _build_memory_query(state)
+    user_id = str(state.get("user_id") or "").strip()
     return [
         LongTermMemorySearchQuery(
+            user_id=user_id,
             namespace_prefixes=namespace_prefixes,
             limit=3,
             memory_types=["profile"],
             mode=LongTermMemorySearchMode.RECENT,
         ),
         LongTermMemorySearchQuery(
+            user_id=user_id,
             namespace_prefixes=namespace_prefixes,
             limit=3,
             memory_types=["instruction"],
             mode=LongTermMemorySearchMode.RECENT,
         ),
         LongTermMemorySearchQuery(
+            user_id=user_id,
             namespace_prefixes=namespace_prefixes,
             query_text=recall_query,
             limit=4,

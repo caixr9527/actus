@@ -6,6 +6,7 @@
 @File   : file.py
 """
 import uuid
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 class File(BaseModel):
     """文件模型,记录上传的文件"""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))  # 文件id
+    user_id: Optional[str] = None  # 所属用户id
     filename: str = ""  # 文件名字
     filepath: str = ""  # 文件路径
     key: str = ""  # 腾讯云cos中的路径

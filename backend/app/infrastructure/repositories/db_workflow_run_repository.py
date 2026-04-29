@@ -65,6 +65,15 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str) -> Optional[WorkflowRun]:
+        stmt = select(WorkflowRunModel).where(
+            WorkflowRunModel.id == run_id,
+            WorkflowRunModel.user_id == user_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
     async def get_by_id_for_update(self, run_id: str) -> Optional[WorkflowRun]:
         record = await self._get_record_with_lock(run_id=run_id)
         return record.to_domain() if record is not None else None
@@ -296,9 +305,14 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         if result.scalar_one_or_none() is not None:
             return False
 
+        run_record = await self._get_record_with_lock(run_id)
+        if run_record is None:
+            return False
+
         event_record = WorkflowRunEventModel(
             run_id=run_id,
             session_id=session_id,
+            user_id=run_record.user_id,
             event_id=str(event.id),
             event_type=event.type,
             event_payload=event.model_dump(mode="json"),

@@ -22,6 +22,7 @@ class LongTermMemoryModel(Base):
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_long_term_memories_id"),
         UniqueConstraint("namespace", "dedupe_key", name="uq_long_term_memories_namespace_dedupe_key"),
+        Index("ix_long_term_memories_user_scope", "user_id", "scope"),
         Index("ix_long_term_memories_namespace", "namespace"),
         Index("ix_long_term_memories_memory_type", "memory_type"),
         Index("ix_long_term_memories_updated_at", "updated_at"),
@@ -35,6 +36,16 @@ class LongTermMemoryModel(Base):
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
     )
+    user_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    scope: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'user'::character varying"),
+    )
+    session_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    workspace_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # 长期记忆命名空间，用于按 user/session/agent 前缀隔离召回与写入范围。
     namespace: Mapped[str] = mapped_column(String(255), nullable=False)
     # 记忆类型，当前主要承载 profile、fact 等稳定记忆类别。
@@ -72,6 +83,26 @@ class LongTermMemoryModel(Base):
         JSONB,
         nullable=False,
         server_default=text("'{}'::jsonb"),
+    )
+    origin: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'long_term_memory'::character varying"),
+    )
+    trust_level: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'system_generated'::character varying"),
+    )
+    privacy_level: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'sensitive'::character varying"),
+    )
+    retention_policy: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'user_memory'::character varying"),
     )
     # 记忆置信度分值，表示该条长期记忆的稳定性或可信程度。
     confidence: Mapped[float] = mapped_column(

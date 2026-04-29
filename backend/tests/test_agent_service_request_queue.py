@@ -91,9 +91,17 @@ class _UoW:
 
 class _WorkflowRunRepo:
     def __init__(self) -> None:
-        self.run = WorkflowRun(id="run-1", session_id="session-1", status=WorkflowRunStatus.RUNNING)
+        self.run = WorkflowRun(
+            id="run-1",
+            session_id="session-1",
+            user_id="user-1",
+            status=WorkflowRunStatus.RUNNING,
+        )
         self.event_records: list[WorkflowRunEventRecord] = []
         self.status_updates: list[WorkflowRunStatus] = []
+
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        return self.run if run_id == self.run.id and user_id == self.run.user_id else None
 
     async def get_by_id_for_update(self, run_id: str):
         return self.run if run_id == self.run.id else None
@@ -136,13 +144,27 @@ class _WorkflowRunRepo:
 
 class _WorkspaceRepo:
     def __init__(self) -> None:
-        self.workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+        self.workspace = Workspace(
+            id="workspace-1",
+            session_id="session-1",
+            user_id="user-1",
+            current_run_id="run-1",
+        )
 
     async def get_by_id(self, workspace_id: str):
         return self.workspace if workspace_id == self.workspace.id else None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        return self.workspace if workspace_id == self.workspace.id and user_id == self.workspace.user_id else None
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace if session_id == self.workspace.session_id else None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        return self.workspace if session_id == self.workspace.session_id and user_id == self.workspace.user_id else None
+
+    async def list_by_session_id(self, session_id: str):
+        return [self.workspace] if session_id == self.workspace.session_id else []
 
 
 def _parse_stream_id(stream_id: str) -> tuple[int, int]:

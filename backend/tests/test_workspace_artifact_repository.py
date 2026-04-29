@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.domain.models import Workspace, WorkspaceArtifact
@@ -16,7 +17,10 @@ class _WorkspaceRepo:
         self._workspace = workspace.model_copy(deep=True)
 
     async def get_by_session_id(self, session_id: str):
-        if session_id != self._workspace.session_id:
+        raise AssertionError("WorkspaceRuntimeService 不应使用裸 session_id 查询 workspace")
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        if session_id != self._workspace.session_id or user_id != self._workspace.user_id:
             return None
         return self._workspace.model_copy(deep=True)
 
@@ -32,14 +36,20 @@ class _WorkspaceArtifactRepo:
         self._artifacts_by_path[artifact.path] = artifact.model_copy(deep=True)
 
     async def list_by_workspace_id(self, workspace_id: str):
+        raise AssertionError("WorkspaceRuntimeService 不应使用裸 workspace_id 查询 artifact")
+
+    async def list_by_user_workspace_id(self, user_id: str, workspace_id: str):
         artifacts = [
             artifact.model_copy(deep=True)
             for artifact in self._artifacts_by_path.values()
-            if artifact.workspace_id == workspace_id
+            if artifact.workspace_id == workspace_id and artifact.user_id == user_id
         ]
         return sorted(artifacts, key=lambda item: item.updated_at, reverse=True)
 
     async def list_by_workspace_id_and_paths(self, workspace_id: str, paths: list[str]):
+        raise AssertionError("WorkspaceRuntimeService 不应使用裸 workspace_id + paths 查询 artifact")
+
+    async def list_by_user_workspace_id_and_paths(self, user_id: str, workspace_id: str, paths: list[str]):
         normalized_paths = {
             str(path or "").strip()
             for path in list(paths or [])
@@ -48,12 +58,17 @@ class _WorkspaceArtifactRepo:
         return [
             artifact.model_copy(deep=True)
             for path, artifact in self._artifacts_by_path.items()
-            if path in normalized_paths and artifact.workspace_id == workspace_id
+            if path in normalized_paths
+            and artifact.workspace_id == workspace_id
+            and artifact.user_id == user_id
         ]
 
     async def get_by_workspace_id_and_path(self, workspace_id: str, path: str):
+        raise AssertionError("WorkspaceRuntimeService 不应使用裸 workspace_id + path 查询 artifact")
+
+    async def get_by_user_workspace_id_and_path(self, user_id: str, workspace_id: str, path: str):
         artifact = self._artifacts_by_path.get(path)
-        if artifact is None or artifact.workspace_id != workspace_id:
+        if artifact is None or artifact.workspace_id != workspace_id or artifact.user_id != user_id:
             return None
         return artifact.model_copy(deep=True)
 
@@ -64,10 +79,20 @@ class _WorkspaceArtifactRepo:
             paths: list[str],
             delivery_state: str,
     ):
+        raise AssertionError("WorkspaceRuntimeService 不应使用裸 workspace_id 更新 artifact")
+
+    async def update_delivery_state_by_user_workspace_id_and_paths(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            paths: list[str],
+            delivery_state: str,
+    ):
         updated: list[WorkspaceArtifact] = []
         for path in list(paths or []):
             artifact = self._artifacts_by_path.get(path)
-            if artifact is None or artifact.workspace_id != workspace_id:
+            if artifact is None or artifact.workspace_id != workspace_id or artifact.user_id != user_id:
                 continue
             next_artifact = artifact.model_copy(deep=True)
             next_artifact.delivery_state = str(delivery_state or "").strip()
@@ -155,11 +180,49 @@ def test_workspace_artifact_repository_update_delivery_state_should_use_single_s
     assert updated[0].delivery_state == "final_delivered"
 
 
+def test_workspace_artifact_repository_user_workspace_query_should_filter_user_id() -> None:
+    db_session = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+        )
+    )
+    repository = DBWorkspaceArtifactRepository(db_session=db_session)
+
+    asyncio.run(
+        repository.list_by_user_workspace_id_and_paths(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            paths=["/workspace/report.md"],
+        )
+    )
+
+    statement = db_session.execute.call_args.args[0]
+    compiled_sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert "workspace_artifacts.user_id" in compiled_sql
+    assert "workspace_artifacts.workspace_id" in compiled_sql
+
+
+def test_workspace_runtime_service_should_require_user_id() -> None:
+    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1", user_id="user-1"))
+    workspace_artifact_repo = _WorkspaceArtifactRepo()
+
+    with pytest.raises(ValueError, match="必须提供 user_id"):
+        WorkspaceRuntimeService(
+            session_id="session-1",
+            user_id="",
+            uow_factory=lambda: _UoW(
+                workspace_repo=workspace_repo,
+                workspace_artifact_repo=workspace_artifact_repo,
+            ),
+        )
+
+
 def test_workspace_runtime_service_should_upsert_artifact_by_workspace_path() -> None:
-    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1"))
+    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1", user_id="user-1"))
     workspace_artifact_repo = _WorkspaceArtifactRepo()
     runtime_service = WorkspaceRuntimeService(
         session_id="session-1",
+        user_id="user-1",
         uow_factory=lambda: _UoW(
             workspace_repo=workspace_repo,
             workspace_artifact_repo=workspace_artifact_repo,
@@ -198,6 +261,8 @@ def test_workspace_runtime_service_should_upsert_artifact_by_workspace_path() ->
     assert first.id == second.id
     assert len(artifacts) == 1
     assert artifacts[0].path == "/workspace/report.md"
+    assert artifacts[0].user_id == "user-1"
+    assert artifacts[0].session_id == "session-1"
     assert artifacts[0].summary == "最新摘要"
     assert artifacts[0].delivery_state == "final_delivered"
     assert artifacts[0].metadata == {"source": "write_file", "size": 128}
@@ -205,10 +270,11 @@ def test_workspace_runtime_service_should_upsert_artifact_by_workspace_path() ->
 
 
 def test_workspace_runtime_service_should_mark_delivery_state_without_creating_missing_artifact() -> None:
-    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1"))
+    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1", user_id="user-1"))
     workspace_artifact_repo = _WorkspaceArtifactRepo()
     runtime_service = WorkspaceRuntimeService(
         session_id="session-1",
+        user_id="user-1",
         uow_factory=lambda: _UoW(
             workspace_repo=workspace_repo,
             workspace_artifact_repo=workspace_artifact_repo,
@@ -237,10 +303,11 @@ def test_workspace_runtime_service_should_mark_delivery_state_without_creating_m
 
 
 def test_workspace_runtime_service_should_not_record_screenshot_artifact_as_changed_file() -> None:
-    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1"))
+    workspace_repo = _WorkspaceRepo(Workspace(id="workspace-1", session_id="session-1", user_id="user-1"))
     workspace_artifact_repo = _WorkspaceArtifactRepo()
     runtime_service = WorkspaceRuntimeService(
         session_id="session-1",
+        user_id="user-1",
         uow_factory=lambda: _UoW(
             workspace_repo=workspace_repo,
             workspace_artifact_repo=workspace_artifact_repo,

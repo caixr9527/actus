@@ -21,8 +21,16 @@ class WorkspaceRepository(Protocol):
         """按工作区 ID 查询。"""
         ...
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str) -> Optional[Workspace]:
+        """按工作区 ID 与用户归属查询。"""
+        ...
+
     async def get_by_session_id(self, session_id: str) -> Optional[Workspace]:
         """按会话 ID 查询工作区。"""
+        ...
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str) -> Optional[Workspace]:
+        """按会话 ID 与用户归属查询工作区。"""
         ...
 
     async def list_by_session_id(self, session_id: str) -> List[Workspace]:

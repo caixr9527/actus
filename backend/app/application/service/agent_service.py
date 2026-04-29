@@ -233,6 +233,7 @@ class AgentService:
         llm = await self._resolve_runtime_llm(session)
         workspace_runtime_service = WorkspaceRuntimeService(
             session_id=session.id,
+            user_id=session.user_id,
             uow_factory=self._uow_factory,
         )
         inspector = LangGraphRunEngine(

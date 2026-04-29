@@ -7,7 +7,7 @@
 """
 import uuid
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pydantic import TypeAdapter
 from sqlalchemy import (
@@ -35,6 +35,7 @@ class WorkflowRunEventModel(Base):
         UniqueConstraint("run_id", "event_id", name="uq_workflow_run_events_run_event_id"),
         Index("ix_workflow_run_events_run_id", "run_id"),
         Index("ix_workflow_run_events_session_id", "session_id"),
+        Index("ix_workflow_run_events_user_session_event", "user_id", "session_id", "event_id"),
         Index("ix_workflow_run_events_created_at", "created_at"),
     )
 
@@ -50,6 +51,7 @@ class WorkflowRunEventModel(Base):
         nullable=False,
     )
     session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     event_id: Mapped[str] = mapped_column(String(255), nullable=False)
     event_type: Mapped[str] = mapped_column(
         String(64),
@@ -73,6 +75,7 @@ class WorkflowRunEventModel(Base):
             id=record.id,
             run_id=record.run_id,
             session_id=record.session_id,
+            user_id=record.user_id,
             event_id=record.event_id,
             event_type=record.event_type,
             event_payload=record.event_payload.model_dump(mode="json"),
@@ -86,6 +89,7 @@ class WorkflowRunEventModel(Base):
             id=self.id,
             run_id=self.run_id,
             session_id=self.session_id,
+            user_id=self.user_id,
             event_id=self.event_id,
             event_type=self.event_type,
             event_payload=event,

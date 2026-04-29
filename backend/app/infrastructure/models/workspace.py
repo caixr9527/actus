@@ -8,7 +8,7 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy import DateTime, Index, String, text
+from sqlalchemy import DateTime, Index, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,10 +22,13 @@ class WorkspaceModel(Base):
     __tablename__ = "workspaces"
     __table_args__ = (
         Index("ix_workspaces_session_id", "session_id"),
+        Index("ix_workspaces_user_id_session_id", "user_id", "session_id"),
+        UniqueConstraint("session_id", name="uq_workspaces_session_id"),
     )
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True, nullable=False)
     session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     current_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     sandbox_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

@@ -20,6 +20,7 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     log_runtime,
     now_perf,
 )
+from app.domain.services.runtime.contracts.data_access_contract import normalize_tenant_id
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import normalize_file_path_list
 from .working_memory import _ensure_working_memory
@@ -83,6 +84,24 @@ def _build_working_memory_with_consolidation_result(
     return working_memory
 
 
+def _build_owned_memory_candidate(
+        item: Dict[str, object],
+        *,
+        state: PlannerReActLangGraphState,
+) -> Dict[str, object]:
+    """长期记忆写入前补齐强归属字段，namespace 不再承担权限边界。"""
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip() or None
+    run_id = str(state.get("run_id") or "").strip() or None
+    candidate = dict(item)
+    candidate["user_id"] = user_id
+    candidate["tenant_id"] = normalize_tenant_id(user_id)
+    candidate.setdefault("scope", "user")
+    candidate.setdefault("session_id", session_id)
+    candidate.setdefault("run_id", run_id)
+    return candidate
+
+
 async def consolidate_memory_node(
         state: PlannerReActLangGraphState,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
@@ -112,7 +131,9 @@ async def consolidate_memory_node(
         write_started_at = now_perf()
         for item in pending_memory_writes:
             try:
-                memory = LongTermMemory.model_validate(item)
+                memory = LongTermMemory.model_validate(
+                    _build_owned_memory_candidate(item, state=state)
+                )
                 persisted_memory = await long_term_memory_repository.upsert(memory)
                 persisted_memory_ids.append(persisted_memory.id)
             except Exception as e:

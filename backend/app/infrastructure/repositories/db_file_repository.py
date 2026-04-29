@@ -31,14 +31,18 @@ class DBFileRepository(FileRepository):
 
         # 如果记录不存在，则创建新的文件模型并添加到数据库
         if not record:
-            record = FileModel.from_domain(file)
-            if user_id is not None:
-                record.user_id = user_id
+            payload = file.model_copy(
+                update={"user_id": user_id or file.user_id}
+            )
+            record = FileModel.from_domain(payload)
             self.db_session.add(record)
             return
 
         # 如果记录存在，则使用传入的文件对象更新现有记录
-        record.update_from_domain(file)
+        payload = file.model_copy(
+            update={"user_id": user_id or file.user_id or record.user_id}
+        )
+        record.update_from_domain(payload)
 
     async def get_by_id(self, file_id: str) -> Optional[File]:
         """根据传递的文件id获取文件信息"""

@@ -41,9 +41,25 @@ class _WorkspaceRepo:
             return self.workspace
         return None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        if (
+                self.workspace is not None
+                and self.workspace.id == workspace_id
+                and self.workspace.user_id == user_id
+        ):
+            return self.workspace
+        return None
+
     async def get_by_session_id(self, session_id: str):
         workspaces = await self.list_by_session_id(session_id)
         return workspaces[0] if workspaces else None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        workspaces = await self.list_by_session_id(session_id)
+        for workspace in workspaces:
+            if workspace.user_id == user_id:
+                return workspace
+        return None
 
     async def list_by_session_id(self, session_id: str):
         if self.workspaces is not None:
@@ -66,6 +82,11 @@ class _WorkflowRunRepo:
             return self.run
         return None
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        if self.run is not None and self.run.id == run_id and self.run.user_id == user_id:
+            return self.run
+        return None
+
 
 class _FileRepo:
     async def get_by_id_and_user_id(self, file_id: str, user_id: str):
@@ -74,6 +95,9 @@ class _FileRepo:
 
 class _WorkspaceArtifactRepo:
     async def list_by_workspace_id_and_paths(self, workspace_id: str, paths: list[str]):
+        return []
+
+    async def list_by_user_workspace_id_and_paths(self, user_id: str, workspace_id: str, paths: list[str]):
         return []
 
 
@@ -118,7 +142,7 @@ def test_resolve_session_scope_should_build_owned_scope() -> None:
         workspace_id="workspace-a",
         current_run_id="run-a",
     )
-    workspace = Workspace(id="workspace-a", session_id="session-a", current_run_id="run-a")
+    workspace = Workspace(id="workspace-a", session_id="session-a", user_id="user-a", current_run_id="run-a")
     run = WorkflowRun(
         id="run-a",
         session_id="session-a",
@@ -156,7 +180,7 @@ def test_resolve_session_scope_should_reject_cross_user_current_run() -> None:
         workspace_id="workspace-a",
         current_run_id="run-a",
     )
-    workspace = Workspace(id="workspace-a", session_id="session-a", current_run_id="run-a")
+    workspace = Workspace(id="workspace-a", session_id="session-a", user_id="user-a", current_run_id="run-a")
     run = WorkflowRun(id="run-a", session_id="session-a", user_id="user-b")
     service = _build_service(_UoW(session=session, workspace=workspace, run=run))
 
@@ -169,8 +193,8 @@ def test_resolve_session_scope_should_reject_cross_user_current_run() -> None:
 def test_resolve_session_scope_should_reject_multiple_workspaces() -> None:
     session = Session(id="session-a", user_id="user-a")
     workspaces = [
-        Workspace(id="workspace-a", session_id="session-a"),
-        Workspace(id="workspace-b", session_id="session-a"),
+        Workspace(id="workspace-a", session_id="session-a", user_id="user-a"),
+        Workspace(id="workspace-b", session_id="session-a", user_id="user-a"),
     ]
     service = _build_service(_UoW(session=session, workspaces=workspaces))
 
@@ -180,6 +204,44 @@ def test_resolve_session_scope_should_reject_multiple_workspaces() -> None:
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
 
+def test_resolve_session_scope_should_reject_unbound_foreign_workspace() -> None:
+    session = Session(id="session-a", user_id="user-a")
+    workspaces = [
+        Workspace(id="workspace-a", session_id="session-a", user_id="user-b"),
+    ]
+    service = _build_service(_UoW(session=session, workspaces=workspaces))
+
+    with pytest.raises(NotFoundError) as exc:
+        asyncio.run(service.resolve_session_scope(user_id="user-a", session_id="session-a"))
+
+    assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
+
+
+def test_resolve_session_scope_should_reject_unbound_workspace_without_owner() -> None:
+    session = Session(id="session-a", user_id="user-a")
+    workspaces = [
+        Workspace(id="workspace-a", session_id="session-a", user_id=None),
+    ]
+    service = _build_service(_UoW(session=session, workspaces=workspaces))
+
+    with pytest.raises(NotFoundError) as exc:
+        asyncio.run(service.resolve_session_scope(user_id="user-a", session_id="session-a"))
+
+    assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
+
+
+def test_resolve_session_scope_should_accept_unbound_workspace_for_current_user() -> None:
+    session = Session(id="session-a", user_id="user-a")
+    workspaces = [
+        Workspace(id="workspace-a", session_id="session-a", user_id="user-a"),
+    ]
+    service = _build_service(_UoW(session=session, workspaces=workspaces))
+
+    scope = asyncio.run(service.resolve_session_scope(user_id="user-a", session_id="session-a"))
+
+    assert scope.workspace_id == "workspace-a"
+
+
 def test_resolve_session_scope_should_not_fallback_when_bound_workspace_missing() -> None:
     session = Session(
         id="session-a",
@@ -187,7 +249,7 @@ def test_resolve_session_scope_should_not_fallback_when_bound_workspace_missing(
         workspace_id="workspace-missing",
     )
     workspaces = [
-        Workspace(id="workspace-other", session_id="session-a"),
+        Workspace(id="workspace-other", session_id="session-a", user_id="user-a"),
     ]
     service = _build_service(_UoW(session=session, workspace=None, workspaces=workspaces))
 

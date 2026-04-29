@@ -210,7 +210,12 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
     ) -> List[LongTermMemory]:
         prepared_query = await self._prepare_query(query)
         query_tokens = self._split_query_tokens(prepared_query.query_text)
-        stmt = select(LongTermMemoryModel)
+        normalized_user_id = str(prepared_query.user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("长期记忆检索必须提供 user_id")
+        stmt = select(LongTermMemoryModel).where(
+            LongTermMemoryModel.user_id == normalized_user_id,
+        )
 
         normalized_prefixes = [str(item).strip() for item in list(prepared_query.namespace_prefixes or []) if str(item).strip()]
         if len(normalized_prefixes) > 0:
@@ -250,12 +255,19 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
         return [record.to_domain() for record in records]
 
     async def upsert(self, memory: LongTermMemory) -> LongTermMemory:
+        if not str(memory.user_id or "").strip():
+            raise ValueError("长期记忆写入必须提供 user_id")
         prepared_memory = await self._prepare_memory(memory)
         # 尝试根据 ID 查找现有记录（加锁以防止并发冲突）
         record: Optional[LongTermMemoryModel] = None
         if str(prepared_memory.id or "").strip():
             result = await self.db_session.execute(
-                select(LongTermMemoryModel).where(LongTermMemoryModel.id == prepared_memory.id).with_for_update()
+                select(LongTermMemoryModel)
+                .where(
+                    LongTermMemoryModel.id == prepared_memory.id,
+                    LongTermMemoryModel.user_id == prepared_memory.user_id,
+                )
+                .with_for_update()
             )
             record = result.scalar_one_or_none()
 
@@ -264,6 +276,7 @@ class DBLongTermMemoryRepository(LongTermMemoryRepository):
             result = await self.db_session.execute(
                 select(LongTermMemoryModel)
                 .where(
+                    LongTermMemoryModel.user_id == prepared_memory.user_id,
                     LongTermMemoryModel.namespace == prepared_memory.namespace,
                     LongTermMemoryModel.dedupe_key == prepared_memory.dedupe_key,
                 )

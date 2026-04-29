@@ -26,6 +26,7 @@ class Workspace(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     session_id: str
+    user_id: Optional[str] = None
     current_run_id: Optional[str] = None
     sandbox_id: Optional[str] = None
     task_id: Optional[str] = None

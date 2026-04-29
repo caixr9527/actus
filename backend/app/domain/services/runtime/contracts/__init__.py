@@ -1,10 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""LangGraph 运行时共享契约。"""
+"""Runtime 共享契约包。
 
-# 统一通过同一 contracts 包导出，避免业务层感知基础设施目录结构。
-from .langgraph_settings import *  # noqa: F401,F403
-from .final_output_contract import *  # noqa: F401,F403
-from .runtime_logging import *  # noqa: F401,F403
-from .step_evidence_contracts import *  # noqa: F401,F403
-from .data_access_contract import *  # noqa: F401,F403
+契约模块会被领域模型导入，包初始化保持轻量，避免通配导出把运行日志、
+外部端口或运行引擎提前加载进来造成循环依赖。业务代码应直接导入具体契约模块。
+"""

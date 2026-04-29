@@ -4,9 +4,16 @@
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataOrigin,
+    DataTrustLevel,
+    PrivacyLevel,
+    RetentionPolicyKind,
+)
 
 LONG_TERM_MEMORY_EMBEDDING_DIMENSIONS = 1536
 
@@ -23,6 +30,7 @@ class LongTermMemorySearchMode(str, Enum):
 class LongTermMemorySearchQuery(BaseModel):
     """长期记忆检索请求。"""
 
+    user_id: str
     namespace_prefixes: List[str] = Field(default_factory=list)
     query_text: str = ""
     # semantic / hybrid 查询允许只提供 query_text，由底层仓储统一补齐 query_embedding。
@@ -34,6 +42,8 @@ class LongTermMemorySearchQuery(BaseModel):
 
     @model_validator(mode="after")
     def validate_query_shape(self) -> "LongTermMemorySearchQuery":
+        if not str(self.user_id or "").strip():
+            raise ValueError("长期记忆检索必须提供 user_id")
         normalized_query_text = str(self.query_text or "").strip()
         has_embedding = bool(self.query_embedding)
 
@@ -66,6 +76,13 @@ class LongTermMemory(BaseModel):
 
     # 长期记忆主键，默认使用 UUID，供跨线程稳定引用。
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # 用户归属是长期记忆权限边界，namespace 只能作为检索组织字段。
+    user_id: str
+    tenant_id: str = ""
+    scope: Literal["user", "session", "workspace", "run"] = "user"
+    session_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    run_id: Optional[str] = None
     # 长期记忆命名空间，用于按 user/session/agent 前缀隔离召回与写入范围。
     namespace: str
     # 记忆类型，当前主要承载 profile、fact 等稳定记忆类别。
@@ -80,6 +97,10 @@ class LongTermMemory(BaseModel):
     tags: List[str] = Field(default_factory=list)
     # 来源元数据，记录提炼来源与写入上下文，便于追踪记忆出处。
     source: Dict[str, Any] = Field(default_factory=dict)
+    origin: DataOrigin = DataOrigin.LONG_TERM_MEMORY
+    trust_level: DataTrustLevel = DataTrustLevel.SYSTEM_GENERATED
+    privacy_level: PrivacyLevel = PrivacyLevel.SENSITIVE
+    retention_policy: RetentionPolicyKind = RetentionPolicyKind.USER_MEMORY
     # 记忆置信度分值，表示该条长期记忆的稳定性或可信程度。
     confidence: float = 0.0
     # 命名空间内的幂等去重键，配合唯一语义避免重复固化相同记忆。

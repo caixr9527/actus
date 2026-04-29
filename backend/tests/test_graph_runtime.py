@@ -108,6 +108,12 @@ class _WorkflowRunRepo:
     async def get_by_id_for_update(self, run_id: str):
         return self.runs_by_id.get(run_id)
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        run = self.runs_by_id.get(run_id)
+        if run is None or run.user_id != user_id:
+            return None
+        return run
+
     async def update_status(self, run_id: str, *, status: WorkflowRunStatus, **_kwargs) -> None:
         self.status_updates.append((run_id, status))
         self.runs_by_id[run_id].status = status
@@ -147,8 +153,20 @@ class _WorkspaceRepo:
     async def get_by_id(self, workspace_id: str):
         return self.workspace_by_id.get(workspace_id)
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        workspace = self.workspace_by_id.get(workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace_by_session_id.get(session_id)
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        workspace = self.workspace_by_session_id.get(session_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
 
 
 def _build_runtime(
@@ -190,6 +208,7 @@ def test_default_graph_runtime_create_task_should_persist_session_links() -> Non
     assert workspace.sandbox_id == "sandbox-1"
     assert workspace.task_id == "task-1"
     assert workspace.current_run_id == "run-1"
+    assert workspace.user_id == "user-a"
 
 
 def test_default_graph_runtime_get_and_cancel_task_by_session() -> None:
@@ -201,6 +220,7 @@ def test_default_graph_runtime_get_and_cancel_task_by_session() -> None:
     workspace = Workspace(
         id="workspace-1",
         session_id="session-a",
+        user_id="user-a",
         task_id="task-1",
         sandbox_id="sandbox-1",
     )
@@ -239,6 +259,7 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
     existing_workspace = Workspace(
         id="workspace-1",
         session_id="session-a",
+        user_id="user-a",
         sandbox_id="sandbox-1",
         current_run_id="run-1",
     )
@@ -255,6 +276,7 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
     workflow_run_repo.runs_by_id["run-1"] = WorkflowRun(
         id="run-1",
         session_id="session-a",
+        user_id="user-a",
         status=WorkflowRunStatus.WAITING,
     )
 
@@ -282,6 +304,7 @@ def test_default_graph_runtime_get_task_should_reuse_workspace_found_by_session_
     workspace = Workspace(
         id="workspace-1",
         session_id="session-a",
+        user_id="user-a",
         task_id="task-1",
         sandbox_id="sandbox-1",
     )

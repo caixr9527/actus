@@ -47,8 +47,26 @@ class DBWorkspaceRepository(WorkspaceRepository):
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str) -> Optional[Workspace]:
+        stmt = select(WorkspaceModel).where(
+            WorkspaceModel.id == workspace_id,
+            WorkspaceModel.user_id == user_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
     async def get_by_session_id(self, session_id: str) -> Optional[Workspace]:
         stmt = select(WorkspaceModel).where(WorkspaceModel.session_id == session_id)
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str) -> Optional[Workspace]:
+        stmt = select(WorkspaceModel).where(
+            WorkspaceModel.session_id == session_id,
+            WorkspaceModel.user_id == user_id,
+        )
         result = await self.db_session.execute(stmt)
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
