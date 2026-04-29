@@ -25,6 +25,8 @@ class _OwnedSessionRepo:
 class _SessionUoW:
     def __init__(self, session_repo: _OwnedSessionRepo) -> None:
         self.session = session_repo
+        self.workspace = _EmptyWorkspaceRepo()
+        self.workflow_run = _EmptyWorkflowRunRepo()
 
     async def __aenter__(self):
         return self
@@ -53,6 +55,22 @@ class _FakeModelConfigService:
 class _DummySandbox:
     @classmethod
     async def get(cls, id: str):
+        return None
+
+
+class _EmptyWorkspaceRepo:
+    async def get_by_id(self, workspace_id: str):
+        return None
+
+    async def get_by_session_id(self, session_id: str):
+        return None
+
+    async def list_by_session_id(self, session_id: str):
+        return []
+
+
+class _EmptyWorkflowRunRepo:
+    async def get_by_id(self, run_id: str):
         return None
 
 

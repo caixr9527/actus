@@ -14,6 +14,7 @@ from typing import AsyncGenerator, Optional, List, Type, Callable, Any
 from pydantic import TypeAdapter
 
 from app.application.errors import AppException, BadRequestError, NotFoundError
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage, Browser
@@ -44,6 +45,7 @@ from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
@@ -73,6 +75,7 @@ class AgentService:
             llm_factory=None,
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
             graph_runtime: Optional[GraphRuntime] = None,
+            access_control_service: RuntimeAccessControlService | None = None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -91,6 +94,9 @@ class AgentService:
         )
         self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
         self._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
+        self._access_control_service = access_control_service or RuntimeAccessControlService(
+            uow_factory=self._uow_factory,
+        )
         # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
         # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
         self._graph_runtime = graph_runtime or DefaultGraphRuntime(
@@ -115,6 +121,13 @@ class AgentService:
             coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
             self._runtime_state_coordinator = coordinator
         return coordinator
+
+    def _get_access_control_service(self) -> RuntimeAccessControlService:
+        access_control_service = getattr(self, "_access_control_service", None)
+        if access_control_service is None:
+            access_control_service = RuntimeAccessControlService(uow_factory=self._uow_factory)
+            self._access_control_service = access_control_service
+        return access_control_service
 
     def _build_task_runner(
             self,
@@ -338,6 +351,10 @@ class AgentService:
         unread_reset_pending = False
         request_id: Optional[str] = None
         try:
+            await self._get_access_control_service().resolve_session_scope(
+                user_id=user_id,
+                session_id=session_id,
+            )
             # 获取会话信息
             async with self._uow_factory() as uow:
                 session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
@@ -428,6 +445,11 @@ class AgentService:
                 async with self._uow_factory() as uow:
                     db_attachments = []
                     for file_id in attachments:
+                        await self._get_access_control_service().assert_file_access(
+                            user_id=user_id,
+                            file_id=file_id,
+                            action=DataAccessAction.READ,
+                        )
                         attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
                         if attachment is not None:
                             db_attachments.append(attachment)
@@ -636,6 +658,11 @@ class AgentService:
                     logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
 
     async def stop_session(self, session_id: str, user_id: str) -> None:
+        await self._get_access_control_service().assert_session_access(
+            user_id=user_id,
+            session_id=session_id,
+            action=DataAccessAction.UPDATE,
+        )
         # 获取指定会话的信息
         async with self._uow_factory() as uow:
             session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)

@@ -131,7 +131,15 @@ class _AgentUoW:
 
 class _OwnedWorkflowRunRepo:
     def __init__(self) -> None:
-        self.run = WorkflowRun(id="run-a", session_id="session-a", status=WorkflowRunStatus.RUNNING)
+        self.run = WorkflowRun(
+            id="run-a",
+            session_id="session-a",
+            user_id="user-a",
+            status=WorkflowRunStatus.RUNNING,
+        )
+
+    async def get_by_id(self, run_id: str):
+        return self.run if run_id == self.run.id else None
 
     async def get_by_id_for_update(self, run_id: str):
         return self.run if run_id == self.run.id else None
@@ -149,6 +157,9 @@ class _OwnedWorkspaceRepo:
 
     async def get_by_session_id(self, session_id: str):
         return self.workspace if session_id == self.workspace.session_id else None
+
+    async def list_by_session_id(self, session_id: str):
+        return [self.workspace] if session_id == self.workspace.session_id else []
 
 
 class _ExistingTask:

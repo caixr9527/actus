@@ -5,7 +5,7 @@
 @Author : caixiaorong01@outlook.com
 @File   : workspace_repository.py
 """
-from typing import Optional, Protocol
+from typing import List, Optional, Protocol
 
 from app.domain.models import Workspace
 
@@ -23,6 +23,10 @@ class WorkspaceRepository(Protocol):
 
     async def get_by_session_id(self, session_id: str) -> Optional[Workspace]:
         """按会话 ID 查询工作区。"""
+        ...
+
+    async def list_by_session_id(self, session_id: str) -> List[Workspace]:
+        """按会话 ID 查询全部工作区，用于识别历史脏数据。"""
         ...
 
     async def delete_by_id(self, workspace_id: str) -> None:

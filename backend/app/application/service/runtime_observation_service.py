@@ -6,13 +6,13 @@
 不执行 graph，也不生成最终正文。
 """
 
-import logging
 from enum import Enum
+import logging
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from app.application.errors import NotFoundError, error_keys
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.domain.models import (
     DoneEvent,
@@ -28,6 +28,7 @@ from app.domain.models import (
     WorkflowRunEventRecord,
 )
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 
 logger = logging.getLogger(__name__)
@@ -127,9 +128,13 @@ class RuntimeObservationService:
             *,
             uow_factory: Callable[[], IUnitOfWork],
             runtime_state_coordinator: RuntimeStateCoordinator | None = None,
+            access_control_service: RuntimeAccessControlService | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._runtime_state_coordinator = runtime_state_coordinator or RuntimeStateCoordinator(
+            uow_factory=uow_factory,
+        )
+        self._access_control_service = access_control_service or RuntimeAccessControlService(
             uow_factory=uow_factory,
         )
 
@@ -220,7 +225,10 @@ class RuntimeObservationService:
             cursor_event_id: str | None,
     ) -> RuntimeReplayResult:
         """按 DB persistent cursor 回放历史事件；Redis stream 不参与历史回放。"""
-        await self._ensure_owned_session(user_id=user_id, session_id=session_id)
+        await self._access_control_service.assert_session_replay_access(
+            user_id=user_id,
+            session_id=session_id,
+        )
         async with self._uow_factory() as uow:
             records = await uow.workflow_run.list_event_records_by_session(session_id)
 
@@ -404,14 +412,11 @@ class RuntimeObservationService:
         return snapshot.session_status
 
     async def _ensure_owned_session(self, *, user_id: str, session_id: str) -> None:
-        async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
-        if session is None:
-            raise NotFoundError(
-                msg=f"任务会话不存在: {session_id}",
-                error_key=error_keys.SESSION_NOT_FOUND,
-                error_params={"session_id": session_id},
-            )
+        await self._access_control_service.assert_session_access(
+            user_id=user_id,
+            session_id=session_id,
+            action=DataAccessAction.READ,
+        )
 
     async def _load_latest_runtime_events(
             self,

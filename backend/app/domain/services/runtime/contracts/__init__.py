@@ -7,3 +7,4 @@ from .langgraph_settings import *  # noqa: F401,F403
 from .final_output_contract import *  # noqa: F401,F403
 from .runtime_logging import *  # noqa: F401,F403
 from .step_evidence_contracts import *  # noqa: F401,F403
+from .data_access_contract import *  # noqa: F401,F403

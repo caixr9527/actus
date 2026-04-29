@@ -18,6 +18,7 @@ from app.application.service import (
     FileService,
     ModelConfigService,
     ModelRuntimeResolver,
+    RuntimeAccessControlService,
     RuntimeObservationService,
     StatusService,
     AgentService,
@@ -26,6 +27,7 @@ from app.application.service import (
 )
 from app.interfaces.facades import SessionStreamFacade
 from app.application.service.run_engine_selector import build_run_engine
+from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.service.session_service import SessionService
 from app.infrastructure.external.cache import ModelConfigCache
 from app.infrastructure.external.email_sender import SMTPEmailSender
@@ -97,6 +99,21 @@ def get_file_service(
 
 
 @lru_cache()
+def get_data_retention_policy_service() -> DataRetentionPolicyService:
+    """获取数据保留策略服务。"""
+    return DataRetentionPolicyService()
+
+
+@lru_cache()
+def get_runtime_access_control_service() -> RuntimeAccessControlService:
+    """获取 Runtime 数据访问控制服务。"""
+    return RuntimeAccessControlService(
+        uow_factory=get_uow,
+        retention_policy_service=get_data_retention_policy_service(),
+    )
+
+
+@lru_cache()
 def get_session_service() -> SessionService:
     """获取会话服务"""
     logger.info("加载获取SessionService")
@@ -104,6 +121,7 @@ def get_session_service() -> SessionService:
         uow_factory=get_uow,
         sandbox_cls=DockerSandbox,
         model_config_service=get_model_config_service(),
+        access_control_service=get_runtime_access_control_service(),
     )
 
 
@@ -172,7 +190,10 @@ def get_session_stream_facade() -> SessionStreamFacade:
 @lru_cache()
 def get_runtime_observation_service() -> RuntimeObservationService:
     """获取 Runtime Observation 应用服务。"""
-    return RuntimeObservationService(uow_factory=get_uow)
+    return RuntimeObservationService(
+        uow_factory=get_uow,
+        access_control_service=get_runtime_access_control_service(),
+    )
 
 
 def get_access_token_blacklist_store() -> RedisAccessTokenBlacklistStore:
@@ -211,6 +232,7 @@ def build_agent_service(cos: Cos) -> AgentService:
         model_runtime_resolver=get_model_runtime_resolver(),
         llm_factory=get_openai_llm_factory(),
         run_engine_factory=build_run_engine,
+        access_control_service=get_runtime_access_control_service(),
     )
 
 

@@ -11,6 +11,7 @@ from .app_config_service import AppConfigService
 from .file_service import FileService
 from .model_config_service import ModelConfigService
 from .model_runtime_resolver import ModelRuntimeResolver
+from .runtime_access_control_service import RuntimeAccessControlService
 from .runtime_observation_service import RuntimeObservationService
 from .session_service import SessionService
 from .status_service import StatusService
@@ -23,6 +24,7 @@ __all__ = [
     "FileService",
     "ModelConfigService",
     "ModelRuntimeResolver",
+    "RuntimeAccessControlService",
     "RuntimeObservationService",
     "SessionService",
     "AgentService",

@@ -11,10 +11,12 @@ from typing import List, Callable, Type
 from app.application.contracts import FileReadResult, ShellReadResult
 from app.application.errors import NotFoundError, ServerError, ValidationError
 from app.application.errors import error_keys
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.model_config_service import ModelConfigService
 from app.domain.external import Sandbox
 from app.domain.models import File, Session, WorkflowRunEventRecord
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +29,26 @@ class SessionService:
             uow_factory: Callable[[], IUnitOfWork],
             sandbox_cls: Type[Sandbox],
             model_config_service: ModelConfigService | None = None,
+            access_control_service: RuntimeAccessControlService | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._sandbox_cls = sandbox_cls
         self._model_config_service = model_config_service
+        self._access_control_service = access_control_service or RuntimeAccessControlService(
+            uow_factory=uow_factory,
+        )
 
-    async def _get_owned_session_or_raise(self, user_id: str, session_id: str) -> Session:
+    async def _get_owned_session_or_raise(
+            self,
+            user_id: str,
+            session_id: str,
+            action: DataAccessAction = DataAccessAction.READ,
+    ) -> Session:
+        await self._access_control_service.assert_session_access(
+            user_id=user_id,
+            session_id=session_id,
+            action=action,
+        )
         async with self._uow_factory() as uow:
             session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
         if not session:
@@ -60,13 +76,21 @@ class SessionService:
 
     async def clear_unread_message_count(self, user_id: str, session_id: str) -> None:
         logger.info(f"清除任务会话未读消息数: {session_id}")
-        await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
+        await self._get_owned_session_or_raise(
+            user_id=user_id,
+            session_id=session_id,
+            action=DataAccessAction.UPDATE,
+        )
         async with self._uow_factory() as uow:
             await uow.session.update_unread_message_count(session_id=session_id, count=0)
 
     async def delete_session(self, user_id: str, session_id: str) -> None:
         logger.info(f"删除任务会话: {session_id}")
-        await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
+        await self._get_owned_session_or_raise(
+            user_id=user_id,
+            session_id=session_id,
+            action=DataAccessAction.DELETE,
+        )
         async with self._uow_factory() as uow:
             await uow.session.delete_by_id(session_id=session_id)
         logger.info(f"删除任务会话成功: {session_id}")
@@ -90,7 +114,11 @@ class SessionService:
 
     async def set_current_model(self, user_id: str, session_id: str, model_id: str) -> Session:
         logger.info(f"更新会话当前模型: session_id={session_id}, model_id={model_id}")
-        session = await self._get_owned_session_or_raise(user_id=user_id, session_id=session_id)
+        session = await self._get_owned_session_or_raise(
+            user_id=user_id,
+            session_id=session_id,
+            action=DataAccessAction.UPDATE,
+        )
 
         if model_id != "auto":
             if self._model_config_service is None:
