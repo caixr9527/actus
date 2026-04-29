@@ -29,12 +29,11 @@ from app.domain.services.runtime.normalizers import (
     normalize_optional_bool,
     normalize_step_result_text,
     normalize_text_list,
-    truncate_text,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import normalize_attachments
-from ..parsers import merge_attachment_paths
 from .working_memory import _ensure_working_memory
+from ..parsers import merge_attachment_paths
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +41,6 @@ _RUNTIME_TEMP_ATTACHMENT_NAME_PATTERN = re.compile(
     r"(^|/)(temp_response\.json|response\.json|final_output\.txt|directory_info\.txt|.*\.tmp|.*\.log)$",
     re.IGNORECASE,
 )
-
-
-def _truncate_text(value: Any, *, max_chars: int) -> str:
-    return truncate_text(value, max_chars=max_chars)
 
 
 def _infer_step_attachment_delivery_preference(
@@ -64,7 +59,7 @@ def _infer_step_attachment_delivery_preference(
     explicit_preference = normalize_optional_bool((normalized_execution or {}).get("deliver_result_as_attachment"))
     if explicit_preference is not None:
         return explicit_preference
-    normalized_message = _truncate_text(user_message, max_chars=600).strip().lower()
+    normalized_message = user_message.strip().lower()
     if not normalized_message:
         return None
     if ATTACHMENT_DELIVERY_DENY_PATTERN.search(normalized_message):
@@ -72,6 +67,7 @@ def _infer_step_attachment_delivery_preference(
     if ATTACHMENT_DELIVERY_ALLOW_PATTERN.search(normalized_message):
         return True
     return None
+
 
 def _is_completed_status(value: Any) -> bool:
     return normalize_controlled_value(value, ExecutionStatus) == ExecutionStatus.COMPLETED.value
@@ -123,6 +119,7 @@ def _normalize_successful_outcome_artifacts(status: Any, outcome_raw: Any) -> Li
         outcome.produced_artifacts,
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
+
 
 def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
     artifact_groups: List[List[str]] = []
