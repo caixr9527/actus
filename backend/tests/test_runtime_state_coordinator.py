@@ -218,8 +218,18 @@ class FakeWorkspaceRepository:
             return self.workspace
         return None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str) -> Workspace | None:
+        if self.workspace and self.workspace.id == workspace_id and self.workspace.user_id == user_id:
+            return self.workspace
+        return None
+
     async def get_by_session_id(self, session_id: str) -> Workspace | None:
         if self.workspace and self.workspace.session_id == session_id:
+            return self.workspace
+        return None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str) -> Workspace | None:
+        if self.workspace and self.workspace.session_id == session_id and self.workspace.user_id == user_id:
             return self.workspace
         return None
 
@@ -268,6 +278,7 @@ def _build_uow(
 ) -> FakeUnitOfWork:
     session = Session(
         id="session-1",
+        user_id="user-1",
         workspace_id="workspace-1",
         current_run_id="session-run-1",
         status=session_status,
@@ -275,6 +286,7 @@ def _build_uow(
     run = WorkflowRun(
         id="run-1",
         session_id="session-1",
+        user_id="user-1",
         status=run_status,
         checkpoint_namespace="",
         checkpoint_id="checkpoint-1",
@@ -282,6 +294,7 @@ def _build_uow(
     workspace = Workspace(
         id="workspace-1",
         session_id="session-1",
+        user_id="user-1",
         current_run_id=workspace_run_id,
     )
     return FakeUnitOfWork(

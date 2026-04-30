@@ -25,6 +25,11 @@ class _WorkflowRunRepo:
             return None
         return self._run
 
+    async def get_by_id_for_user(self, run_id: str, user_id: str):
+        if run_id != self._run.id or self._run.user_id != user_id:
+            return None
+        return self._run
+
     async def update_checkpoint_ref(
             self,
             run_id: str,
@@ -47,8 +52,26 @@ class _WorkspaceRepo:
             return None
         return self._workspace
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        if (
+                self._workspace is None
+                or workspace_id != self._workspace.id
+                or self._workspace.user_id != user_id
+        ):
+            return None
+        return self._workspace
+
     async def get_by_session_id(self, session_id: str):
         if self._workspace is None or session_id != self._workspace.session_id:
+            return None
+        return self._workspace
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        if (
+                self._workspace is None
+                or session_id != self._workspace.session_id
+                or self._workspace.user_id != user_id
+        ):
             return None
         return self._workspace
 
@@ -95,11 +118,12 @@ class _FakeCheckpointer:
 
 
 def test_checkpoint_store_adapter_should_resolve_invoke_config_from_workflow_run() -> None:
-    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    session = Session(id="session-1", user_id="user-1", workspace_id="workspace-1", current_run_id="run-legacy")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id="run-1")
     run = WorkflowRun(
         id="run-1",
         session_id="session-1",
+        user_id="user-1",
         thread_id="thread-1",
         checkpoint_namespace="",
         checkpoint_id="cp-old",
@@ -122,11 +146,12 @@ def test_checkpoint_store_adapter_should_resolve_invoke_config_from_workflow_run
 
 
 def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
-    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id="run-1")
+    session = Session(id="session-1", user_id="user-1", workspace_id="workspace-1", current_run_id="run-legacy")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id="run-1")
     run = WorkflowRun(
         id="run-1",
         session_id="session-1",
+        user_id="user-1",
         thread_id="thread-1",
         checkpoint_namespace="",
         checkpoint_id="cp-old",
@@ -155,11 +180,12 @@ def test_checkpoint_store_adapter_should_sync_latest_checkpoint_ref() -> None:
 
 
 def test_checkpoint_store_adapter_should_not_fallback_to_session_current_run_id() -> None:
-    session = Session(id="session-1", workspace_id="workspace-1", current_run_id="run-legacy")
-    workspace = Workspace(id="workspace-1", session_id="session-1", current_run_id=None)
+    session = Session(id="session-1", user_id="user-1", workspace_id="workspace-1", current_run_id="run-legacy")
+    workspace = Workspace(id="workspace-1", session_id="session-1", user_id="user-1", current_run_id=None)
     run = WorkflowRun(
         id="run-1",
         session_id="session-1",
+        user_id="user-1",
         thread_id="thread-1",
         checkpoint_namespace="",
         checkpoint_id="cp-old",

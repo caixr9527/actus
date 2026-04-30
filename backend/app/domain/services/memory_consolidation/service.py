@@ -34,6 +34,7 @@ from app.domain.services.runtime.contracts.sensitive_data_policy import (
 from app.domain.services.runtime.normalizers import normalize_message_window_entry
 
 _MEMORY_SOURCE_ALLOWLIST = {"kind", "stage", "run_id", "step_id", "session_id", "thread_id"}
+_MEMORY_SUMMARY_MAX_CHARS = 120
 
 
 @dataclass(frozen=True)
@@ -267,7 +268,7 @@ class MemoryConsolidationService:
 
     @staticmethod
     def _truncate_memory_summary(value: Any) -> str:
-        return str(value or "").strip()
+        return str(value or "").strip()[:_MEMORY_SUMMARY_MAX_CHARS]
 
     @classmethod
     def _normalize_memory_tags(cls, raw_tags: Any) -> List[str]:

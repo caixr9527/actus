@@ -23,6 +23,16 @@ from app.infrastructure.models.workflow_run_step import WorkflowRunStepModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 
 
+class _ExecuteQueue:
+    def __init__(self, *results) -> None:
+        self._results = list(results)
+
+    async def __call__(self, statement):
+        if not self._results:
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+        return self._results.pop(0)
+
+
 def _build_repo(execute_result) -> DBWorkflowRunRepository:
     db_session = SimpleNamespace(
         execute=AsyncMock(return_value=execute_result),
@@ -31,9 +41,25 @@ def _build_repo(execute_result) -> DBWorkflowRunRepository:
     return DBWorkflowRunRepository(db_session=db_session)
 
 
+def _build_event_insert_repo() -> DBWorkflowRunRepository:
+    run_record = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        session_id="session-1",
+        current_step_id=None,
+    )
+    db_session = SimpleNamespace(
+        execute=_ExecuteQueue(
+            SimpleNamespace(scalar_one_or_none=lambda: None),
+            SimpleNamespace(scalar_one_or_none=lambda: run_record),
+        ),
+        add=MagicMock(),
+    )
+    return DBWorkflowRunRepository(db_session=db_session)
+
+
 def test_add_event_if_absent_should_sync_step_projection_for_step_event() -> None:
-    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
-    repo = _build_repo(execute_result)
+    repo = _build_event_insert_repo()
     repo._refresh_run_status_by_event = AsyncMock()
     repo.upsert_step_from_event = AsyncMock()
     repo.replace_steps_from_plan = AsyncMock()
@@ -59,14 +85,15 @@ def test_add_event_if_absent_should_sync_step_projection_for_step_event() -> Non
     )
 
     assert inserted is True
+    event_record = repo.db_session.add.call_args.args[0]
+    assert event_record.user_id == "user-1"
     repo._refresh_run_status_by_event.assert_not_awaited()
     repo.upsert_step_from_event.assert_awaited_once()
     repo.replace_steps_from_plan.assert_not_awaited()
 
 
 def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> None:
-    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
-    repo = _build_repo(execute_result)
+    repo = _build_event_insert_repo()
     repo._refresh_run_status_by_event = AsyncMock()
     repo.upsert_step_from_event = AsyncMock()
     repo.replace_steps_from_plan = AsyncMock()
@@ -100,6 +127,8 @@ def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> Non
     )
 
     assert inserted is True
+    event_record = repo.db_session.add.call_args.args[0]
+    assert event_record.user_id == "user-1"
     repo._refresh_run_status_by_event.assert_not_awaited()
     repo.replace_steps_from_plan.assert_awaited_once()
     repo.upsert_step_from_event.assert_not_awaited()

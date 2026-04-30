@@ -277,13 +277,13 @@ def test_pr4_migration_should_scope_memory_dedupe_constraint_by_user_id() -> Non
         Path(__file__).resolve().parents[1]
         / "alembic"
         / "versions"
-        / "1a2b3c4d5e6f_p0_4_memory_user_dedupe_constraint.py"
+        / "d7cfc3374fa2_.py"
     )
     migration_source = migration_path.read_text(encoding="utf-8")
 
-    assert "uq_long_term_memories_namespace_dedupe_key" in migration_source
-    assert "uq_long_term_memories_user_namespace_dedupe_key" in migration_source
-    assert '["user_id", "namespace", "dedupe_key"]' in migration_source
+    assert "op.drop_constraint(op.f('uq_long_term_memories_namespace_dedupe_key')" in migration_source
+    assert "op.create_unique_constraint('uq_long_term_memories_user_namespace_dedupe_key'" in migration_source
+    assert "['user_id', 'namespace', 'dedupe_key']" in migration_source
 
 
 def test_long_term_memory_model_should_scope_dedupe_constraint_by_user_id() -> None:

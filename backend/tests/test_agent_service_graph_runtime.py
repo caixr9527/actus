@@ -1,6 +1,7 @@
 import asyncio
 
 from app.application.service.agent_service import AgentService
+from app.application.service.runtime_access_control_service import AccessScopeResult
 from app.domain.models import RuntimeLLMConfig, Session, SessionStatus
 
 
@@ -63,6 +64,19 @@ class _DummyLLMFactory:
         self.calls += 1
         self.last_config = llm_config
         return self.last_llm
+
+
+class _StubAccessControlService:
+    def __init__(self) -> None:
+        self.session_access_calls: list[tuple[str, str, object]] = []
+
+    async def assert_session_access(self, *, user_id: str, session_id: str, action):
+        self.session_access_calls.append((user_id, session_id, action))
+        return AccessScopeResult(
+            tenant_id=user_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
 
 
 def test_agent_service_get_task_should_delegate_to_graph_runtime() -> None:
@@ -143,7 +157,12 @@ def test_agent_service_stop_session_should_delegate_cancel_to_graph_runtime() ->
     service = object.__new__(AgentService)
     service._graph_runtime = runtime
     service._uow_factory = lambda: _UoW()
+    access_control = _StubAccessControlService()
+    service._access_control_service = access_control
 
     asyncio.run(service.stop_session("session-a", "user-a"))
 
     assert runtime.cancel_calls == ["session-a"]
+    assert [(user_id, session_id) for user_id, session_id, _ in access_control.session_access_calls] == [
+        ("user-a", "session-a")
+    ]

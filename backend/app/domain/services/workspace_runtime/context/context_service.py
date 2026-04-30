@@ -41,6 +41,8 @@ _MEMORY_CONTENT_MAX_CHARS = 240
 _STEP_SUMMARY_MAX_CHARS = 160
 _FINAL_MESSAGE_MAX_CHARS = 240
 _DIGEST_TEXT_MAX_CHARS = 240
+_RUN_BRIEF_SUMMARY_MAX_CHARS = 120
+_RUN_BRIEF_EXCERPT_MAX_CHARS = 160
 _SEARCH_EVIDENCE_SNIPPET_MAX_CHARS = 520
 _WEB_EVIDENCE_SUMMARY_MAX_CHARS = 720
 _DEFAULT_RUNTIME_TIMEZONE = "Asia/Shanghai"
@@ -1095,8 +1097,14 @@ class RuntimeContextService:
                     "title": str(item.get("title") or "").strip(),
                     "goal": str(item.get("goal") or "").strip(),
                     "status": str(item.get("status") or "").strip(),
-                    "final_answer_summary": item.get("final_answer_summary"),
-                    "final_answer_text_excerpt": item.get("final_answer_text_excerpt"),
+                    "final_answer_summary": self._truncate_text(
+                        item.get("final_answer_summary"),
+                        max_chars=_RUN_BRIEF_SUMMARY_MAX_CHARS,
+                    ),
+                    "final_answer_text_excerpt": self._truncate_text(
+                        item.get("final_answer_text_excerpt"),
+                        max_chars=_RUN_BRIEF_EXCERPT_MAX_CHARS,
+                    ),
                 }
             )
             if len(briefs) >= _BRIEF_LIMIT:
