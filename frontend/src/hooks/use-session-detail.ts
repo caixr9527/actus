@@ -581,6 +581,9 @@ export function useSessionDetail(
 
       const streamEpoch = sessionEpochRef.current
       const streamSessionId = sessionId
+      const previousSession = session
+      const previousSessionStatus = sessionStatusRef.current
+      const previousRuntimeObservation = runtimeObservationRef.current
 
       stopEmptyStream()
       stopMessageStream()
@@ -669,7 +672,8 @@ export function useSessionDetail(
         }
       }
 
-      const messageStreamCleanup = sessionApi.chat(
+      let isMessageStreamAccepted = false
+      const messageStreamHandle = sessionApi.openChatStream(
         streamSessionId,
         chatParams,
         onEvent,
@@ -679,6 +683,9 @@ export function useSessionDetail(
             streamSessionId !== currentSessionIdRef.current ||
             streamInstanceId !== messageStreamInstanceIdRef.current
           ) {
+            return
+          }
+          if (!isMessageStreamAccepted) {
             return
           }
           const closeReason = classifyMessageStreamCloseReason(err)
@@ -697,14 +704,32 @@ export function useSessionDetail(
         streamSessionId !== currentSessionIdRef.current ||
         streamInstanceId !== messageStreamInstanceIdRef.current
       ) {
-        messageStreamCleanup()
+        messageStreamHandle.cleanup()
         return
       }
 
       // 将消息流的 cleanup 存到独立的 ref，不与 emptyStream 混淆
-      messageStreamCleanupRef.current = messageStreamCleanup
+      messageStreamCleanupRef.current = messageStreamHandle.cleanup
+      try {
+        await messageStreamHandle.ready
+        isMessageStreamAccepted = true
+      } catch (error) {
+        if (
+          streamEpoch === sessionEpochRef.current &&
+          streamSessionId === currentSessionIdRef.current &&
+          streamInstanceId === messageStreamInstanceIdRef.current
+        ) {
+          if ('message' in chatParams) {
+            sessionStatusRef.current = previousSessionStatus
+            runtimeObservationRef.current = previousRuntimeObservation
+            setSession(previousSession)
+          }
+          finalizeMessageStream()
+        }
+        throw error
+      }
     },
-    [enabled, sessionId, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream, t]
+    [enabled, sessionId, session, appendEvent, loadSessionSnapshot, setStreamingState, stopEmptyStream, stopMessageStream, t]
   )
 
   const sendMessage = useCallback(

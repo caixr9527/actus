@@ -306,6 +306,7 @@ export const zhCNMessages: MessageDictionary = {
   "apiErrors.session.notCancelled": "当前会话不处于已取消状态，无法继续已取消任务",
   "apiErrors.session.cancelledContinueUnavailable": "当前已取消任务没有可继续的执行计划，请重新发起任务",
   "sessionDetail.resumeAttachmentUnsupported": "等待恢复阶段暂不支持上传附件",
+  "apiErrors.documentInput.unsupportedTaskInput": "不支持该类型作为任务输入",
   "apiErrors.file.notFound": "文件不存在或已被删除",
   "apiErrors.appConfig.loadFailed": "加载配置失败，请稍后重试",
   "apiErrors.appConfig.saveFailed": "保存配置失败，请稍后重试",

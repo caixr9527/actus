@@ -306,6 +306,7 @@ export const enUSMessages: MessageDictionary = {
   "apiErrors.session.notCancelled": "This session is not cancelled, so the cancelled task cannot be continued.",
   "apiErrors.session.cancelledContinueUnavailable": "The cancelled task no longer has a resumable plan. Start a new run instead.",
   "sessionDetail.resumeAttachmentUnsupported": "Attachments are not supported while resuming a waiting run.",
+  "apiErrors.documentInput.unsupportedTaskInput": "This file type is not supported as task input",
   "apiErrors.file.notFound": "The file does not exist or has been deleted",
   "apiErrors.appConfig.loadFailed": "Failed to load configuration. Please try again later.",
   "apiErrors.appConfig.saveFailed": "Failed to save configuration. Please try again later.",

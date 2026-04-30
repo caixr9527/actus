@@ -9,6 +9,8 @@ import {
   classifyMessageStreamCloseReason,
   shouldReloadSnapshotAfterMessageStreamClose,
 } from '../src/lib/session-detail-runtime'
+import { sessionApi } from '../src/lib/api/session'
+import { ApiError } from '../src/lib/api/fetch'
 import {
   createRuntimeObservationFromSnapshot,
   reduceRuntimeObservationOnEvent,
@@ -206,6 +208,60 @@ test('message stream end should reload snapshot and use snapshot runtime status 
   assert.equal(runtimeState.status, 'completed')
   assert.equal(runtimeState.capabilities.can_send_message, true)
   assert.equal(realtimeState.lastEventId, 'evt-done')
+})
+
+test('document input preflight rejection should not create timeline event or persistent cursor', async () => {
+  const initialRealtimeState = buildSessionRealtimeStateFromSnapshot({
+    rawEvents: [messageEvent('evt-1', 'persisted')],
+    snapshotLatestEventId: 'evt-1',
+  })
+  let eventCount = 0
+  let capturedError: unknown = null
+
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    code: 400,
+    msg: '不支持该类型作为任务输入',
+    data: null,
+    error_key: 'error.document_input.unsupported_media_image',
+    error_params: {
+      reason_code: 'unsupported_media_image',
+    },
+  }), {
+    status: 400,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })) as typeof fetch
+
+  try {
+    const handle = sessionApi.openChatStream(
+      'session-1',
+      { message: '分析图片', attachments: ['file-image'] },
+      () => {
+        eventCount += 1
+      },
+      (error) => {
+        capturedError = error
+      },
+    )
+
+    await assert.rejects(handle.ready, (error: unknown) => {
+      assert.ok(error instanceof ApiError)
+      assert.equal(error.errorKey, 'error.document_input.unsupported_media_image')
+      assert.deepEqual(error.errorParams, { reason_code: 'unsupported_media_image' })
+      return true
+    })
+
+    assert.equal(eventCount, 0)
+    assert.ok(capturedError instanceof ApiError)
+    assert.equal(initialRealtimeState.events.length, 1)
+    assert.equal(initialRealtimeState.lastEventId, 'evt-1')
+    assert.deepEqual(Array.from(initialRealtimeState.seenPersistentCursorIds), ['evt-1'])
+    handle.cleanup()
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('waiting resume running final done chain should follow runtime capabilities and cursor', () => {

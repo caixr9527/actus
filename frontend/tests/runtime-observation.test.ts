@@ -260,3 +260,33 @@ test('persistent cursor helpers should only read runtime.cursor_event_id from pe
   assert.equal(getPersistentCursorEventId(liveOnly), null)
   assert.deepEqual(Array.from(collectPersistentCursorEventIds([persistent, liveOnly])), ['evt-1'])
 })
+
+test('document input rejection payload alone should not change runtime observation or cursor', () => {
+  const prev = createRuntimeObservationFromSnapshot(sessionDetail(runtimeObservation({
+    status: 'completed',
+    cursor: {
+      latest_event_id: 'evt-1',
+      has_more: false,
+    },
+    capabilities: {
+      can_send_message: true,
+      can_resume: false,
+      can_cancel: false,
+      can_continue_cancelled: false,
+      disabled_reasons: {},
+    },
+  })))
+  const rejection = {
+    code: 400,
+    msg: '不支持该类型作为任务输入',
+    error_key: 'error.document_input.unsupported_media_image',
+    error_params: {
+      reason_code: 'unsupported_media_image',
+    },
+  }
+
+  assert.equal('runtime' in rejection, false)
+  assert.equal(prev.status, 'completed')
+  assert.equal(prev.cursor.latest_event_id, 'evt-1')
+  assert.equal(prev.capabilities.can_send_message, true)
+})
