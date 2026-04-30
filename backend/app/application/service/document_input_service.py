@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from io import BytesIO, StringIO
 from typing import Any, BinaryIO, Protocol
 
+from pydantic import BaseModel
+
 from app.application.service.runtime_access_control_service import AccessScopeResult
 from app.domain.external import FileStorage
 from app.domain.models import File
 from app.domain.services.runtime.contracts.document_input_contract import (
     DOCUMENT_INPUT_EXCERPT_CHAR_LIMIT,
+    DOCUMENT_INPUT_CONTEXT_CHAR_LIMIT,
     DOCUMENT_INPUT_MAX_FILE_SIZE_BYTES,
     DOCUMENT_REASON_DECODE_FAILED,
     DOCUMENT_REASON_EMPTY,
@@ -115,6 +118,25 @@ class DocumentAttachmentSource:
     sha256: str | None = None
 
 
+class DocumentPromptContextItem(BaseModel):
+    file_id: str
+    filename: str
+    sandbox_filepath: str | None = None
+    kind: str
+    parse_status: str
+    reason_code: str | None = None
+    is_truncated: bool = False
+    summary: str = ""
+    text_excerpt: str = ""
+
+
+class DocumentPromptContextResult(BaseModel):
+    documents: list[DocumentPromptContextItem]
+    document_count: int
+    context_char_count: int
+    truncated_document_count: int
+
+
 class DocumentInputService:
     """P0-5 文档输入处理入口。"""
 
@@ -144,6 +166,57 @@ class DocumentInputService:
             request_id or "",
         )
         return parts
+
+    def build_prompt_context(
+            self,
+            *,
+            parts: list[DocumentInputPart],
+            max_chars: int = DOCUMENT_INPUT_CONTEXT_CHAR_LIMIT,
+    ) -> DocumentPromptContextResult:
+        """将 DocumentInputPart 纯转换为 prompt-safe 文档上下文。"""
+        documents: list[DocumentPromptContextItem] = []
+        remaining_chars = max(0, int(max_chars))
+        truncated_document_count = 0
+        context_char_count = 0
+        for part in list(parts or []):
+            if not isinstance(part, DocumentInputPart):
+                part = DocumentInputPart.model_validate(part)
+            summary = str(part.summary or "")
+            if len(summary) > remaining_chars:
+                summary = summary[:remaining_chars]
+                text_excerpt = ""
+                is_context_truncated = True
+            else:
+                text_excerpt = str(part.text_excerpt or "")
+                budget = max(0, remaining_chars - len(summary))
+                if len(text_excerpt) > budget:
+                    text_excerpt = text_excerpt[:budget]
+                    is_context_truncated = True
+                else:
+                    is_context_truncated = False
+            item = DocumentPromptContextItem(
+                file_id=part.source.file_id,
+                filename=part.source.filename,
+                sandbox_filepath=part.source.sandbox_filepath,
+                kind=part.kind.value,
+                parse_status=part.parse_status.value,
+                reason_code=part.reason_code,
+                is_truncated=bool(part.is_truncated or is_context_truncated),
+                summary=summary,
+                text_excerpt=text_excerpt,
+            )
+            documents.append(item)
+            used_chars = len(summary) + len(text_excerpt)
+            context_char_count += used_chars
+            remaining_chars = max(0, remaining_chars - used_chars)
+            if item.is_truncated:
+                truncated_document_count += 1
+        return DocumentPromptContextResult(
+            documents=documents,
+            document_count=len(documents),
+            context_char_count=context_char_count,
+            truncated_document_count=truncated_document_count,
+        )
 
     def _ensure_scope_matches(
             self,

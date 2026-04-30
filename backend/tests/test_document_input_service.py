@@ -170,3 +170,26 @@ def test_document_input_service_should_extract_visible_html_text() -> None:
     assert "alert" not in parts[0].text_excerpt
     assert "display:none" not in parts[0].text_excerpt
     assert "<h1>" not in parts[0].text_excerpt
+
+
+def test_document_input_service_should_build_prompt_context_with_status_and_budget() -> None:
+    service = DocumentInputService()
+    parsed_file = File(id="file-1", filename="notes.md", extension=".md", mime_type="text/markdown", size=120)
+    unsupported_file = File(id="file-2", filename="paper.pdf", extension=".pdf", mime_type="application/pdf", size=120)
+    parts = [
+        *asyncio.run(service.build_input_parts(scope=_scope(), attachments=[_source(parsed_file, b"abcdef")])),
+        *asyncio.run(service.build_input_parts(scope=_scope(), attachments=[_source(unsupported_file, b"%PDF")])),
+    ]
+
+    context = service.build_prompt_context(parts=parts, max_chars=3)
+
+    assert context.document_count == 2
+    assert context.context_char_count == 3
+    assert context.documents[0].file_id == "file-1"
+    assert context.documents[0].sandbox_filepath == "/home/ubuntu/upload/file-1/notes.md"
+    assert context.documents[0].parse_status == "parsed"
+    assert context.documents[0].is_truncated is True
+    assert context.documents[0].summary == "mar"
+    assert context.documents[0].text_excerpt == ""
+    assert context.documents[1].parse_status == "unsupported"
+    assert context.documents[1].reason_code == "unsupported_document_format"

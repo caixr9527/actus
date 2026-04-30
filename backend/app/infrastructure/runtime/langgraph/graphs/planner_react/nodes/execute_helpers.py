@@ -59,6 +59,7 @@ from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
     _extract_prompt_context_state_updates,
+    extract_document_attachment_paths,
 )
 from .wait_helpers import _build_step_label
 from .working_memory import _ensure_working_memory
@@ -323,13 +324,8 @@ async def _build_message(
         user_message_prompt: str,
         input_parts: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """按多模态能力统一构造执行节点 user content。"""
-    if getattr(llm, "multimodal", False) and len(input_parts) > 0:
-        multiplexed_message = await llm.format_multiplexed_message(input_parts)
-        return [
-            {"type": "text", "text": user_message_prompt},
-            *multiplexed_message,
-        ]
+    """构造执行节点 user content。"""
+    # P0-5 禁止 image/audio/video 原生透传，文档内容只通过 document_context 文本上下文进入模型。
     return [{"type": "text", "text": user_message_prompt}]
 
 
@@ -378,7 +374,7 @@ async def prepare_execute_step_input(
         working_memory=working_memory,
     )
     input_parts = list(state.get("input_parts") or [])
-    attachments = [str(part.get("sandbox_filepath") or "") for part in input_parts if part.get("sandbox_filepath")]
+    attachments = extract_document_attachment_paths(input_parts)
     available_file_context_refs = _collect_available_file_context_refs(state)
     available_file_context = has_available_file_context(
         user_message=user_message,

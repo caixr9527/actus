@@ -126,15 +126,8 @@ def _build_planner_failed_step(
 
 
 async def _build_message(llm: LLM, user_message_prompt: str, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if getattr(llm, "multimodal", False) and input_parts is not None and len(input_parts) > 0:
-        multiplexed_message = await llm.format_multiplexed_message(input_parts)
-        user_content = [
-            {"type": "text", "text": user_message_prompt},
-            *multiplexed_message,
-        ]
-    else:
-        user_content = [{"type": "text", "text": user_message_prompt}]
-    return user_content
+    # P0-5 禁止 image/audio/video 原生透传，文档内容只通过 document_context 文本上下文进入模型。
+    return [{"type": "text", "text": user_message_prompt}]
 
 
 def _resolve_emit_live_events():
@@ -183,6 +176,18 @@ def _resolve_prompt_context_appender():
             return package_appender
     from .prompt_context_helpers import _append_prompt_context_to_prompt
     return _append_prompt_context_to_prompt
+
+
+def _resolve_document_attachment_path_extractor():
+    package_module = sys.modules.get(
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes"
+    )
+    if package_module is not None:
+        package_extractor = getattr(package_module, "extract_document_attachment_paths", None)
+        if callable(package_extractor):
+            return package_extractor
+    from .prompt_context_helpers import extract_document_attachment_paths
+    return extract_document_attachment_paths
 
 
 async def create_or_reuse_plan_node(
@@ -236,7 +241,7 @@ async def create_or_reuse_plan_node(
 
     user_message = state.get("user_message", "").strip()
     input_parts = list(state.get("input_parts") or [])
-    attachments = [part.get("sandbox_filepath") for part in input_parts]
+    attachments = _resolve_document_attachment_path_extractor()(input_parts)
 
     build_prompt_context_packet_async = _resolve_prompt_context_builder()
     extract_prompt_context_state_updates = _resolve_prompt_context_extractor()
