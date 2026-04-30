@@ -64,6 +64,16 @@ SESSION_RUNTIME_STATE_CONFLICT = "error.session.runtime_state_conflict"
 # 文件链路
 FILE_NOT_FOUND = "error.file.not_found"
 
+# 文档输入链路
+DOCUMENT_INPUT_UNSUPPORTED_MEDIA_IMAGE = "error.document_input.unsupported_media_image"
+DOCUMENT_INPUT_UNSUPPORTED_MEDIA_AUDIO = "error.document_input.unsupported_media_audio"
+DOCUMENT_INPUT_UNSUPPORTED_MEDIA_VIDEO = "error.document_input.unsupported_media_video"
+DOCUMENT_INPUT_UNSUPPORTED_BINARY = "error.document_input.unsupported_binary"
+DOCUMENT_INPUT_UNSUPPORTED_DOCUMENT_FORMAT = "error.document_input.unsupported_document_format"
+DOCUMENT_INPUT_TOO_LARGE = "error.document_input.too_large"
+DOCUMENT_INPUT_TOO_MANY_ATTACHMENTS = "error.document_input.too_many_attachments"
+DOCUMENT_INPUT_EMPTY = "error.document_input.empty"
+
 # 应用配置链路
 APP_CONFIG_LOAD_FAILED = "error.app_config.load_failed"
 APP_CONFIG_SAVE_FAILED = "error.app_config.save_failed"

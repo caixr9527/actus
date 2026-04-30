@@ -24,7 +24,8 @@ from app.domain.models import (
     SessionStatus,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.infrastructure.runtime.langgraph.engine.run_engine import LangGraphRunEngine
+from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.infrastructure.runtime.langgraph.engine.run_engine import DocumentInputContractError, LangGraphRunEngine
 
 
 class _FakeGraph:
@@ -325,10 +326,11 @@ class _InputPartsFileStorage:
         return f"https://cdn.example.com/{file.id}"
 
 
-def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_attachments() -> None:
+def test_langgraph_run_engine_build_input_parts_should_emit_document_parts_for_attachments() -> None:
     engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
+        user_id="user-1",
         file_storage=_InputPartsFileStorage(
             {
                 "file-1": b"content-a",
@@ -344,15 +346,26 @@ def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_att
                     filename="same.txt",
                     filepath="/home/ubuntu/upload/file-1/same.txt",
                     mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
                 ),
                 "/home/ubuntu/upload/file-2/same.txt": File(
                     id="file-2",
                     filename="same.txt",
                     filepath="/home/ubuntu/upload/file-2/same.txt",
                     mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
                 ),
             }
         )
+    )
+    scope = AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
     )
 
     parts = asyncio.run(
@@ -365,18 +378,117 @@ def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_att
                 ],
             ),
             uow=uow,
+            scope=scope,
         )
     )
 
-    assert [part["sandbox_filepath"] for part in parts] == [
+    assert [part["type"] for part in parts] == ["document", "document"]
+    assert [part["source"]["sandbox_filepath"] for part in parts] == [
         "/home/ubuntu/upload/file-1/same.txt",
         "/home/ubuntu/upload/file-2/same.txt",
     ]
-    assert [part["file_url"] for part in parts] == [
-        "https://cdn.example.com/file-1",
-        "https://cdn.example.com/file-2",
-    ]
-    assert parts[0]["base64_payload"] != parts[1]["base64_payload"]
+    assert [part["source"]["file_id"] for part in parts] == ["file-1", "file-2"]
+    assert [part["text_excerpt"] for part in parts] == ["content-a", "content-b"]
+    assert "base64_payload" not in parts[0]
+    assert "file_url" not in parts[0]
+
+
+def test_langgraph_run_engine_build_input_parts_should_fail_when_scope_missing_for_attachments() -> None:
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content"}),
+    )
+    uow = SimpleNamespace(session=_InputPartsSessionRepo({}))
+
+    with pytest.raises(RuntimeError, match="document input contract dependency missing"):
+        asyncio.run(
+            engine._build_input_parts(
+                Message(
+                    message="读取附件",
+                    attachments=["/home/ubuntu/upload/file-1/notes.txt"],
+                ),
+                uow=uow,
+                scope=None,
+            )
+        )
+
+
+def test_langgraph_run_engine_build_graph_input_state_should_not_fallback_when_document_scope_missing(monkeypatch) -> None:
+    fake_graph = _FakeGraph()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+    session_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Session(
+                id="session-1",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                current_run_id="run-1",
+            )
+        )
+    )
+    workspace_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                user_id="user-1",
+                current_run_id="run-1",
+            )
+        ),
+        get_by_id_for_user=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                user_id="user-1",
+                current_run_id="run-1",
+            )
+        ),
+        get_by_session_id=AsyncMock(return_value=None),
+    )
+    workflow_run_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=WorkflowRun(
+                id="run-1",
+                session_id="session-1",
+                user_id="user-1",
+                status=WorkflowRunStatus.RUNNING,
+            )
+        )
+    )
+    workflow_run_summary_repo = SimpleNamespace(list_by_session_id=AsyncMock(side_effect=[[], []]))
+    session_context_snapshot_repo = SimpleNamespace(get_by_session_id=AsyncMock(return_value=None))
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content"}),
+        uow_factory=lambda: _FakeUoW(
+            session_repo=session_repo,
+            workflow_run_repo=workflow_run_repo,
+            workflow_run_summary_repo=workflow_run_summary_repo,
+            session_context_snapshot_repo=session_context_snapshot_repo,
+            workspace_repo=workspace_repo,
+        ),
+        access_control_service=None,
+    )
+    engine._access_control_service = None
+
+    with pytest.raises(DocumentInputContractError, match="scope"):
+        asyncio.run(
+            engine._build_graph_input_state(
+                message=Message(
+                    message="读取附件",
+                    attachments=["/home/ubuntu/upload/file-1/notes.txt"],
+                ),
+                run_id="run-1",
+                invoke_config={"configurable": {"thread_id": "session-1"}},
+            )
+        )
 
 
 def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:

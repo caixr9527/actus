@@ -13,6 +13,7 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
+from app.application.service.agent_service import AgentService
 from app.application.service import (
     AppConfigService,
     FileService,
@@ -21,7 +22,6 @@ from app.application.service import (
     RuntimeAccessControlService,
     RuntimeObservationService,
     StatusService,
-    AgentService,
     AuthService,
     UserService,
 )

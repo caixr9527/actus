@@ -14,7 +14,8 @@ from redis.exceptions import RedisError
 from sse_starlette import ServerSentEvent
 
 from app.application.errors import NotFoundError, error_keys
-from app.application.service import AgentService, RuntimeObservationService, SessionService
+from app.application.service import RuntimeObservationService, SessionService
+from app.application.service.agent_service import AgentService
 from app.application.service.runtime_observation_service import RuntimeObservationContextResult
 from app.domain.models import SessionStatus
 from app.domain.models import WorkflowRunEventRecord

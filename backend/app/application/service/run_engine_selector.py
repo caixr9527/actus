@@ -9,6 +9,7 @@ import logging
 from typing import Callable, Dict
 
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine, FileStorage
 from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
@@ -131,4 +132,5 @@ def build_run_engine(
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         data_retention_policy_service=DataRetentionPolicyService(),
+        access_control_service=RuntimeAccessControlService(uow_factory=uow_factory),
     )

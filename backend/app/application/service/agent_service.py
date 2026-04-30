@@ -14,6 +14,7 @@ from typing import AsyncGenerator, Optional, List, Type, Callable, Any
 from pydantic import TypeAdapter
 
 from app.application.errors import AppException, BadRequestError, NotFoundError
+from app.application.service.document_input_preflight_policy import DocumentInputPreflightPolicy
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
@@ -77,6 +78,7 @@ class AgentService:
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
             graph_runtime: Optional[GraphRuntime] = None,
             access_control_service: RuntimeAccessControlService | None = None,
+            document_input_preflight_policy: DocumentInputPreflightPolicy | None = None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -98,6 +100,7 @@ class AgentService:
         self._access_control_service = access_control_service or RuntimeAccessControlService(
             uow_factory=self._uow_factory,
         )
+        self._document_input_preflight_policy = document_input_preflight_policy or DocumentInputPreflightPolicy()
         # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
         # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
         self._graph_runtime = graph_runtime or DefaultGraphRuntime(
@@ -120,8 +123,15 @@ class AgentService:
         coordinator = getattr(self, "_runtime_state_coordinator", None)
         if coordinator is None:
             coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
-            self._runtime_state_coordinator = coordinator
+        self._runtime_state_coordinator = coordinator
         return coordinator
+
+    def _get_document_input_preflight_policy(self) -> DocumentInputPreflightPolicy:
+        policy = getattr(self, "_document_input_preflight_policy", None)
+        if policy is None:
+            policy = DocumentInputPreflightPolicy()
+            self._document_input_preflight_policy = policy
+        return policy
 
     def _get_access_control_service(self) -> RuntimeAccessControlService:
         access_control_service = getattr(self, "_access_control_service", None)
@@ -129,6 +139,40 @@ class AgentService:
             access_control_service = RuntimeAccessControlService(uow_factory=self._uow_factory)
             self._access_control_service = access_control_service
         return access_control_service
+
+    async def _load_and_validate_message_attachments(
+            self,
+            *,
+            attachments: List[str],
+            user_id: str,
+            session_id: str,
+            request_id: str,
+    ) -> list[Any]:
+        """加载当前用户附件元数据，并在创建 task/message 前完成文档 preflight。"""
+        db_attachments = []
+        async with self._uow_factory() as uow:
+            for file_id in attachments:
+                await self._get_access_control_service().assert_file_access(
+                    user_id=user_id,
+                    file_id=file_id,
+                    action=DataAccessAction.READ,
+                )
+                attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
+                if attachment is not None:
+                    db_attachments.append(attachment)
+                else:
+                    raise NotFoundError(
+                        msg=f"该文件[{file_id}]不存在",
+                        error_key=error_keys.FILE_NOT_FOUND,
+                        error_params={"file_id": file_id},
+                    )
+        self._get_document_input_preflight_policy().validate(
+            db_attachments,
+            user_id=user_id,
+            session_id=session_id,
+            request_id=request_id,
+        )
+        return db_attachments
 
     def _build_task_runner(
             self,
@@ -247,6 +291,7 @@ class AgentService:
             ),
             checkpointer=get_langgraph_checkpointer().get_checkpointer(),
             data_retention_policy_service=DataRetentionPolicyService(),
+            access_control_service=self._get_access_control_service(),
         )
         return await inspector.inspect_resume_checkpoint()
 
@@ -424,6 +469,14 @@ class AgentService:
                 # 统一归一化可选参数，避免后续列表处理触发None错误。
                 attachments = attachments or []
 
+                request_id = str(uuid.uuid4())
+                db_attachments = await self._load_and_validate_message_attachments(
+                    attachments=attachments,
+                    user_id=user_id,
+                    session_id=session_id,
+                    request_id=request_id,
+                )
+
                 # 如果会话未处于运行状态，或者没有任务，则创建/恢复任务。
                 if task is None:
                     current_run_id = await self._get_workspace_manager().resolve_current_run_id(session=session)
@@ -443,33 +496,12 @@ class AgentService:
                         logger.error(f"会话{session_id}的聊天请求失败: 创建任务失败")
                         raise RuntimeError(f"会话{session_id}的聊天请求失败: 创建任务失败")
 
-                # 先查询附件元数据，构建完整消息事件。
-                # 该步骤为只读，不涉及会话投影写入，因此不会产生“先写latest_message”的窗口。
-                async with self._uow_factory() as uow:
-                    db_attachments = []
-                    for file_id in attachments:
-                        await self._get_access_control_service().assert_file_access(
-                            user_id=user_id,
-                            file_id=file_id,
-                            action=DataAccessAction.READ,
-                        )
-                        attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
-                        if attachment is not None:
-                            db_attachments.append(attachment)
-                        else:
-                            raise NotFoundError(
-                                msg=f"该文件[{file_id}]不存在",
-                                error_key=error_keys.FILE_NOT_FOUND,
-                                error_params={"file_id": file_id},
-                            )
-
                 # 创建用户消息事件
                 message_event = MessageEvent(
                     role="user",
                     message=message,
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
-                request_id = str(uuid.uuid4())
                 runtime_input = RuntimeInput(
                     request_id=request_id,
                     payload=message_event,

@@ -6,10 +6,8 @@
 @File   : langgraph_run_engine.py
 """
 import asyncio
-import base64
 import json
 import logging
-import mimetypes
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
@@ -32,6 +30,7 @@ from app.domain.repositories import IUnitOfWork
 from app.domain.services.memory_consolidation import MemoryConsolidationService
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.data_access_contract import (
+    DataAccessAction,
     DataClassificationPolicy,
     DefaultDataClassificationPolicy,
 )
@@ -59,6 +58,12 @@ from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime import WorkspaceManager
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.application.service.document_input_service import (
+    DocumentAttachmentSource,
+    DocumentInputService,
+    FileStorageDocumentAttachmentReader,
+)
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
     bind_live_event_sink,
@@ -67,12 +72,15 @@ from app.infrastructure.runtime.langgraph.graphs import (
 )
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.external.llm import OllamaLLMFactory
-from app.infrastructure.utils import BaseUtils
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 SESSION_CONTEXT_SUMMARY_LIMIT = 20
+
+
+class DocumentInputContractError(RuntimeError):
+    """文档输入契约错误必须失败关闭，禁止回退为空附件继续执行。"""
 
 
 @dataclass(frozen=True)
@@ -143,6 +151,8 @@ class LangGraphRunEngine(RunEngine):
             max_tool_iterations: Optional[int] = None,
             checkpointer: Any | None = None,
             data_retention_policy_service: DataClassificationPolicy | None = None,
+            document_input_service: DocumentInputService | None = None,
+            access_control_service: RuntimeAccessControlService | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
@@ -153,6 +163,12 @@ class LangGraphRunEngine(RunEngine):
         self._uow_factory = uow_factory
         self._checkpointer = checkpointer
         self._data_retention_policy_service = effective_data_retention_policy_service
+        self._document_input_service = document_input_service or DocumentInputService()
+        self._access_control_service = access_control_service or (
+            RuntimeAccessControlService(uow_factory=uow_factory)
+            if uow_factory is not None
+            else None
+        )
         normalized_stage_llms = ensure_required_stage_llms(stage_llms)
         self._long_term_memory_repository = (
             LangGraphLongTermMemoryRepository(uow_factory=uow_factory)
@@ -251,39 +267,58 @@ class LangGraphRunEngine(RunEngine):
             self,
             message: Message,
             uow: Optional[IUnitOfWork] = None,
+            scope: Any | None = None,
+            request_id: str | None = None,
     ) -> List[Dict[str, Any]]:
-        """根据 message.attachments 构建输入片段。"""
-        parts: List[Dict[str, Any]] = []
+        """根据 message.attachments 构建文档输入片段。"""
         attachment_paths = message.attachments or []
-
+        if not attachment_paths:
+            return []
+        missing_dependencies = []
+        if uow is None:
+            missing_dependencies.append("uow")
+        if scope is None:
+            missing_dependencies.append("scope")
+        if self._file_storage is None:
+            missing_dependencies.append("file_storage")
+        if self._user_id is None:
+            missing_dependencies.append("user_id")
+        if missing_dependencies:
+            logger.error(
+                "document_input_contract_dependency_missing session_id=%s missing=%s request_id=%s",
+                self._session_id,
+                ",".join(missing_dependencies),
+                request_id or "",
+            )
+            raise DocumentInputContractError(
+                "document input contract dependency missing: " + ",".join(missing_dependencies)
+            )
+        sources: List[DocumentAttachmentSource] = []
         for filepath in attachment_paths:
-            part_type = BaseUtils.resolve_part_type_by_filepath(filepath=filepath)
             file_record: Optional[File] = await uow.session.get_file_by_path(
                 session_id=self._session_id,
                 filepath=filepath,
             )
             if file_record is None:
                 continue
-
-            guessed_mime_type = str(mimetypes.guess_type(filepath)[0] or "").strip()
-            mime_type = file_record.mime_type or guessed_mime_type or "application/octet-stream"
-
-            file_stream, _ = await self._file_storage.download_file(
-                file_id=file_record.id,
-                user_id=self._user_id,
+            sources.append(
+                DocumentAttachmentSource(
+                    scope=scope,
+                    file=file_record,
+                    sandbox_filepath=filepath,
+                    reader=FileStorageDocumentAttachmentReader(
+                        file_storage=self._file_storage,
+                        file=file_record,
+                        user_id=self._user_id,
+                    ),
+                )
             )
-
-            bytes_raw, _ = BaseUtils.read_limited_bytes(stream=file_stream)
-
-            part: Dict[str, Any] = {
-                "type": part_type,
-                "base64_payload": base64.b64encode(bytes_raw).decode('utf-8'),
-                "mime_type": mime_type,
-                "file_url": self._file_storage.get_file_url(file=file_record),
-                "sandbox_filepath": filepath,
-            }
-            parts.append(part)
-        return parts
+        parts = await self._document_input_service.build_input_parts(
+            scope=scope,
+            attachments=sources,
+            request_id=request_id,
+        )
+        return [part.model_dump(mode="json") for part in parts]
 
     async def _build_graph_input_state(
             self,
@@ -317,6 +352,14 @@ class LangGraphRunEngine(RunEngine):
                     if resolved_run_id
                     else None
                 )
+                scope = None
+                if run is not None and self._access_control_service is not None and self._user_id is not None:
+                    scope = await self._access_control_service.assert_run_access(
+                        user_id=self._user_id,
+                        run_id=run.id,
+                        action=DataAccessAction.READ,
+                        expected_session_id=self._session_id,
+                    )
                 completed_run_summaries = await uow.workflow_run_summary.list_by_session_id(
                     session_id=session.id,
                     limit=SESSION_CONTEXT_SUMMARY_LIMIT,
@@ -330,7 +373,12 @@ class LangGraphRunEngine(RunEngine):
                 session_context_snapshot = await uow.session_context_snapshot.get_by_session_id(
                     session_id=session.id,
                 )
-                input_parts = await self._build_input_parts(message=message, uow=uow)
+                input_parts = await self._build_input_parts(
+                    message=message,
+                    uow=uow,
+                    scope=scope,
+                    request_id=thread_id,
+                )
 
                 return GraphStateContractMapper.build_initial_state(
                     session=session,
@@ -347,6 +395,8 @@ class LangGraphRunEngine(RunEngine):
                     workspace_id=workspace.id if workspace is not None else session.workspace_id,
                     thread_id=thread_id,
                 )
+        except DocumentInputContractError:
+            raise
         except Exception as e:
             # 状态构建失败时必须降级，不能阻断主链路执行。
             log_runtime(

@@ -17,7 +17,8 @@ from websockets import ConnectionClosed
 
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
-from app.application.service import SessionService, AgentService, RuntimeObservationService
+from app.application.service import SessionService, RuntimeObservationService
+from app.application.service.agent_service import AgentService
 from app.domain.models import User
 from app.interfaces.facades import SessionStreamFacade
 from app.interfaces.schemas import (

@@ -5,9 +5,10 @@
 @Author : caixiaorong01@outlook.com
 @File   : __init__.py.py
 """
-from .agent_service import AgentService
 from .auth_service import AuthService
 from .app_config_service import AppConfigService
+from .document_input_preflight_policy import DocumentInputPreflightPolicy
+from .document_input_service import DocumentInputService
 from .file_service import FileService
 from .model_config_service import ModelConfigService
 from .model_runtime_resolver import ModelRuntimeResolver
@@ -20,6 +21,8 @@ from .user_service import UserService
 __all__ = [
     "AuthService",
     "AppConfigService",
+    "DocumentInputPreflightPolicy",
+    "DocumentInputService",
     "StatusService",
     "FileService",
     "ModelConfigService",
@@ -27,6 +30,5 @@ __all__ = [
     "RuntimeAccessControlService",
     "RuntimeObservationService",
     "SessionService",
-    "AgentService",
     "UserService",
 ]
