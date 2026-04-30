@@ -2814,10 +2814,9 @@ def test_summarize_should_filter_explicit_summary_attachments_by_workspace_artif
         )
     )
 
-    # P3-一次性收口：显式 attachments 仅可选取真相源(source_refs)子集；未声明真相源时应全部丢弃。
-    assert summarized_state["selected_artifacts"] == []
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == []
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
 
 
 def test_summarize_should_keep_all_current_run_artifacts_when_falling_back() -> None:
@@ -3648,9 +3647,9 @@ def test_summarize_should_prefer_explicit_summary_attachments_over_previous_arti
 
     summarized_state = asyncio.run(summarize_node(state, llm))
 
-    assert summarized_state["selected_artifacts"] == []
+    assert summarized_state["selected_artifacts"] == ["/home/ubuntu/final-output.md"]
     message_event = summarized_state["emitted_events"][0]
-    assert [attachment.filepath for attachment in message_event.attachments] == []
+    assert [attachment.filepath for attachment in message_event.attachments] == ["/home/ubuntu/final-output.md"]
 
 
 class _FakeUnknownSummaryAttachmentLLM:

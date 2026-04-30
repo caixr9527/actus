@@ -257,15 +257,10 @@ async def _resolve_summary_attachment_refs(
         normalize_attachments(parsed_attachments),
         authoritative_paths,
     )
-    known_attachment_refs = normalize_file_path_list(authoritative_paths, max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
     if len(explicit_attachment_refs) > 0:
-        selected_paths = set(selected_attachment_refs)
-        resolved_explicit_refs = [
-            ref for ref in explicit_attachment_refs
-            if ref in known_attachment_refs and ref in selected_paths
-        ]
-        if len(resolved_explicit_refs) > 0:
-            return resolved_explicit_refs
+        # selected_artifacts 是 summary 本阶段要写入的最终选择结果，不能作为显式附件的前置条件。
+        # 显式附件只要已命中 workspace artifact 或当前 run produced_artifacts，就允许进入最终交付。
+        return explicit_attachment_refs
 
     if _has_explicit_attachment_payload(parsed_attachments):
         return []
