@@ -13,6 +13,11 @@ export type ChatInputInteractionState = {
   canSwitchModel: boolean
 }
 
+export type ChatInputDraftState<TFile> = {
+  inputValue: string
+  files: TFile[]
+}
+
 /**
  * 统一计算输入区可交互状态。
  * 规则：
@@ -41,5 +46,19 @@ export function resolveChatInputInteractionState(
     canEditInput,
     canSend,
     canSwitchModel,
+  }
+}
+
+export function resolveChatInputDraftAfterSendResult<TFile>(
+  draft: ChatInputDraftState<TFile>,
+  sendSucceeded: boolean,
+): ChatInputDraftState<TFile> {
+  if (!sendSucceeded) {
+    return draft
+  }
+
+  return {
+    inputValue: '',
+    files: [],
   }
 }

@@ -12,7 +12,7 @@ import { getApiErrorMessage } from '@/lib/api'
 import {fileApi} from '@/lib/api/file'
 import type {FileInfo, ListModelItem} from '@/lib/api/types'
 import { performModelSelection, resolveModelSelectorState } from '@/lib/chat-model-selector'
-import { resolveChatInputInteractionState } from '@/lib/chat-input-interaction'
+import { resolveChatInputDraftAfterSendResult, resolveChatInputInteractionState } from '@/lib/chat-input-interaction'
 import {toast} from 'sonner'
 import { useI18n } from '@/lib/i18n'
 
@@ -212,10 +212,10 @@ export const ChatInput = forwardRef<ChatInputRef, ChatInputProps>(
         setSending(true)
         try {
           await onSend(trimmedMessage, files)
-          // 发送成功后清空输入框和文件列表
-          setInputValue('')
-          setFiles([])
-          onInputValueChange?.('')
+          const nextDraft = resolveChatInputDraftAfterSendResult({inputValue, files}, true)
+          setInputValue(nextDraft.inputValue)
+          setFiles(nextDraft.files)
+          onInputValueChange?.(nextDraft.inputValue)
         } catch (error) {
           // 错误处理由 onSend 内部处理
           console.error('发送消息失败:', error)

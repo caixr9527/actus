@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { resolveChatInputInteractionState } from '../src/lib/chat-input-interaction'
+import {
+  resolveChatInputDraftAfterSendResult,
+  resolveChatInputInteractionState,
+} from '../src/lib/chat-input-interaction'
 
 test('resolveChatInputInteractionState should allow typing but block send and model switch while running', () => {
   const state = resolveChatInputInteractionState({
@@ -48,3 +51,38 @@ test('resolveChatInputInteractionState should allow send and model switch when i
   assert.equal(state.canSwitchModel, true)
 })
 
+test('resolveChatInputDraftAfterSendResult should preserve draft and attachments after failed send', () => {
+  const draft = {
+    inputValue: '读取这个附件',
+    files: [
+      {
+        id: 'file-1',
+        filename: 'notes.pdf',
+      },
+    ],
+  }
+
+  const nextDraft = resolveChatInputDraftAfterSendResult(draft, false)
+
+  assert.deepEqual(nextDraft, draft)
+})
+
+test('resolveChatInputDraftAfterSendResult should clear draft and attachments after successful send', () => {
+  const nextDraft = resolveChatInputDraftAfterSendResult(
+    {
+      inputValue: '读取这个附件',
+      files: [
+        {
+          id: 'file-1',
+          filename: 'notes.pdf',
+        },
+      ],
+    },
+    true,
+  )
+
+  assert.deepEqual(nextDraft, {
+    inputValue: '',
+    files: [],
+  })
+})
