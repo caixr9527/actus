@@ -456,66 +456,17 @@ class OpenAILLM(LLM):
     def supported(self) -> list[str]:
         return list(self._supported)
 
-    async def _image_message_format(self, input_part: Dict[str, Any]) -> Dict[str, Any]:
-        if self.model_name.startswith("Qwen"):
-            return {
-                "type": "image_url",
-                "image_url": {
-                    "url": input_part.get("file_url")
-                }
-            }
-        if self.model_name.startswith("Kimi"):
-            image_url = f"data:{input_part.get('mime_type')};base64,{input_part.get('base64_payload')}"
-            return {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url,
-                },
-            }
-        image_url = f"data:{input_part.get('mime_type')};base64,{input_part.get('base64_payload')}"
-        return {
-            "type": "image_url",
-            "image_url": {
-                "url": image_url,
-            },
-        }
-
-    async def _video_message_format(self, input_part: Dict[str, Any]) -> Dict[str, Any]:
-        if self.model_name.startswith("Qwen"):
-            return {
-                "type": "video",
-                "video": [
-                    input_part.get("file_url")
-                ]
-            }
-        if self.model_name.startswith("Kimi"):
-            video_url = f"data:{input_part.get('mime_type')};base64,{input_part.get('base64_payload')}"
-            return {
-                "type": "video_url",
-                "video_url": {
-                    "url": video_url,
-                },
-            }
-        return {}
-
-    async def _audio_message_format(self, input_part: Dict[str, Any]) -> Dict[str, Any]:
-        if self.model_name.startswith("Qwen"):
-            return {}
-        if self.model_name.startswith("Kimi"):
-            return {}
-        return {}
-
     async def format_multiplexed_message(self, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        attachments_message: List[Dict[str, Any]] = []
-        for input_part in input_parts:
-            if input_part.get("type") == "image":
-                attachments_message.append(await self._image_message_format(input_part))
-            if input_part.get("type") == "audio":
-                attachments_message.append(await self._audio_message_format(input_part))
-            if input_part.get("type") == "video":
-                attachments_message.append(await self._video_message_format(input_part))
-
-        return attachments_message
+        # P0-5 禁止 image/audio/video/file/file_ref 原生透传，文档上下文由后续 PR 注入文本。
+        blocked_types = {"image", "audio", "video", "file", "file_ref"}
+        for input_part in list(input_parts or []):
+            input_type = str(input_part.get("type") or "").strip().lower()
+            if input_type in blocked_types:
+                logger.warning(
+                    "document_input_legacy_path_blocked reason_code=%s",
+                    f"legacy_native_{input_type}_blocked",
+                )
+        return []
 
     async def invoke(
             self,

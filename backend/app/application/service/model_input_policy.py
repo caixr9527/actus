@@ -1,10 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""模型输入能力与多模态输入策略。"""
+"""模型输入能力与文档输入策略。"""
 
 from typing import Any, Dict, List, Protocol
 
-ALLOWED_SUPPORTED_INPUT_TYPES = {"image", "audio", "video", "file"}
+from app.domain.services.runtime.contracts.document_input_contract import (
+    ALLOWED_DOCUMENT_INPUT_TYPES,
+    LEGACY_NATIVE_INPUT_TYPES,
+    normalize_document_supported_input_types,
+)
 
 
 class SupportsModelInputPolicy(Protocol):
@@ -18,28 +22,12 @@ class SupportsModelInputPolicy(Protocol):
 
 
 def normalize_supported_input_types(raw_supported: object) -> list[str]:
-    if isinstance(raw_supported, str):
-        candidates = [raw_supported]
-    elif isinstance(raw_supported, list):
-        candidates = raw_supported
-    else:
-        return []
-
-    normalized_supported: list[str] = []
-    for item in candidates:
-        input_type = str(item or "").strip().lower()
-        if not input_type or input_type not in ALLOWED_SUPPORTED_INPUT_TYPES:
-            continue
-        if input_type not in normalized_supported:
-            normalized_supported.append(input_type)
-    return normalized_supported
+    return normalize_document_supported_input_types(raw_supported)
 
 
 def _normalize_input_part_type(raw_part: Dict[str, Any]) -> str:
     part_type = str(raw_part.get("type") or "").strip().lower()
-    if part_type == "file_ref":
-        return "file"
-    if part_type in ALLOWED_SUPPORTED_INPUT_TYPES:
+    if part_type in ALLOWED_DOCUMENT_INPUT_TYPES or part_type in LEGACY_NATIVE_INPUT_TYPES:
         return part_type
     return ""
 
@@ -53,20 +41,6 @@ def _build_unsupported_part(raw_part: Dict[str, Any], *, input_type: str, reason
     if filepath:
         unsupported_part["filepath"] = filepath
     return unsupported_part
-
-
-def _build_native_user_content_part(raw_part: Dict[str, Any], *, input_type: str) -> Dict[str, Any]:
-    native_part: Dict[str, Any] = {"type": input_type}
-    base64_payload = str(raw_part.get("base64") or raw_part.get("base64_payload") or "").strip()
-    if base64_payload:
-        native_part["base64"] = base64_payload
-    mime_type = str(raw_part.get("mime_type") or "").strip()
-    if mime_type:
-        native_part["mime_type"] = mime_type
-    file_url = str(raw_part.get("file_url") or "").strip()
-    if file_url:
-        native_part["file_url"] = file_url
-    return native_part
 
 
 def resolve_model_input_policy(
@@ -86,6 +60,17 @@ def resolve_model_input_policy(
         input_type = _normalize_input_part_type(raw_part)
         if not input_type:
             continue
+        if input_type in LEGACY_NATIVE_INPUT_TYPES:
+            # P0-5 禁止 image/audio/video/file/file_ref 原生透传；请求前 4xx 由 PR2 接入。
+            unsupported_parts.append(
+                _build_unsupported_part(
+                    raw_part,
+                    input_type=input_type,
+                    reason="document_input_required",
+                )
+            )
+            continue
+        # PR1 只阻断 native 透传；document context 构造和 prompt 注入分别由 PR2/PR3 接入。
         if not multimodal_enabled:
             unsupported_parts.append(
                 _build_unsupported_part(
@@ -104,9 +89,6 @@ def resolve_model_input_policy(
                 )
             )
             continue
-        native_user_content_parts.append(
-            _build_native_user_content_part(raw_part, input_type=input_type)
-        )
 
     return {
         "native_user_content_parts": native_user_content_parts,

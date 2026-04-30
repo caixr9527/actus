@@ -88,13 +88,16 @@ def test_model_runtime_resolver_should_raise_when_default_model_unavailable() ->
     assert exc.value.error_key == error_keys.APP_CONFIG_DEFAULT_MODEL_UNAVAILABLE
 
 
-def test_model_runtime_resolver_should_parse_multimodal_capabilities() -> None:
+def test_model_runtime_resolver_should_normalize_supported_capabilities_to_document_only() -> None:
     resolver = ModelRuntimeResolver(
         model_config_service=_FakeModelConfigService(
             models=[
                 _build_model(
                     "gpt-5.4",
-                    capabilities={"multimodal": True, "supported": ["image", "audio", "file"]},
+                    capabilities={
+                        "multimodal": True,
+                        "supported": ["image", "audio", "file", "file_ref", "document"],
+                    },
                 )
             ],
             default_model_id="gpt-5.4",
@@ -105,7 +108,7 @@ def test_model_runtime_resolver_should_parse_multimodal_capabilities() -> None:
     _, llm_config = asyncio.run(resolver.resolve(session))
 
     assert llm_config.multimodal is True
-    assert llm_config.supported == ["image", "audio", "file"]
+    assert llm_config.supported == ["document"]
 
 
 def test_model_runtime_resolver_should_parse_api_style_capability() -> None:
