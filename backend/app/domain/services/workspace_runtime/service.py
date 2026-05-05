@@ -4,9 +4,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
+
+from pydantic import ValidationError
 
 from app.domain.models import Workspace, WorkspaceArtifact
 from app.domain.models.tool_result import ToolResult
@@ -17,7 +20,15 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     PrivacyLevel,
     RetentionPolicyKind,
 )
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+    SandboxCapabilityProfile,
+    validate_sandbox_capability_profile_payload,
+)
 from app.domain.services.workspace_runtime.manager import WorkspaceManager
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -157,6 +168,55 @@ class WorkspaceRuntimeService:
         workspace.updated_at = datetime.now()
         await self._save_workspace(workspace)
         return workspace
+
+    async def record_sandbox_capability_profile(self, *, profile: SandboxCapabilityProfile) -> Workspace:
+        workspace = await self.get_workspace_or_raise()
+        if (
+                profile.user_id != self._user_id
+                or profile.session_id != self._session_id
+                or profile.workspace_id != workspace.id
+        ):
+            raise ValueError("sandbox capability profile scope 与当前 workspace 不一致")
+        next_environment_summary = dict(workspace.environment_summary or {})
+        next_environment_summary[SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY] = profile.model_dump(mode="json")
+        workspace.environment_summary = next_environment_summary
+        workspace.last_active_at = datetime.now()
+        workspace.updated_at = datetime.now()
+        await self._save_workspace(workspace)
+        return workspace
+
+    async def get_sandbox_capability_profile(self) -> SandboxCapabilityProfile | None:
+        workspace = await self.get_workspace()
+        if workspace is None:
+            return None
+        raw_profile = dict(workspace.environment_summary or {}).get(SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY)
+        if raw_profile is None:
+            return None
+        if not isinstance(raw_profile, dict):
+            logger.warning(
+                "sandbox_profile_invalid_payload",
+                extra={
+                    "user_id": self._user_id,
+                    "session_id": self._session_id,
+                    "workspace_id": workspace.id,
+                    "reason_code": "sandbox_profile_payload_not_mapping",
+                },
+            )
+            return None
+        try:
+            return validate_sandbox_capability_profile_payload(raw_profile)
+        except ValidationError as exc:
+            logger.warning(
+                "sandbox_profile_invalid_payload",
+                extra={
+                    "user_id": self._user_id,
+                    "session_id": self._session_id,
+                    "workspace_id": workspace.id,
+                    "reason_code": "sandbox_profile_payload_invalid",
+                    "error_count": exc.error_count(),
+                },
+            )
+            return None
 
     async def record_browser_snapshot(
             self,
