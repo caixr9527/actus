@@ -21,6 +21,10 @@ from docker.models.resource import Model
 
 from app.domain.external import Sandbox, Browser
 from app.domain.models import ToolResult
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SandboxCapabilityProbePayload,
+    SandboxCapabilityStatus,
+)
 from app.infrastructure.external.browser import PlaywrightBrowser
 from core.config import get_settings
 
@@ -380,6 +384,54 @@ class DockerSandbox(Sandbox):
             f"{self._base_url}/api/searxng/status",
         )
         return ToolResult.from_sandbox(**response.json())
+
+    async def probe_capabilities(self) -> ToolResult[SandboxCapabilityProbePayload]:
+        """调用 sandbox 固定探测 API，不在后端拼接 shell 命令兜底。"""
+        try:
+            response = await self.client.get(
+                f"{self._base_url}/api/capabilities/profile",
+            )
+        except Exception:
+            return self._build_capability_probe_unavailable_result(
+                reason_code="sandbox_profile_probe_unavailable",
+                message="sandbox capability profile probe unavailable",
+            )
+
+        if response.status_code in {404, 501}:
+            return self._build_capability_probe_unavailable_result(
+                reason_code="sandbox_profile_probe_unavailable",
+                message="sandbox capability profile probe api unavailable",
+            )
+        try:
+            response.raise_for_status()
+            tool_result = ToolResult.from_sandbox(**response.json())
+            if isinstance(tool_result.data, SandboxCapabilityProbePayload):
+                return tool_result
+            return ToolResult[SandboxCapabilityProbePayload](
+                success=tool_result.success,
+                message=tool_result.message,
+                data=SandboxCapabilityProbePayload.model_validate(tool_result.data or {}),
+            )
+        except Exception:
+            return self._build_capability_probe_unavailable_result(
+                reason_code="sandbox_profile_probe_invalid_response",
+                message="sandbox capability profile probe response invalid",
+            )
+
+    @staticmethod
+    def _build_capability_probe_unavailable_result(
+            *,
+            reason_code: str,
+            message: str,
+    ) -> ToolResult[SandboxCapabilityProbePayload]:
+        return ToolResult[SandboxCapabilityProbePayload](
+            success=False,
+            message=message,
+            data=SandboxCapabilityProbePayload(
+                reason_code=reason_code,
+                probe_status=SandboxCapabilityStatus.UNKNOWN,
+            ),
+        )
 
     async def search(
             self,
