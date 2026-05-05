@@ -27,6 +27,7 @@ def _build_fake_task(task_id: str = "task-1") -> RedisStreamTask:
     task._output_stream = _FakeStream()
     task._task_runner = _FakeRunner()
     task._execution_task = None
+    task._finalize_task = None
     task._streams_cleaned = False
     return task
 
@@ -53,3 +54,17 @@ def test_destroy_cleans_streams_and_runner() -> None:
     assert task._input_stream.delete_calls == 1
     assert task._output_stream.delete_calls == 1
     assert task._task_runner.destroy_calls == 1
+
+
+def test_destroy_cleans_allocated_unbound_task() -> None:
+    backup_registry = dict(RedisStreamTask._task_registry)
+    task = _build_fake_task(task_id="task-unbound-1")
+    task._task_runner = None
+    RedisStreamTask._task_registry = {task.id: task}
+    try:
+        asyncio.run(RedisStreamTask.destroy())
+    finally:
+        RedisStreamTask._task_registry = backup_registry
+
+    assert task._input_stream.delete_calls == 1
+    assert task._output_stream.delete_calls == 1

@@ -25,6 +25,7 @@ async def _build_prompt_context_packet_async(
         runtime_context_service: RuntimeContextService,
         step: Optional[Step] = None,
         task_mode: str = "",
+        include_sandbox_profile_for_summary: bool = False,
 ) -> Dict[str, Any]:
     """统一从上下文服务异步构造 Prompt 数据包。"""
     packet = await runtime_context_service.build_packet_async(
@@ -32,6 +33,7 @@ async def _build_prompt_context_packet_async(
         state=state,
         step=step,
         task_mode=task_mode,
+        include_sandbox_profile_for_summary=include_sandbox_profile_for_summary,
     )
     if str(stage) in _DOCUMENT_CONTEXT_STAGES:
         _append_document_context(packet=packet, state=state)

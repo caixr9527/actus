@@ -31,6 +31,10 @@ from app.domain.models import (
     ToolResult,
 )
 from app.domain.models.app_config import A2AConfig, MCPConfig
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    RuntimeToolCapabilitySnapshot,
+    RuntimeToolCapabilitySnapshotItem,
+)
 from app.domain.services.tools.a2a import A2ATool
 from app.domain.services.tools.base import BaseTool
 from app.domain.services.tools.capability_registry import CapabilityBuildContext, CapabilityRegistry
@@ -64,6 +68,12 @@ class ToolRuntimeEventHooks:
     get_shell_tool_result: Optional[Callable[[], Awaitable[ToolResult]]] = None
     read_file_content: Optional[Callable[[str], Awaitable[ToolResult]]] = None
     sync_file_to_storage: Optional[Callable[[str], Awaitable[object]]] = None
+
+
+@dataclass(frozen=True)
+class RuntimeToolsWithSnapshot:
+    runtime_tools: List[BaseTool]
+    snapshot: RuntimeToolCapabilitySnapshot
 
 
 class ToolRuntimeAdapter:
@@ -281,6 +291,62 @@ class ToolRuntimeAdapter:
         if a2a_tool is not None:
             tools.append(a2a_tool)
         return tools
+
+    def build_runtime_tools_with_snapshot(
+            self,
+            capability_context: CapabilityBuildContext,
+            mcp_tool: Optional[MCPTool] = None,
+            mcp_config: Optional[MCPConfig] = None,
+            a2a_tool: Optional[A2ATool] = None,
+    ) -> RuntimeToolsWithSnapshot:
+        tools = self.build_runtime_tools(
+            capability_context=capability_context,
+            mcp_tool=mcp_tool,
+            mcp_config=mcp_config,
+            a2a_tool=a2a_tool,
+        )
+        return RuntimeToolsWithSnapshot(
+            runtime_tools=tools,
+            snapshot=RuntimeToolCapabilitySnapshot(
+                items=[
+                    RuntimeToolCapabilitySnapshotItem(
+                        capability_id=self._resolve_capability_id(tool),
+                        tool_family=str(getattr(tool, "name", "") or tool.__class__.__name__).strip(),
+                        source=self._resolve_tool_source(tool, a2a_tool=a2a_tool),
+                    )
+                    for tool in tools
+                ]
+            ),
+        )
+
+    @staticmethod
+    def _resolve_tool_source(tool: BaseTool, *, a2a_tool: Optional[A2ATool]) -> str:
+        if a2a_tool is not None and tool is a2a_tool:
+            return "a2a"
+        if tool.__class__.__name__ == "MCPCapabilityAdapter":
+            return "mcp"
+        if ToolRuntimeAdapter._resolve_capability_id(tool) not in (
+                CapabilityRegistry.CAPABILITY_LOCAL_SHELL,
+                CapabilityRegistry.CAPABILITY_SEARCH,
+                CapabilityRegistry.CAPABILITY_BROWSER,
+                CapabilityRegistry.CAPABILITY_SANDBOX_FILE,
+                CapabilityRegistry.CAPABILITY_MESSAGE,
+        ):
+            return "custom"
+        return "local"
+
+    @staticmethod
+    def _resolve_capability_id(tool: BaseTool) -> str:
+        tool_name = str(getattr(tool, "name", "") or "").strip()
+        capability_by_tool_name = {
+            "shell": CapabilityRegistry.CAPABILITY_LOCAL_SHELL,
+            "search": CapabilityRegistry.CAPABILITY_SEARCH,
+            "browser": CapabilityRegistry.CAPABILITY_BROWSER,
+            "file": CapabilityRegistry.CAPABILITY_SANDBOX_FILE,
+            "message": CapabilityRegistry.CAPABILITY_MESSAGE,
+            "mcp": CapabilityRegistry.CAPABILITY_MCP,
+        }
+        return capability_by_tool_name.get(tool_name) or tool_name or tool.__class__.__name__
 
     @staticmethod
     async def initialize_remote_tools(

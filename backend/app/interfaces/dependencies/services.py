@@ -21,6 +21,7 @@ from app.application.service import (
     ModelRuntimeResolver,
     RuntimeAccessControlService,
     RuntimeObservationService,
+    SandboxCapabilityProfileService,
     StatusService,
     AuthService,
     UserService,
@@ -193,6 +194,16 @@ def get_runtime_observation_service() -> RuntimeObservationService:
     """获取 Runtime Observation 应用服务。"""
     return RuntimeObservationService(
         uow_factory=get_uow,
+        access_control_service=get_runtime_access_control_service(),
+    )
+
+
+@lru_cache()
+def get_sandbox_capability_profile_service() -> SandboxCapabilityProfileService:
+    """获取 Sandbox Capability Profile 应用服务。"""
+    return SandboxCapabilityProfileService(
+        uow_factory=get_uow,
+        sandbox_cls=DockerSandbox,
         access_control_service=get_runtime_access_control_service(),
     )
 

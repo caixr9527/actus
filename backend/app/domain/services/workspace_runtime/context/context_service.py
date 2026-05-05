@@ -15,6 +15,9 @@ from app.domain.models import (
     StepTaskModeHint,
     normalize_wait_payload,
 )
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+)
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
@@ -64,6 +67,7 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             step: Optional[Step] = None,
             task_mode: str = "",
+            include_sandbox_profile_for_summary: bool = False,
     ) -> PromptContextPacket:
         """统一生成结构化 Prompt 上下文数据包。"""
         return self._build_packet(
@@ -72,6 +76,7 @@ class RuntimeContextService:
             step=step,
             task_mode=task_mode,
             workspace_snapshot=None,
+            include_sandbox_profile_for_summary=include_sandbox_profile_for_summary,
         )
 
     async def build_packet_async(
@@ -81,6 +86,7 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             step: Optional[Step] = None,
             task_mode: str = "",
+            include_sandbox_profile_for_summary: bool = False,
     ) -> PromptContextPacket:
         """基于 workspace 快照构造 Prompt 上下文数据包。"""
         workspace_snapshot = None
@@ -92,6 +98,7 @@ class RuntimeContextService:
             step=step,
             task_mode=task_mode,
             workspace_snapshot=workspace_snapshot,
+            include_sandbox_profile_for_summary=include_sandbox_profile_for_summary,
         )
 
     def _build_packet(
@@ -102,6 +109,7 @@ class RuntimeContextService:
             step: Optional[Step],
             task_mode: str,
             workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+            include_sandbox_profile_for_summary: bool,
     ) -> PromptContextPacket:
         """统一生成结构化 Prompt 上下文数据包。"""
         resolved_task_mode = self._resolve_task_mode(stage=stage, state=state, step=step, task_mode=task_mode)
@@ -119,12 +127,17 @@ class RuntimeContextService:
             packet["open_questions"] = self._build_open_questions(state=state, step=step)
         if policy.include_pending_confirmation:
             packet["pending_confirmation"] = self._build_pending_confirmation(state=state)
-        if policy.include_environment_digest:
+        should_include_sandbox_profile = (
+                policy.include_sandbox_profile
+                or (stage == "summary" and include_sandbox_profile_for_summary)
+        )
+        if policy.include_environment_digest or should_include_sandbox_profile:
             packet["environment_digest"] = self._build_environment_digest(
                 state=state,
                 stage=stage,
                 task_mode=resolved_task_mode,
                 workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=should_include_sandbox_profile,
             )
         if policy.include_observation_digest:
             packet["observation_digest"] = self._build_observation_digest(
@@ -400,6 +413,7 @@ class RuntimeContextService:
             stage: PromptStage,
             task_mode: str,
             workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+            include_sandbox_profile: bool = False,
     ) -> Dict[str, Any]:
         # environment 只保留“当前模式还能依赖什么”，不负责回放完整轨迹。
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
@@ -421,7 +435,11 @@ class RuntimeContextService:
                     workspace_snapshot=workspace_snapshot,
                 ),
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
         if task_mode == StepTaskModeHint.BROWSER_INTERACTION.value:
             current_page = self._collect_browser_page_summary(
                 workspace_snapshot=workspace_snapshot,
@@ -430,7 +448,11 @@ class RuntimeContextService:
                 "current_page": current_page,
                 "actionable_elements": list(current_page.get("actionable_elements") or [])[:_OPEN_QUESTION_LIMIT],
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
         if task_mode in {StepTaskModeHint.CODING.value, StepTaskModeHint.FILE_PROCESSING.value}:
             digest = {
                 "cwd": self._extract_latest_shell_cwd(
@@ -449,7 +471,11 @@ class RuntimeContextService:
                     workspace_snapshot=workspace_snapshot,
                 ),
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
             pending_confirmation = self._build_pending_confirmation(state=state)
             digest = {
@@ -457,7 +483,11 @@ class RuntimeContextService:
                 "wait_prompt": str(pending_confirmation.get("prompt") or "").strip(),
                 "wait_options": list(pending_confirmation.get("options") or []),
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
 
         digest = {
             "available_artifacts": self._collect_available_artifacts(
@@ -465,7 +495,42 @@ class RuntimeContextService:
             ),
             "stage": stage,
         }
-        return self._clean_dict(digest)
+        return self._with_sandbox_profile(
+            digest=self._clean_dict(digest),
+            workspace_snapshot=workspace_snapshot,
+            include_sandbox_profile=include_sandbox_profile,
+        )
+
+    def _with_sandbox_profile(
+            self,
+            *,
+            digest: Dict[str, Any],
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+            include_sandbox_profile: bool,
+    ) -> Dict[str, Any]:
+        if not include_sandbox_profile:
+            return digest
+        profile_summary = self._extract_sandbox_profile_prompt_summary(workspace_snapshot=workspace_snapshot)
+        if profile_summary:
+            return {**digest, "sandbox_capability_profile": profile_summary}
+        return digest
+
+    @staticmethod
+    def _extract_sandbox_profile_prompt_summary(
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+    ) -> Dict[str, Any]:
+        if workspace_snapshot is None:
+            return {}
+        raw_profile = dict(workspace_snapshot.workspace.environment_summary or {}).get(
+            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY
+        )
+        if not isinstance(raw_profile, dict):
+            return {}
+        prompt_summary = raw_profile.get("prompt_summary")
+        if not isinstance(prompt_summary, dict):
+            return {}
+        return dict(prompt_summary)
 
     def _build_observation_digest(
             self,

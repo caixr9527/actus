@@ -1,6 +1,11 @@
 import asyncio
 
 from app.domain.models import Step
+from app.domain.models import Workspace
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+)
+from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import (
     _build_message as _build_execute_message,
@@ -48,6 +53,35 @@ def _document_part(**overrides):
     }
     part.update(overrides)
     return part
+
+
+class _WorkspaceRuntimeService:
+    def __init__(self, workspace: Workspace) -> None:
+        self._workspace = workspace
+
+    async def build_environment_snapshot(self):
+        return WorkspaceEnvironmentSnapshot(workspace=self._workspace, artifacts=[])
+
+
+def _context_service_with_sandbox_profile() -> RuntimeContextService:
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        user_id="user-1",
+        environment_summary={
+            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY: {
+                "prompt_summary": {
+                    "health_status": "available",
+                    "cwd": "/workspace",
+                    "available_tools": ["shell"],
+                    "sandbox_profile_stale": False,
+                }
+            }
+        },
+    )
+    return RuntimeContextService(
+        workspace_runtime_service=_WorkspaceRuntimeService(workspace),
+    )
 
 
 def test_document_prompt_context_should_be_added_to_unified_context_packet() -> None:
@@ -163,6 +197,31 @@ def test_document_prompt_context_should_not_be_added_to_summary_or_replan_stage(
     assert "document_context" not in summary_packet.get("prompt_visible_fields", [])
     assert "document_context" not in replan_packet
     assert "document_context" not in replan_packet.get("prompt_visible_fields", [])
+
+
+def test_summary_prompt_context_should_not_include_sandbox_profile_by_default() -> None:
+    packet = asyncio.run(
+        _build_prompt_context_packet_async(
+            stage="summary",
+            state={"user_message": "总结结果"},
+            runtime_context_service=_context_service_with_sandbox_profile(),
+        )
+    )
+
+    assert "sandbox_capability_profile" not in packet.get("environment_digest", {})
+
+
+def test_summary_prompt_context_should_include_sandbox_profile_when_explicitly_requested() -> None:
+    packet = asyncio.run(
+        _build_prompt_context_packet_async(
+            stage="summary",
+            state={"user_message": "总结结果"},
+            runtime_context_service=_context_service_with_sandbox_profile(),
+            include_sandbox_profile_for_summary=True,
+        )
+    )
+
+    assert packet["environment_digest"]["sandbox_capability_profile"]["cwd"] == "/workspace"
 
 
 def test_extract_document_attachment_paths_should_read_source_sandbox_filepath() -> None:

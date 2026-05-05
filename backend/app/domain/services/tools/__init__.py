@@ -21,6 +21,7 @@ __all__ = [
     "CapabilityRegistry",
     "ToolRuntimeAdapter",
     "ToolRuntimeEventHooks",
+    "RuntimeToolsWithSnapshot",
 ]
 
 
@@ -35,6 +36,7 @@ _LAZY_IMPORTS = {
     "CapabilityRegistry": ("app.domain.services.tools.capability_registry", "CapabilityRegistry"),
     "ToolRuntimeAdapter": ("app.domain.services.tools.runtime_adapter", "ToolRuntimeAdapter"),
     "ToolRuntimeEventHooks": ("app.domain.services.tools.runtime_adapter", "ToolRuntimeEventHooks"),
+    "RuntimeToolsWithSnapshot": ("app.domain.services.tools.runtime_adapter", "RuntimeToolsWithSnapshot"),
 }
 
 

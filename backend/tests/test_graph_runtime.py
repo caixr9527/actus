@@ -39,10 +39,20 @@ class _Task:
     def __init__(self, task_id: str) -> None:
         self.id = task_id
         self.cancel_calls = 0
+        self.runner = None
 
     async def cancel(self) -> bool:
         self.cancel_calls += 1
         return True
+
+    @property
+    def is_bound(self) -> bool:
+        return self.runner is not None
+
+    def bind_runner(self, task_runner) -> None:
+        if self.runner is not None:
+            raise RuntimeError("任务 runner 已绑定，禁止重复绑定")
+        self.runner = task_runner
 
 
 class _TaskFactory:
@@ -55,10 +65,16 @@ class _TaskFactory:
         return cls.registry.get(task_id)
 
     @classmethod
-    def create(cls, task_runner):
+    def allocate(cls, task_id: str | None = None):
         cls.sequence += 1
-        task = _Task(task_id=f"task-{cls.sequence}")
+        task = _Task(task_id=task_id or f"task-{cls.sequence}")
         cls.registry[task.id] = task
+        return task
+
+    @classmethod
+    def create(cls, task_runner):
+        task = cls.allocate()
+        task.bind_runner(task_runner)
         return task
 
     @classmethod
@@ -169,20 +185,61 @@ class _WorkspaceRepo:
         return workspace
 
 
+class _Refresher:
+    def __init__(self, should_fail: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.should_fail = should_fail
+
+    async def refresh_after_sandbox_bound(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+        if self.should_fail:
+            raise RuntimeError("refresh failed")
+
+
 def _build_runtime(
         session_repo: _SessionRepo,
         workflow_run_repo: _WorkflowRunRepo,
         workspace_repo: _WorkspaceRepo,
+        *,
+        refresher: _Refresher,
+        runner_factory_should_fail: bool = False,
 ) -> DefaultGraphRuntime:
+    async def _build_runner(**kwargs):
+        if runner_factory_should_fail:
+            raise RuntimeError("runner failed")
+        return object()
+
     return DefaultGraphRuntime(
         sandbox_cls=_DummySandboxCls,
         task_cls=_TaskFactory,
         uow_factory=lambda: _UoW(session_repo, workflow_run_repo, workspace_repo),
-        task_runner_factory=lambda **kwargs: object(),
+        task_runner_factory=_build_runner,
         runtime_state_coordinator=RuntimeStateCoordinator(
             uow_factory=lambda: _UoW(session_repo, workflow_run_repo, workspace_repo),
         ),
+        sandbox_capability_profile_refresher=refresher,
     )
+
+
+def test_default_graph_runtime_should_require_profile_refresher() -> None:
+    async def _build_runner(**kwargs):
+        return object()
+
+    try:
+        DefaultGraphRuntime(
+            sandbox_cls=_DummySandboxCls,
+            task_cls=_TaskFactory,
+            uow_factory=lambda: _UoW(_SessionRepo(), _WorkflowRunRepo(), _WorkspaceRepo()),
+            task_runner_factory=_build_runner,
+            runtime_state_coordinator=RuntimeStateCoordinator(
+                uow_factory=lambda: _UoW(_SessionRepo(), _WorkflowRunRepo(), _WorkspaceRepo()),
+            ),
+            sandbox_capability_profile_refresher=None,  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        assert str(exc) == "sandbox_capability_profile_refresher 不能为空"
+    else:
+        raise AssertionError("DefaultGraphRuntime should reject missing profile refresher")
 
 
 def test_default_graph_runtime_create_task_should_persist_session_links() -> None:
@@ -191,13 +248,15 @@ def test_default_graph_runtime_create_task_should_persist_session_links() -> Non
     session_repo = _SessionRepo()
     workflow_run_repo = _WorkflowRunRepo()
     workspace_repo = _WorkspaceRepo()
-    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo)
+    refresher = _Refresher()
+    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo, refresher=refresher)
     session = Session(id="session-a", user_id="user-a")
     asyncio.run(session_repo.save(session))
 
     task = asyncio.run(runtime.create_task(session=session, llm=object()))
 
     assert task.id == "task-1"
+    assert task.is_bound is True
     assert session.workspace_id is not None
     assert session.current_run_id == "run-1"
     assert session.status == SessionStatus.RUNNING
@@ -209,6 +268,12 @@ def test_default_graph_runtime_create_task_should_persist_session_links() -> Non
     assert workspace.task_id == "task-1"
     assert workspace.current_run_id == "run-1"
     assert workspace.user_id == "user-a"
+    assert len(refresher.calls) == 1
+    assert refresher.calls[0]["reason"].value == "sandbox_created"
+    assert refresher.calls[0]["workspace_id"] == workspace.id
+    assert refresher.calls[0]["run_id"] == "run-1"
+    assert refresher.calls[0]["task_id"] == "task-1"
+    assert refresher.calls[0]["sandbox_id"] == "sandbox-1"
 
 
 def test_default_graph_runtime_get_and_cancel_task_by_session() -> None:
@@ -225,7 +290,8 @@ def test_default_graph_runtime_get_and_cancel_task_by_session() -> None:
         sandbox_id="sandbox-1",
     )
     asyncio.run(workspace_repo.save(workspace))
-    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo)
+    refresher = _Refresher()
+    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo, refresher=refresher)
     session = Session(id="session-a", user_id="user-a", workspace_id="workspace-1")
     _TaskFactory.registry["task-1"] = _Task(task_id="task-1")
 
@@ -243,7 +309,7 @@ def test_default_graph_runtime_destroy_should_delegate_task_factory() -> None:
     session_repo = _SessionRepo()
     workflow_run_repo = _WorkflowRunRepo()
     workspace_repo = _WorkspaceRepo()
-    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo)
+    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo, refresher=_Refresher())
 
     asyncio.run(runtime.destroy())
 
@@ -264,7 +330,8 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
         current_run_id="run-1",
     )
     asyncio.run(workspace_repo.save(existing_workspace))
-    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo)
+    refresher = _Refresher()
+    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo, refresher=refresher)
     session = Session(
         id="session-a",
         user_id="user-a",
@@ -283,6 +350,7 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
     task = asyncio.run(runtime.resume_task(session=session, llm=object()))
 
     assert task.id == "task-1"
+    assert task.is_bound is True
     assert session.current_run_id == "run-1"
     assert session.status == SessionStatus.RUNNING
     assert workflow_run_repo.created_for_session_ids == []
@@ -293,6 +361,11 @@ def test_default_graph_runtime_resume_task_should_reuse_current_run() -> None:
     workspace = workspace_repo.workspace_by_id["workspace-1"]
     assert workspace.task_id == "task-1"
     assert workspace.current_run_id == "run-1"
+    assert len(refresher.calls) == 1
+    assert refresher.calls[0]["reason"].value == "sandbox_resumed"
+    assert refresher.calls[0]["workspace_id"] == "workspace-1"
+    assert refresher.calls[0]["run_id"] == "run-1"
+    assert refresher.calls[0]["task_id"] == "task-1"
 
 
 def test_default_graph_runtime_get_task_should_reuse_workspace_found_by_session_id() -> None:
@@ -309,7 +382,7 @@ def test_default_graph_runtime_get_task_should_reuse_workspace_found_by_session_
         sandbox_id="sandbox-1",
     )
     asyncio.run(workspace_repo.save(workspace))
-    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo)
+    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo, refresher=_Refresher())
     session = Session(id="session-a", user_id="user-a")
     _TaskFactory.registry["task-1"] = _Task(task_id="task-1")
 
@@ -317,3 +390,60 @@ def test_default_graph_runtime_get_task_should_reuse_workspace_found_by_session_
 
     assert task is not None
     assert task.id == "task-1"
+
+
+def test_default_graph_runtime_should_cleanup_task_and_sandbox_when_refresh_fails() -> None:
+    _TaskFactory.registry = {}
+    _TaskFactory.sequence = 0
+    _DummySandboxCls.sandbox = _DummySandbox()
+    session_repo = _SessionRepo()
+    workflow_run_repo = _WorkflowRunRepo()
+    workspace_repo = _WorkspaceRepo()
+    refresher = _Refresher(should_fail=True)
+    runtime = _build_runtime(session_repo, workflow_run_repo, workspace_repo, refresher=refresher)
+    session = Session(id="session-a", user_id="user-a")
+    asyncio.run(session_repo.save(session))
+
+    try:
+        asyncio.run(runtime.create_task(session=session, llm=object()))
+    except RuntimeError as exc:
+        assert str(exc) == "refresh failed"
+    else:
+        raise AssertionError("refresh failure should abort task creation")
+
+    task = _TaskFactory.registry["task-1"]
+    assert task.cancel_calls == 1
+    assert task.is_bound is False
+    assert _DummySandboxCls.sandbox.destroy_calls == 1
+
+
+def test_default_graph_runtime_should_not_bind_task_when_runner_factory_fails() -> None:
+    _TaskFactory.registry = {}
+    _TaskFactory.sequence = 0
+    _DummySandboxCls.sandbox = _DummySandbox()
+    session_repo = _SessionRepo()
+    workflow_run_repo = _WorkflowRunRepo()
+    workspace_repo = _WorkspaceRepo()
+    refresher = _Refresher()
+    runtime = _build_runtime(
+        session_repo,
+        workflow_run_repo,
+        workspace_repo,
+        refresher=refresher,
+        runner_factory_should_fail=True,
+    )
+    session = Session(id="session-a", user_id="user-a")
+    asyncio.run(session_repo.save(session))
+
+    try:
+        asyncio.run(runtime.create_task(session=session, llm=object()))
+    except RuntimeError as exc:
+        assert str(exc) == "runner failed"
+    else:
+        raise AssertionError("runner factory failure should abort task creation")
+
+    task = _TaskFactory.registry["task-1"]
+    assert task.cancel_calls == 1
+    assert task.is_bound is False
+    assert len(refresher.calls) == 1
+    assert _DummySandboxCls.sandbox.destroy_calls == 1

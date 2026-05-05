@@ -63,6 +63,8 @@ class ContextPolicy:
     # 环境摘要，如工作区、文件、工具环境等稳定执行条件。
     # 业务含义：让模型了解“当前可用的执行环境是什么”，便于决定是否写文件、读文件、继续操作。
     include_environment_digest: bool = False
+    # 是否允许 environment_digest 注入 prompt-safe sandbox profile。
+    include_sandbox_profile: bool = False
     # 观察摘要，如本轮已看到的页面、文件、命令结果等观测事实。
     # 业务含义：为模型提供“已经观察到什么”的最新外部事实，避免重复读取。
     include_observation_digest: bool = False
@@ -126,6 +128,7 @@ def _build_execute_policy(
         include_open_questions=_EXECUTE_BASE_POLICY.include_open_questions,
         include_pending_confirmation=_EXECUTE_BASE_POLICY.include_pending_confirmation,
         include_environment_digest=_EXECUTE_BASE_POLICY.include_environment_digest,
+        include_sandbox_profile=True,
         include_observation_digest=include_observation_digest,
         include_recent_action_digest=_EXECUTE_BASE_POLICY.include_recent_action_digest,
         include_working_memory_digest=_EXECUTE_BASE_POLICY.include_working_memory_digest,
@@ -163,6 +166,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         include_open_questions=True,
         include_working_memory_digest=True,
         include_retrieved_memory_digest=True,
+        include_environment_digest=True,
+        include_sandbox_profile=True,
         # P3-一次性收口：planner 不消费 profile 记忆，避免把历史偏好误当本轮已确认事实。
         retrieved_memory_allowed_types=frozenset({"fact", "instruction"}),
         retrieved_memory_max_items=5,
@@ -278,6 +283,8 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
         # 才能决定是改写当前步骤、补插步骤，还是整体重排计划。
         include_current_step=True,
         include_open_questions=True,
+        include_environment_digest=True,
+        include_sandbox_profile=True,
         include_observation_digest=True,
         include_recent_action_digest=True,
         include_working_memory_digest=True,

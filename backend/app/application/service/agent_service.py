@@ -16,6 +16,7 @@ from pydantic import TypeAdapter
 from app.application.errors import AppException, BadRequestError, NotFoundError
 from app.application.service.document_input_preflight_policy import DocumentInputPreflightPolicy
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_capability_profile_service import SandboxCapabilityProfileService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.errors import error_keys
@@ -48,6 +49,7 @@ from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import SandboxProfileRefreshReason
 from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
@@ -100,6 +102,11 @@ class AgentService:
         self._access_control_service = access_control_service or RuntimeAccessControlService(
             uow_factory=self._uow_factory,
         )
+        self._sandbox_capability_profile_service = SandboxCapabilityProfileService(
+            uow_factory=self._uow_factory,
+            sandbox_cls=self._sandbox_cls,
+            access_control_service=self._access_control_service,
+        )
         self._document_input_preflight_policy = document_input_preflight_policy or DocumentInputPreflightPolicy()
         # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
         # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
@@ -109,6 +116,7 @@ class AgentService:
             uow_factory=self._uow_factory,
             task_runner_factory=self._build_task_runner,
             runtime_state_coordinator=self._runtime_state_coordinator,
+            sandbox_capability_profile_refresher=self._sandbox_capability_profile_service,
         )
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
 
@@ -174,7 +182,7 @@ class AgentService:
         )
         return db_attachments
 
-    def _build_task_runner(
+    async def _build_task_runner(
             self,
             session: Session,
             llm: LLM,
@@ -182,7 +190,7 @@ class AgentService:
             browser: Browser,
     ) -> AgentTaskRunner:
         """构建任务执行器，供 GraphRuntime 在创建任务时回调。"""
-        return AgentTaskRunner(
+        return await AgentTaskRunner.create(
             llm=llm,
             agent_config=self._agent_config,
             mcp_config=self._mcp_config,
@@ -198,6 +206,21 @@ class AgentService:
             run_engine_factory=self._run_engine_factory,
             tool_runtime_adapter=self._tool_runtime_adapter,
             runtime_state_coordinator=self._get_runtime_state_coordinator(),
+            runtime_tool_snapshot_recorder=self._sandbox_capability_profile_service,
+        )
+
+    async def _ensure_periodic_sandbox_profile(self, *, user_id: str, session_id: str) -> None:
+        async with self._uow_factory() as uow:
+            workspace = await uow.workspace.get_by_session_id_for_user(
+                session_id=session_id,
+                user_id=user_id,
+            )
+        if workspace is None or not str(workspace.sandbox_id or "").strip():
+            return
+        await self._sandbox_capability_profile_service.ensure_fresh_profile(
+            user_id=user_id,
+            session_id=session_id,
+            reason=SandboxProfileRefreshReason.PERIODIC,
         )
 
     async def _get_task(self, session: Session) -> Optional[Task]:
@@ -502,6 +525,7 @@ class AgentService:
                     message=message,
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
+                await self._ensure_periodic_sandbox_profile(user_id=user_id, session_id=session_id)
                 runtime_input = RuntimeInput(
                     request_id=request_id,
                     payload=message_event,
@@ -540,6 +564,7 @@ class AgentService:
                         raise RuntimeError(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
 
                 request_id = str(uuid.uuid4())
+                await self._ensure_periodic_sandbox_profile(user_id=user_id, session_id=session_id)
                 event_id = await task.input_stream.put(
                     RuntimeInput(
                         request_id=request_id,
@@ -570,6 +595,7 @@ class AgentService:
                         raise RuntimeError(f"会话{session_id}的继续取消任务请求失败: 创建任务失败")
 
                 request_id = str(uuid.uuid4())
+                await self._ensure_periodic_sandbox_profile(user_id=user_id, session_id=session_id)
                 event_id = await task.input_stream.put(
                     RuntimeInput(
                         request_id=request_id,

@@ -51,7 +51,7 @@ class Task(Protocol):
         ...
 
     @property
-    def id(self) -> None:
+    def id(self) -> str:
         """任务ID"""
         ...
 
@@ -60,9 +60,23 @@ class Task(Protocol):
         """任务是否完成"""
         ...
 
+    @property
+    def is_bound(self) -> bool:
+        """任务是否已绑定真实 runner。"""
+        ...
+
+    def bind_runner(self, task_runner: TaskRunner) -> None:
+        """为预分配任务绑定真实 runner。"""
+        ...
+
     @classmethod
     def get(cls, task_id: str) -> Optional["Task"]:
         """获取任务"""
+        ...
+
+    @classmethod
+    def allocate(cls, task_id: Optional[str] = None) -> "Task":
+        """预分配任务ID和输入/输出流，但不绑定 runner。"""
         ...
 
     @classmethod

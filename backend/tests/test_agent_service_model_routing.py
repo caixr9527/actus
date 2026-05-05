@@ -30,21 +30,37 @@ class _DummySandboxCls:
 
 
 class _Task:
-    def __init__(self, task_runner) -> None:
+    def __init__(self, task_id: str = "task-1", task_runner=None) -> None:
         self.id = "task-1"
+        self.id = task_id
         self.task_runner = task_runner
 
     async def cancel(self):
         return None
+
+    @property
+    def is_bound(self) -> bool:
+        return self.task_runner is not None
+
+    def bind_runner(self, task_runner) -> None:
+        if self.task_runner is not None:
+            raise RuntimeError("任务 runner 已绑定，禁止重复绑定")
+        self.task_runner = task_runner
 
 
 class _TaskFactory:
     created_tasks: list[_Task] = []
 
     @classmethod
-    def create(cls, task_runner):
-        task = _Task(task_runner=task_runner)
+    def allocate(cls, task_id: str | None = None):
+        task = _Task(task_id=task_id or "task-1")
         cls.created_tasks.append(task)
+        return task
+
+    @classmethod
+    def create(cls, task_runner):
+        task = cls.allocate()
+        task.bind_runner(task_runner)
         return task
 
 
@@ -60,6 +76,12 @@ class _SessionRepo:
 
     async def get_by_id_for_update(self, session_id: str):
         return self.sessions_by_id.get(session_id)
+
+    async def get_by_id(self, *, session_id: str, user_id: str):
+        session = self.sessions_by_id.get(session_id)
+        if session is None or session.user_id != user_id:
+            return None
+        return session
 
     async def update_runtime_state(self, session_id: str, *, status: SessionStatus, current_run_id=None, **_kwargs):
         session = self.sessions_by_id[session_id]
@@ -82,6 +104,12 @@ class _WorkflowRunRepo:
     async def get_by_id_for_update(self, run_id: str):
         return self.runs_by_id.get(run_id)
 
+    async def get_by_id_for_user(self, *, run_id: str, user_id: str):
+        run = self.runs_by_id.get(run_id)
+        if run is None or run.user_id != user_id:
+            return None
+        return run
+
     async def list_event_records_by_session(self, session_id: str):
         return []
 
@@ -102,8 +130,24 @@ class _WorkspaceRepo:
                 return workspace
         return None
 
+    async def get_by_id_for_user(self, *, workspace_id: str, user_id: str):
+        workspace = await self.get_by_id(workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
+    async def list_by_session_id(self, *, session_id: str):
+        workspace = self.workspace_by_session_id.get(session_id)
+        return [workspace] if workspace is not None else []
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace_by_session_id.get(session_id)
+
+    async def get_by_session_id_for_user(self, *, session_id: str, user_id: str):
+        workspace = self.workspace_by_session_id.get(session_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
 
 
 class _UoW:
@@ -168,7 +212,7 @@ class _DummyRunEngine:
             yield message
 
 
-def _dummy_run_engine_factory(**kwargs):
+async def _dummy_run_engine_factory(**kwargs):
     return _DummyRunEngine()
 
 

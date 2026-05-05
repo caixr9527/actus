@@ -24,9 +24,9 @@ class RedisStreamTask(Task):
     # - 在 BE-LG-07 后该结构退化为实现细节，不再由 AgentService 直接依赖。
     _task_registry: Dict[str, "RedisStreamTask"] = {}
 
-    def __init__(self, task_runner: TaskRunner):
+    def __init__(self, task_runner: Optional[TaskRunner] = None, task_id: Optional[str] = None):
         self._task_runner = task_runner
-        self._id = str(uuid.uuid4())
+        self._id = str(task_id or uuid.uuid4())
         self._execution_task: Optional[asyncio.Task] = None
         self._finalize_task: Optional[asyncio.Task] = None
         self._streams_cleaned = False
@@ -75,7 +75,7 @@ class RedisStreamTask(Task):
         3. 最后回收 registry，彻底移除活跃任务引用。
         """
         try:
-            if self._task_runner:
+            if self._task_runner is not None:
                 await self._task_runner.on_done(self)
         finally:
             try:
@@ -97,6 +97,8 @@ class RedisStreamTask(Task):
         await finalize_task
 
     async def _execute_task(self) -> None:
+        if self._task_runner is None:
+            raise RuntimeError("任务未绑定 runner，禁止执行")
 
         try:
             await self._task_runner.invoke(self)
@@ -110,6 +112,8 @@ class RedisStreamTask(Task):
 
     async def invoke(self) -> None:
         """任务执行方法"""
+        if self._task_runner is None:
+            raise RuntimeError("任务未绑定 runner，禁止执行")
         # done=True 表示“当前没有活跃执行协程”：
         # - 首次调用时 _execution_task 为 None，因此允许启动；
         # - 历史执行结束后再次 invoke 也允许启动新一轮执行。
@@ -156,15 +160,33 @@ class RedisStreamTask(Task):
             return True
         return self._execution_task.done()
 
+    @property
+    def is_bound(self) -> bool:
+        """任务是否已绑定真实 runner。"""
+        return self._task_runner is not None
+
+    def bind_runner(self, task_runner: TaskRunner) -> None:
+        """绑定真实 runner，只允许执行一次。"""
+        if self._task_runner is not None:
+            raise RuntimeError("任务 runner 已绑定，禁止重复绑定")
+        self._task_runner = task_runner
+
     @classmethod
     def get(cls, task_id: str) -> Optional["Task"]:
         """获取任务"""
         return RedisStreamTask._task_registry.get(task_id)
 
     @classmethod
+    def allocate(cls, task_id: Optional[str] = None) -> "Task":
+        """预分配任务ID和输入/输出流，但不绑定 runner。"""
+        return cls(task_id=task_id)
+
+    @classmethod
     def create(cls, task_runner: TaskRunner) -> "Task":
         """创建任务"""
-        return cls(task_runner)
+        task = cls.allocate()
+        task.bind_runner(task_runner)
+        return task
 
     @classmethod
     async def destroy(cls) -> None:

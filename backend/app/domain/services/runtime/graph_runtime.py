@@ -6,11 +6,17 @@
 @File   : graph_runtime.py
 """
 import logging
-from typing import Callable, Optional, Protocol, Type
+from typing import Awaitable, Callable, Optional, Protocol, Type
 
 from app.domain.external import Browser, LLM, Sandbox, Task, TaskRunner
 from app.domain.models import RuntimeStateSnapshot, Session, Workspace
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SandboxProfileRefreshReason,
+)
+from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import (
+    SandboxCapabilityProfileRefresherPort,
+)
 from app.domain.services.workspace_runtime import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -29,7 +35,7 @@ def _log_core(level: int, event: str, **fields: object) -> None:
 class TaskRunnerFactory(Protocol):
     """任务执行器工厂协议，隔离 GraphRuntime 与具体 Runner 构造细节。"""
 
-    def __call__(
+    async def __call__(
             self,
             *,
             session: Session,
@@ -103,15 +109,19 @@ class DefaultGraphRuntime(GraphRuntime):
             sandbox_cls: Type[Sandbox],
             task_cls: Type[Task],
             uow_factory: Callable[[], IUnitOfWork],
-            task_runner_factory: TaskRunnerFactory,
+            task_runner_factory: TaskRunnerFactory | Callable[..., Awaitable[TaskRunner]],
             runtime_state_coordinator: RuntimeStateCoordinatorPort,
+            sandbox_capability_profile_refresher: SandboxCapabilityProfileRefresherPort,
     ) -> None:
+        if not sandbox_capability_profile_refresher:
+            raise ValueError("sandbox_capability_profile_refresher 不能为空")
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
         self._uow_factory = uow_factory
         self._task_runner_factory = task_runner_factory
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
         self._runtime_state_coordinator = runtime_state_coordinator
+        self._sandbox_capability_profile_refresher = sandbox_capability_profile_refresher
 
     @staticmethod
     def _resolve_log_workspace_id(session: Session, workspace: Optional[Workspace]) -> str:
@@ -134,13 +144,12 @@ class DefaultGraphRuntime(GraphRuntime):
     async def _get_workspace(self, session: Session) -> Optional[Workspace]:
         return await self._workspace_manager.get_workspace(session=session)
 
-    async def _build_task_instance(
+    async def _prepare_task_resources(
             self,
             session: Session,
-            llm: LLM,
             workspace: Workspace,
-    ) -> tuple[Task, Sandbox, bool]:
-        """构建任务实例，统一复用创建/恢复场景。"""
+    ) -> tuple[Task, Sandbox, Browser, bool]:
+        """准备 sandbox/browser 并预分配 task_id，禁止启动执行。"""
         _log_core(
             logging.INFO,
             "构建任务实例开始",
@@ -187,17 +196,10 @@ class DefaultGraphRuntime(GraphRuntime):
 
         task = None
         try:
-            # 构建任务执行器并创建任务实例。
-            task_runner = self._task_runner_factory(
-                session=session,
-                llm=llm,
-                sandbox=sandbox,
-                browser=browser,
-            )
-            task = self._task_cls.create(task_runner=task_runner)
+            task = self._task_cls.allocate()
             _log_core(
                 logging.INFO,
-                "构建任务实例成功",
+                "预分配任务实例成功",
                 session_id=session.id,
                 workspace_id=self._resolve_log_workspace_id(session, workspace),
                 task_id=task.id,
@@ -205,14 +207,31 @@ class DefaultGraphRuntime(GraphRuntime):
                 created_new_sandbox=created_new_sandbox,
             )
         except Exception:
-            # 任务实例构造失败时，若本轮新建了沙箱则立即回收，避免外部资源泄漏。
+            # 任务预分配失败时，若本轮新建了沙箱则立即回收，避免外部资源泄漏。
             if created_new_sandbox:
                 try:
                     await sandbox.destroy()
                 except Exception as destroy_err:
-                    logger.error("会话%s任务构造失败后销毁沙箱失败: %s", session.id, destroy_err)
+                    logger.error("会话%s任务预分配失败后销毁沙箱失败: %s", session.id, destroy_err)
             raise
-        return task, sandbox, created_new_sandbox
+        return task, sandbox, browser, created_new_sandbox
+
+    async def _bind_task_runner(
+            self,
+            *,
+            session: Session,
+            llm: LLM,
+            task: Task,
+            sandbox: Sandbox,
+            browser: Browser,
+    ) -> None:
+        task_runner = await self._task_runner_factory(
+            session=session,
+            llm=llm,
+            sandbox=sandbox,
+            browser=browser,
+        )
+        task.bind_runner(task_runner)
 
     async def create_task(self, session: Session, llm: LLM) -> Task:
         """创建任务并在单一流程内完成会话关联写回与异常补偿。"""
@@ -227,17 +246,10 @@ class DefaultGraphRuntime(GraphRuntime):
             source_run_id=str(session.current_run_id or "").strip(),
         )
 
-        task, sandbox, created_new_sandbox = await self._build_task_instance(
+        task, sandbox, browser, created_new_sandbox = await self._prepare_task_resources(
             session=session,
-            llm=llm,
             workspace=workspace,
         )
-
-        # 记录旧值用于补偿回滚，避免数据库写回失败后内存态悬挂。
-        previous_workspace_id = session.workspace_id
-        previous_current_run_id = session.current_run_id
-        previous_status = session.status
-        previous_workspace = workspace.model_copy(deep=True)
 
         try:
             snapshot = await self._runtime_state_coordinator.start_run(
@@ -245,6 +257,22 @@ class DefaultGraphRuntime(GraphRuntime):
                 sandbox_id=sandbox.id,
                 task_id=task.id,
                 thread_id=session.id,
+            )
+            await self._refresh_sandbox_profile_after_bound(
+                user_id=str(session.user_id or ""),
+                session_id=session.id,
+                workspace_id=snapshot.workspace_id,
+                run_id=snapshot.run_id,
+                sandbox_id=sandbox.id,
+                task_id=task.id,
+                reason=SandboxProfileRefreshReason.SANDBOX_CREATED,
+            )
+            await self._bind_task_runner(
+                session=session,
+                llm=llm,
+                task=task,
+                sandbox=sandbox,
+                browser=browser,
             )
             session.workspace_id = snapshot.workspace_id
             session.current_run_id = snapshot.run_id
@@ -284,18 +312,6 @@ class DefaultGraphRuntime(GraphRuntime):
                 except Exception as destroy_err:
                     logger.error("会话%s补偿销毁沙箱失败: %s", session.id, destroy_err)
 
-            # 补偿3：回滚会话内存态并尽力落库，降低后续读到脏关联字段的概率。
-            session.workspace_id = previous_workspace_id
-            session.current_run_id = previous_current_run_id
-            session.status = previous_status
-            workspace = previous_workspace
-            try:
-                async with self._uow_factory() as uow:
-                    if previous_workspace_id:
-                        await uow.workspace.save(workspace=workspace)
-                    await uow.session.save(session=session)
-            except Exception as rollback_err:
-                logger.error("会话%s补偿回滚关联字段失败: %s", session.id, rollback_err)
             raise
 
     async def resume_task(self, session: Session, llm: LLM) -> Task:
@@ -314,15 +330,10 @@ class DefaultGraphRuntime(GraphRuntime):
             run_id=resolved_run_id,
         )
 
-        task, sandbox, created_new_sandbox = await self._build_task_instance(
+        task, sandbox, browser, created_new_sandbox = await self._prepare_task_resources(
             session=session,
-            llm=llm,
             workspace=workspace,
         )
-        previous_workspace_id = session.workspace_id
-        previous_current_run_id = session.current_run_id
-        previous_status = session.status
-        previous_workspace = workspace.model_copy(deep=True)
 
         try:
             snapshot = await self._runtime_state_coordinator.reopen_running_run(
@@ -330,6 +341,22 @@ class DefaultGraphRuntime(GraphRuntime):
                 run_id=resolved_run_id,
                 sandbox_id=sandbox.id,
                 task_id=task.id,
+            )
+            await self._refresh_sandbox_profile_after_bound(
+                user_id=str(session.user_id or ""),
+                session_id=session.id,
+                workspace_id=snapshot.workspace_id,
+                run_id=snapshot.run_id,
+                sandbox_id=sandbox.id,
+                task_id=task.id,
+                reason=SandboxProfileRefreshReason.SANDBOX_RESUMED,
+            )
+            await self._bind_task_runner(
+                session=session,
+                llm=llm,
+                task=task,
+                sandbox=sandbox,
+                browser=browser,
             )
             session.workspace_id = snapshot.workspace_id
             session.current_run_id = snapshot.run_id
@@ -368,16 +395,6 @@ class DefaultGraphRuntime(GraphRuntime):
                 except Exception as destroy_err:
                     logger.error("会话%s恢复任务补偿销毁沙箱失败: %s", session.id, destroy_err)
 
-            session.workspace_id = previous_workspace_id
-            session.current_run_id = previous_current_run_id
-            session.status = previous_status
-            workspace = previous_workspace
-            try:
-                async with self._uow_factory() as uow:
-                    await uow.workspace.save(workspace=workspace)
-                    await uow.session.save(session=session)
-            except Exception as rollback_err:
-                logger.error("会话%s恢复任务补偿回滚关联字段失败: %s", session.id, rollback_err)
             raise
 
     async def cancel_task(self, session: Session) -> bool:
@@ -390,3 +407,24 @@ class DefaultGraphRuntime(GraphRuntime):
     async def destroy(self) -> None:
         """销毁运行时任务实例。"""
         await self._task_cls.destroy()
+
+    async def _refresh_sandbox_profile_after_bound(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            workspace_id: str,
+            run_id: str,
+            sandbox_id: str,
+            task_id: str,
+            reason: SandboxProfileRefreshReason,
+    ) -> None:
+        await self._sandbox_capability_profile_refresher.refresh_after_sandbox_bound(
+            user_id=user_id,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            sandbox_id=sandbox_id,
+            task_id=task_id,
+            reason=reason,
+        )

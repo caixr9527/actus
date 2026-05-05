@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, AsyncGenerator, Callable, Optional, Any, Literal
+from typing import Awaitable, List, AsyncGenerator, Callable, Optional, Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -49,6 +49,7 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.models import RuntimeEventProjection
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.projectors import (
@@ -80,22 +81,27 @@ class AgentTaskRunner(TaskRunner):
             browser: Browser,
             search_engine: SearchEngine,
             sandbox: Sandbox,
-            run_engine_factory: Optional[Callable[..., RunEngine]] = None,
+            run_engine: RunEngine,
             tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
             runtime_state_coordinator: Any = None,
+            mcp_tool: MCPTool | None = None,
+            a2a_tool: A2ATool | None = None,
+            workspace_runtime_service: WorkspaceRuntimeService | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
+        if run_engine is None:
+            raise RuntimeError("AgentTaskRunner 必须在构造时提供已初始化 run engine")
         self._session_id = session_id
         self._user_id = user_id
         self._sandbox = sandbox
         self._mcp_config = mcp_config
-        self._mcp_tool = MCPTool()
+        self._mcp_tool = mcp_tool or MCPTool()
         self._a2a_config = a2a_config
-        self._a2a_tool = A2ATool()
+        self._a2a_tool = a2a_tool or A2ATool()
         self._file_storage = file_storage
         self._uow_factory = uow_factory
-        self._workspace_runtime_service = WorkspaceRuntimeService(
+        self._workspace_runtime_service = workspace_runtime_service or WorkspaceRuntimeService(
             session_id=session_id,
             user_id=user_id,
             uow_factory=uow_factory,
@@ -125,52 +131,128 @@ class AgentTaskRunner(TaskRunner):
             file_storage=file_storage,
             uow_factory=uow_factory,
         )
-        self._run_engine = self._build_run_engine(
+        self._run_engine: RunEngine | None = run_engine
+
+    @classmethod
+    async def create(
+            cls,
+            *,
+            llm: LLM,
+            agent_config: AgentConfig,
+            mcp_config: MCPConfig,
+            a2a_config: A2AConfig,
+            session_id: str,
+            user_id: Optional[str],
+            file_storage: FileStorage,
+            uow_factory: Callable[[], IUnitOfWork],
+            json_parser: JSONParser,
+            browser: Browser,
+            search_engine: SearchEngine,
+            sandbox: Sandbox,
+            run_engine_factory: Optional[Callable[..., Awaitable[RunEngine]]] = None,
+            tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
+            runtime_state_coordinator: Any = None,
+            runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
+    ) -> "AgentTaskRunner":
+        if run_engine_factory is None:
+            raise RuntimeError(
+                "未配置 run_engine_factory，当前仅支持 LangGraph 运行时，禁止回退 legacy planner-react"
+            )
+        if runtime_tool_snapshot_recorder is None:
+            raise RuntimeError("未配置 RuntimeToolSnapshotRecorderPort，禁止构建未记录 snapshot 的运行引擎")
+        if tool_runtime_adapter is None:
+            raise ValueError("tool_runtime_adapter 不能为空")
+
+        mcp_tool = MCPTool()
+        a2a_tool = A2ATool()
+        workspace_runtime_service = WorkspaceRuntimeService(
+            session_id=session_id,
+            user_id=user_id,
+            uow_factory=uow_factory,
+        )
+        run_engine = await cls._build_run_engine(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
+            user_id=user_id,
+            file_storage=file_storage,
             uow_factory=uow_factory,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
             search_engine=search_engine,
+            mcp_config=mcp_config,
+            mcp_tool=mcp_tool,
+            a2a_tool=a2a_tool,
+            workspace_runtime_service=workspace_runtime_service,
+            tool_runtime_adapter=tool_runtime_adapter,
             run_engine_factory=run_engine_factory,
+            runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
+        )
+        return cls(
+            llm=llm,
+            agent_config=agent_config,
+            mcp_config=mcp_config,
+            a2a_config=a2a_config,
+            session_id=session_id,
+            user_id=user_id,
+            file_storage=file_storage,
+            uow_factory=uow_factory,
+            json_parser=json_parser,
+            browser=browser,
+            search_engine=search_engine,
+            sandbox=sandbox,
+            run_engine=run_engine,
+            tool_runtime_adapter=tool_runtime_adapter,
+            runtime_state_coordinator=runtime_state_coordinator,
+            mcp_tool=mcp_tool,
+            a2a_tool=a2a_tool,
+            workspace_runtime_service=workspace_runtime_service,
         )
 
-    def _build_run_engine(
-            self,
+    @staticmethod
+    async def _build_run_engine(
             llm: LLM,
             agent_config: AgentConfig,
             session_id: str,
+            user_id: Optional[str],
+            file_storage: FileStorage,
             uow_factory: Callable[[], IUnitOfWork],
             json_parser: JSONParser,
             browser: Browser,
             sandbox: Sandbox,
             search_engine: SearchEngine,
-            run_engine_factory: Optional[Callable[..., RunEngine]],
+            mcp_config: MCPConfig,
+            mcp_tool: MCPTool,
+            a2a_tool: A2ATool,
+            workspace_runtime_service: WorkspaceRuntimeService,
+            tool_runtime_adapter: ToolRuntimeAdapter,
+            run_engine_factory: Callable[..., Awaitable[RunEngine]],
+            runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort,
     ) -> RunEngine:
-        if run_engine_factory is None:
-            raise RuntimeError(
-                "未配置 run_engine_factory，当前仅支持 LangGraph 运行时，禁止回退 legacy planner-react"
-            )
-
-        return run_engine_factory(
+        return await run_engine_factory(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
-            file_storage=self._file_storage,
+            file_storage=file_storage,
             uow_factory=uow_factory,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
             search_engine=search_engine,
-            mcp_tool=self._mcp_tool,
-            a2a_tool=self._a2a_tool,
-            workspace_runtime_service=self._workspace_runtime_service,
-            mcp_config=self._mcp_config,
-            user_id=self._user_id,
-            tool_runtime_adapter=self._tool_runtime_adapter,
+            mcp_tool=mcp_tool,
+            a2a_tool=a2a_tool,
+            workspace_runtime_service=workspace_runtime_service,
+            mcp_config=mcp_config,
+            user_id=user_id,
+            tool_runtime_adapter=tool_runtime_adapter,
+            runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
         )
+
+    def _require_run_engine(self) -> RunEngine:
+        if self._run_engine is None:
+            raise RuntimeError("AgentTaskRunner 未完成 run engine 初始化")
+        return self._run_engine
 
     def _get_workspace_manager(self) -> WorkspaceManager:
         manager = getattr(self, "_workspace_manager", None)
@@ -339,7 +421,7 @@ class AgentTaskRunner(TaskRunner):
             return
 
         # 遍历流程执行过程中产生的事件
-        async for event in self._run_engine.invoke(message):
+        async for event in self._require_run_engine().invoke(message):
             # 处理工具事件，根据工具类型进行相应的内容填充
             if isinstance(event, ToolEvent):
                 await self._tool_event_projector.project(event)
@@ -362,7 +444,7 @@ class AgentTaskRunner(TaskRunner):
             yield event
 
     async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
-        async for event in self._run_engine.resume(value):
+        async for event in self._require_run_engine().resume(value):
             if isinstance(event, ToolEvent):
                 await self._tool_event_projector.project(event)
             elif isinstance(event, MessageEvent):

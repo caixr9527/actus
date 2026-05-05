@@ -1070,7 +1070,7 @@ def test_runtime_context_service_should_not_inherit_previous_task_mode_in_planne
     )
 
     assert context_packet["task_mode"] == StepTaskModeHint.GENERAL.value
-    assert "environment_digest" not in context_packet
+    assert context_packet["environment_digest"] == {"stage": "planner"}
     assert "observation_digest" not in context_packet
     assert context_packet["retrieved_memory_digest"][0]["memory_type"] == "instruction"
 
