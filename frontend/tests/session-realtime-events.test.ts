@@ -64,6 +64,7 @@ function observation(overrides: Partial<RuntimeObservation> = {}): RuntimeObserv
       interrupt_id: null,
       payload: {},
     },
+    sandbox_profile: null,
     ...overrides,
   }
 }

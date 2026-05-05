@@ -109,12 +109,67 @@ test('normalizeSessionDetailRuntimeStatus should mirror top-level status from ru
         interrupt_id: 'interrupt-1',
         payload: {},
       },
+      sandbox_profile: null,
     },
     events: [],
   })
 
   assert.equal(detail.status, 'waiting')
   assert.equal(detail.runtime.status, 'waiting')
+})
+
+test('normalizeSessionDetailRuntimeStatus should accept null or object sandbox profile projection', () => {
+  const detailWithNullProfile = normalizeSessionDetailRuntimeStatus({
+    session_id: 'session-1',
+    title: 'runtime wins',
+    latest_message: '',
+    latest_message_at: '',
+    status: 'running',
+    unread_message_count: 0,
+    current_model_id: 'auto',
+    runtime: {
+      session_id: 'session-1',
+      run_id: 'run-1',
+      status: 'running',
+      current_step_id: null,
+      cursor: {
+        latest_event_id: 'evt-1',
+        has_more: false,
+      },
+      capabilities: {
+        can_send_message: false,
+        can_resume: false,
+        can_cancel: true,
+        can_continue_cancelled: false,
+        disabled_reasons: {},
+      },
+      interaction: {
+        kind: 'none',
+        interrupt_id: null,
+        payload: {},
+      },
+      sandbox_profile: null,
+    },
+    events: [],
+  })
+  const detailWithProfile = normalizeSessionDetailRuntimeStatus({
+    ...detailWithNullProfile,
+    runtime: {
+      ...detailWithNullProfile.runtime,
+      sandbox_profile: {
+        schema_version: 'sandbox_capability_profile.v1',
+        health_status: 'available',
+        generated_at: '2026-05-05T10:00:00',
+        expires_at: null,
+        stale: true,
+        unavailable_capabilities: [],
+        requires_confirmation: ['shell'],
+      },
+    },
+  })
+
+  assert.equal(detailWithNullProfile.runtime.sandbox_profile, null)
+  assert.equal(detailWithProfile.runtime.sandbox_profile?.health_status, 'available')
 })
 
 test('normalizeEvents should filter invalid items', () => {

@@ -62,6 +62,18 @@ class RuntimeInteractionResponse(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class RuntimeSandboxProfileProjectionResponse(BaseModel):
+    """会话详情 runtime 中的 sandbox profile 轻量展示投影。"""
+
+    schema_version: str
+    health_status: str
+    generated_at: datetime
+    expires_at: Optional[datetime] = None
+    stale: bool = True
+    unavailable_capabilities: List[str] = Field(default_factory=list)
+    requires_confirmation: List[str] = Field(default_factory=list)
+
+
 class RuntimeObservationResponse(BaseModel):
     """会话详情 runtime 观察快照。"""
 
@@ -72,6 +84,7 @@ class RuntimeObservationResponse(BaseModel):
     cursor: RuntimeCursorResponse
     capabilities: RuntimeCapabilityResponse
     interaction: RuntimeInteractionResponse
+    sandbox_profile: Optional[RuntimeSandboxProfileProjectionResponse] = None
 
     @classmethod
     def from_result(cls, result: RuntimeObservationResult) -> "RuntimeObservationResponse":
@@ -98,6 +111,13 @@ class RuntimeObservationResponse(BaseModel):
                 kind=result.interaction.kind,
                 interrupt_id=result.interaction.interrupt_id,
                 payload=dict(result.interaction.payload or {}),
+            ),
+            sandbox_profile=(
+                RuntimeSandboxProfileProjectionResponse.model_validate(
+                    result.sandbox_profile.model_dump(mode="json")
+                )
+                if result.sandbox_profile is not None
+                else None
             ),
         )
 

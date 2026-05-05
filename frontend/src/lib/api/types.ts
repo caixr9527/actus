@@ -247,6 +247,16 @@ export type RuntimeInteraction = {
   payload: Record<string, unknown>;
 };
 
+export type SandboxProfileProjection = {
+  schema_version: "sandbox_capability_profile.v1";
+  health_status: string;
+  generated_at: string;
+  expires_at: string | null;
+  stale: boolean;
+  unavailable_capabilities: string[];
+  requires_confirmation: string[];
+};
+
 export type RuntimeObservation = {
   session_id: string;
   run_id: string | null;
@@ -255,6 +265,7 @@ export type RuntimeObservation = {
   cursor: RuntimeCursor;
   capabilities: RuntimeCapabilities;
   interaction: RuntimeInteraction;
+  sandbox_profile: SandboxProfileProjection | null;
 };
 
 /**

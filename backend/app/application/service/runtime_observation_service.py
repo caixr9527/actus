@@ -6,6 +6,7 @@
 不执行 graph，也不生成最终正文。
 """
 
+from datetime import datetime
 from enum import Enum
 import logging
 from typing import Any, Callable, Literal
@@ -30,6 +31,8 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import SandboxCapabilityProfile
+from app.domain.services.workspace_runtime import WorkspaceRuntimeService
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,18 @@ class RuntimeInteractionResult(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class RuntimeSandboxProfileProjectionResult(BaseModel):
+    """会话详情 runtime 中的 sandbox profile 轻量展示投影。"""
+
+    schema_version: str
+    health_status: str
+    generated_at: datetime
+    expires_at: datetime | None = None
+    stale: bool = True
+    unavailable_capabilities: list[str] = Field(default_factory=list)
+    requires_confirmation: list[str] = Field(default_factory=list)
+
+
 class RuntimeObservationResult(BaseModel):
     """会话详情 runtime 观察快照。"""
 
@@ -79,6 +94,7 @@ class RuntimeObservationResult(BaseModel):
     cursor: RuntimeCursorResult
     capabilities: RuntimeCapabilityResult
     interaction: RuntimeInteractionResult
+    sandbox_profile: RuntimeSandboxProfileProjectionResult | None = None
 
 
 class RuntimeEventMetaResult(BaseModel):
@@ -171,6 +187,10 @@ class RuntimeObservationService:
             has_current_run=snapshot.run_status is not None,
             has_continuable_cancelled_plan=snapshot.has_continuable_cancelled_plan,
         )
+        sandbox_profile = await self._build_sandbox_profile_projection(
+            user_id=user_id,
+            session_id=session_id,
+        )
 
         logger.info(
             "构建runtime observation",
@@ -189,6 +209,7 @@ class RuntimeObservationService:
             cursor=RuntimeCursorResult(latest_event_id=latest_event_id),
             capabilities=capabilities,
             interaction=interaction,
+            sandbox_profile=sandbox_profile,
         )
 
     async def build_event_context(
@@ -417,6 +438,45 @@ class RuntimeObservationService:
             session_id=session_id,
             action=DataAccessAction.READ,
         )
+
+    async def _build_sandbox_profile_projection(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+    ) -> RuntimeSandboxProfileProjectionResult | None:
+        workspace_runtime = WorkspaceRuntimeService(
+            user_id=user_id,
+            session_id=session_id,
+            uow_factory=self._uow_factory,
+        )
+        profile = await workspace_runtime.get_sandbox_capability_profile()
+        if profile is None:
+            return None
+        return self._project_sandbox_profile(profile)
+
+    @classmethod
+    def _project_sandbox_profile(
+            cls,
+            profile: SandboxCapabilityProfile,
+    ) -> RuntimeSandboxProfileProjectionResult:
+        return RuntimeSandboxProfileProjectionResult(
+            schema_version=profile.schema_version,
+            health_status=profile.health_status.value,
+            generated_at=profile.generated_at,
+            expires_at=profile.expires_at,
+            stale=cls._is_sandbox_profile_stale(profile),
+            unavailable_capabilities=list(profile.prompt_summary.unavailable_capabilities),
+            requires_confirmation=list(profile.prompt_summary.requires_confirmation),
+        )
+
+    @staticmethod
+    def _is_sandbox_profile_stale(profile: SandboxCapabilityProfile) -> bool:
+        if profile.prompt_summary.sandbox_profile_stale:
+            return True
+        if profile.expires_at is None:
+            return True
+        return profile.expires_at <= datetime.now(profile.expires_at.tzinfo)
 
     async def _load_latest_runtime_events(
             self,

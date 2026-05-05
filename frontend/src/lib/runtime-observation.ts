@@ -3,6 +3,7 @@ import type {
   RuntimeCursor,
   RuntimeInteraction,
   RuntimeObservation,
+  SandboxProfileProjection,
   SSEEventData,
   SessionDetail,
   SessionStatus,
@@ -16,6 +17,7 @@ export type RuntimeObservationViewState = {
   cursor: RuntimeCursor
   capabilities: RuntimeCapabilities
   interaction: RuntimeInteraction
+  sandboxProfile: SandboxProfileProjection | null
 }
 
 export type SessionRuntimeState = {
@@ -151,6 +153,7 @@ function runtimeObservationToViewState(runtime: RuntimeObservation): RuntimeObse
     cursor: runtime.cursor,
     capabilities: runtime.capabilities,
     interaction: runtime.interaction,
+    sandboxProfile: runtime.sandbox_profile,
   }
 }
 

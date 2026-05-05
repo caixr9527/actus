@@ -11,6 +11,7 @@ import {
 import type {
   RuntimeEventMeta,
   RuntimeObservation,
+  SandboxProfileProjection,
   SSEEventData,
   SessionDetail,
   SessionStatus,
@@ -52,6 +53,7 @@ function runtimeObservation(overrides: Partial<RuntimeObservation> = {}): Runtim
       interrupt_id: null,
       payload: {},
     },
+    sandbox_profile: null,
     ...overrides,
   }
 }
@@ -98,6 +100,65 @@ test('createRuntimeObservationFromSnapshot should use detail.runtime as the sour
   assert.equal(state.sessionId, 'session-1')
   assert.equal(state.capabilities.can_resume, true)
   assert.equal(state.interaction.kind, 'wait')
+})
+
+test('createRuntimeObservationFromSnapshot should keep sandbox profile as display-only snapshot data', () => {
+  const sandboxProfile: SandboxProfileProjection = {
+    schema_version: 'sandbox_capability_profile.v1',
+    health_status: 'available',
+    generated_at: '2026-05-05T10:00:00',
+    expires_at: '2026-05-05T10:30:00',
+    stale: false,
+    unavailable_capabilities: ['node'],
+    requires_confirmation: ['shell'],
+  }
+  const state = createRuntimeObservationFromSnapshot(sessionDetail(runtimeObservation({
+    sandbox_profile: sandboxProfile,
+    capabilities: {
+      can_send_message: false,
+      can_resume: false,
+      can_cancel: false,
+      can_continue_cancelled: false,
+      disabled_reasons: {},
+    },
+  })))
+
+  assert.deepEqual(state.sandboxProfile, sandboxProfile)
+  assert.deepEqual(state.capabilities, {
+    can_send_message: false,
+    can_resume: false,
+    can_cancel: false,
+    can_continue_cancelled: false,
+    disabled_reasons: {},
+  })
+})
+
+test('reduceRuntimeObservationOnEvent should not derive or mutate sandbox profile from SSE events', () => {
+  const sandboxProfile: SandboxProfileProjection = {
+    schema_version: 'sandbox_capability_profile.v1',
+    health_status: 'degraded',
+    generated_at: '2026-05-05T10:00:00',
+    expires_at: null,
+    stale: true,
+    unavailable_capabilities: ['browser'],
+    requires_confirmation: ['shell'],
+  }
+  const prev = createRuntimeObservationFromSnapshot(sessionDetail(runtimeObservation({
+    sandbox_profile: sandboxProfile,
+  })))
+
+  const next = reduceRuntimeObservationOnEvent(prev, eventOf('message', {
+    runtime: runtimeMeta({ status_after_event: 'running', cursor_event_id: 'evt-2' }),
+    sandbox_profile: {
+      schema_version: 'sandbox_capability_profile.v1',
+      health_status: 'available',
+    },
+    role: 'assistant',
+    message: 'ok',
+  }))
+
+  assert.deepEqual(next.sandboxProfile, sandboxProfile)
+  assert.equal(next.capabilities.can_cancel, true)
 })
 
 test('reduceRuntimeObservationOnEvent should update status only from runtime.status_after_event', () => {
