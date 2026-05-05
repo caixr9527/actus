@@ -17,6 +17,7 @@ from app.domain.models import (
 )
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+    validate_sandbox_capability_profile_payload,
 )
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
@@ -527,10 +528,11 @@ class RuntimeContextService:
         )
         if not isinstance(raw_profile, dict):
             return {}
-        prompt_summary = raw_profile.get("prompt_summary")
-        if not isinstance(prompt_summary, dict):
+        try:
+            profile = validate_sandbox_capability_profile_payload(raw_profile)
+        except ValueError:
             return {}
-        return dict(prompt_summary)
+        return profile.prompt_summary.model_dump(mode="json")
 
     def _build_observation_digest(
             self,

@@ -1,9 +1,21 @@
 import asyncio
+from copy import deepcopy
+from datetime import datetime, timedelta
+
+import pytest
 
 from app.domain.models import StepTaskModeHint, Workspace
 from app.domain.services.prompts import SYSTEM_PROMPT
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+    RuntimeToolCapabilitySnapshot,
+    RuntimeToolCapabilitySnapshotItem,
+    SandboxCapabilityItem,
+    SandboxCapabilityKind,
+    SandboxCapabilityPromptSummary,
+    SandboxCapabilityStatus,
+    SandboxProfileRefreshReason,
+    build_sandbox_capability_profile_from_draft,
 )
 from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -20,21 +32,58 @@ class _WorkspaceRuntimeService:
         return WorkspaceEnvironmentSnapshot(workspace=self._workspace, artifacts=[])
 
 
-def _build_context_service() -> RuntimeContextService:
+def _build_profile_payload() -> dict:
+    now = datetime(2026, 5, 5, 10, 0, 0)
+    draft = {
+        "schema_version": "sandbox_capability_profile.v1",
+        "profile_id": "profile-1",
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "sandbox_id": "sandbox-1",
+        "generated_at": now,
+        "expires_at": now + timedelta(minutes=30),
+        "refresh_reason": SandboxProfileRefreshReason.SANDBOX_CREATED,
+        "health_status": SandboxCapabilityStatus.AVAILABLE,
+        "cwd": "/workspace",
+        "capabilities": [
+            SandboxCapabilityItem(
+                kind=SandboxCapabilityKind.PYTHON,
+                name="python3",
+                status=SandboxCapabilityStatus.AVAILABLE,
+                version="3.12.1",
+                path="/usr/bin/python3",
+            ),
+        ],
+        "runtime_tool_capabilities": RuntimeToolCapabilitySnapshot(
+            items=[
+                RuntimeToolCapabilitySnapshotItem(
+                    capability_id="local_shell",
+                    tool_family="shell",
+                    source="local",
+                ),
+            ]
+        ),
+        "prompt_summary": SandboxCapabilityPromptSummary(
+            health_status=SandboxCapabilityStatus.AVAILABLE,
+            cwd="/workspace",
+            available_runtime={"python": "3.12.1"},
+            available_tools=["shell", "file"],
+            generated_at=now,
+            sandbox_profile_stale=False,
+        ),
+    }
+    return build_sandbox_capability_profile_from_draft(draft).model_dump(mode="json")
+
+
+def _build_context_service(profile_payload: dict | None = None) -> RuntimeContextService:
     workspace = Workspace(
         id="workspace-1",
         session_id="session-1",
         user_id="user-1",
         environment_summary={
-            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY: {
-                "prompt_summary": {
-                    "health_status": "available",
-                    "cwd": "/workspace",
-                    "available_runtime": {"python": "3.12.1"},
-                    "available_tools": ["shell", "file"],
-                    "sandbox_profile_stale": False,
-                }
-            }
+            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY: profile_payload or _build_profile_payload()
         },
     )
     return RuntimeContextService(
@@ -152,3 +201,47 @@ def test_planner_execute_replan_prompt_should_use_dynamic_sandbox_profile_contex
         assert '"available_tools": [' in prompt
         assert '"shell"' in prompt
         assert '"file"' in prompt
+
+
+@pytest.mark.parametrize(
+    ("case_name", "mutate_profile"),
+    [
+        (
+            "top_level_extra",
+            lambda payload: payload.update({"legacy_extra": "invalid"}),
+        ),
+        (
+            "prompt_summary_extra",
+            lambda payload: payload["prompt_summary"].update({"legacy_extra": "invalid"}),
+        ),
+        (
+            "profile_hash_mismatch",
+            lambda payload: payload.update({"cwd": "/tampered"}),
+        ),
+    ],
+)
+def test_runtime_context_should_not_inject_invalid_sandbox_profile(
+        case_name: str,
+        mutate_profile,
+) -> None:
+    profile_payload = deepcopy(_build_profile_payload())
+    mutate_profile(profile_payload)
+    context_service = _build_context_service(profile_payload=profile_payload)
+    state = {"user_message": f"处理项目代码 {case_name}"}
+
+    for stage, task_mode in [
+        ("planner", StepTaskModeHint.GENERAL.value),
+        ("execute", StepTaskModeHint.CODING.value),
+        ("replan", StepTaskModeHint.GENERAL.value),
+    ]:
+        packet = asyncio.run(
+            context_service.build_packet_async(
+                stage=stage,
+                state=state,
+                task_mode=task_mode,
+            )
+        )
+        prompt = _append_prompt_context_to_prompt("用户任务", packet)
+
+        assert "sandbox_capability_profile" not in packet.get("environment_digest", {})
+        assert '"sandbox_capability_profile"' not in prompt
