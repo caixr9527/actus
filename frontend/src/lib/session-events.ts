@@ -13,7 +13,6 @@ import type {
   PlanEvent,
   StepEvent,
   ToolEvent,
-  SandboxFactEvent,
   SessionFile,
 } from "./api/types";
 import { visitSessionEvent } from "./session-event-adapter";
@@ -29,7 +28,6 @@ export type TimelineItem =
   | { kind: "attachments"; id: string; role: "user" | "assistant"; files: AttachmentFile[] }
   | { kind: "assistant"; id: string; data: ChatMessage }
   | { kind: "tool"; id: string; data: ToolEvent; timeLabel?: string }
-  | { kind: "sandbox_fact"; id: string; data: SandboxFactEvent; summary: string; timeLabel?: string }
   | { kind: "step"; id: string; data: StepEvent; tools: ToolEvent[] }
   | { kind: "error"; id: string; error: string; timestamp?: number };
 
@@ -78,7 +76,6 @@ export type TimelineBuildContext = {
   stepIndexById: Map<string, number>;
   stepToolIndexByStepId: Map<string, Map<string, number>>;
   standaloneToolIndexByCallId: Map<string, number>;
-  factIndex: number;
 };
 
 export function createTimelineBuildContext(): TimelineBuildContext {
@@ -91,7 +88,6 @@ export function createTimelineBuildContext(): TimelineBuildContext {
     stepIndexById: new Map<string, number>(),
     stepToolIndexByStepId: new Map<string, Map<string, number>>(),
     standaloneToolIndexByCallId: new Map<string, number>(),
-    factIndex: 0,
   };
 }
 
@@ -318,24 +314,6 @@ function appendToolEvent(
   }
 }
 
-function appendSandboxFactEvent(
-  context: TimelineBuildContext,
-  factEvent: SandboxFactEvent,
-  locale: AppLocale,
-): void {
-  const count = Array.isArray(factEvent.fact_refs) ? factEvent.fact_refs.length : 0;
-  const summary = typeof factEvent.summary === "string" && factEvent.summary.trim().length > 0
-    ? factEvent.summary.trim()
-    : (locale === "en-US" ? `Recorded ${count} fact(s)` : `记录了 ${count} 条事实`);
-  context.list.push({
-    kind: "sandbox_fact",
-    id: stableId("fact", context.factIndex++, String(factEvent.event_id ?? context.list.length)),
-    data: factEvent,
-    summary,
-    timeLabel: formatTimeLabel(factEvent.created_at, locale),
-  });
-}
-
 function appendErrorEvent(
   context: TimelineBuildContext,
   data: unknown,
@@ -378,7 +356,9 @@ export function appendTimelineEvent(
     plan: (event) => reconcileStepsFromPlan(context, event.data as PlanEvent),
     step: (event) => appendStepEvent(context, event.data as StepEvent),
     tool: (event) => appendToolEvent(context, event.data as ToolEvent, locale),
-    sandbox_fact: (event) => appendSandboxFactEvent(context, event.data as SandboxFactEvent, locale),
+    sandbox_fact: () => {
+      // 事实事件用于审计和后续 Evidence，不进入普通用户对话 timeline。
+    },
     error: (event) => appendErrorEvent(context, event.data, locale),
   });
 }
@@ -395,7 +375,6 @@ function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildC
       Array.from(source.stepToolIndexByStepId.entries()).map(([stepId, indexMap]) => [stepId, new Map(indexMap)])
     ),
     standaloneToolIndexByCallId: new Map(source.standaloneToolIndexByCallId),
-    factIndex: source.factIndex,
   };
 }
 

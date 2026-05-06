@@ -178,7 +178,7 @@ test('tool events without runtime current step id should remain standalone', () 
   }
 })
 
-test('sandbox fact event should remain standalone and not attach to step or tool', () => {
+test('sandbox fact event should stay out of user-facing timeline', () => {
   const events: SSEEventData[] = [
     eventOf('step', { id: 's-1', status: 'running', description: 'running step' }),
     eventOf('tool', {
@@ -205,20 +205,14 @@ test('sandbox fact event should remain standalone and not attach to step or tool
 
   const timeline = eventsToTimeline(events)
   const stepItems = timeline.filter((item) => item.kind === 'step')
-  const factItems = timeline.filter((item) => item.kind === 'sandbox_fact')
+  const timelineKinds = timeline.map((item) => item.kind as string)
 
   assert.equal(stepItems.length, 1)
-  assert.equal(factItems.length, 1)
+  assert.equal(timelineKinds.includes('sandbox_fact'), false)
   const stepItem = stepItems[0]
   assert.equal(stepItem?.kind, 'step')
   if (stepItem?.kind === 'step') {
     assert.equal(stepItem.tools.length, 1)
-  }
-  const factItem = factItems[0]
-  assert.equal(factItem?.kind, 'sandbox_fact')
-  if (factItem?.kind === 'sandbox_fact') {
-    assert.equal(factItem.summary, '记录了 1 条事实')
-    assert.equal(factItem.data.fact_refs[0]?.fact_id, 'fact-1')
   }
 })
 

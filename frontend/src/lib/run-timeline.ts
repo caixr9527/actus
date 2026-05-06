@@ -1,10 +1,10 @@
-import type { SSEEventData, PlanEvent, SandboxFactEvent, StepEvent, StepOutcome, ToolEvent, WaitEventData } from './api/types'
+import type { SSEEventData, PlanEvent, StepEvent, StepOutcome, ToolEvent, WaitEventData } from './api/types'
 import type { AppLocale } from './i18n'
 import { getFriendlyToolLabel } from '../components/tool-use/utils'
 import { visitSessionEvent } from './session-event-adapter'
 import { parseWaitEventContext, type WaitEventContext } from './wait-event'
 
-export type RunTimelineKind = 'message' | 'plan' | 'step' | 'tool' | 'sandbox_fact' | 'wait' | 'error' | 'done'
+export type RunTimelineKind = 'message' | 'plan' | 'step' | 'tool' | 'wait' | 'error' | 'done'
 
 export type RunTimelineItem = {
   id: string
@@ -117,15 +117,6 @@ function waitSummary(data: WaitEventData, locale: AppLocale): string {
   return locale === 'en-US' ? 'Waiting for your input' : '等待你的输入'
 }
 
-function sandboxFactSummary(data: SandboxFactEvent, locale: AppLocale): string {
-  const summary = typeof data.summary === 'string' ? data.summary.trim() : ''
-  if (summary) return truncate(summary, 80)
-  const count = Array.isArray(data.fact_refs) ? data.fact_refs.length : 0
-  return locale === 'en-US'
-    ? `Recorded ${count} fact(s)`
-    : `记录了 ${count} 条事实`
-}
-
 function errorSummary(data: Record<string, unknown>, locale: AppLocale): string {
   const error = typeof data.error === 'string' ? data.error : ''
   const errorKey = typeof data.error_key === 'string' ? data.error_key : ''
@@ -180,12 +171,8 @@ export function buildRunTimeline(events: SSEEventData[], locale: AppLocale = 'zh
           summary: getFriendlyToolLabel(toolEvent.data as ToolEvent, locale),
         })
       },
-      sandbox_fact: (factEvent) => {
-        items.push({
-          ...base,
-          kind: 'sandbox_fact',
-          summary: sandboxFactSummary(factEvent.data as SandboxFactEvent, locale),
-        })
+      sandbox_fact: () => {
+        // 事实事件用于审计和后续 Evidence，不进入普通用户运行时间线。
       },
       wait: (waitEvent) => {
         items.push({
