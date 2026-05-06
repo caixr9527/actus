@@ -51,6 +51,7 @@ from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
+    SandboxFactEventProjectorPort,
     SandboxFactProjectionContextBuilderPort,
     SandboxFactRecorderPort,
 )
@@ -89,6 +90,7 @@ class AgentTaskRunner(TaskRunner):
             workspace_runtime_service: WorkspaceRuntimeService | None = None,
             sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -112,6 +114,7 @@ class AgentTaskRunner(TaskRunner):
         self._runtime_state_coordinator = runtime_state_coordinator
         self._sandbox_fact_recorder = sandbox_fact_recorder
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
+        self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -159,6 +162,7 @@ class AgentTaskRunner(TaskRunner):
             runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
             sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
             raise RuntimeError(
@@ -212,6 +216,7 @@ class AgentTaskRunner(TaskRunner):
             workspace_runtime_service=workspace_runtime_service,
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
+            sandbox_fact_event_projector=sandbox_fact_event_projector,
         )
 
     @staticmethod
@@ -335,9 +340,16 @@ class AgentTaskRunner(TaskRunner):
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
 
-    async def _record_sandbox_facts_for_tool_event(self, *, event: ToolEvent, source_event_id: str | None) -> None:
+    async def _record_sandbox_facts_for_tool_event(
+            self,
+            *,
+            task: Task | None = None,
+            event: ToolEvent,
+            source_event_id: str | None,
+    ) -> None:
         recorder = getattr(self, "_sandbox_fact_recorder", None)
         context_builder = getattr(self, "_sandbox_fact_context_builder", None)
+        event_projector = getattr(self, "_sandbox_fact_event_projector", None)
         if recorder is None or context_builder is None:
             return
         if not source_event_id:
@@ -353,7 +365,31 @@ class AgentTaskRunner(TaskRunner):
             return
         try:
             context = await context_builder.build_for_tool_event(source_event_id=source_event_id)
-            await recorder.record_from_tool_event(context=context, event=event)
+            facts = await recorder.record_from_tool_event(context=context, event=event)
+            if event_projector is not None:
+                fact_event = await event_projector.project_tool_event_facts(context=context, facts=facts)
+                if fact_event is not None and task is not None:
+                    try:
+                        await self._put_and_add_event(
+                            task=task,
+                            event=fact_event,
+                            allow_status_transition=False,
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "sandbox_fact_event_projection_failed",
+                            extra={
+                                "user_id": getattr(context.scope, "user_id", None),
+                                "session_id": getattr(context.scope, "session_id", None),
+                                "run_id": getattr(context.scope, "run_id", None),
+                                "step_id": getattr(context, "current_step_id", None)
+                                or getattr(context.scope, "current_step_id", None),
+                                "source_event_id": source_event_id,
+                                "fact_ids": [getattr(fact, "id", None) for fact in facts],
+                                "error_type": exc.__class__.__name__,
+                                "reason_code": "event_stream_persist_failed",
+                            },
+                        )
         except Exception as exc:
             logger.exception(
                 "sandbox_fact_record_failed",
@@ -686,6 +722,7 @@ class AgentTaskRunner(TaskRunner):
                         source_event_id = await self._put_and_add_event(task=task, event=event)
                         if isinstance(event, ToolEvent):
                             await self._record_sandbox_facts_for_tool_event(
+                                task=task,
                                 event=event,
                                 source_event_id=source_event_id,
                             )

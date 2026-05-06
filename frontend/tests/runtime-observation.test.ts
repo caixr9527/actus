@@ -186,6 +186,37 @@ test('reduceRuntimeObservationOnEvent should update status only from runtime.sta
   assert.equal(afterWait.interaction.kind, 'wait')
 })
 
+test('reduceRuntimeObservationOnEvent should not derive status or capabilities from sandbox_fact event', () => {
+  const prev = createRuntimeObservationFromSnapshot(sessionDetail(runtimeObservation({
+    status: 'running',
+    capabilities: {
+      can_send_message: false,
+      can_resume: false,
+      can_cancel: true,
+      can_continue_cancelled: false,
+      disabled_reasons: {},
+    },
+  })))
+  const factEvent = eventOf('sandbox_fact', {
+    runtime: runtimeMeta({
+      status_after_event: null,
+      cursor_event_id: 'evt-fact-1',
+      source_event_id: 'tool-event-1',
+      current_step_id: 'step-1',
+    }),
+    fact_refs: [{ fact_id: 'fact-1', fact_kind: 'tool_failure', summary: 'tool failed' }],
+    summary: 'tool failed',
+    source_event_id: 'tool-event-1',
+    step_id: 'step-1',
+  })
+
+  const next = reduceRuntimeObservationOnEvent(prev, factEvent)
+
+  assert.equal(next.status, 'running')
+  assert.deepEqual(next.capabilities, prev.capabilities)
+  assert.equal(next.cursor.latest_event_id, 'evt-fact-1')
+})
+
 test('reduceRuntimeObservationOnEvent should project capabilities from explicit runtime status', () => {
   const prev = createRuntimeObservationFromSnapshot(sessionDetail(runtimeObservation({
     status: 'waiting',

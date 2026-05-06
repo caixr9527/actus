@@ -9,7 +9,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict
 
 from app.application.service.runtime_access_control_service import AccessScopeResult
-from app.domain.models import ToolEvent
+from app.domain.models import SandboxFactEvent, ToolEvent
 from app.domain.models.sandbox_fact import SandboxFactRecord
 from app.domain.services.runtime.contracts.sandbox_fact_contract import (
     SandboxFactProfileRef,
@@ -45,4 +45,15 @@ class SandboxFactRecorderPort(Protocol):
             event: ToolEvent,
     ) -> list[SandboxFactRecord]:
         """PR3 接入 ToolEvent 投影；PR2 不实现工具事件分发。"""
+        ...
+
+
+class SandboxFactEventProjectorPort(Protocol):
+    async def project_tool_event_facts(
+            self,
+            *,
+            context: SandboxFactProjectionContext,
+            facts: list[SandboxFactRecord],
+    ) -> SandboxFactEvent | None:
+        """PR4 将已入库 fact 转换为轻量 runtime event。"""
         ...

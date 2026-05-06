@@ -178,6 +178,50 @@ test('tool events without runtime current step id should remain standalone', () 
   }
 })
 
+test('sandbox fact event should remain standalone and not attach to step or tool', () => {
+  const events: SSEEventData[] = [
+    eventOf('step', { id: 's-1', status: 'running', description: 'running step' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-1',
+      name: 'shell',
+      function: 'exec_command',
+      args: { command: 'pytest -q' },
+      status: 'called',
+      content: 'ok',
+    }, { current_step_id: 's-1' }),
+    eventOf('sandbox_fact', {
+      fact_refs: [
+        {
+          fact_id: 'fact-1',
+          fact_kind: 'command_execution',
+          summary: 'exec_command tool fact',
+        },
+      ],
+      summary: '记录了 1 条事实',
+      source_event_id: 'tool-event-1',
+      step_id: 's-1',
+    }, { current_step_id: 's-1', source_event_id: 'tool-event-1' }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+  const factItems = timeline.filter((item) => item.kind === 'sandbox_fact')
+
+  assert.equal(stepItems.length, 1)
+  assert.equal(factItems.length, 1)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.tools.length, 1)
+  }
+  const factItem = factItems[0]
+  assert.equal(factItem?.kind, 'sandbox_fact')
+  if (factItem?.kind === 'sandbox_fact') {
+    assert.equal(factItem.summary, '记录了 1 条事实')
+    assert.equal(factItem.data.fact_refs[0]?.fact_id, 'fact-1')
+  }
+})
+
 test('plan event should reconcile existing running step card to cancelled', () => {
   const events: SSEEventData[] = [
     eventOf('message', { role: 'user', message: 'q1' }),

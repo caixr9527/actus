@@ -17,6 +17,7 @@ from app.application.errors import AppException, BadRequestError, NotFoundError
 from app.application.service.document_input_preflight_policy import DocumentInputPreflightPolicy
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
+from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.application.service.sandbox_capability_profile_service import SandboxCapabilityProfileService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
@@ -212,6 +213,9 @@ class AgentService:
             runtime_tool_snapshot_recorder=self._sandbox_capability_profile_service,
             sandbox_fact_recorder=SandboxFactToolEventProjector(
                 ledger_service=SandboxFactLedgerService(uow_factory=self._uow_factory),
+            ),
+            sandbox_fact_event_projector=SandboxFactEventProjector(
+                uow_factory=self._uow_factory,
             ),
             sandbox_fact_context_builder=SandboxFactProjectionContextBuilder(
                 access_control_service=self._get_access_control_service(),

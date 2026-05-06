@@ -11,6 +11,9 @@ from app.domain.models import (
     StepEventStatus,
     Step,
     StepOutcome,
+    SandboxFactEvent,
+    SandboxFactEventRef,
+    SandboxFactKind,
     TextStreamChannel,
     TextStreamDeltaEvent,
     TextStreamEndEvent,
@@ -185,6 +188,46 @@ def test_event_mapper_should_serialize_text_stream_events() -> None:
     assert end_payload["event"] == "text_stream_end"
     assert end_payload["data"]["full_text_length"] == 8
     assert end_payload["data"]["reason"] == "completed"
+
+
+def test_event_mapper_should_serialize_sandbox_fact_event_without_raw_payload() -> None:
+    event = SandboxFactEvent(
+        id="evt-fact-1",
+        created_at=datetime(2026, 3, 11, 12, 0, 5),
+        fact_refs=[
+            SandboxFactEventRef(
+                fact_id="fact-1",
+                fact_kind=SandboxFactKind.COMMAND_EXECUTION,
+                summary="exec_command tool fact",
+            )
+        ],
+        summary="记录了 1 条事实",
+        source_event_id="tool-event-1",
+        step_id="step-1",
+    )
+
+    payload = _map_event(event).model_dump(mode="json")
+
+    assert payload["event"] == "sandbox_fact"
+    assert payload["data"]["fact_refs"] == [
+        {
+            "fact_id": "fact-1",
+            "fact_kind": SandboxFactKind.COMMAND_EXECUTION.value,
+            "summary": "exec_command tool fact",
+        }
+    ]
+    assert payload["data"]["summary"] == "记录了 1 条事实"
+    assert payload["data"]["source_event_id"] == "tool-event-1"
+    assert payload["data"]["step_id"] == "step-1"
+    assert "payload" not in payload["data"]
+    assert payload["data"]["runtime"]["status_after_event"] is None
+
+
+def test_sandbox_fact_event_should_be_persistent() -> None:
+    event = SandboxFactEvent(fact_refs=[], summary="记录了 0 条事实")
+
+    assert get_event_delivery_policy(event) == EventDeliveryPolicy.PERSISTENT_AND_LIVE
+    assert should_persist_event(event) is True
 
 
 def test_text_stream_events_should_be_live_only() -> None:
@@ -411,6 +454,37 @@ def test_workflow_run_event_model_should_normalize_historical_step_event_outcome
 
     assert isinstance(domain_record.event_payload, StepEvent)
     assert domain_record.event_payload.step.outcome.produced_artifacts == ["/tmp/final.md"]
+
+
+def test_workflow_run_event_model_should_restore_sandbox_fact_event() -> None:
+    event = SandboxFactEvent(
+        id="evt-fact-history",
+        fact_refs=[
+            SandboxFactEventRef(
+                fact_id="fact-1",
+                fact_kind=SandboxFactKind.TOOL_FAILURE,
+                summary="tool failed",
+            )
+        ],
+        summary="tool failed",
+        source_event_id="tool-event-1",
+        step_id=None,
+    )
+    record = WorkflowRunEventModel(
+        id="record-fact-1",
+        run_id="run-1",
+        session_id="session-1",
+        event_id=event.id,
+        event_type=event.type,
+        event_payload=event.model_dump(mode="json"),
+        created_at=datetime(2026, 3, 11, 12, 0, 8),
+    )
+
+    domain_record = record.to_domain()
+
+    assert isinstance(domain_record.event_payload, SandboxFactEvent)
+    assert domain_record.event_payload.source_event_id == "tool-event-1"
+    assert domain_record.event_payload.fact_refs[0].fact_kind == SandboxFactKind.TOOL_FAILURE
 
 
 def test_workflow_run_event_model_should_normalize_historical_plan_event_outcome_on_read() -> None:

@@ -16,6 +16,7 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     RuntimeInput,
+    SandboxFactEvent,
     Session,
     SessionStatus,
     Step,
@@ -1395,12 +1396,22 @@ def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_i
 
         async def record_from_tool_event(self, *, context, event: ToolEvent):
             self.calls.append((context, event))
-            return []
+            return ["fact-1"]
+
+    class _EventProjector:
+        def __init__(self) -> None:
+            self.calls: list[tuple[dict, list[str]]] = []
+
+        async def project_tool_event_facts(self, *, context, facts):
+            self.calls.append((context, facts))
+            return None
 
     context_builder = _ContextBuilder()
     recorder = _Recorder()
+    event_projector = _EventProjector()
     runner._sandbox_fact_context_builder = context_builder
     runner._sandbox_fact_recorder = recorder
+    runner._sandbox_fact_event_projector = event_projector
     event = ToolEvent(
         id="tool-event-1",
         tool_call_id="call-1",
@@ -1420,6 +1431,56 @@ def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_i
 
     assert context_builder.source_event_ids == ["stream-record-1"]
     assert recorder.calls == [({"source_event_id": "stream-record-1"}, event)]
+    assert event_projector.calls == [({"source_event_id": "stream-record-1"}, ["fact-1"])]
+
+
+def test_record_sandbox_facts_for_tool_event_should_emit_fact_event_without_rollback_on_failure() -> None:
+    runner = _new_runner()
+    fact_event = SandboxFactEvent(id="fact-event-1", summary="记录了 1 条事实")
+    put_calls: list[None] = []
+
+    class _ContextBuilder:
+        async def build_for_tool_event(self, *, source_event_id: str):
+            return {"source_event_id": source_event_id}
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.facts = ["fact-1"]
+
+        async def record_from_tool_event(self, *, context, event: ToolEvent):
+            return self.facts
+
+    class _EventProjector:
+        async def project_tool_event_facts(self, *, context, facts):
+            return fact_event
+
+    async def _put_and_add_event(**kwargs):
+        put_calls.append(None)
+        raise RuntimeError("event write failed")
+
+    runner._sandbox_fact_context_builder = _ContextBuilder()
+    runner._sandbox_fact_recorder = _Recorder()
+    runner._sandbox_fact_event_projector = _EventProjector()
+    runner._put_and_add_event = _put_and_add_event
+    event = ToolEvent(
+        id="tool-event-3",
+        tool_call_id="call-3",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(
+        runner._record_sandbox_facts_for_tool_event(
+            task=object(),
+            event=event,
+            source_event_id="stream-record-3",
+        )
+    )
+
+    assert put_calls == [None]
 
 
 def test_record_sandbox_facts_for_tool_event_should_skip_without_source_event_id() -> None:
@@ -1435,6 +1496,7 @@ def test_record_sandbox_facts_for_tool_event_should_skip_without_source_event_id
 
     runner._sandbox_fact_context_builder = _ContextBuilder()
     runner._sandbox_fact_recorder = _Recorder()
+    runner._sandbox_fact_event_projector = None
     event = ToolEvent(
         id="tool-event-2",
         tool_call_id="call-2",

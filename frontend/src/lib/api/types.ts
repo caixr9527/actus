@@ -364,6 +364,23 @@ export type ToolEvent = {
   [key: string]: unknown;
 };
 
+export type SandboxFactEventRef = {
+  fact_id: string;
+  fact_kind: string;
+  summary: string;
+};
+
+export type SandboxFactEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
+  fact_refs: SandboxFactEventRef[];
+  summary: string;
+  source_event_id?: string | null;
+  step_id?: string | null;
+  [key: string]: unknown;
+};
+
 export type SearchResultItem = {
   url: string;
   title: string;
@@ -514,6 +531,7 @@ export type SSEEventType =
   | "plan"
   | "step"
   | "tool"
+  | "sandbox_fact"
   | "wait"
   | "done"
   | "error"
@@ -538,6 +556,7 @@ export type SSEEventData =
   | { type: "plan"; data: PlanEvent }
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
+  | { type: "sandbox_fact"; data: SandboxFactEvent }
   | { type: "wait"; data: WaitEventData }
   | {
       type: "done";

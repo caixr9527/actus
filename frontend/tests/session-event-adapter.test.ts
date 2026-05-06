@@ -64,6 +64,22 @@ test('normalizeEvent should reject known events without runtime metadata', () =>
   )
 })
 
+test('normalizeEvent should accept sandbox_fact events', () => {
+  const event = normalizeEvent({
+    event: 'sandbox_fact',
+    data: {
+      runtime,
+      fact_refs: [{ fact_id: 'fact-1', fact_kind: 'command_execution', summary: 'exec' }],
+      summary: '记录了 1 条事实',
+      source_event_id: 'tool-event-1',
+      step_id: null,
+    },
+  })
+
+  assert.equal(event?.type, 'sandbox_fact')
+  assert.equal(event?.data.summary, '记录了 1 条事实')
+})
+
 test('assertSessionDetailRuntime should reject detail snapshots without runtime', () => {
   assert.throws(
     () => assertSessionDetailRuntime({

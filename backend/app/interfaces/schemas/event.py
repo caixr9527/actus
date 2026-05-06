@@ -18,6 +18,7 @@ from app.domain.models import (
     WaitEvent,
     ToolEvent,
     ToolEventStatus,
+    SandboxFactEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
@@ -258,6 +259,45 @@ class ToolSSEEvent(BaseSSEEvent):
         )
 
 
+class SandboxFactEventRefData(BaseModel):
+    """Fact timeline 引用数据；禁止携带 fact raw payload。"""
+
+    fact_id: str
+    fact_kind: str
+    summary: str = ""
+
+
+class SandboxFactEventData(BaseEventData):
+    """Sandbox Fact 轻量事件数据。"""
+
+    fact_refs: List[SandboxFactEventRefData] = Field(default_factory=list)
+    summary: str = ""
+    source_event_id: Optional[str] = None
+    step_id: Optional[str] = None
+
+
+class SandboxFactSSEEvent(BaseSSEEvent):
+    """Sandbox Fact timeline 事件。"""
+
+    event: Literal["sandbox_fact"] = "sandbox_fact"
+    data: SandboxFactEventData
+
+    @classmethod
+    def from_event(cls, event: SandboxFactEvent, runtime: RuntimeEventMeta) -> Self:
+        return cls(
+            data=SandboxFactEventData(
+                **BaseEventData.base_event_data(event, runtime),
+                fact_refs=[
+                    SandboxFactEventRefData.model_validate(ref.model_dump(mode="json"))
+                    for ref in event.fact_refs
+                ],
+                summary=event.summary,
+                source_event_id=event.source_event_id,
+                step_id=event.step_id,
+            )
+        )
+
+
 class DoneSSEEvent(BaseSSEEvent):
     """停止流式事件"""
     event: Literal["done"] = "done"
@@ -356,6 +396,7 @@ AgentSSEEvent = Union[
     StepSSEEvent,
     PlanSSEEvent,
     ToolSSEEvent,
+    SandboxFactSSEEvent,
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,

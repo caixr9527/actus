@@ -23,6 +23,7 @@ from .plan import Plan, Step
 from .search import FetchedPage, SearchResultItem
 from .tool_result import ToolResult
 from .wait import normalize_wait_payload
+from .sandbox_fact import SandboxFactKind
 
 
 class PlanEventStatus(str, Enum):
@@ -190,6 +191,24 @@ class ToolEvent(BaseEvent):
     status: ToolEventStatus = ToolEventStatus.CALLING  # 工具事件状态
 
 
+class SandboxFactEventRef(BaseModel):
+    """Runtime timeline 中的 fact 轻量引用，不包含 raw payload。"""
+
+    fact_id: str
+    fact_kind: SandboxFactKind
+    summary: str = ""
+
+
+class SandboxFactEvent(BaseEvent):
+    """Sandbox Fact timeline 投影事件。"""
+
+    type: Literal["sandbox_fact"] = "sandbox_fact"
+    fact_refs: List[SandboxFactEventRef] = Field(default_factory=list)
+    summary: str = ""
+    source_event_id: Optional[str] = None
+    step_id: Optional[str] = None
+
+
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
@@ -261,6 +280,7 @@ Event = Annotated[
         StepEvent,
         MessageEvent,
         ToolEvent,
+        SandboxFactEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,
