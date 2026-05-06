@@ -401,3 +401,55 @@ def test_pr3_should_not_create_browser_screenshot_artifact_fact() -> None:
     assert facts[0].fact_kind == SandboxFactKind.BROWSER_SNAPSHOT
     assert facts[0].source_ref.artifact_id is None
     assert facts[0].payload["screenshot_artifact_id"] is None
+
+
+def test_browser_screenshot_fact_should_reference_workspace_artifact() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-9",
+        tool_call_id="call-9",
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(
+            success=True,
+            data={
+                "url": "https://example.com",
+                "title": "Example",
+                "screenshot_artifact": {
+                    "artifact_id": "artifact-1",
+                    "artifact_path": "/.workspace/browser-screenshots/shot.png",
+                },
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts[0].fact_kind == SandboxFactKind.BROWSER_SNAPSHOT
+    assert facts[0].payload["screenshot_artifact_id"] == "artifact-1"
+    assert facts[0].payload["screenshot_artifact_path"] == "/.workspace/browser-screenshots/shot.png"
+
+
+def test_browser_screenshot_fact_should_not_read_tool_content_screenshot_as_artifact() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-10",
+        tool_call_id="call-10",
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(
+            success=True,
+            data={"url": "https://example.com", "title": "Example"},
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+    event.tool_content = {"screenshot": "https://cdn.example.com/shot.png"}
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts[0].payload["screenshot_artifact_id"] is None
+    assert facts[0].payload["screenshot_artifact_path"] is None
+    assert facts[0].payload["reason_code"] == "screenshot_artifact_missing"

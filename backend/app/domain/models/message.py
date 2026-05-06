@@ -18,3 +18,4 @@ class Message(BaseModel):
     message: str = ""
     attachments: List[str] = Field(default_factory=list)  # 同步到沙箱到路径
     command: Optional[MessageCommand] = None
+    source_event_id: Optional[str] = None

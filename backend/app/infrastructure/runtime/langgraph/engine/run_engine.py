@@ -64,6 +64,8 @@ from app.application.service.document_input_service import (
     FileStorageDocumentAttachmentReader,
 )
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
+from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
     bind_live_event_sink,
@@ -152,6 +154,8 @@ class LangGraphRunEngine(RunEngine):
             checkpointer: Any | None = None,
             data_retention_policy_service: DataClassificationPolicy | None = None,
             document_input_service: DocumentInputService | None = None,
+            sandbox_fact_document_projector: SandboxFactDocumentInputProjector | None = None,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             access_control_service: RuntimeAccessControlService | None = None,
     ) -> None:
         if runtime_context_service is None:
@@ -164,6 +168,8 @@ class LangGraphRunEngine(RunEngine):
         self._checkpointer = checkpointer
         self._data_retention_policy_service = effective_data_retention_policy_service
         self._document_input_service = document_input_service or DocumentInputService()
+        self._sandbox_fact_document_projector = sandbox_fact_document_projector
+        self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._access_control_service = access_control_service or (
             RuntimeAccessControlService(uow_factory=uow_factory)
             if uow_factory is not None
@@ -318,7 +324,54 @@ class LangGraphRunEngine(RunEngine):
             attachments=sources,
             request_id=request_id,
         )
+        await self._record_document_context_facts(
+            message=message,
+            scope=scope,
+            parts=parts,
+            request_id=request_id,
+        )
         return [part.model_dump(mode="json") for part in parts]
+
+    async def _record_document_context_facts(
+            self,
+            *,
+            message: Message,
+            scope: Any,
+            parts: list[Any],
+            request_id: str | None,
+    ) -> None:
+        projector = self._sandbox_fact_document_projector
+        context_builder = self._sandbox_fact_context_builder
+        if projector is None or context_builder is None or not parts:
+            return
+        source_event_id = str(message.source_event_id or "").strip()
+        if not source_event_id:
+            logger.warning(
+                "sandbox_fact_record_failed",
+                extra={
+                    "reason_code": "document_source_event_id_missing",
+                    "session_id": self._session_id,
+                    "request_id": request_id or "",
+                },
+            )
+            return
+        try:
+            context = await context_builder.build_for_document_input(
+                source_event_id=source_event_id,
+                scope=scope,
+            )
+            await projector.record_document_context(context=context, parts=parts)
+        except Exception as exc:
+            logger.exception(
+                "sandbox_fact_record_failed",
+                extra={
+                    "reason_code": "document_context_projection_failed",
+                    "session_id": self._session_id,
+                    "source_event_id": source_event_id,
+                    "request_id": request_id or "",
+                    "error_type": exc.__class__.__name__,
+                },
+            )
 
     async def _build_graph_input_state(
             self,

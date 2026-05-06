@@ -9,6 +9,7 @@ import uuid
 from typing import Optional
 
 from app.domain.external import Browser, FileStorage, FileUploadPayload
+from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotArtifactRef
 from .helpers import get_stream_size
 from ..service import WorkspaceRuntimeService
 
@@ -36,7 +37,7 @@ class BrowserScreenshotArtifactService:
             preferred_path = f"{str(file_id or '').strip() or str(uuid.uuid4())}.png"
         return f"/.workspace/browser-screenshots/{preferred_path}"
 
-    async def capture(self, *, source_capability: str = "browser_screenshot") -> str:
+    async def capture(self, *, source_capability: str = "browser_screenshot") -> BrowserScreenshotArtifactRef:
         screenshot = await self._browser.screenshot()
         screenshot_stream = io.BytesIO(screenshot)
         filename = f"{str(uuid.uuid4())}.png"
@@ -56,7 +57,7 @@ class BrowserScreenshotArtifactService:
             filepath=uploaded_file.filepath,
             filename=uploaded_file.filename or filename,
         )
-        await self._workspace_runtime_service.upsert_artifact(
+        artifact = await self._workspace_runtime_service.upsert_artifact(
             path=artifact_path,
             artifact_type="browser_screenshot",
             summary=f"浏览器截图: {artifact_path}",
@@ -72,4 +73,8 @@ class BrowserScreenshotArtifactService:
             },
             record_as_changed_file=False,
         )
-        return screenshot_url
+        return BrowserScreenshotArtifactRef(
+            url=screenshot_url,
+            artifact_id=artifact.id,
+            artifact_path=artifact.path,
+        )

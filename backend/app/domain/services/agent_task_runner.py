@@ -198,6 +198,7 @@ class AgentTaskRunner(TaskRunner):
             tool_runtime_adapter=tool_runtime_adapter,
             run_engine_factory=run_engine_factory,
             runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
         )
         return cls(
             mcp_config=mcp_config,
@@ -238,6 +239,7 @@ class AgentTaskRunner(TaskRunner):
             tool_runtime_adapter: ToolRuntimeAdapter,
             run_engine_factory: Callable[..., Awaitable[RunEngine]],
             runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
     ) -> RunEngine:
         return await run_engine_factory(
             llm=llm,
@@ -256,6 +258,7 @@ class AgentTaskRunner(TaskRunner):
             user_id=user_id,
             tool_runtime_adapter=tool_runtime_adapter,
             runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
         )
 
     def _require_run_engine(self) -> RunEngine:
@@ -624,6 +627,7 @@ class AgentTaskRunner(TaskRunner):
                     message_obj = Message(
                         message=message,
                         attachments=[attachment.filepath for attachment in event.attachments],
+                        source_event_id=event.id,
                     )
                     event_stream = self._run_flow(message_obj)
                 elif isinstance(event, ResumeInput):

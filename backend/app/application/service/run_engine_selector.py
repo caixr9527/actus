@@ -10,11 +10,14 @@ from typing import Callable, Dict
 
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
+from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine, FileStorage
 from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.stage_llm import REQUIRED_STAGE_LLM_NAMES
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, CapabilityBuildContext
@@ -93,6 +96,7 @@ async def build_run_engine(
         user_id: str | None = None,
         tool_runtime_adapter: ToolRuntimeAdapter | None = None,
         runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
+        sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
 ) -> RunEngine:
     """根据配置选择运行时引擎（BE-LG-12 起仅支持 LangGraph）。"""
     settings = get_settings()
@@ -143,5 +147,9 @@ async def build_run_engine(
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         data_retention_policy_service=DataRetentionPolicyService(),
+        sandbox_fact_document_projector=SandboxFactDocumentInputProjector(
+            ledger_service=SandboxFactLedgerService(uow_factory=uow_factory),
+        ) if sandbox_fact_context_builder is not None else None,
+        sandbox_fact_context_builder=sandbox_fact_context_builder,
         access_control_service=RuntimeAccessControlService(uow_factory=uow_factory),
     )

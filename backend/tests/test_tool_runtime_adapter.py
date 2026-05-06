@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 from app.domain.models import (
     BrowserLinkMatchResult,
@@ -25,6 +26,7 @@ from app.domain.services.tools import (
     ToolRuntimeAdapter,
     ToolRuntimeEventHooks,
 )
+from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotArtifactRef
 from app.domain.services.workspace_runtime.capabilities import (
     WorkspaceBrowserCapability,
     WorkspaceFileCapability,
@@ -270,13 +272,17 @@ def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions(
     adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     screenshot_calls: list[str] = []
 
-    async def _get_browser_screenshot() -> str:
+    async def _get_browser_screenshot() -> BrowserScreenshotArtifactRef:
         screenshot_calls.append("shot")
-        return "https://cdn.example.com/browser-shot.png"
+        return BrowserScreenshotArtifactRef(
+            url="https://cdn.example.com/browser-shot.png",
+            artifact_id="artifact-1",
+            artifact_path="/.workspace/browser-screenshots/shot.png",
+        )
 
     view_event = ToolEvent(
         tool_name="browser",
-        function_name="browser_view",
+        function_name="browser_read_current_page_structured",
         function_args={},
         function_result=ToolResult(success=True, data={}),
         status=ToolEventStatus.CALLED,
@@ -309,6 +315,146 @@ def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions(
     assert scroll_event.tool_content is not None
     assert scroll_event.tool_content.screenshot == ""
     assert screenshot_calls == ["shot"]
+
+
+def test_tool_runtime_adapter_should_write_screenshot_artifact_ref_to_function_result() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+
+    async def _get_browser_screenshot() -> BrowserScreenshotArtifactRef:
+        return BrowserScreenshotArtifactRef(
+            url="https://cdn.example.com/browser-shot.png",
+            artifact_id="artifact-1",
+            artifact_path="/.workspace/browser-screenshots/shot.png",
+        )
+
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(get_browser_screenshot=_get_browser_screenshot),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.screenshot == "https://cdn.example.com/browser-shot.png"
+    assert event.function_result is not None
+    assert event.function_result.data["screenshot_artifact"] == {
+        "artifact_id": "artifact-1",
+        "artifact_path": "/.workspace/browser-screenshots/shot.png",
+    }
+
+
+def test_tool_runtime_adapter_should_merge_screenshot_artifact_into_pydantic_browser_result() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+
+    async def _get_browser_screenshot() -> BrowserScreenshotArtifactRef:
+        return BrowserScreenshotArtifactRef(
+            url="https://cdn.example.com/browser-shot.png",
+            artifact_id="artifact-1",
+            artifact_path="/.workspace/browser-screenshots/shot.png",
+        )
+
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(
+            success=True,
+            data=BrowserPageStructuredResult(
+                url="https://example.com/docs/runtime",
+                title="Runtime Docs",
+                page_type=BrowserPageType.DOCUMENT,
+                content_summary="runtime summary",
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(get_browser_screenshot=_get_browser_screenshot),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.url == "https://example.com/docs/runtime"
+    assert event.tool_content.screenshot == "https://cdn.example.com/browser-shot.png"
+    assert isinstance(event.function_result.data, dict)
+    assert event.function_result.data["screenshot_artifact"] == {
+        "artifact_id": "artifact-1",
+        "artifact_path": "/.workspace/browser-screenshots/shot.png",
+    }
+    assert event.function_result.data["url"] == "https://example.com/docs/runtime"
+
+
+def test_tool_runtime_adapter_should_reject_string_screenshot_hook_result() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+
+    async def _get_browser_screenshot():
+        return "https://cdn.example.com/browser-shot.png"
+
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(get_browser_screenshot=_get_browser_screenshot),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.screenshot == ""
+    assert event.function_result is not None
+    assert "screenshot_artifact" not in event.function_result.data
+
+
+def test_tool_runtime_adapter_should_reject_non_contract_screenshot_ref_with_matching_attrs() -> None:
+    adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+
+    async def _get_browser_screenshot():
+        return SimpleNamespace(
+            url="https://cdn.example.com/browser-shot.png",
+            artifact_id="artifact-1",
+            artifact_path="/.workspace/browser-screenshots/shot.png",
+        )
+
+    event = ToolEvent(
+        tool_name="browser",
+        function_name="browser_view",
+        function_args={},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    handled = asyncio.run(
+        adapter.enrich_tool_event(
+            event=event,
+            hooks=ToolRuntimeEventHooks(get_browser_screenshot=_get_browser_screenshot),
+        )
+    )
+
+    assert handled is True
+    assert event.tool_content is not None
+    assert event.tool_content.screenshot == ""
+    assert event.function_result is not None
+    assert "screenshot_artifact" not in event.function_result.data
 
 
 def test_tool_runtime_adapter_should_keep_browser_event_usable_without_screenshot_hook() -> None:

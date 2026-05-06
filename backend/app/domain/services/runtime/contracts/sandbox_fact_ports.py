@@ -4,16 +4,20 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from app.application.service.runtime_access_control_service import AccessScopeResult
 from app.domain.models import SandboxFactEvent, ToolEvent
 from app.domain.models.sandbox_fact import SandboxFactRecord
 from app.domain.services.runtime.contracts.sandbox_fact_contract import (
     SandboxFactProfileRef,
 )
+
+if TYPE_CHECKING:
+    from app.application.service.runtime_access_control_service import AccessScopeResult
+else:
+    AccessScopeResult = Any
 
 
 class SandboxFactProjectionContext(BaseModel):
@@ -33,6 +37,15 @@ class SandboxFactProjectionContextBuilderPort(Protocol):
             source_event_id: str,
     ) -> SandboxFactProjectionContext:
         """由 runner/runtime 上游集中构造 ToolEvent fact 投影上下文。"""
+        ...
+
+    async def build_for_document_input(
+            self,
+            *,
+            source_event_id: str,
+            scope: AccessScopeResult,
+    ) -> SandboxFactProjectionContext:
+        """由 runtime 文档输入链路集中构造 DOCUMENT_CONTEXT fact 投影上下文。"""
         ...
 
 

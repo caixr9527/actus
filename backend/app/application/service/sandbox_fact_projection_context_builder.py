@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.runtime_access_control_service import AccessScopeResult
 from app.domain.models.sandbox_fact import SandboxFactProfileRef
 from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
@@ -42,6 +43,24 @@ class SandboxFactProjectionContextBuilder(SandboxFactProjectionContextBuilderPor
             session_id=self._session_id,
             action=DataAccessAction.READ,
         )
+        return await self._build_context(source_event_id=source_event_id, scope=scope)
+
+    async def build_for_document_input(
+            self,
+            *,
+            source_event_id: str,
+            scope: AccessScopeResult,
+    ) -> SandboxFactProjectionContext:
+        if not self._user_id:
+            raise ValueError("Sandbox fact projection context 需要 user_id")
+        return await self._build_context(source_event_id=source_event_id, scope=scope)
+
+    async def _build_context(
+            self,
+            *,
+            source_event_id: str,
+            scope: AccessScopeResult,
+    ) -> SandboxFactProjectionContext:
         workspace = await self._workspace_runtime_service.get_workspace()
         profile_error: Exception | None = None
         try:

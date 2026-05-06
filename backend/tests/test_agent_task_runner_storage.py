@@ -27,6 +27,7 @@ from app.domain.models import (
     ToolEventStatus,
     WaitEvent,
     Workspace,
+    WorkspaceArtifact,
     WorkflowRun,
     WorkflowRunStatus,
 )
@@ -483,7 +484,16 @@ class _CaptureWorkspaceRuntimeService:
 
     async def upsert_artifact(self, **kwargs):
         self.artifact_calls.append(dict(kwargs))
-        return kwargs
+        return WorkspaceArtifact(
+            id="artifact-screenshot",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            session_id="session-1",
+            path=kwargs["path"],
+            artifact_type=kwargs["artifact_type"],
+            summary=kwargs.get("summary") or "",
+            metadata=kwargs.get("metadata") or {},
+        )
 
     async def get_latest_shell_tool_result(self):
         return ToolResult(success=False, data={"console_records": []})
@@ -1026,9 +1036,11 @@ def test_browser_screenshot_artifact_service_should_upload_and_index_workspace_a
         user_id="user-1",
     )
 
-    screenshot_url = asyncio.run(service.capture(source_capability="browser_view"))
+    screenshot_ref = asyncio.run(service.capture(source_capability="browser_view"))
 
-    assert screenshot_url == "https://cdn.example.com/2026/03/19/s.png"
+    assert screenshot_ref.url == "https://cdn.example.com/2026/03/19/s.png"
+    assert screenshot_ref.artifact_id == "artifact-screenshot"
+    assert screenshot_ref.artifact_path == "/.workspace/browser-screenshots/2026/03/19/s.png"
     assert file_storage.upload_user_ids == ["user-1"]
     payload = file_storage.upload_payloads[0]
     assert getattr(payload, "filename").endswith(".png")

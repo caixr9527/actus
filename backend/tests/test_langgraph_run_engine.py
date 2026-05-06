@@ -25,6 +25,7 @@ from app.domain.models import (
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext
 from app.infrastructure.runtime.langgraph.engine.run_engine import DocumentInputContractError, LangGraphRunEngine
 
 
@@ -326,6 +327,32 @@ class _InputPartsFileStorage:
         return f"https://cdn.example.com/{file.id}"
 
 
+class _DocumentFactContextBuilder:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def build_for_tool_event(self, *, source_event_id: str):
+        raise AssertionError("document input fact 不应调用 tool event context builder")
+
+    async def build_for_document_input(self, *, source_event_id: str, scope: AccessScopeResult):
+        self.calls.append({"source_event_id": source_event_id, "scope": scope})
+        return SandboxFactProjectionContext(
+            scope=scope,
+            profile_ref={"status": "missing"},
+            sandbox_id=None,
+            source_event_id=source_event_id,
+            current_step_id=scope.current_step_id,
+        )
+
+
+class _DocumentFactProjector:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def record_document_context(self, *, context, parts):
+        self.calls.append({"context": context, "parts": list(parts)})
+
+
 def test_langgraph_run_engine_build_input_parts_should_emit_document_parts_for_attachments() -> None:
     engine = _build_run_engine(
         session_id="session-1",
@@ -391,6 +418,106 @@ def test_langgraph_run_engine_build_input_parts_should_emit_document_parts_for_a
     assert [part["text_excerpt"] for part in parts] == ["content-a", "content-b"]
     assert "base64_payload" not in parts[0]
     assert "file_url" not in parts[0]
+
+
+def test_langgraph_run_engine_build_input_parts_should_record_document_facts_with_message_source() -> None:
+    context_builder = _DocumentFactContextBuilder()
+    document_projector = _DocumentFactProjector()
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content-a"}),
+        sandbox_fact_context_builder=context_builder,
+        sandbox_fact_document_projector=document_projector,
+    )
+    uow = SimpleNamespace(
+        session=_InputPartsSessionRepo(
+            {
+                "/home/ubuntu/upload/file-1/note.txt": File(
+                    id="file-1",
+                    filename="note.txt",
+                    filepath="/home/ubuntu/upload/file-1/note.txt",
+                    mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
+                )
+            }
+        )
+    )
+    scope = AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
+    )
+
+    parts = asyncio.run(
+        engine._build_input_parts(
+            Message(
+                message="读取附件",
+                attachments=["/home/ubuntu/upload/file-1/note.txt"],
+                source_event_id="message-event-1",
+            ),
+            uow=uow,
+            scope=scope,
+        )
+    )
+
+    assert parts[0]["source"]["file_id"] == "file-1"
+    assert context_builder.calls[0]["source_event_id"] == "message-event-1"
+    assert document_projector.calls[0]["context"].source_event_id == "message-event-1"
+    assert document_projector.calls[0]["parts"][0].source.file_id == "file-1"
+
+
+def test_langgraph_run_engine_build_input_parts_should_skip_document_fact_without_source_event_id() -> None:
+    context_builder = _DocumentFactContextBuilder()
+    document_projector = _DocumentFactProjector()
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content-a"}),
+        sandbox_fact_context_builder=context_builder,
+        sandbox_fact_document_projector=document_projector,
+    )
+    uow = SimpleNamespace(
+        session=_InputPartsSessionRepo(
+            {
+                "/home/ubuntu/upload/file-1/note.txt": File(
+                    id="file-1",
+                    filename="note.txt",
+                    filepath="/home/ubuntu/upload/file-1/note.txt",
+                    mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
+                )
+            }
+        )
+    )
+    scope = AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
+    )
+
+    parts = asyncio.run(
+        engine._build_input_parts(
+            Message(
+                message="读取附件",
+                attachments=["/home/ubuntu/upload/file-1/note.txt"],
+            ),
+            uow=uow,
+            scope=scope,
+        )
+    )
+
+    assert parts[0]["source"]["file_id"] == "file-1"
+    assert context_builder.calls == []
+    assert document_projector.calls == []
 
 
 def test_langgraph_run_engine_build_input_parts_should_fail_when_scope_missing_for_attachments() -> None:
