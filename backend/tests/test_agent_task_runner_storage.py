@@ -1376,3 +1376,73 @@ def test_put_and_add_event_should_stream_live_only_event_without_persisting_hist
 
     assert len(task.output_stream.records) == 1
     assert session_repo.persist_calls == 0
+
+
+def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_id() -> None:
+    runner = _new_runner()
+
+    class _ContextBuilder:
+        def __init__(self) -> None:
+            self.source_event_ids: list[str] = []
+
+        async def build_for_tool_event(self, *, source_event_id: str):
+            self.source_event_ids.append(source_event_id)
+            return {"source_event_id": source_event_id}
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[dict, ToolEvent]] = []
+
+        async def record_from_tool_event(self, *, context, event: ToolEvent):
+            self.calls.append((context, event))
+            return []
+
+    context_builder = _ContextBuilder()
+    recorder = _Recorder()
+    runner._sandbox_fact_context_builder = context_builder
+    runner._sandbox_fact_recorder = recorder
+    event = ToolEvent(
+        id="tool-event-1",
+        tool_call_id="call-1",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(
+        runner._record_sandbox_facts_for_tool_event(
+            event=event,
+            source_event_id="stream-record-1",
+        )
+    )
+
+    assert context_builder.source_event_ids == ["stream-record-1"]
+    assert recorder.calls == [({"source_event_id": "stream-record-1"}, event)]
+
+
+def test_record_sandbox_facts_for_tool_event_should_skip_without_source_event_id() -> None:
+    runner = _new_runner()
+
+    class _ContextBuilder:
+        async def build_for_tool_event(self, *, source_event_id: str):
+            raise AssertionError("source_event_id 缺失时不应构造 context")
+
+    class _Recorder:
+        async def record_from_tool_event(self, *, context, event: ToolEvent):
+            raise AssertionError("source_event_id 缺失时不应写 fact")
+
+    runner._sandbox_fact_context_builder = _ContextBuilder()
+    runner._sandbox_fact_recorder = _Recorder()
+    event = ToolEvent(
+        id="tool-event-2",
+        tool_call_id="call-2",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(runner._record_sandbox_facts_for_tool_event(event=event, source_event_id=None))

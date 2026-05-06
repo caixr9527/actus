@@ -50,6 +50,10 @@ from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import (
+    SandboxFactProjectionContextBuilderPort,
+    SandboxFactRecorderPort,
+)
 from app.domain.models import RuntimeEventProjection
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.projectors import (
@@ -83,6 +87,8 @@ class AgentTaskRunner(TaskRunner):
             mcp_tool: MCPTool | None = None,
             a2a_tool: A2ATool | None = None,
             workspace_runtime_service: WorkspaceRuntimeService | None = None,
+            sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -104,6 +110,8 @@ class AgentTaskRunner(TaskRunner):
         )
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
         self._runtime_state_coordinator = runtime_state_coordinator
+        self._sandbox_fact_recorder = sandbox_fact_recorder
+        self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -149,6 +157,8 @@ class AgentTaskRunner(TaskRunner):
             tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
             runtime_state_coordinator: Any = None,
             runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
+            sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
             raise RuntimeError(
@@ -200,6 +210,8 @@ class AgentTaskRunner(TaskRunner):
             mcp_tool=mcp_tool,
             a2a_tool=a2a_tool,
             workspace_runtime_service=workspace_runtime_service,
+            sandbox_fact_recorder=sandbox_fact_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
         )
 
     @staticmethod
@@ -284,7 +296,7 @@ class AgentTaskRunner(TaskRunner):
             latest_message_at: Optional[datetime] = None,
             increment_unread: bool = False,
             allow_status_transition: bool = True,
-    ) -> None:
+    ) -> str | None:
         event_id = None
         try:
             # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
@@ -293,7 +305,7 @@ class AgentTaskRunner(TaskRunner):
                 record=TaskStreamEventRecord(event=event),
             )
             if not should_persist_event(event):
-                return
+                return event_id
             # 注意：不要原地修改传入 event.id。
             # LangGraphRunEngine 会对同一事件对象做 live + final replay 去重，
             # 若这里直接改写 id，可能导致 replay 阶段去重失效并重复落库。
@@ -312,6 +324,7 @@ class AgentTaskRunner(TaskRunner):
                 projection=projection,
                 allow_status_transition=allow_status_transition,
             )
+            return event_id
         except Exception as e:
             # 落库失败时补偿删除输出流，尽量降低Redis/DB分叉概率。
             logger.error(f"写入输出流后保存事件历史失败: {e}")
@@ -321,6 +334,37 @@ class AgentTaskRunner(TaskRunner):
                 except Exception as rollback_err:
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
+
+    async def _record_sandbox_facts_for_tool_event(self, *, event: ToolEvent, source_event_id: str | None) -> None:
+        recorder = getattr(self, "_sandbox_fact_recorder", None)
+        context_builder = getattr(self, "_sandbox_fact_context_builder", None)
+        if recorder is None or context_builder is None:
+            return
+        if not source_event_id:
+            logger.warning(
+                "sandbox_fact_record_skipped",
+                extra={
+                    "reason_code": "source_event_id_missing",
+                    "tool_event_id": event.id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                },
+            )
+            return
+        try:
+            context = await context_builder.build_for_tool_event(source_event_id=source_event_id)
+            await recorder.record_from_tool_event(context=context, event=event)
+        except Exception as exc:
+            logger.exception(
+                "sandbox_fact_record_failed",
+                extra={
+                    "tool_event_id": event.id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                    "source_event_id": source_event_id,
+                    "error_type": exc.__class__.__name__,
+                },
+            )
 
     async def _emit_request_started(self, task: Task, request_id: str) -> None:
         await self._put_stream_record(
@@ -639,7 +683,12 @@ class AgentTaskRunner(TaskRunner):
                             pending_requests_rejected = True
                     else:
                         # 其他事件：仅记录事件历史。
-                        await self._put_and_add_event(task=task, event=event)
+                        source_event_id = await self._put_and_add_event(task=task, event=event)
+                        if isinstance(event, ToolEvent):
+                            await self._record_sandbox_facts_for_tool_event(
+                                event=event,
+                                source_event_id=source_event_id,
+                            )
 
             # 所有事件处理完成后，执行一次状态兜底：
             # 这里只兜底正常完成路径，不能覆盖 wait/failed 等已真实收敛的终态。

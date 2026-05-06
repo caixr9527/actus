@@ -4,12 +4,14 @@
 
 from .browser_screenshot_artifact_service import BrowserScreenshotArtifactService
 from .message_attachment_projector import MessageAttachmentProjector
+from .sandbox_fact_tool_event_projector import SandboxFactToolEventProjector
 from .tool_event_projector import ToolEventProjector
 from .user_input_attachment_projector import UserInputAttachmentProjector
 
 __all__ = [
     "BrowserScreenshotArtifactService",
     "MessageAttachmentProjector",
+    "SandboxFactToolEventProjector",
     "ToolEventProjector",
     "UserInputAttachmentProjector",
 ]

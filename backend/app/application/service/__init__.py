@@ -15,6 +15,8 @@ from .model_runtime_resolver import ModelRuntimeResolver
 from .runtime_access_control_service import RuntimeAccessControlService
 from .runtime_observation_service import RuntimeObservationService
 from .sandbox_capability_profile_service import SandboxCapabilityProfileService
+from .sandbox_fact_ledger_service import SandboxFactLedgerService
+from .sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from .session_service import SessionService
 from .status_service import StatusService
 from .user_service import UserService
@@ -31,6 +33,8 @@ __all__ = [
     "RuntimeAccessControlService",
     "RuntimeObservationService",
     "SandboxCapabilityProfileService",
+    "SandboxFactLedgerService",
+    "SandboxFactProjectionContextBuilder",
     "SessionService",
     "UserService",
 ]

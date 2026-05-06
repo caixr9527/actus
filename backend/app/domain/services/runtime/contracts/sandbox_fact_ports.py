@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -26,6 +26,17 @@ class SandboxFactProjectionContext(BaseModel):
     current_step_id: str | None = None
 
 
+class SandboxFactProjectionContextBuilderPort(Protocol):
+    async def build_for_tool_event(
+            self,
+            *,
+            source_event_id: str,
+    ) -> SandboxFactProjectionContext:
+        """由 runner/runtime 上游集中构造 ToolEvent fact 投影上下文。"""
+        ...
+
+
+@runtime_checkable
 class SandboxFactRecorderPort(Protocol):
     async def record_from_tool_event(
             self,

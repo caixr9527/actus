@@ -16,6 +16,8 @@ from pydantic import TypeAdapter
 from app.application.errors import AppException, BadRequestError, NotFoundError
 from app.application.service.document_input_preflight_policy import DocumentInputPreflightPolicy
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
+from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.application.service.sandbox_capability_profile_service import SandboxCapabilityProfileService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
@@ -54,6 +56,7 @@ from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.projectors import SandboxFactToolEventProjector
 from app.infrastructure.runtime.langgraph import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -207,6 +210,19 @@ class AgentService:
             tool_runtime_adapter=self._tool_runtime_adapter,
             runtime_state_coordinator=self._get_runtime_state_coordinator(),
             runtime_tool_snapshot_recorder=self._sandbox_capability_profile_service,
+            sandbox_fact_recorder=SandboxFactToolEventProjector(
+                ledger_service=SandboxFactLedgerService(uow_factory=self._uow_factory),
+            ),
+            sandbox_fact_context_builder=SandboxFactProjectionContextBuilder(
+                access_control_service=self._get_access_control_service(),
+                workspace_runtime_service=WorkspaceRuntimeService(
+                    session_id=session.id,
+                    user_id=session.user_id,
+                    uow_factory=self._uow_factory,
+                ),
+                user_id=session.user_id,
+                session_id=session.id,
+            ),
         )
 
     async def _ensure_periodic_sandbox_profile(self, *, user_id: str, session_id: str) -> None:

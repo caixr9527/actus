@@ -19,7 +19,6 @@ from app.application.service.sandbox_fact_ledger_service import (
     ToolFailureFactInput,
     normalize_fact_input,
 )
-from app.domain.models import ToolEvent
 from app.domain.models.sandbox_fact import (
     SandboxFactKind,
     SandboxFactProfileRef,
@@ -429,19 +428,7 @@ def test_list_facts_should_pass_user_session_scope_to_repository() -> None:
     ]
 
 
-def test_record_from_tool_event_should_not_dispatch_in_pr2() -> None:
-    repo = _SandboxFactRepo()
-    service = _service(repo)
+def test_sandbox_fact_ledger_service_should_not_implement_tool_event_recorder() -> None:
+    service = _service(_SandboxFactRepo())
 
-    with pytest.raises(NotImplementedError):
-        asyncio.run(
-            service.record_from_tool_event(
-                context=_context(),
-                event=ToolEvent(
-                    tool_call_id="tool-1",
-                    tool_name="shell",
-                    function_name="exec_command",
-                    function_args={},
-                ),
-            )
-        )
+    assert not hasattr(service, "record_from_tool_event")

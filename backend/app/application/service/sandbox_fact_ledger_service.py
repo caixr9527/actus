@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Sandbox Fact Ledger 应用服务。
 
-PR2 只接收领域输入模型并写入 fact；ToolEvent 到领域输入的适配进入 PR3。
+PR2 只接收领域输入模型并写入 fact；工具事件适配进入 PR3 projector。
 """
 
 from __future__ import annotations
@@ -17,13 +17,13 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.models import ToolEvent
 from app.domain.models.sandbox_fact import (
     BrowserActionPayload,
     BrowserSnapshotPayload,
     CommandExecutionPayload,
     DocumentContextPayload,
     FetchedPagePayload,
+    FileListPayload,
     FileMutationPayload,
     FileReadPayload,
     FileSearchPayload,
@@ -47,7 +47,6 @@ from app.domain.models.sandbox_fact import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactProjectionContext,
-    SandboxFactRecorderPort,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +100,8 @@ class _FactInput(BaseModel):
     artifact_id: str | None = None
     file_id: str | None = None
     document_source_id: str | None = None
+    missing_fields: list[str] | None = None
+    reason_code: str | None = None
 
 
 class CommandExecutionFactInput(_FactInput):
@@ -174,6 +175,25 @@ class FileSearchFactInput(_FactInput):
     match_count: int
     matches: list[FileSearchMatchInput] = Field(default_factory=list)
     is_truncated: bool = False
+
+
+class FileListEntryFactInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    type: str = "file"
+    size: int | None = None
+    mtime: datetime | None = None
+
+
+class FileListFactInput(_FactInput):
+    fact_kind: Literal[SandboxFactKind.FILE_LIST] = SandboxFactKind.FILE_LIST
+    dir_path: str
+    entry_count: int
+    entries: list[FileListEntryFactInput] = Field(default_factory=list)
+    is_truncated: bool = False
+    missing_fields: list[str] | None = None
+    reason_code: str | None = None
 
 
 class BrowserSnapshotFactInput(_FactInput):
@@ -268,6 +288,7 @@ SandboxFactInput = (
     | ShellOutputFactInput
     | FileReadFactInput
     | FileMutationFactInput
+    | FileListFactInput
     | FileSearchFactInput
     | BrowserSnapshotFactInput
     | BrowserActionFactInput
@@ -337,6 +358,12 @@ def sanitize_summary(summary: str) -> str:
     return sanitized
 
 
+def _merge_missing_fields(existing: list[str] | None, extra: list[str]) -> list[str] | None:
+    values = [str(item) for item in (existing or []) if str(item or "").strip()]
+    values.extend(str(item) for item in extra if str(item or "").strip())
+    return values or None
+
+
 def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], SandboxFactSubjectRef, str]:
     """将 PR2 领域输入归一为 fact payload、subject ref 和默认摘要。"""
 
@@ -359,15 +386,15 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             changed_paths=fact_input.changed_paths,
             timeout=fact_input.timeout,
             command_excerpt=command_excerpt,
-            missing_fields=["command_excerpt"] if command_truncated else None,
-            reason_code="command_excerpt_truncated" if command_truncated else None,
+            missing_fields=_merge_missing_fields(fact_input.missing_fields, ["command_excerpt"] if command_truncated else []),
+            reason_code=fact_input.reason_code or ("command_excerpt_truncated" if command_truncated else None),
         )
         subject = SandboxFactSubjectRef(subject_type="command", subject_key=payload.command_fingerprint)
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Command execution fact")
 
     if isinstance(fact_input, ShellOutputFactInput):
         output, output_truncated, _ = _sanitize_excerpt(fact_input.output, max_chars=MAX_LONG_EXCERPT_CHARS)
-        missing_fields = ["exit_code"] if fact_input.exit_code is None else None
+        missing_fields = _merge_missing_fields(fact_input.missing_fields, ["exit_code"] if fact_input.exit_code is None else [])
         payload = ShellOutputPayload(
             session_ref=fact_input.session_ref,
             output_excerpt=output,
@@ -377,7 +404,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             exit_code=fact_input.exit_code,
             duration_ms=fact_input.duration_ms,
             missing_fields=missing_fields,
-            reason_code="exit_code_unavailable" if missing_fields else None,
+            reason_code=fact_input.reason_code or ("exit_code_unavailable" if fact_input.exit_code is None else None),
         )
         subject = SandboxFactSubjectRef(subject_type="command", subject_key=f"shell:{fact_input.session_ref}")
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Shell output fact")
@@ -429,9 +456,23 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             matches=matches,
             is_truncated=fact_input.is_truncated or len(fact_input.matches) > MAX_FILE_SEARCH_MATCHES,
             regex_excerpt=_sanitize_excerpt(fact_input.regex, max_chars=300)[0],
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
         )
         subject = SandboxFactSubjectRef(subject_type="file", subject_key=f"{fact_input.path}:{payload.regex_hash}", path=fact_input.path)
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "File search fact")
+
+    if isinstance(fact_input, FileListFactInput):
+        payload = FileListPayload(
+            dir_path=fact_input.dir_path,
+            entry_count=fact_input.entry_count,
+            entries=[item.model_dump(mode="json") for item in fact_input.entries[:MAX_SEARCH_RESULTS]],
+            is_truncated=fact_input.is_truncated or len(fact_input.entries) > MAX_SEARCH_RESULTS,
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
+        )
+        subject = SandboxFactSubjectRef(subject_type="file", subject_key=fact_input.dir_path, path=fact_input.dir_path)
+        return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "File list fact")
 
     if isinstance(fact_input, BrowserSnapshotFactInput):
         url_hash = hash_url(fact_input.url) or hash_text("")
@@ -444,6 +485,8 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             structured_summary=_sanitize_excerpt(fact_input.structured_summary, max_chars=MAX_LONG_EXCERPT_CHARS)[0],
             actionable_element_count=fact_input.actionable_element_count,
             degrade_reason=fact_input.degrade_reason,
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
         )
         subject = SandboxFactSubjectRef(subject_type="browser", subject_key=url_hash, url_hash=url_hash)
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Browser snapshot fact")
@@ -456,6 +499,8 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             url_hash_after=hash_url(fact_input.url_after),
             success=fact_input.success,
             degrade_reason=fact_input.degrade_reason,
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
         )
         subject = SandboxFactSubjectRef(subject_type="browser", subject_key=f"{fact_input.action}:{payload.url_hash_after or payload.url_hash_before or ''}")
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Browser action fact")
@@ -478,6 +523,8 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             result_count=fact_input.result_count,
             top_results=top_results,
             is_truncated=fact_input.is_truncated or len(fact_input.top_results) > MAX_SEARCH_RESULTS,
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
         )
         subject = SandboxFactSubjectRef(subject_type="search", subject_key=payload.query_hash)
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Search result fact")
@@ -493,6 +540,8 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             title=_sanitize_excerpt(fact_input.title, max_chars=500)[0],
             excerpt=excerpt,
             is_truncated=fact_input.is_truncated or excerpt_truncated,
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
         )
         subject = SandboxFactSubjectRef(subject_type="page", subject_key=fetched_url_hash, url_hash=fetched_url_hash)
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Fetched page fact")
@@ -542,19 +591,11 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
     raise ValueError(f"不支持的 sandbox fact 输入类型: {type(fact_input).__name__}")
 
 
-class SandboxFactLedgerService(SandboxFactRecorderPort):
+class SandboxFactLedgerService:
     """Sandbox Fact 写入与查询的应用层唯一入口。"""
 
     def __init__(self, *, uow_factory) -> None:
         self._uow_factory = uow_factory
-
-    async def record_from_tool_event(
-            self,
-            *,
-            context: SandboxFactProjectionContext,
-            event: ToolEvent,
-    ) -> list[SandboxFactRecord]:
-        raise NotImplementedError("PR2 不实现 ToolEvent 到 Sandbox Fact 的分发，固定进入 PR3")
 
     async def record_fact(
             self,
