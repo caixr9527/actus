@@ -1,7 +1,7 @@
 import asyncio
 
 from app.application.service.agent_service import AgentService
-from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.models import RuntimeLLMConfig, Session, SessionStatus
 
 

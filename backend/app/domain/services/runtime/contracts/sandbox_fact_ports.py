@@ -4,20 +4,16 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
 from app.domain.models import SandboxFactEvent, ToolEvent
 from app.domain.models.sandbox_fact import SandboxFactRecord
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.sandbox_fact_contract import (
     SandboxFactProfileRef,
 )
-
-if TYPE_CHECKING:
-    from app.application.service.runtime_access_control_service import AccessScopeResult
-else:
-    AccessScopeResult = Any
 
 
 class SandboxFactProjectionContext(BaseModel):

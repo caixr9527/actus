@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.domain.models import ToolEvent, ToolEventStatus, ToolResult

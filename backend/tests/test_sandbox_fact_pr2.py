@@ -4,7 +4,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.application.service.sandbox_fact_ledger_service import (
     CommandExecutionFactInput,
     DocumentContextFactInput,

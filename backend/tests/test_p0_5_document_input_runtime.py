@@ -14,7 +14,7 @@ from app.application.service.document_input_service import (
     DocumentInputService,
     FileStorageDocumentAttachmentReader,
 )
-from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.models import (
     ErrorEvent,
     ExecutionStatus,

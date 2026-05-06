@@ -24,7 +24,7 @@ from app.domain.models import (
     SessionStatus,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext
 from app.infrastructure.runtime.langgraph.engine.run_engine import DocumentInputContractError, LangGraphRunEngine
 

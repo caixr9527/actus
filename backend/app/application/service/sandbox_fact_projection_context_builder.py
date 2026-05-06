@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
-from app.application.service.runtime_access_control_service import AccessScopeResult
 from app.domain.models.sandbox_fact import SandboxFactProfileRef
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactProjectionContext,

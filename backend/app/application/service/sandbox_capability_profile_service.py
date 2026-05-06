@@ -10,10 +10,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Callable, Sequence, Type
 
-from app.application.service.runtime_access_control_service import (
-    AccessScopeResult,
-    RuntimeAccessControlService,
-)
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_capability_profile_normalizer import (
     normalize_sandbox_raw_profile,
 )
@@ -22,6 +19,7 @@ from app.application.service.sandbox_capability_profile_sanitizer import (
 )
 from app.domain.external import Sandbox
 from app.domain.models import ToolResult, Workspace
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.contracts.data_access_contract import (
     DataAccessAction,

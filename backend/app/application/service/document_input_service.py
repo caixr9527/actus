@@ -14,7 +14,7 @@ from typing import Any, BinaryIO, Protocol
 
 from pydantic import BaseModel
 
-from app.application.service.runtime_access_control_service import AccessScopeResult
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.external import FileStorage
 from app.domain.models import File
 from app.domain.services.runtime.contracts.document_input_contract import (

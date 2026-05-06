@@ -21,19 +21,9 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     RetentionPolicyKind,
     normalize_tenant_id,
 )
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 
 logger = logging.getLogger(__name__)
-
-
-class AccessScopeResult(BaseModel):
-    """已校验的数据访问范围。"""
-
-    tenant_id: str
-    user_id: str
-    session_id: str | None = None
-    workspace_id: str | None = None
-    run_id: str | None = None
-    current_step_id: str | None = None
 
 
 class AccessDecisionResult(BaseModel):
