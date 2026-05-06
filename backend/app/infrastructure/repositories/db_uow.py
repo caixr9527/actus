@@ -14,6 +14,7 @@ from app.domain.repositories import IUnitOfWork
 from .db_file_repository import DBFileRepository
 from .db_llm_model_config_repository import DBLLMModelConfigRepository
 from .db_long_term_memory_repository import DBLongTermMemoryRepository
+from .db_sandbox_fact_repository import DBSandboxFactRepository
 from .db_session_repository import DBSessionRepository
 from .db_session_context_snapshot_repository import DBSessionContextSnapshotRepository
 from .db_user_repository import DBUserRepository
@@ -66,6 +67,7 @@ class DBUnitOfWork(IUnitOfWork):
         self.user = DBUserRepository(db_session=self.db_session)
         self.llm_model_config = DBLLMModelConfigRepository(db_session=self.db_session)
         self.long_term_memory = DBLongTermMemoryRepository(db_session=self.db_session)
+        self.sandbox_fact = DBSandboxFactRepository(db_session=self.db_session)
         self.workflow_run = DBWorkflowRunRepository(db_session=self.db_session)
         self.workflow_run_summary = DBWorkflowRunSummaryRepository(db_session=self.db_session)
         self.session_context_snapshot = DBSessionContextSnapshotRepository(db_session=self.db_session)

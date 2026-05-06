@@ -79,6 +79,13 @@ from .runtime_state import (
     RuntimeTransition,
     ResumeGateInspection,
 )
+from .sandbox_fact import (
+    SandboxFactKind,
+    SandboxFactRecord,
+    SandboxFactScope,
+    SandboxFactSourceType,
+    SandboxFactVisibility,
+)
 from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
@@ -163,6 +170,11 @@ __all__ = [
     "RuntimeStateSource",
     "RuntimeTransition",
     "ResumeGateInspection",
+    "SandboxFactKind",
+    "SandboxFactRecord",
+    "SandboxFactScope",
+    "SandboxFactSourceType",
+    "SandboxFactVisibility",
     "File",
     "Message",
     "MessageCommand",

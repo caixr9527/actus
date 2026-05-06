@@ -9,6 +9,7 @@ from .base import Base
 from .file import FileModel
 from .llm_model_config import LLMModelConfigModel
 from .long_term_memory import LongTermMemoryModel
+from .sandbox_fact import SandboxFactModel
 from .session import SessionModel
 from .session_context_snapshot import SessionContextSnapshotModel
 from .user import UserModel
@@ -28,6 +29,7 @@ __all__ = [
     "UserProfileModel",
     "LLMModelConfigModel",
     "LongTermMemoryModel",
+    "SandboxFactModel",
     "SessionContextSnapshotModel",
     "WorkflowRunModel",
     "WorkflowRunEventModel",
