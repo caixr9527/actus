@@ -1,9 +1,18 @@
 import asyncio
+from datetime import datetime, timedelta
 
 from app.domain.models import Step
 from app.domain.models import Workspace
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+    RuntimeToolCapabilitySnapshot,
+    RuntimeToolCapabilitySnapshotItem,
+    SandboxCapabilityItem,
+    SandboxCapabilityKind,
+    SandboxCapabilityPromptSummary,
+    SandboxCapabilityStatus,
+    SandboxProfileRefreshReason,
+    build_sandbox_capability_profile_from_draft,
 )
 from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -63,20 +72,57 @@ class _WorkspaceRuntimeService:
         return WorkspaceEnvironmentSnapshot(workspace=self._workspace, artifacts=[])
 
 
+def _build_profile_payload() -> dict:
+    now = datetime(2026, 5, 5, 10, 0, 0)
+    draft = {
+        "schema_version": "sandbox_capability_profile.v1",
+        "profile_id": "profile-1",
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "sandbox_id": "sandbox-1",
+        "generated_at": now,
+        "expires_at": now + timedelta(minutes=30),
+        "refresh_reason": SandboxProfileRefreshReason.SANDBOX_CREATED,
+        "health_status": SandboxCapabilityStatus.AVAILABLE,
+        "cwd": "/workspace",
+        "capabilities": [
+            SandboxCapabilityItem(
+                kind=SandboxCapabilityKind.PYTHON,
+                name="python3",
+                status=SandboxCapabilityStatus.AVAILABLE,
+                version="3.12.1",
+                path="/usr/bin/python3",
+            ),
+        ],
+        "runtime_tool_capabilities": RuntimeToolCapabilitySnapshot(
+            items=[
+                RuntimeToolCapabilitySnapshotItem(
+                    capability_id="local_shell",
+                    tool_family="shell",
+                    source="local",
+                ),
+            ]
+        ),
+        "prompt_summary": SandboxCapabilityPromptSummary(
+            health_status=SandboxCapabilityStatus.AVAILABLE,
+            cwd="/workspace",
+            available_tools=["shell"],
+            generated_at=now,
+            sandbox_profile_stale=False,
+        ),
+    }
+    return build_sandbox_capability_profile_from_draft(draft).model_dump(mode="json")
+
+
 def _context_service_with_sandbox_profile() -> RuntimeContextService:
     workspace = Workspace(
         id="workspace-1",
         session_id="session-1",
         user_id="user-1",
         environment_summary={
-            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY: {
-                "prompt_summary": {
-                    "health_status": "available",
-                    "cwd": "/workspace",
-                    "available_tools": ["shell"],
-                    "sandbox_profile_stale": False,
-                }
-            }
+            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY: _build_profile_payload()
         },
     )
     return RuntimeContextService(
