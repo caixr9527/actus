@@ -6,6 +6,7 @@
 @File   : __init__.py.py
 """
 from .base import Base
+from .evidence import EvidenceModel
 from .file import FileModel
 from .llm_model_config import LLMModelConfigModel
 from .long_term_memory import LongTermMemoryModel
@@ -23,6 +24,7 @@ from .workspace_artifact import WorkspaceArtifactModel
 
 __all__ = [
     "Base",
+    "EvidenceModel",
     "SessionModel",
     "FileModel",
     "UserModel",

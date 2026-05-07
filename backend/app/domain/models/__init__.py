@@ -52,6 +52,19 @@ from .event import (
     MCPToolContent,
     A2AToolContent,
 )
+from .evidence import (
+    EvidenceKind,
+    EvidenceQualityStatus,
+    EvidenceRecord,
+    EvidenceResultHandle,
+    EvidenceResultRef,
+    EvidenceResultRefType,
+    EvidenceReusePolicy,
+    EvidenceScope,
+    EvidenceSourceType,
+    EvidenceStalenessPolicy,
+    EvidenceSupportLevel,
+)
 from .file import File
 from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
@@ -204,6 +217,17 @@ __all__ = [
     "FileToolContent",
     "MCPToolContent",
     "A2AToolContent",
+    "EvidenceKind",
+    "EvidenceQualityStatus",
+    "EvidenceRecord",
+    "EvidenceResultHandle",
+    "EvidenceResultRef",
+    "EvidenceResultRefType",
+    "EvidenceReusePolicy",
+    "EvidenceScope",
+    "EvidenceSourceType",
+    "EvidenceStalenessPolicy",
+    "EvidenceSupportLevel",
     "User",
     "UserProfile",
     "UserStatus",
