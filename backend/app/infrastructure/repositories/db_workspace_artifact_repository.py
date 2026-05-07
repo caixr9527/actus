@@ -155,6 +155,21 @@ class DBWorkspaceArtifactRepository(WorkspaceArtifactRepository):
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
 
+    async def get_by_user_workspace_id_and_id(
+            self,
+            user_id: str,
+            workspace_id: str,
+            artifact_id: str,
+    ) -> Optional[WorkspaceArtifact]:
+        stmt = select(WorkspaceArtifactModel).where(
+            WorkspaceArtifactModel.user_id == user_id,
+            WorkspaceArtifactModel.workspace_id == workspace_id,
+            WorkspaceArtifactModel.id == artifact_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
     async def update_delivery_state_by_workspace_id_and_paths(
             self,
             *,

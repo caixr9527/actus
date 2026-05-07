@@ -129,3 +129,14 @@ class WorkflowRunRepository(Protocol):
     async def list_event_records_by_session(self, session_id: str) -> List[WorkflowRunEventRecord]:
         """按 session_id 读取同会话下全部运行事件记录。"""
         ...
+
+    async def get_event_record_by_event_id(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            run_id: str,
+            event_id: str,
+    ) -> Optional[WorkflowRunEventRecord]:
+        """按 user/session/run/event 强过滤读取运行事件，禁止裸 event id 查询。"""
+        ...

@@ -379,3 +379,21 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
     async def list_events_by_session(self, session_id: str) -> List[Event]:
         records = await self.list_event_records_by_session(session_id=session_id)
         return [record.event_payload for record in records]
+
+    async def get_event_record_by_event_id(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            run_id: str,
+            event_id: str,
+    ) -> Optional[WorkflowRunEventRecord]:
+        stmt = select(WorkflowRunEventModel).where(
+            WorkflowRunEventModel.user_id == user_id,
+            WorkflowRunEventModel.session_id == session_id,
+            WorkflowRunEventModel.run_id == run_id,
+            WorkflowRunEventModel.event_id == event_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None

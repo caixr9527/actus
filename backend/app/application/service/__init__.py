@@ -9,6 +9,8 @@ from .auth_service import AuthService
 from .app_config_service import AppConfigService
 from .document_input_preflight_policy import DocumentInputPreflightPolicy
 from .document_input_service import DocumentInputService
+from .evidence_ledger_service import EvidenceLedgerService
+from .evidence_result_handle_resolver import EvidenceResultHandleResolver
 from .file_service import FileService
 from .model_config_service import ModelConfigService
 from .model_runtime_resolver import ModelRuntimeResolver
@@ -27,6 +29,8 @@ __all__ = [
     "AppConfigService",
     "DocumentInputPreflightPolicy",
     "DocumentInputService",
+    "EvidenceLedgerService",
+    "EvidenceResultHandleResolver",
     "StatusService",
     "FileService",
     "ModelConfigService",

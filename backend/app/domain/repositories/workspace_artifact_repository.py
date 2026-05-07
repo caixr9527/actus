@@ -59,6 +59,15 @@ class WorkspaceArtifactRepository(Protocol):
         """按用户 + 工作区 ID + 路径查询单个产物。"""
         ...
 
+    async def get_by_user_workspace_id_and_id(
+            self,
+            user_id: str,
+            workspace_id: str,
+            artifact_id: str,
+    ) -> Optional[WorkspaceArtifact]:
+        """按用户 + 工作区 ID + 产物 ID 强过滤查询单个产物。"""
+        ...
+
     async def update_delivery_state_by_workspace_id_and_paths(
             self,
             *,
