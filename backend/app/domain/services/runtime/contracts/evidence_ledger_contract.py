@@ -227,6 +227,8 @@ class DocumentEvidencePayload(_StrictPayload):
 
 class SearchEvidencePayload(_StrictPayload):
     query_excerpt: str
+    query_hash: str | None = None
+    verification_reason_code: str | None = None
     result_count: int
     top_result_origins: list[str]
     source_fact_id: str
@@ -236,6 +238,8 @@ class SearchEvidencePayload(_StrictPayload):
 
 class PageEvidencePayload(_StrictPayload):
     origin: str
+    url_hash: str | None = None
+    verification_reason_code: str | None = None
     title: str
     status_code: int | None = None
     source_fact_id: str
@@ -246,6 +250,7 @@ class PageEvidencePayload(_StrictPayload):
 class FileEvidencePayload(_StrictPayload):
     path: str
     operation: str
+    mutation_intent_hash: str | None = None
     exists: bool
     content_sha256: str | None = None
     content_sha256_kind: str

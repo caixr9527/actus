@@ -258,6 +258,7 @@ def _payload_for_kind(
         EvidenceKind.FILE_EVIDENCE: {
             "path": "/workspace/a.txt",
             "operation": "read",
+            "mutation_intent_hash": None,
             "exists": True,
             "content_sha256": "sha256:file",
             "content_sha256_kind": "read_content_sha256",

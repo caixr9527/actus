@@ -16,6 +16,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import build_default_external_signals_snapshot
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.artifact_policy import evaluate_artifact_policy
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.human_wait_policy import evaluate_human_wait_policy
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.evidence_reuse_policy import evaluate_evidence_reuse_policy
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.repeat_loop_policy import evaluate_repeat_loop_policy
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.research_route_policy import build_research_route_rewrite_decision
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.research_route_policy import evaluate_research_route_policy
@@ -271,6 +272,7 @@ class ConstraintEngine:
                 ("artifact_policy", evaluate_artifact_policy),
                 ("human_wait_policy", evaluate_human_wait_policy),
                 ("research_route_policy", evaluate_research_route_policy),
+                ("evidence_reuse_policy", evaluate_evidence_reuse_policy),
                 ("repeat_loop_policy", evaluate_repeat_loop_policy),
         ):
             try:

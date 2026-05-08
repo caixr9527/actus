@@ -3144,6 +3144,20 @@ class _FetchOnlyTool:
         return str(function_name or "").strip().lower() == "fetch_page"
 
 
+class _CountingTool:
+    name = "counting-tool"
+
+    def __init__(self) -> None:
+        self.invocation_count = 0
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == "read_file"
+
+    async def invoke(self, function_name: str, **kwargs: Any) -> ToolResult:
+        self.invocation_count += 1
+        return ToolResult(success=True, data={"path": kwargs.get("path")})
+
+
 def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missing_ask_user() -> None:
     llm = _FakeNoToolLLM({"content": '{"success": true, "summary": "ok"}'})
     step = Step(description="等待用户确认后继续")
@@ -3458,6 +3472,56 @@ def test_policy_engine_should_not_count_blocked_search_call_as_real_invocation()
     assert execution_state.search_invocation_count == 0
     assert execution_state.search_repeat_counter == {}
     assert execution_state.same_tool_repeat_count == 0
+
+
+def test_policy_engine_should_fail_closed_for_invalid_evidence_snapshot_without_invoking_tool() -> None:
+    logger = logging.getLogger(__name__)
+    engine = ToolPolicyEngine(logger=logger)
+    execution_state = ExecutionState()
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取文件"}],
+        available_tools=[],
+        available_function_names={"read_file"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    tool = _CountingTool()
+
+    result = asyncio.run(
+        engine.evaluate_tool_call(
+            step=Step(description="读取 /workspace/a.txt"),
+            task_mode="general",
+            function_name="read_file",
+            normalized_function_name="read_file",
+            function_args={"path": "/workspace/a.txt"},
+            matched_tool=tool,  # type: ignore[arg-type]
+            runtime_tools=[tool],  # type: ignore[list-item]
+            browser_route_state_key="",
+            iteration_blocked_function_names=set(),
+            execution_context=execution_context,
+            execution_state=execution_state,
+            started_at=time.perf_counter(),
+            evidence_reuse_snapshot={"run_id": "run-1"},  # type: ignore[arg-type]
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is False
+    assert result.loop_break_reason == REASON_CONSTRAINT_ENGINE_ERROR
+    assert result.tool_cost_ms == 0
+    assert result.final_normalized_function_name == "read_file"
+    assert tool.invocation_count == 0
+    assert execution_state.same_tool_repeat_count == 0
+    assert execution_state.runtime_recent_action["last_failed_action"]["function_name"] == "read_file"
 
 
 def test_apply_tool_preinvoke_effects_should_track_repeat_counters() -> None:

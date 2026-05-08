@@ -4,6 +4,7 @@
 
 from .artifact_policy import evaluate_artifact_policy
 from .human_wait_policy import evaluate_human_wait_policy
+from .evidence_reuse_policy import evaluate_evidence_reuse_policy
 from .repeat_loop_policy import evaluate_repeat_loop_policy
 from .research_route_policy import (
     build_research_route_rewrite_decision,
@@ -15,6 +16,7 @@ from .task_mode_policy import evaluate_task_mode_policy
 __all__ = [
     "evaluate_artifact_policy",
     "evaluate_human_wait_policy",
+    "evaluate_evidence_reuse_policy",
     "evaluate_repeat_loop_policy",
     "evaluate_research_route_policy",
     "build_research_route_rewrite_decision",

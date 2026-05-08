@@ -41,3 +41,4 @@ class PromptContextPacket(TypedDict, total=False):
     stable_background: Dict[str, Any]
     prompt_visible_fields: List[str]
     audit_refs: Dict[str, Any]
+    evidence_context: Dict[str, Any]

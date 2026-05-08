@@ -141,6 +141,7 @@ def _payload_for_kind(
     base_file_mutation = {
         "path": "/workspace/a.txt",
         "operation": "write",
+        "mutation_intent_hash": "sha256:intent",
         "exists": True,
         "before_content_sha256": None,
         "after_content_sha256": "sha256:after",

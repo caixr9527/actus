@@ -49,8 +49,25 @@ def _extract_prompt_context_state_updates(
 
 def _append_prompt_context_to_prompt(prompt: str, context_packet: Dict[str, Any]) -> str:
     """将结构化 context packet 追加到 Prompt，避免节点手写上下文拼装。"""
-    context_json = json.dumps(context_packet, ensure_ascii=False, indent=2)
+    context_json = json.dumps(_build_prompt_safe_context_packet(context_packet), ensure_ascii=False, indent=2)
     return f"{prompt}\n\n已知上下文:\n```json\n{context_json}\n```"
+
+
+def _build_prompt_safe_context_packet(context_packet: Dict[str, Any]) -> Dict[str, Any]:
+    """裁剪 prompt 可见上下文，结构化 evidence context 只给 runtime 消费。"""
+    visible_fields = [
+        str(field_name)
+        for field_name in list(context_packet.get("prompt_visible_fields") or [])
+        if str(field_name) != "evidence_context"
+    ]
+    safe_packet = {
+        field_name: context_packet[field_name]
+        for field_name in visible_fields
+        if field_name in context_packet
+    }
+    if "prompt_visible_fields" in context_packet:
+        safe_packet["prompt_visible_fields"] = visible_fields
+    return safe_packet
 
 
 def extract_document_attachment_paths(input_parts: List[Dict[str, Any]]) -> List[str]:

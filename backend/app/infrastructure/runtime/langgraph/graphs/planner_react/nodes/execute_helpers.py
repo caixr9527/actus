@@ -32,6 +32,10 @@ from app.domain.services.runtime.contracts.final_output_contract import (
     assert_state_update_allowed,
 )
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.services.runtime.contracts.evidence_ledger_contract import (
+    EvidenceResultHandle,
+    RuntimeEvidenceContextResult,
+)
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_execution_response,
@@ -87,6 +91,11 @@ class ExecuteStepPreparedInput:
     available_file_context: bool
     execute_context_updates: Dict[str, Any]
     initial_runtime_recent_action: Dict[str, Any]
+    runtime_evidence_context: Optional[RuntimeEvidenceContextResult]
+    has_previous_completed_steps: bool
+    result_handle_index: Dict[str, EvidenceResultHandle]
+    pending_evidence_resolution: Dict[str, Any]
+    pending_resolution_tool_result: Optional[Any]
     user_content: List[Dict[str, Any]]
 
 
@@ -398,6 +407,8 @@ async def prepare_execute_step_input(
         runtime_context_service=runtime_context_service,
         context_packet=execute_context_packet,
     )
+    runtime_evidence_context = _extract_runtime_evidence_context(execute_context_packet)
+    completed_step_ids = _collect_completed_step_ids_for_execute(state=state, current_step=step)
     initial_runtime_recent_action = runtime_context_service.normalize_runtime_recent_action(
         execute_context_packet.get("recent_action_digest")
     )
@@ -414,8 +425,49 @@ async def prepare_execute_step_input(
         available_file_context=available_file_context,
         execute_context_updates=execute_context_updates,
         initial_runtime_recent_action=initial_runtime_recent_action,
+        runtime_evidence_context=runtime_evidence_context,
+        has_previous_completed_steps=bool(completed_step_ids),
+        result_handle_index=(
+            dict(runtime_evidence_context.result_handle_index)
+            if runtime_evidence_context is not None
+            else {}
+        ),
+        pending_evidence_resolution={},
+        pending_resolution_tool_result=None,
         user_content=user_content,
     )
+
+
+def _extract_runtime_evidence_context(context_packet: Dict[str, Any]) -> Optional[RuntimeEvidenceContextResult]:
+    raw_context = context_packet.get("evidence_context")
+    if raw_context is None:
+        return None
+    return RuntimeEvidenceContextResult.model_validate(raw_context)
+
+
+def _collect_completed_step_ids_for_execute(
+        *,
+        state: PlannerReActLangGraphState,
+        current_step: Step,
+) -> list[str]:
+    current_step_id = str(getattr(current_step, "id", "") or "").strip()
+    completed_ids: list[str] = []
+    for item in list(state.get("step_states") or []):
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("step_id") or "").strip()
+        if not step_id or step_id == current_step_id or step_id in completed_ids:
+            continue
+        if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value:
+            completed_ids.append(step_id)
+    plan = state.get("plan")
+    for plan_step in list(getattr(plan, "steps", []) or []):
+        step_id = str(getattr(plan_step, "id", "") or "").strip()
+        if not step_id or step_id == current_step_id or step_id in completed_ids:
+            continue
+        if getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED:
+            completed_ids.append(step_id)
+    return completed_ids
 
 
 def build_timeout_execution_message(*, step: Step, timeout_seconds: int) -> Dict[str, Any]:

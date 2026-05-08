@@ -11,7 +11,9 @@ from app.domain.external import LLM
 from app.domain.models import ExecutionStatus, StepEvent, StepEventStatus, ToolEvent
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.contracts.langgraph_settings import STEP_EXECUTION_TIMEOUT_SECONDS
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
+from app.domain.models.evidence import EvidenceResolvedStatus
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -54,6 +56,7 @@ async def execute_step_node(
         state: PlannerReActLangGraphState,
         llm: LLM,
         runtime_context_service: RuntimeContextService,
+        evidence_result_handle_resolver=None,
         skill_runtime: Optional[SkillGraphRuntime] = None,
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
@@ -131,6 +134,14 @@ async def execute_step_node(
                     artifact_paths=prepared_execute_input.available_file_context_refs,
                     has_available_file_context=prepared_execute_input.available_file_context,
                     initial_runtime_recent_action=prepared_execute_input.initial_runtime_recent_action,
+                    runtime_evidence_context=prepared_execute_input.runtime_evidence_context,
+                    has_previous_completed_steps=prepared_execute_input.has_previous_completed_steps,
+                )
+                llm_message = await _resolve_pending_evidence_reuse(
+                    llm_message=llm_message,
+                    prepared_input=prepared_execute_input,
+                    state=state,
+                    evidence_result_handle_resolver=evidence_result_handle_resolver,
                 )
                 tool_cost_ms = elapsed_ms(tool_started_at)
 
@@ -285,4 +296,155 @@ async def execute_step_node(
         state,
         updates=completed_transition.updates,
         events=completed_transition.events,
+    )
+
+
+async def _resolve_pending_evidence_reuse(
+        *,
+        llm_message: Optional[Dict[str, object]],
+        prepared_input,
+        state: PlannerReActLangGraphState,
+        evidence_result_handle_resolver,
+) -> Optional[Dict[str, object]]:
+    if evidence_result_handle_resolver is None or not isinstance(llm_message, dict):
+        return llm_message
+    if str(llm_message.get("loop_break_reason") or "") != "virtual_success_pending_resolution":
+        return llm_message
+    data = llm_message.get("data")
+    if not isinstance(data, dict):
+        return llm_message
+    result_handle_id = str(data.get("result_handle_id") or "").strip()
+    handle = prepared_input.result_handle_index.get(result_handle_id)
+    if handle is None:
+        _log_pending_evidence_resolution(
+            event_name="evidence_result_handle_resolve_failed",
+            state=state,
+            current_step_id=(
+                str(prepared_input.runtime_evidence_context.current_step_id or "")
+                if prepared_input.runtime_evidence_context
+                else ""
+            ),
+            result_handle_id=result_handle_id,
+            read_strategy="",
+            status="missing",
+            reason_code="result_handle_missing",
+        )
+        return {
+            **llm_message,
+            "success": False,
+            "loop_break_reason": "result_handle_missing",
+            "data": {**data, "reason_code": "result_handle_missing"},
+        }
+    scope = _build_resolver_scope(state=state, current_step_id=str(prepared_input.runtime_evidence_context.current_step_id or "") if prepared_input.runtime_evidence_context else "")
+    if scope is None:
+        _log_pending_evidence_resolution(
+            event_name="evidence_result_handle_resolve_failed",
+            state=state,
+            current_step_id=(
+                str(prepared_input.runtime_evidence_context.current_step_id or "")
+                if prepared_input.runtime_evidence_context
+                else ""
+            ),
+            result_handle_id=result_handle_id,
+            read_strategy=handle.read_strategy.value,
+            status="scope_missing",
+            reason_code="evidence_scope_missing",
+        )
+        return {
+            **llm_message,
+            "success": False,
+            "loop_break_reason": "result_handle_resolve_failed",
+            "data": {**data, "reason_code": "evidence_scope_missing"},
+        }
+    resolved = await evidence_result_handle_resolver.resolve(scope=scope, handle=handle)
+    if resolved.status != EvidenceResolvedStatus.RESOLVED:
+        _log_pending_evidence_resolution(
+            event_name=(
+                "evidence_result_handle_stale"
+                if resolved.status == EvidenceResolvedStatus.STALE
+                else "evidence_result_handle_resolve_failed"
+            ),
+            state=state,
+            current_step_id=str(scope.current_step_id or ""),
+            result_handle_id=result_handle_id,
+            read_strategy=handle.read_strategy.value,
+            status=resolved.status.value,
+            reason_code=resolved.reason_code,
+        )
+        return {
+            **llm_message,
+            "success": False,
+            "loop_break_reason": "result_handle_resolve_failed",
+            "data": {
+                **data,
+                "result_handle_resolved": False,
+                "resolved_status": resolved.status.value,
+                "reason_code": resolved.reason_code,
+            },
+        }
+    _log_pending_evidence_resolution(
+        event_name="evidence_result_handle_resolved",
+        state=state,
+        current_step_id=str(scope.current_step_id or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=handle.read_strategy.value,
+        status=resolved.status.value,
+        reason_code=resolved.reason_code or "resolved",
+    )
+    return {
+        **llm_message,
+        "success": True,
+        "summary": str(resolved.summary or data.get("reuse_summary") or "已复用前序证据结果"),
+        "loop_break_reason": "evidence_reuse_allowed",
+        "data": {
+            **data,
+            "duplicate_decision": "reuse_existing_evidence",
+            "result_handle_resolved": True,
+            "resolved_result": resolved.model_dump(mode="json"),
+        },
+    }
+
+
+def _log_pending_evidence_resolution(
+        *,
+        event_name: str,
+        state: PlannerReActLangGraphState,
+        current_step_id: str,
+        result_handle_id: str,
+        read_strategy: str,
+        status: str,
+        reason_code: str | None,
+) -> None:
+    log_runtime(
+        logger,
+        logging.INFO,
+        event_name,
+        state={**state, "current_step_id": current_step_id or state.get("current_step_id")},
+        user_id=str(state.get("user_id") or ""),
+        workspace_id=str(state.get("workspace_id") or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=read_strategy,
+        status=status,
+        reason_code=str(reason_code or ""),
+    )
+
+
+def _build_resolver_scope(
+        *,
+        state: PlannerReActLangGraphState,
+        current_step_id: str,
+) -> AccessScopeResult | None:
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    workspace_id = str(state.get("workspace_id") or "").strip()
+    run_id = str(state.get("run_id") or "").strip()
+    if not user_id or not session_id or not workspace_id or not run_id:
+        return None
+    return AccessScopeResult(
+        tenant_id=user_id,
+        user_id=user_id,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        current_step_id=current_step_id or str(state.get("current_step_id") or "").strip() or None,
     )

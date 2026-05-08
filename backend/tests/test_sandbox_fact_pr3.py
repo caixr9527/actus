@@ -6,12 +6,14 @@ import pytest
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.application.service.sandbox_fact_ledger_service import (
     CommandExecutionFactInput,
+    FileMutationFactInput,
     SandboxFactLedgerService,
     SandboxFactProfileMismatchError,
 )
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.domain.models import ToolEvent, ToolEventStatus, ToolResult
 from app.domain.models.sandbox_fact import SandboxFactKind, SandboxFactProfileRef, SandboxFactRecord
+from app.domain.services.runtime.contracts.evidence_key_normalizer import build_file_mutation_intent_hash
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext, SandboxFactRecorderPort
 from app.domain.services.workspace_runtime.projectors import SandboxFactToolEventProjector
 
@@ -155,6 +157,56 @@ def test_projection_context_builder_should_preserve_missing_profile_ref() -> Non
     assert context.sandbox_id == "sandbox-1"
     assert context.profile_ref.status == "missing"
     assert context.profile_ref.sandbox_id is None
+
+
+def test_file_mutation_fact_input_should_require_mutation_intent_hash() -> None:
+    with pytest.raises(Exception):
+        FileMutationFactInput(
+            fact_kind=SandboxFactKind.FILE_WRITE,
+            path="/workspace/a.txt",
+            operation="write",
+            exists=True,
+            content_sha256_kind="read_content_sha256",
+            changed=True,
+        )
+
+
+def test_tool_event_projector_should_use_normalized_file_mutation_intent_hash() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-1",
+        tool_call_id="call-1",
+        tool_name="workspace",
+        function_name="write_file",
+        function_args={
+            "path": "/workspace/dir/../a.txt",
+            "content": "new content",
+        },
+        function_result=ToolResult(
+            success=True,
+            data={
+                "path": "/workspace/dir/../a.txt",
+                "after_content_sha256": "sha256:file-v2",
+                "content_sha256_kind": "read_content_sha256",
+                "size_after": 11,
+                "changed": True,
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts[0].payload["mutation_intent_hash"] == build_file_mutation_intent_hash(
+        path="/workspace/a.txt",
+        operation="write",
+        content="new content",
+        old_str="",
+        new_str="",
+        append=False,
+        leading_newline=False,
+        trailing_newline=False,
+    )
 
 
 def test_projection_context_builder_should_mark_profile_ref_invalid_when_profile_load_fails() -> None:

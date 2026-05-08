@@ -150,6 +150,7 @@ class FileMutationFactInput(_FactInput):
     ]
     path: str
     operation: Literal["write", "delete", "snapshot"]
+    mutation_intent_hash: str
     exists: bool
     before_content_sha256: str | None = None
     after_content_sha256: str | None = None
@@ -432,6 +433,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         payload = FileMutationPayload(
             path=fact_input.path,
             operation=fact_input.operation,
+            mutation_intent_hash=fact_input.mutation_intent_hash,
             exists=fact_input.exists,
             before_content_sha256=fact_input.before_content_sha256,
             after_content_sha256=fact_input.after_content_sha256,

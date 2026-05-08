@@ -66,6 +66,7 @@ from app.application.service.document_input_service import (
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceResultHandleResolverPort
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
     bind_live_event_sink,
@@ -157,6 +158,7 @@ class LangGraphRunEngine(RunEngine):
             sandbox_fact_document_projector: SandboxFactDocumentInputProjector | None = None,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             access_control_service: RuntimeAccessControlService | None = None,
+            evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
@@ -170,6 +172,7 @@ class LangGraphRunEngine(RunEngine):
         self._document_input_service = document_input_service or DocumentInputService()
         self._sandbox_fact_document_projector = sandbox_fact_document_projector
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
+        self._evidence_result_handle_resolver = evidence_result_handle_resolver
         self._access_control_service = access_control_service or (
             RuntimeAccessControlService(uow_factory=uow_factory)
             if uow_factory is not None
@@ -196,6 +199,7 @@ class LangGraphRunEngine(RunEngine):
             long_term_memory_repository=self._long_term_memory_repository,
             memory_consolidation_service=self._memory_consolidation_service,
             data_retention_policy_service=self._data_retention_policy_service,
+            evidence_result_handle_resolver=self._evidence_result_handle_resolver,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -226,6 +230,7 @@ class LangGraphRunEngine(RunEngine):
             long_term_memory_repository: Any,
             memory_consolidation_service: MemoryConsolidationService,
             data_retention_policy_service: DataClassificationPolicy | None,
+            evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
@@ -238,6 +243,7 @@ class LangGraphRunEngine(RunEngine):
             graph_kwargs["runtime_tools"] = runtime_tools
             graph_kwargs["max_tool_iterations"] = max_tool_iterations or 5
         graph_kwargs["runtime_context_service"] = runtime_context_service
+        graph_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver
 
         log_runtime(
             logger,

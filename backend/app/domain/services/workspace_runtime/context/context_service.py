@@ -15,6 +15,8 @@ from app.domain.models import (
     StepTaskModeHint,
     normalize_wait_payload,
 )
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceRuntimeContextProviderPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
     validate_sandbox_capability_profile_payload,
@@ -58,8 +60,10 @@ class RuntimeContextService:
     def __init__(
             self,
             workspace_runtime_service: Optional[WorkspaceRuntimeService] = None,
+            evidence_context_provider: EvidenceRuntimeContextProviderPort | None = None,
     ) -> None:
         self._workspace_runtime_service = workspace_runtime_service
+        self._evidence_context_provider = evidence_context_provider
 
     def build_packet(
             self,
@@ -93,7 +97,7 @@ class RuntimeContextService:
         workspace_snapshot = None
         if self._workspace_runtime_service is not None:
             workspace_snapshot = await self._workspace_runtime_service.build_environment_snapshot()
-        return self._build_packet(
+        packet = self._build_packet(
             stage=stage,
             state=state,
             step=step,
@@ -101,6 +105,24 @@ class RuntimeContextService:
             workspace_snapshot=workspace_snapshot,
             include_sandbox_profile_for_summary=include_sandbox_profile_for_summary,
         )
+        evidence_context = await self._build_runtime_evidence_context(
+            stage=stage,
+            state=state,
+            step=step,
+            task_mode=str(packet.get("task_mode") or task_mode or ""),
+        )
+        if evidence_context is not None:
+            packet["evidence_context"] = evidence_context.model_dump(mode="json")
+            packet["evidence_prompt_digest"] = evidence_context.prompt_digest
+            visible_fields = [
+                field_name
+                for field_name in list(packet.get("prompt_visible_fields") or [])
+                if field_name != "evidence_context"
+            ]
+            if evidence_context.prompt_digest and "evidence_prompt_digest" not in visible_fields:
+                visible_fields.append("evidence_prompt_digest")
+            packet["prompt_visible_fields"] = visible_fields
+        return packet
 
     def _build_packet(
             self,
@@ -191,6 +213,76 @@ class RuntimeContextService:
             "recent_action_digest": self._wrap_state_digest(task_mode=task_mode,
                                                             payload=packet.get("recent_action_digest")),
         }
+
+    async def _build_runtime_evidence_context(
+            self,
+            *,
+            stage: PromptStage,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+            task_mode: str,
+    ):
+        if self._evidence_context_provider is None or stage not in {"execute", "replan"}:
+            return None
+        scope = self._build_access_scope(state=state, step=step)
+        if scope is None:
+            return None
+        completed_step_ids = self._collect_completed_step_ids(state=state, current_step=step)
+        return await self._evidence_context_provider.build_context(
+            stage=stage,
+            scope=scope,
+            completed_step_ids=completed_step_ids,
+            step=step,
+            task_mode=task_mode,
+        )
+
+    @staticmethod
+    def _build_access_scope(
+            *,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+    ) -> AccessScopeResult | None:
+        user_id = str(state.get("user_id") or "").strip()
+        session_id = str(state.get("session_id") or "").strip()
+        workspace_id = str(state.get("workspace_id") or "").strip()
+        run_id = str(state.get("run_id") or "").strip()
+        if not user_id or not session_id or not workspace_id or not run_id:
+            return None
+        return AccessScopeResult(
+            tenant_id=user_id,
+            user_id=user_id,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            current_step_id=str(getattr(step, "id", None) or state.get("current_step_id") or "").strip() or None,
+        )
+
+    @staticmethod
+    def _collect_completed_step_ids(
+            *,
+            state: PlannerReActLangGraphState,
+            current_step: Optional[Step],
+    ) -> list[str]:
+        current_step_id = str(getattr(current_step, "id", None) or "").strip()
+        completed_ids: list[str] = []
+        for item in list(state.get("step_states") or []):
+            if not isinstance(item, dict):
+                continue
+            step_id = str(item.get("step_id") or "").strip()
+            if not step_id or step_id == current_step_id:
+                continue
+            if str(item.get("status") or "") != ExecutionStatus.COMPLETED.value:
+                continue
+            if step_id not in completed_ids:
+                completed_ids.append(step_id)
+        plan = state.get("plan")
+        for plan_step in list(getattr(plan, "steps", []) or []):
+            step_id = str(getattr(plan_step, "id", "") or "").strip()
+            if not step_id or step_id == current_step_id or step_id in completed_ids:
+                continue
+            if getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED:
+                completed_ids.append(step_id)
+        return completed_ids
 
     def normalize_runtime_recent_action(self, raw: Any) -> Dict[str, Any]:
         """统一接收执行阶段产出的 recent_action 结构，避免节点自己做字段筛选。"""

@@ -62,6 +62,7 @@ class WebReadingConvergenceJudge:
             evidence_items=strong_evidence_items,
             min_page_count=required_page_count,
             require_source_links=require_source_links,
+            require_content_weight=False,
         )
         remaining_page_count = max(0, required_page_count - current_page_count)
         progress = {
@@ -71,6 +72,12 @@ class WebReadingConvergenceJudge:
             "require_source_links": require_source_links,
             "remaining_page_count": remaining_page_count,
             "contract_satisfied": contract_satisfied,
+            "convergence_satisfied": cls._has_enough_evidence(
+                evidence_items=strong_evidence_items,
+                min_page_count=required_page_count,
+                require_source_links=require_source_links,
+                require_content_weight=True,
+            ),
         }
         runtime_action = dict(runtime_recent_action or {})
         runtime_action["web_reading_progress"] = dict(progress)
@@ -127,7 +134,7 @@ class WebReadingConvergenceJudge:
         execution_state.runtime_recent_action["web_reading_progress"] = dict(
             contract_progress_state.get("progress") or {}
         )
-        if bool(dict(contract_progress_state.get("progress") or {}).get("contract_satisfied")):
+        if bool(dict(contract_progress_state.get("progress") or {}).get("convergence_satisfied")):
             reason_code = (
                 "explicit_url_browser_evidence_ready"
                 if bool(execution_state.explicit_url_degraded)
@@ -225,6 +232,7 @@ class WebReadingConvergenceJudge:
             evidence_items: List[Dict[str, Any]],
             min_page_count: int,
             require_source_links: bool,
+            require_content_weight: bool = False,
     ) -> bool:
         unique_urls = {
             str(item.get("url") or "").strip()
@@ -236,6 +244,15 @@ class WebReadingConvergenceJudge:
             return False
         if require_source_links and len(unique_urls) < max(1, min_page_count):
             return False
+        if require_content_weight and min_page_count == 1:
+            for item in evidence_items:
+                evidence_function_name = str(item.get("function_name") or "").strip().lower()
+                if (
+                        evidence_function_name in {"", "fetch_page"}
+                        and int(item.get("content_length") or 0) < 120
+                        and int(item.get("link_count") or 0) <= 1
+                ):
+                    return False
         return True
 
     @staticmethod

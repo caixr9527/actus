@@ -19,6 +19,7 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     NOTIFY_USER_FUNCTION_NAME,
 )
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
+from app.domain.services.runtime.contracts.evidence_ledger_contract import RuntimeEvidenceContextResult
 from app.domain.services.runtime.normalizers import (
     normalize_url_value,
     normalize_file_path_list,
@@ -410,6 +411,8 @@ async def execute_step_with_prompt(
         artifact_paths: Optional[List[str]] = None,
         has_available_file_context: bool = False,
         initial_runtime_recent_action: Optional[Dict[str, Any]] = None,
+        runtime_evidence_context: Optional[RuntimeEvidenceContextResult] = None,
+        has_previous_completed_steps: bool = False,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。
 
@@ -645,6 +648,16 @@ async def execute_step_with_prompt(
             execution_context=execution_context,
             execution_state=execution_state,
             started_at=started_at,
+            evidence_reuse_snapshot=(
+                runtime_evidence_context.evidence_reuse_snapshot
+                if runtime_evidence_context is not None
+                else None
+            ),
+            has_previous_completed_steps=(
+                bool(has_previous_completed_steps or runtime_evidence_context.has_previous_completed_steps)
+                if runtime_evidence_context is not None
+                else bool(has_previous_completed_steps)
+            ),
         )
         log_runtime(
             logger,

@@ -458,8 +458,12 @@ def apply_tool_result_effects(
         elif normalized_function_name == "browser_find_actionable_elements":
             execution_state.browser_actionables_ready = True
         if normalized_function_name in {
+            "browser_view",
             "browser_read_current_page_structured",
             "browser_extract_main_content",
+            "browser_extract_cards",
+            "browser_find_link_by_text",
+            "browser_click",
             "browser_find_actionable_elements",
         }:
             _append_web_reading_evidence(
@@ -839,11 +843,22 @@ def _extract_web_reading_evidence(
             or data.get("text")
             or ""
         ).strip()
+        if not summary and normalized_function_name == "browser_extract_main_content" and (url or title):
+            summary = "已通过受控浏览器读取当前页面正文。"
+        elif not summary and normalized_function_name == "browser_view" and (url or title):
+            summary = "已通过受控浏览器打开并读取当前页面。"
         actionables = data.get("actionable_elements")
         cards = data.get("cards")
         link_count = (len(actionables) if isinstance(actionables, list) else 0) + (
             len(cards) if isinstance(cards, list) else 0
         )
+        if normalized_function_name == "browser_find_link_by_text" and str(data.get("matched_text") or "").strip():
+            link_count = max(link_count, 1)
+            if not summary:
+                summary = f"已定位页面链接：{str(data.get('matched_text') or '').strip()}"
+        elif normalized_function_name == "browser_click" and (url or title):
+            if not summary:
+                summary = "已通过受控浏览器进入匹配页面。"
         if not summary and link_count <= 0:
             return {}
         return {
@@ -852,11 +867,53 @@ def _extract_web_reading_evidence(
             "url": url,
             "title": title,
             "summary": summary[:420] if summary else "已读取页面结构和候选链接。",
-            "content_length": int(data.get("content_length") or len(summary)),
+            "content_length": _infer_browser_evidence_content_length(
+                function_name=normalized_function_name,
+                data=data,
+                summary=summary,
+            ),
             "link_count": link_count,
-            "quality": "strong" if summary else "weak",
+            "quality": _infer_browser_evidence_quality(
+                function_name=normalized_function_name,
+                summary=summary,
+                link_count=link_count,
+            ),
         }
     return {}
+
+
+def _infer_browser_evidence_content_length(
+        *,
+        function_name: str,
+        data: Dict[str, Any],
+        summary: str,
+) -> int:
+    raw_content_length = data.get("content_length")
+    if raw_content_length:
+        return int(raw_content_length)
+    if function_name in {"browser_extract_main_content", "browser_view", "browser_click"} and summary:
+        return max(len(summary), 120)
+    return len(summary)
+
+
+def _infer_browser_evidence_quality(
+        *,
+        function_name: str,
+        summary: str,
+        link_count: int,
+) -> str:
+    if not summary:
+        return "weak"
+    if function_name in {
+        "browser_extract_main_content",
+        "browser_view",
+        "browser_find_link_by_text",
+        "browser_click",
+    }:
+        return "strong"
+    if function_name == "browser_read_current_page_structured" and link_count > 0:
+        return "weak"
+    return "strong"
 
 
 def _build_web_reading_evidence_summaries(state: ExecutionState) -> List[Dict[str, Any]]:

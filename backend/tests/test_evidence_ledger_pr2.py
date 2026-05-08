@@ -8,10 +8,11 @@ from sqlalchemy.dialects import postgresql
 
 from app.application.service.evidence_ledger_service import (
     EvidenceLedgerService,
-    EvidenceRecordInput,
     EvidenceScopeMismatchError,
     EvidenceSourceMissingError,
 )
+from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
+from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.domain.models import MessageEvent, WorkflowRunEventRecord, WorkspaceArtifact
 from app.domain.models.evidence import (
@@ -159,6 +160,10 @@ def _scope(**overrides) -> AccessScopeResult:
     return AccessScopeResult(**values)
 
 
+def _ledger_service(*, uow_factory) -> EvidenceLedgerService:
+    return EvidenceLedgerService(uow_factory=uow_factory, assembler=EvidenceFactAssembler())
+
+
 def _fact(
         *,
         fact_id: str = "fact-1",
@@ -304,7 +309,7 @@ def test_record_evidence_should_generate_hashes_sanitize_and_save_once() -> None
     evidence_repo = _EvidenceRepo()
     fact_repo = _FactRepo([_fact()])
     workflow_repo = _WorkflowRunRepo(event_exists=True)
-    service = EvidenceLedgerService(
+    service = _ledger_service(
         uow_factory=lambda: _UoW(evidence_repo=evidence_repo, fact_repo=fact_repo, workflow_run_repo=workflow_repo)
     )
 
@@ -327,19 +332,19 @@ def test_record_evidence_should_generate_hashes_sanitize_and_save_once() -> None
 
 
 def test_record_evidence_should_fail_closed_for_cross_scope_and_missing_sources() -> None:
-    service_missing_event = EvidenceLedgerService(
+    service_missing_event = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([_fact()]), workflow_run_repo=_WorkflowRunRepo(event_exists=False))
     )
     with pytest.raises(EvidenceSourceMissingError):
         asyncio.run(service_missing_event.record_evidence(scope=_scope(), evidence_input=_record_input()))
 
-    service_missing_fact = EvidenceLedgerService(
+    service_missing_fact = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([]), workflow_run_repo=_WorkflowRunRepo(event_exists=True))
     )
     with pytest.raises(EvidenceSourceMissingError):
         asyncio.run(service_missing_fact.record_evidence(scope=_scope(), evidence_input=_record_input()))
 
-    service_cross_run = EvidenceLedgerService(
+    service_cross_run = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([_fact(run_id="run-2")]), workflow_run_repo=_WorkflowRunRepo())
     )
     with pytest.raises(EvidenceScopeMismatchError):
@@ -347,7 +352,7 @@ def test_record_evidence_should_fail_closed_for_cross_scope_and_missing_sources(
 
 
 def test_record_evidence_should_validate_payload_fact_refs() -> None:
-    service_missing_payload_fact = EvidenceLedgerService(
+    service_missing_payload_fact = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([_fact()]), workflow_run_repo=_WorkflowRunRepo())
     )
     with pytest.raises(EvidenceScopeMismatchError):
@@ -374,7 +379,7 @@ def test_record_evidence_should_validate_payload_fact_refs() -> None:
             )
         )
 
-    service_cross_session = EvidenceLedgerService(
+    service_cross_session = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([_fact(session_id="session-2")]), workflow_run_repo=_WorkflowRunRepo())
     )
     with pytest.raises(EvidenceSourceMissingError):
@@ -391,7 +396,7 @@ def test_record_evidence_should_validate_payload_fact_refs() -> None:
             )
         )
 
-    service_cross_workspace = EvidenceLedgerService(
+    service_cross_workspace = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([_fact(workspace_id="workspace-2")]), workflow_run_repo=_WorkflowRunRepo())
     )
     with pytest.raises(EvidenceScopeMismatchError):
@@ -399,7 +404,7 @@ def test_record_evidence_should_validate_payload_fact_refs() -> None:
 
 
 def test_record_evidence_should_reject_payload_refs_inconsistent_with_source_ref() -> None:
-    service = EvidenceLedgerService(
+    service = _ledger_service(
         uow_factory=lambda: _UoW(
             fact_repo=_FactRepo([_fact(), _fact(fact_id="fact-2")]),
             workflow_run_repo=_WorkflowRunRepo(),
@@ -495,7 +500,7 @@ def test_record_evidence_should_fail_closed_for_missing_or_cross_scope_artifact(
         },
         evidence_kind=EvidenceKind.ARTIFACT_EVIDENCE,
     )
-    service = EvidenceLedgerService(
+    service = _ledger_service(
         uow_factory=lambda: _UoW(
             fact_repo=_FactRepo([]),
             workflow_run_repo=_WorkflowRunRepo(),
@@ -524,7 +529,7 @@ def test_record_evidence_should_fail_closed_for_missing_or_cross_scope_artifact(
         },
         evidence_kind=EvidenceKind.ARTIFACT_EVIDENCE,
     )
-    service_with_artifact = EvidenceLedgerService(
+    service_with_artifact = _ledger_service(
         uow_factory=lambda: _UoW(
             workflow_run_repo=_WorkflowRunRepo(),
             artifact_repo=_ArtifactRepo([_artifact()]),
@@ -552,7 +557,7 @@ def test_record_evidence_should_fail_closed_for_artifact_scope_mismatch(artifact
         content_hash="sha256:artifact",
         read_strategy=EvidenceReadStrategy.READ_ARTIFACT,
     )
-    service = EvidenceLedgerService(
+    service = _ledger_service(
         uow_factory=lambda: _UoW(
             workflow_run_repo=_WorkflowRunRepo(),
             artifact_repo=_ArtifactRepo([artifact]),
@@ -587,7 +592,7 @@ def test_record_evidence_should_fail_closed_for_artifact_scope_mismatch(artifact
 
 def test_evidence_service_queries_should_use_scope_filters() -> None:
     repo = _EvidenceRepo()
-    service = EvidenceLedgerService(uow_factory=lambda: _UoW(evidence_repo=repo))
+    service = _ledger_service(uow_factory=lambda: _UoW(evidence_repo=repo))
 
     asyncio.run(service.list_reusable_by_run(scope=_scope(), run_id="run-1"))
     asyncio.run(

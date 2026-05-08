@@ -9,6 +9,11 @@ import logging
 from typing import Callable, Dict
 
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
+from app.application.service.evidence_digest_projector import EvidenceDigestProjector
+from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
+from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
+from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
+from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
@@ -143,7 +148,15 @@ async def build_run_engine(
         runtime_tools=runtime_tools_with_snapshot.runtime_tools,
         runtime_context_service=RuntimeContextService(
             workspace_runtime_service=workspace_runtime_service,
+            evidence_context_provider=EvidenceRuntimeContextProvider(
+                ledger_service=EvidenceLedgerService(
+                    uow_factory=uow_factory,
+                    assembler=EvidenceFactAssembler(),
+                ),
+                projector=EvidenceDigestProjector(uow_factory=uow_factory),
+            ),
         ),
+        evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         data_retention_policy_service=DataRetentionPolicyService(),

@@ -15,6 +15,11 @@ from pydantic import TypeAdapter
 
 from app.application.errors import AppException, BadRequestError, NotFoundError
 from app.application.service.document_input_preflight_policy import DocumentInputPreflightPolicy
+from app.application.service.evidence_digest_projector import EvidenceDigestProjector
+from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
+from app.application.service.evidence_ledger_service import EvidenceLedgerService
+from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
+from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
@@ -217,6 +222,10 @@ class AgentService:
             sandbox_fact_event_projector=SandboxFactEventProjector(
                 uow_factory=self._uow_factory,
             ),
+            evidence_step_reconciler=EvidenceLedgerService(
+                uow_factory=self._uow_factory,
+                assembler=EvidenceFactAssembler(),
+            ),
             sandbox_fact_context_builder=SandboxFactProjectionContextBuilder(
                 access_control_service=self._get_access_control_service(),
                 workspace_runtime_service=WorkspaceRuntimeService(
@@ -331,7 +340,15 @@ class AgentService:
             uow_factory=self._uow_factory,
             runtime_context_service=RuntimeContextService(
                 workspace_runtime_service=workspace_runtime_service,
+                evidence_context_provider=EvidenceRuntimeContextProvider(
+                    ledger_service=EvidenceLedgerService(
+                        uow_factory=self._uow_factory,
+                        assembler=EvidenceFactAssembler(),
+                    ),
+                    projector=EvidenceDigestProjector(uow_factory=self._uow_factory),
+                ),
             ),
+            evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=self._uow_factory),
             checkpointer=get_langgraph_checkpointer().get_checkpointer(),
             data_retention_policy_service=DataRetentionPolicyService(),
             access_control_service=self._get_access_control_service(),

@@ -176,6 +176,7 @@ class FileReadPayload(_StrictPayload):
 class FileMutationPayload(_StrictPayload):
     path: str
     operation: Literal["write", "delete", "snapshot"]
+    mutation_intent_hash: str
     exists: bool
     before_content_sha256: str | None
     after_content_sha256: str | None

@@ -40,6 +40,8 @@ class ResearchConvergenceJudge:
             return ConvergenceDecision(should_break=False)
 
         if bool(execution_state.research_snippet_sufficient):
+            if _requires_broader_research(step) and len(list(execution_state.research_search_evidence_items or [])) < 3:
+                return ConvergenceDecision(should_break=False)
             reason_code = (
                 "research_fetch_low_value_snippet_fallback"
                 if normalized_function_name == "fetch_page"
@@ -177,3 +179,25 @@ def _extract_runtime_search_evidence_items(runtime_recent_action: Dict[str, Any]
         if isinstance(raw_progress_items, list):
             return [item for item in raw_progress_items if isinstance(item, dict)]
     return []
+
+
+def _requires_broader_research(step: Step) -> bool:
+    candidate_text = " ".join(
+        [
+            str(getattr(step, "title", "") or ""),
+            str(getattr(step, "description", "") or ""),
+            " ".join([str(item or "") for item in list(getattr(step, "success_criteria", []) or [])]),
+        ]
+    )
+    broad_markers = (
+        "热门景点",
+        "交通",
+        "住宿",
+        "注意事项",
+        "路线",
+        "行程",
+        "至少3",
+        "至少 3",
+        "至少三",
+    )
+    return sum(1 for marker in broad_markers if marker in candidate_text) >= 2

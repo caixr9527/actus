@@ -29,6 +29,7 @@ from app.application.service.sandbox_fact_ledger_service import (
 )
 from app.domain.models import ToolEvent, ToolEventStatus
 from app.domain.models.sandbox_fact import SandboxFactRecord, SandboxFactScope, SandboxFactSourceType
+from app.domain.services.runtime.contracts.evidence_key_normalizer import build_file_mutation_intent_hash
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactProjectionContext,
     SandboxFactRecorderPort,
@@ -251,6 +252,16 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             fact_kind=fact_kind,
             path=path,
             operation=operation,
+            mutation_intent_hash=build_file_mutation_intent_hash(
+                path=path,
+                operation=operation,
+                content=str(args.get("content") or ""),
+                old_str=str(args.get("old_str") or args.get("old_string") or ""),
+                new_str=str(args.get("new_str") or args.get("new_string") or ""),
+                append=bool(args.get("append")),
+                leading_newline=bool(args.get("leading_newline")),
+                trailing_newline=bool(args.get("trailing_newline")),
+            ),
             exists=bool(data.get("exists", operation != "delete")),
             before_content_sha256=_optional_text(data.get("before_content_sha256")),
             after_content_sha256=_optional_text(data.get("after_content_sha256") or data.get("content_sha256") or data.get("sha256")),

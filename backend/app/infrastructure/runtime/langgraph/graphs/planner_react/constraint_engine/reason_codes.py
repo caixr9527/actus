@@ -38,3 +38,14 @@ REASON_REPEAT_TOOL_CALL_SUCCESS_FALLBACK = "repeat_tool_call_success_fallback"
 # browser route 软阻断
 REASON_BROWSER_CLICK_TARGET_BLOCKED = "browser_click_target_blocked"
 REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED = "browser_high_level_retry_blocked"
+
+# evidence reuse
+REASON_EVIDENCE_REUSE_PENDING_RESOLUTION = "evidence_reuse_pending_resolution"
+REASON_EVIDENCE_REUSE_ALLOWED = "evidence_reuse_allowed"
+REASON_EVIDENCE_REUSE_REQUIRES_VERIFICATION = "evidence_reuse_requires_verification"
+REASON_EVIDENCE_DUPLICATE_BLOCKED = "evidence_duplicate_blocked"
+REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING = "evidence_reuse_snapshot_missing"
+REASON_EVIDENCE_CONTEXT_CURSOR_MISMATCH = "evidence_context_cursor_mismatch"
+REASON_RESULT_HANDLE_MISSING = "result_handle_missing"
+REASON_RESULT_HANDLE_RESOLVE_FAILED = "result_handle_resolve_failed"
+REASON_RESULT_HANDLE_STALE = "result_handle_stale"

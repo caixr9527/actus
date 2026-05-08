@@ -12,10 +12,10 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from app.application.service.evidence_ledger_inputs import EvidenceQueryInput
+from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
 from app.domain.models.evidence import (
     EvidenceKind,
     EvidenceQualityStatus,
@@ -28,13 +28,14 @@ from app.domain.models.evidence import (
     EvidenceStalenessPolicy,
     EvidenceSubjectRef,
     EvidenceSupportLevel,
-    EvidenceVisibility,
     build_evidence_idempotency_key,
     build_evidence_payload_hash,
     build_evidence_result_refs_hash,
     classify_evidence_data,
     validate_evidence_payload,
 )
+from app.domain.models import Step
+from app.domain.models.sandbox_fact import SandboxFactRecord, SandboxFactScope
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,20 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
+class EvidenceAssemblyResultLike(Protocol):
+    """Evidence assembler 返回对象的最小结构。"""
+
+    evidence_inputs: list[EvidenceRecordInput]
+    gap_inputs: list[EvidenceRecordInput]
+
+
+class EvidenceStepAssembler(Protocol):
+    """EvidenceLedgerService 所需的 fact 组织器接口。"""
+
+    def assemble_step(self, *, step: Step, facts: list[SandboxFactRecord]) -> EvidenceAssemblyResultLike:
+        ...
+
+
 class EvidenceLedgerError(RuntimeError):
     """Evidence Ledger 应用服务错误。"""
 
@@ -65,54 +80,12 @@ class EvidenceSourceMissingError(EvidenceLedgerError):
     """source fact/artifact/event 缺失或不可归属。"""
 
 
-class EvidenceRecordInput(BaseModel):
-    """Evidence 显式写入命令。
-
-    调用方只能提供业务字段；hash 和 idempotency key 必须由 service 生成。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    evidence_scope: EvidenceScope = EvidenceScope.STEP
-    evidence_kind: EvidenceKind
-    source_ref: EvidenceSourceRef
-    subject_ref: EvidenceSubjectRef
-    support_level: EvidenceSupportLevel
-    quality_status: EvidenceQualityStatus
-    payload: dict[str, Any] = Field(default_factory=dict)
-    run_id: str | None = None
-    step_id: str | None = None
-    action_key: str | None = None
-    claim_key: str | None = None
-    claim_text: str | None = None
-    source_step_id: str | None = None
-    summary: str = ""
-    confidence: float = 0.0
-    reusable: bool = False
-    reuse_policy: EvidenceReusePolicy = EvidenceReusePolicy.DO_NOT_REUSE
-    staleness_policy: EvidenceStalenessPolicy = EvidenceStalenessPolicy.STEP_SCOPED
-    visibility: EvidenceVisibility = EvidenceVisibility.INTERNAL
-    result_refs: list[EvidenceResultRef] = Field(default_factory=list)
-    related_evidence_ids: list[str] = Field(default_factory=list)
-    supersedes_evidence_id: str | None = None
-
-
-class EvidenceQueryInput(BaseModel):
-    """PR2 强过滤查询输入。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    run_id: str
-    action_key: str | None = None
-    subject_key: str | None = None
-    limit: int = 100
-
-
 class EvidenceLedgerService:
     """Evidence 写入和查询的应用层唯一入口。"""
 
-    def __init__(self, *, uow_factory) -> None:
+    def __init__(self, *, uow_factory, assembler: EvidenceStepAssembler) -> None:
         self._uow_factory = uow_factory
+        self._assembler = assembler
 
     async def record_evidence(
             self,
@@ -248,6 +221,87 @@ class EvidenceLedgerService:
                 limit=query.limit,
             )
 
+    async def reconcile_step_evidence(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+    ) -> list[EvidenceRecord]:
+        """在 step completed 前把当前 step facts 对账成 evidence 或 gap。"""
+        self._validate_scope_basics(scope)
+        step_id = str(step.id or scope.current_step_id or "").strip()
+        if not step_id:
+            raise EvidenceScopeMismatchError("reconcile_step_evidence 必须包含 step_id")
+        run_id = self._resolve_run_id(scope=scope, run_id=scope.run_id)
+        saved: list[EvidenceRecord] = []
+        try:
+            async with self._uow_factory() as uow:
+                facts = await uow.sandbox_fact.list_by_scope(
+                    user_id=scope.user_id,
+                    session_id=str(scope.session_id),
+                    fact_scope=SandboxFactScope.STEP,
+                    run_id=run_id,
+                    step_id=step_id,
+                    limit=100,
+                )
+            assembled = self._assembler.assemble_step(step=step, facts=facts)
+            for evidence_input in [*assembled.evidence_inputs, *assembled.gap_inputs]:
+                saved.append(await self.record_evidence(scope=scope, evidence_input=evidence_input))
+        except Exception as exc:
+            logger.warning(
+                "evidence_reconcile_failed user_id=%s session_id=%s run_id=%s step_id=%s error_type=%s",
+                scope.user_id,
+                scope.session_id,
+                run_id,
+                step_id,
+                exc.__class__.__name__,
+            )
+            gap_input = _reconcile_failed_gap_input(step=step, run_id=run_id)
+            saved.append(await self.record_evidence(scope=scope, evidence_input=gap_input))
+        return saved
+
+    async def record_reconcile_failed_gap(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+    ) -> EvidenceRecord:
+        """runner 兜底入口：只写 evidence_reconcile_failed gap。"""
+        self._validate_scope_basics(scope)
+        run_id = self._resolve_run_id(scope=scope, run_id=scope.run_id)
+        return await self.record_evidence(
+            scope=scope,
+            evidence_input=_reconcile_failed_gap_input(step=step, run_id=run_id),
+        )
+
+    async def reconcile_previous_steps_evidence(
+            self,
+            *,
+            scope: AccessScopeResult,
+            completed_step_ids: list[str],
+    ) -> list[EvidenceRecord]:
+        """下一个 step execute 前补齐前序 completed step 的 evidence gap。"""
+        self._validate_scope_basics(scope)
+        run_id = self._resolve_run_id(scope=scope, run_id=scope.run_id)
+        saved: list[EvidenceRecord] = []
+        missing_step_ids: list[str] = []
+        async with self._uow_factory() as uow:
+            for step_id in _normalize_text_list(completed_step_ids):
+                existing = await uow.evidence.list_by_step(
+                    user_id=scope.user_id,
+                    session_id=str(scope.session_id),
+                    run_id=run_id,
+                    step_id=step_id,
+                    limit=1,
+                )
+                if existing:
+                    continue
+                missing_step_ids.append(step_id)
+        for step_id in missing_step_ids:
+            gap_input = _previous_step_missing_gap_input(step_id=step_id, run_id=run_id)
+            saved.append(await self.record_evidence(scope=scope, evidence_input=gap_input))
+        return saved
+
     @staticmethod
     def _validate_scope_basics(scope: AccessScopeResult) -> None:
         if not str(scope.user_id or "").strip():
@@ -282,7 +336,12 @@ class EvidenceLedgerService:
                 raise EvidenceScopeMismatchError("evidence run_id 与 access scope 不一致")
             if not current_step_id:
                 raise EvidenceScopeMismatchError("STEP scope evidence 必须包含 current_step_id")
-            if not step_id or step_id != current_step_id:
+            is_previous_gap = (
+                    evidence_input.evidence_kind == EvidenceKind.EVIDENCE_GAP
+                    and str((evidence_input.payload or {}).get("reason_code") or "").strip()
+                    == "previous_step_evidence_missing"
+            )
+            if not step_id or (step_id != current_step_id and not is_previous_gap):
                 raise EvidenceScopeMismatchError("STEP scope evidence 的 step_id 必须等于当前 step")
             source_step_id = evidence_input.source_step_id or step_id
             if source_step_id != step_id:
@@ -504,3 +563,47 @@ def _normalize_text_list(values: list[str]) -> list[str]:
         for value in list(values or [])
         if str(value or "").strip()
     ]
+
+
+def _reconcile_failed_gap_input(*, step: Step, run_id: str) -> EvidenceRecordInput:
+    return EvidenceRecordInput(
+        evidence_scope=EvidenceScope.STEP,
+        evidence_kind=EvidenceKind.EVIDENCE_GAP,
+        run_id=run_id,
+        step_id=step.id,
+        source_step_id=step.id,
+        source_ref=EvidenceSourceRef(source_type=EvidenceSourceType.SYSTEM_PROJECTION),
+        subject_ref=EvidenceSubjectRef(subject_type="step", subject_key=f"step:{step.id}"),
+        support_level=EvidenceSupportLevel.GAP,
+        quality_status=EvidenceQualityStatus.MISSING_SOURCE,
+        summary="evidence reconcile failed",
+        payload={
+            "gap_type": "step_evidence",
+            "missing_source_types": [EvidenceSourceType.SYSTEM_PROJECTION.value],
+            "claim_text": str(step.description or step.title or ""),
+            "reason_code": "evidence_reconcile_failed",
+            "required_for": "step_completion",
+        },
+    )
+
+
+def _previous_step_missing_gap_input(*, step_id: str, run_id: str) -> EvidenceRecordInput:
+    return EvidenceRecordInput(
+        evidence_scope=EvidenceScope.STEP,
+        evidence_kind=EvidenceKind.EVIDENCE_GAP,
+        run_id=run_id,
+        step_id=step_id,
+        source_step_id=step_id,
+        source_ref=EvidenceSourceRef(source_type=EvidenceSourceType.SYSTEM_PROJECTION),
+        subject_ref=EvidenceSubjectRef(subject_type="step", subject_key=f"step:{step_id}"),
+        support_level=EvidenceSupportLevel.GAP,
+        quality_status=EvidenceQualityStatus.MISSING_SOURCE,
+        summary="previous step evidence missing",
+        payload={
+            "gap_type": "previous_step_evidence",
+            "missing_source_types": [EvidenceSourceType.SYSTEM_PROJECTION.value],
+            "claim_text": "",
+            "reason_code": "previous_step_evidence_missing",
+            "required_for": "execute_context",
+        },
+    )

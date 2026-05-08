@@ -34,6 +34,8 @@ from app.domain.models import (
     Message,
     MessageCommand,
     BaseEvent,
+    StepEvent,
+    StepEventStatus,
     ToolEvent,
     DoneEvent,
     TitleEvent,
@@ -49,6 +51,8 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactEventProjectorPort,
@@ -91,6 +95,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -115,6 +120,7 @@ class AgentTaskRunner(TaskRunner):
         self._sandbox_fact_recorder = sandbox_fact_recorder
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
+        self._evidence_step_reconciler = evidence_step_reconciler
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -163,6 +169,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
             raise RuntimeError(
@@ -218,6 +225,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
+            evidence_step_reconciler=evidence_step_reconciler,
         )
 
     @staticmethod
@@ -404,6 +412,117 @@ class AgentTaskRunner(TaskRunner):
                     "error_type": exc.__class__.__name__,
                 },
             )
+
+    async def _reconcile_evidence_before_step_completed(self, event: StepEvent) -> None:
+        reconciler = getattr(self, "_evidence_step_reconciler", None)
+        if reconciler is None or event.status != StepEventStatus.COMPLETED:
+            return
+        scope: AccessScopeResult | None = None
+        try:
+            scope = await self._build_evidence_reconcile_scope(current_step_id=event.step.id)
+        except Exception as exc:
+            logger.exception(
+                "evidence_reconcile_scope_missing",
+                extra={
+                    "user_id": getattr(self, "_user_id", None),
+                    "session_id": getattr(self, "_session_id", None),
+                    "step_id": str(getattr(event.step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_reconcile_scope_missing",
+                },
+            )
+            return
+        try:
+            saved = await reconciler.reconcile_step_evidence(scope=scope, step=event.step)
+            if saved is None:
+                logger.error(
+                    "evidence_reconcile_contract_violation",
+                    extra={
+                        "user_id": scope.user_id,
+                        "session_id": str(scope.session_id),
+                        "run_id": scope.run_id,
+                        "step_id": str(getattr(event.step, "id", "") or ""),
+                        "reason_code": "evidence_reconcile_return_missing",
+                    },
+                )
+        except Exception as exc:
+            logger.exception(
+                "evidence_reconcile_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": str(getattr(event.step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_reconcile_failed",
+                },
+            )
+            await self._try_record_evidence_reconcile_failed_gap(
+                reconciler=reconciler,
+                scope=scope,
+                step=event.step,
+            )
+
+    @staticmethod
+    async def _try_record_evidence_reconcile_failed_gap(
+            *,
+            reconciler: EvidenceStepReconcilerPort,
+            scope: AccessScopeResult,
+            step,
+    ) -> None:
+        record_gap = getattr(reconciler, "record_reconcile_failed_gap", None)
+        if not callable(record_gap):
+            return
+        try:
+            await record_gap(scope=scope, step=step)
+        except Exception as exc:
+            logger.exception(
+                "evidence_reconcile_gap_write_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": str(getattr(step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_reconcile_gap_write_failed",
+                },
+            )
+
+    async def _build_evidence_reconcile_scope(self, *, current_step_id: str) -> AccessScopeResult:
+        if not self._user_id:
+            raise RuntimeError("evidence reconcile 需要 user_id")
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=self._session_id, user_id=self._user_id)
+            if session is None:
+                raise RuntimeError("evidence reconcile 无法解析 session scope")
+            workspace_id = str(getattr(session, "workspace_id", None) or "").strip()
+            workspace = None
+            if workspace_id:
+                workspace = await uow.workspace.get_by_id_for_user(
+                    workspace_id=workspace_id,
+                    user_id=self._user_id,
+                )
+            if workspace is None:
+                workspace = await uow.workspace.get_by_session_id_for_user(
+                    session_id=self._session_id,
+                    user_id=self._user_id,
+                )
+            if workspace is None:
+                raise RuntimeError("evidence reconcile 无法解析 workspace scope")
+            run_id = str(getattr(workspace, "current_run_id", None) or session.current_run_id or "").strip()
+            if not run_id:
+                raise RuntimeError("evidence reconcile 无法解析 run scope")
+            run = await uow.workflow_run.get_by_id_for_user(run_id=run_id, user_id=self._user_id)
+            if run is None or run.session_id != self._session_id:
+                raise RuntimeError("evidence reconcile run scope 不属于当前 session")
+        return AccessScopeResult(
+            tenant_id=self._user_id,
+            user_id=self._user_id,
+            session_id=self._session_id,
+            workspace_id=workspace.id,
+            run_id=run_id,
+            current_step_id=str(current_step_id or "").strip() or None,
+        )
 
     async def _emit_request_started(self, task: Task, request_id: str) -> None:
         await self._put_stream_record(
@@ -723,6 +842,8 @@ class AgentTaskRunner(TaskRunner):
                             pending_requests_rejected = True
                     else:
                         # 其他事件：仅记录事件历史。
+                        if isinstance(event, StepEvent):
+                            await self._reconcile_evidence_before_step_completed(event)
                         source_event_id = await self._put_and_add_event(task=task, event=event)
                         if isinstance(event, ToolEvent):
                             await self._record_sandbox_facts_for_tool_event(
