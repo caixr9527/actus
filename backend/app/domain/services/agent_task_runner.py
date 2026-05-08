@@ -445,6 +445,11 @@ class AgentTaskRunner(TaskRunner):
                         "reason_code": "evidence_reconcile_return_missing",
                     },
                 )
+            await self._overwrite_step_outcome_with_evidence_projection(
+                reconciler=reconciler,
+                scope=scope,
+                step=event.step,
+            )
         except Exception as exc:
             logger.exception(
                 "evidence_reconcile_failed",
@@ -462,6 +467,26 @@ class AgentTaskRunner(TaskRunner):
                 scope=scope,
                 step=event.step,
             )
+
+    @staticmethod
+    async def _overwrite_step_outcome_with_evidence_projection(
+            *,
+            reconciler: EvidenceStepReconcilerPort,
+            scope: AccessScopeResult,
+            step,
+    ) -> None:
+        build_projection = getattr(reconciler, "build_step_evidence_backed_facts", None)
+        if not callable(build_projection):
+            return
+        projections = await build_projection(scope=scope, step=step)
+        if getattr(step, "outcome", None) is None:
+            return
+        step.outcome.evidence_backed_facts = list(projections or [])
+        step.outcome.facts_learned = [
+            str(item.text or "").strip()
+            for item in list(projections or [])
+            if str(item.text or "").strip()
+        ]
 
     @staticmethod
     async def _try_record_evidence_reconcile_failed_gap(

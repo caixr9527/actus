@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from app.application.service.evidence_ledger_inputs import EvidenceQueryInput
 from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
 from app.domain.models.evidence import (
+    EvidenceBackedFactProjection,
     EvidenceKind,
     EvidenceQualityStatus,
     EvidenceRecord,
@@ -37,6 +38,7 @@ from app.domain.models.evidence import (
 from app.domain.models import Step
 from app.domain.models.sandbox_fact import SandboxFactRecord, SandboxFactScope
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.application.service.evidence_digest_projector import EvidenceDigestProjector
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +275,28 @@ class EvidenceLedgerService:
             scope=scope,
             evidence_input=_reconcile_failed_gap_input(step=step, run_id=run_id),
         )
+
+    async def build_step_evidence_backed_facts(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+    ) -> list[EvidenceBackedFactProjection]:
+        """基于当前 step 已落库 evidence 生成 StepOutcome 可读事实投影。"""
+        self._validate_scope_basics(scope)
+        step_id = str(step.id or scope.current_step_id or "").strip()
+        if not step_id:
+            return []
+        projector = EvidenceDigestProjector(uow_factory=self._uow_factory)
+        digest = await projector.build_digest(
+            scope=scope,
+            current_step_id=step_id,
+            completed_step_ids=[step_id],
+            stage="execute",
+        )
+        if digest is None:
+            return []
+        return list(digest.evidence_backed_facts or [])
 
     async def reconcile_previous_steps_evidence(
             self,

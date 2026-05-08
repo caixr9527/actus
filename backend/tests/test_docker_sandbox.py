@@ -31,8 +31,9 @@ class _FakeDockerClient:
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict, *, status_code: int = 200) -> None:
         self._payload = payload
+        self.status_code = status_code
 
     def json(self) -> dict:
         return self._payload
@@ -106,15 +107,9 @@ def test_search_searxng_should_post_search_request_to_sandbox() -> None:
         safesearch=1,
     ))
 
-    assert fake_client.last_post_url == "http://127.0.0.1:8081/api/searxng/search"
+    assert fake_client.last_post_url == "http://127.0.0.1:8081/api/searxng/ai-search"
     assert fake_client.last_post_json == {
         "query": "openai",
-        "categories": None,
-        "engines": None,
-        "language": "zh-CN",
-        "page": 2,
-        "time_range": None,
-        "safesearch": 1,
     }
     assert result.success is True
     assert result.data == {"query": "openai", "results": []}

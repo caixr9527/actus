@@ -36,7 +36,6 @@ from app.domain.services.runtime.contracts.final_output_contract import (
     RuntimeOutputStage,
     assert_state_update_allowed,
 )
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
@@ -53,8 +52,10 @@ from .delivery_helpers import (
     _resolve_attachment_delivery_preference_for_summary,
     _resolve_summary_attachment_refs,
 )
+from .evidence_context_guard import validate_stage_evidence_context_packet
 from .prompt_context_helpers import (
     _build_prompt_context_packet_async,
+    _build_prompt_safe_context_packet,
     _extract_prompt_context_state_updates,
 )
 from .state_reducer import _reduce_state_with_events
@@ -179,32 +180,6 @@ def _build_summary_message_fallback(
     return "任务已完成。"
 
 
-def _extract_step_draft_fact_text(*, state: PlannerReActLangGraphState, last_executed_step: Any) -> str:
-    """提取执行阶段沉淀的正文草稿，供 summary 模型异常时兜底。
-
-    只识别 `STEP_DRAFT_FACT_PREFIX` 标记的事实，避免把普通 facts_learned 误当最终正文。
-    """
-    candidate_facts: List[str] = []
-    step_outcome = getattr(last_executed_step, "outcome", None)
-    candidate_facts.extend([str(item or "") for item in list(getattr(step_outcome, "facts_learned", []) or [])])
-    for step_state in list(state.get("step_states") or []):
-        if not isinstance(step_state, dict):
-            continue
-        outcome = step_state.get("outcome")
-        if not isinstance(outcome, dict):
-            continue
-        candidate_facts.extend([str(item or "") for item in list(outcome.get("facts_learned") or [])])
-
-    for raw_fact in reversed(candidate_facts):
-        fact = str(raw_fact or "").strip()
-        if not fact.startswith(STEP_DRAFT_FACT_PREFIX):
-            continue
-        draft_text = fact[len(STEP_DRAFT_FACT_PREFIX):].strip()
-        if draft_text:
-            return draft_text
-    return ""
-
-
 async def summarize_node(
         state: PlannerReActLangGraphState,
         llm: LLM,
@@ -238,9 +213,27 @@ async def summarize_node(
         runtime_context_service=runtime_context_service,
         context_packet=summary_context_packet,
     )
+    evidence_guard = validate_stage_evidence_context_packet(
+        stage="summary",
+        context_packet=summary_context_packet,
+    )
+    if evidence_guard.blocked:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "总结 evidence context 校验失败，已 fail closed",
+            state=state,
+            stage_name="summary",
+            reason_code=evidence_guard.reason_code,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return {
+            **state,
+            **summary_context_updates,
+        }
     llm_runtime = describe_llm_runtime(llm)
     summarize_prompt = SUMMARIZE_PROMPT.format(
-        context_packet=json.dumps(summary_context_packet, ensure_ascii=False)
+        context_packet=json.dumps(_build_prompt_safe_context_packet(summary_context_packet), ensure_ascii=False)
     )
     log_runtime(
         logger,
@@ -285,10 +278,6 @@ async def summarize_node(
             step_id=str(getattr(last_executed_step, "id", "") or ""),
         )
     else:
-        draft_fallback_text = _extract_step_draft_fact_text(
-            state=state,
-            last_executed_step=last_executed_step,
-        )
         summary_message = str(
             parsed.get("message")
             or _build_summary_message_fallback(
@@ -299,7 +288,6 @@ async def summarize_node(
         ).strip()
         final_answer_text = str(
             parsed.get("final_answer_text")
-            or draft_fallback_text
             or summary_message
             or ""
         ).strip()

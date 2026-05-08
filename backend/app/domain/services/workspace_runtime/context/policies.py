@@ -318,6 +318,19 @@ _POLICIES: dict[tuple[PromptStage, str], ContextPolicy] = {
             include_summary_focus=True,
         ),
     ),
+    (
+        "future_review",
+        StepTaskModeHint.GENERAL.value,
+    ): ContextPolicy(
+        # PR4 仅预留后续 Self-Review / Final Gate stage 名称，不接真实业务消费。
+        include_stable_background=True,
+        include_audit_refs=True,
+        stable_background=StableBackgroundPolicy(
+            include_conversation_summary=True,
+            include_plan_snapshot=True,
+            include_summary_focus=True,
+        ),
+    ),
 }
 
 

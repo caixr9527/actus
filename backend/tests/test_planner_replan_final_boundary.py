@@ -15,6 +15,10 @@ from app.domain.models import (
     StepTaskModeHint,
     TextStreamStartEvent,
 )
+from app.domain.services.runtime.contracts.evidence_ledger_contract import (
+    EvidenceReuseSnapshot,
+    RuntimeEvidenceContextResult,
+)
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.entry import EntryCompiler
 from app.domain.services.workspace_runtime.policies import (
@@ -31,7 +35,60 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
 from app.infrastructure.runtime.langgraph.graphs.planner_react.routing import route_after_plan
 
 
-_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+class _ReadyRuntimeContextService(RuntimeContextService):
+    async def _build_runtime_evidence_context(self, *, stage, state, step, task_mode):
+        if stage not in {"replan", "summary"}:
+            return await super()._build_runtime_evidence_context(
+                stage=stage,
+                state=state,
+                step=step,
+                task_mode=task_mode,
+            )
+        source_step_ids = _collect_completed_step_ids(state)
+        snapshot = EvidenceReuseSnapshot(
+            run_id=str(state.get("run_id") or "run-1"),
+            current_step_id=str(getattr(step, "id", "") or "") or None,
+            source_step_ids=source_step_ids,
+            cursor="cursor-1",
+            do_not_repeat=[],
+            completed_actions=[],
+            available_artifacts=[],
+            verified_claims=[],
+            result_handles=[],
+        )
+        return RuntimeEvidenceContextResult(
+            run_id=str(state.get("run_id") or "run-1"),
+            current_step_id=str(getattr(step, "id", "") or "") or None,
+            source_step_ids=source_step_ids,
+            has_previous_completed_steps=True,
+            prompt_digest="evidence digest",
+            evidence_reuse_snapshot=snapshot,
+            result_handles=[],
+            result_handle_index={},
+            evidence_gaps=[],
+            cursor="cursor-1",
+        )
+
+
+def _collect_completed_step_ids(state: dict) -> list[str]:
+    completed_ids: list[str] = []
+    for item in list(state.get("step_states") or []):
+        if not isinstance(item, dict) or str(item.get("status") or "") != ExecutionStatus.COMPLETED.value:
+            continue
+        step_id = str(item.get("step_id") or "").strip()
+        if step_id and step_id not in completed_ids:
+            completed_ids.append(step_id)
+    plan = state.get("plan")
+    for plan_step in list(getattr(plan, "steps", []) or []):
+        if getattr(plan_step, "status", None) != ExecutionStatus.COMPLETED:
+            continue
+        step_id = str(getattr(plan_step, "id", "") or "").strip()
+        if step_id and step_id not in completed_ids:
+            completed_ids.append(step_id)
+    return completed_ids or ["step-1"]
+
+
+_TEST_RUNTIME_CONTEXT_SERVICE = _ReadyRuntimeContextService()
 
 
 async def create_or_reuse_plan_node(*args, **kwargs):

@@ -111,17 +111,37 @@ class RuntimeContextService:
             step=step,
             task_mode=str(packet.get("task_mode") or task_mode or ""),
         )
+        has_completed_steps = self._has_completed_steps(state=state)
         if evidence_context is not None:
-            packet["evidence_context"] = evidence_context.model_dump(mode="json")
-            packet["evidence_prompt_digest"] = evidence_context.prompt_digest
+            packet.update(
+                self._build_stage_evidence_packet_fields(
+                    stage=stage,
+                    evidence_context=evidence_context,
+                )
+            )
             visible_fields = [
                 field_name
                 for field_name in list(packet.get("prompt_visible_fields") or [])
-                if field_name != "evidence_context"
+                if field_name not in {"evidence_context", "summary_evidence_context", "evidence_replan_context"}
             ]
             if evidence_context.prompt_digest and "evidence_prompt_digest" not in visible_fields:
                 visible_fields.append("evidence_prompt_digest")
+            if stage == "summary" and "summary_evidence_context" not in visible_fields:
+                visible_fields.append("summary_evidence_context")
+            if stage == "replan" and "evidence_replan_context" not in visible_fields:
+                visible_fields.append("evidence_replan_context")
             packet["prompt_visible_fields"] = visible_fields
+        elif stage in {"replan", "summary"} and has_completed_steps:
+            packet["evidence_context_error"] = {
+                "reason_code": "evidence_context_missing",
+                "stage": stage,
+                "completed_step_ids": self._collect_completed_step_ids_for_error(state=state),
+            }
+            packet["prompt_visible_fields"] = [
+                field_name
+                for field_name in list(packet.get("prompt_visible_fields") or [])
+                if field_name != "evidence_context_error"
+            ]
         return packet
 
     def _build_packet(
@@ -173,6 +193,7 @@ class RuntimeContextService:
         if policy.include_recent_action_digest:
             packet["recent_action_digest"] = self._build_recent_action_digest(
                 state=state,
+                stage=stage,
                 task_mode=resolved_task_mode,
             )
         if policy.include_working_memory_digest:
@@ -222,7 +243,7 @@ class RuntimeContextService:
             step: Optional[Step],
             task_mode: str,
     ):
-        if self._evidence_context_provider is None or stage not in {"execute", "replan"}:
+        if self._evidence_context_provider is None or stage not in {"execute", "replan", "summary"}:
             return None
         scope = self._build_access_scope(state=state, step=step)
         if scope is None:
@@ -235,6 +256,54 @@ class RuntimeContextService:
             step=step,
             task_mode=task_mode,
         )
+
+    @staticmethod
+    def _build_stage_evidence_packet_fields(
+            *,
+            stage: PromptStage,
+            evidence_context,
+    ) -> Dict[str, Any]:
+        context_payload = evidence_context.model_dump(mode="json")
+        if stage == "summary":
+            return {
+                "evidence_context_cursor": evidence_context.cursor,
+                "evidence_prompt_digest": evidence_context.prompt_digest,
+                "summary_evidence_context": {
+                    "evidence_prompt_digest": evidence_context.prompt_digest,
+                    "completed_actions": context_payload.get("evidence_reuse_snapshot", {}).get(
+                        "completed_actions", []
+                    ) if isinstance(context_payload.get("evidence_reuse_snapshot"), dict) else [],
+                    "available_artifacts": context_payload.get("evidence_reuse_snapshot", {}).get(
+                        "available_artifacts", []
+                    ) if isinstance(context_payload.get("evidence_reuse_snapshot"), dict) else [],
+                    "verified_claims": context_payload.get("evidence_reuse_snapshot", {}).get(
+                        "verified_claims", []
+                    ) if isinstance(context_payload.get("evidence_reuse_snapshot"), dict) else [],
+                    "evidence_gaps": context_payload.get("evidence_gaps", []),
+                    "cursor": evidence_context.cursor,
+                },
+            }
+        if stage == "replan":
+            snapshot = context_payload.get("evidence_reuse_snapshot")
+            return {
+                "evidence_context": context_payload,
+                "evidence_context_cursor": evidence_context.cursor,
+                "evidence_prompt_digest": evidence_context.prompt_digest,
+                "evidence_replan_context": {
+                    "completed_actions": snapshot.get("completed_actions", []) if isinstance(snapshot, dict) else [],
+                    "available_artifacts": snapshot.get("available_artifacts", []) if isinstance(snapshot, dict) else [],
+                    "verified_claims": snapshot.get("verified_claims", []) if isinstance(snapshot, dict) else [],
+                    "evidence_gaps": context_payload.get("evidence_gaps", []),
+                    "do_not_repeat": snapshot.get("do_not_repeat", []) if isinstance(snapshot, dict) else [],
+                    "result_handles": context_payload.get("result_handles", []),
+                    "cursor": evidence_context.cursor,
+                },
+            }
+        return {
+            "evidence_context": context_payload,
+            "evidence_context_cursor": evidence_context.cursor,
+            "evidence_prompt_digest": evidence_context.prompt_digest,
+        }
 
     @staticmethod
     def _build_access_scope(
@@ -281,6 +350,35 @@ class RuntimeContextService:
             if not step_id or step_id == current_step_id or step_id in completed_ids:
                 continue
             if getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED:
+                completed_ids.append(step_id)
+        return completed_ids
+
+    @staticmethod
+    def _has_completed_steps(*, state: PlannerReActLangGraphState) -> bool:
+        for item in list(state.get("step_states") or []):
+            if isinstance(item, dict) and str(item.get("status") or "") == ExecutionStatus.COMPLETED.value:
+                return True
+        plan = state.get("plan")
+        return any(
+            getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED
+            for plan_step in list(getattr(plan, "steps", []) or [])
+        )
+
+    @staticmethod
+    def _collect_completed_step_ids_for_error(*, state: PlannerReActLangGraphState) -> list[str]:
+        completed_ids: list[str] = []
+        for item in list(state.get("step_states") or []):
+            if not isinstance(item, dict) or str(item.get("status") or "") != ExecutionStatus.COMPLETED.value:
+                continue
+            step_id = str(item.get("step_id") or "").strip()
+            if step_id and step_id not in completed_ids:
+                completed_ids.append(step_id)
+        plan = state.get("plan")
+        for plan_step in list(getattr(plan, "steps", []) or []):
+            if getattr(plan_step, "status", None) != ExecutionStatus.COMPLETED:
+                continue
+            step_id = str(getattr(plan_step, "id", "") or "").strip()
+            if step_id and step_id not in completed_ids:
                 completed_ids.append(step_id)
         return completed_ids
 
@@ -647,10 +745,10 @@ class RuntimeContextService:
                     item
                     for item in normalize_text_list(last_step.outcome.blockers)
                 ]
-                # facts_learned 作为步骤级证据文本，需要把完整内容传给后续 step，而不是再次截断成摘要。
                 digest["last_step_facts"] = [
-                    str(item)
-                    for item in normalize_text_list(last_step.outcome.facts_learned)
+                    str(item.text)
+                    for item in list(getattr(last_step.outcome, "evidence_backed_facts", []) or [])
+                    if str(item.text or "").strip()
                 ]
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             latest_fetch_summary = self._collect_fetch_page_summaries(
@@ -683,6 +781,7 @@ class RuntimeContextService:
             self,
             *,
             state: PlannerReActLangGraphState,
+            stage: PromptStage,
             task_mode: str,
     ) -> Dict[str, Any]:
         # recent_action 的失败/阻断只读同模式，research/web_reading 证据允许向后投影给下一阶段消费。
@@ -702,12 +801,14 @@ class RuntimeContextService:
             digest["last_blocked_tool_call"] = dict(same_mode_digest.get("last_blocked_tool_call") or {})
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             digest["recent_search_queries"] = normalize_text_list(same_mode_digest.get("recent_search_queries"))
-        digest.update(
-            self._project_cross_step_evidence(
-                task_mode=task_mode,
-                source_digest=cross_mode_digest,
+        # PR4 后 replan/summary 的 evidence 来源统一走 EvidenceDigestResult。
+        if stage not in {"replan", "summary"}:
+            digest.update(
+                self._project_cross_step_evidence(
+                    task_mode=task_mode,
+                    source_digest=cross_mode_digest,
+                )
             )
-        )
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
             digest["last_user_wait_reason"] = str(
                 self._build_pending_confirmation(state=state).get("prompt") or "").strip()
@@ -1175,10 +1276,14 @@ class RuntimeContextService:
                     item
                     for item in normalize_text_list(target_step.outcome.blockers)
                 ],
-                # 当前步骤执行结果里的证据文本必须完整暴露给后续 prompt，上层模型才能直接复用。
+                "evidence_backed_facts": [
+                    item.model_dump(mode="json")
+                    for item in list(getattr(target_step.outcome, "evidence_backed_facts", []) or [])
+                ],
                 "facts_learned": [
-                    str(item)
-                    for item in normalize_text_list(target_step.outcome.facts_learned)
+                    str(item.text)
+                    for item in list(getattr(target_step.outcome, "evidence_backed_facts", []) or [])
+                    if str(item.text or "").strip()
                 ],
                 "open_questions": [
                     item
@@ -1231,10 +1336,11 @@ class RuntimeContextService:
                     "description": item.get("description"),
                     "status": str(item.get("status") or "").strip(),
                     "summary": outcome.get("summary"),
-                    # 已完成步骤摘要中的 facts_learned 同样保留全文，避免下游只能看到残缺片段。
+                    "evidence_backed_facts": list(outcome.get("evidence_backed_facts") or []),
                     "facts_learned": [
-                        str(item)
-                        for item in normalize_text_list(outcome.get("facts_learned"))
+                        str(item.get("text") or "").strip()
+                        for item in list(outcome.get("evidence_backed_facts") or [])
+                        if isinstance(item, dict) and str(item.get("text") or "").strip()
                     ],
                 }
             )

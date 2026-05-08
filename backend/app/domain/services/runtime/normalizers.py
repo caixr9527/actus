@@ -14,7 +14,7 @@ _LOW_VALUE_SUCCESS_CRITERIA_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _USER_FACING_FINAL_SUMMARY_PREFIX_PATTERN = re.compile(
-    r"^(下面是|以下是|最终答案如下|最终结论如下|最终方案如下|已为你整理|给你整理了|给用户|输出给用户|回复用户|Here is|Here are|Final answer|Final response)",
+    r"^(下面是|以下是)(?:最终答案|最终结论|最终方案)?|^(最终答案如下|最终结论如下|最终方案如下|已为你整理|给你整理了|给用户|输出给用户|回复用户|Here is|Here are|Final answer|Final response)",
     re.IGNORECASE,
 )
 _SUCCESS_CRITERIA_MAX_ITEMS = 3
@@ -346,6 +346,7 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "summary",
             "produced_artifacts",
             "blockers",
+            "evidence_backed_facts",
             "facts_learned",
             "open_questions",
             "deliver_result_as_attachment",
@@ -363,6 +364,9 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
         "summary": normalize_step_result_text(source.get("summary")),
         "produced_artifacts": normalize_file_path_list(source.get("produced_artifacts")),
         "blockers": normalize_text_list(source.get("blockers")),
+        "evidence_backed_facts": normalize_evidence_backed_fact_projection_payloads(
+            source.get("evidence_backed_facts")
+        ),
         "facts_learned": normalize_text_list(source.get("facts_learned")),
         "open_questions": normalize_text_list(source.get("open_questions")),
         "deliver_result_as_attachment": normalize_optional_bool(source.get("deliver_result_as_attachment")),
@@ -370,6 +374,37 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
         "reused_from_run_id": reused_from_run_id or None,
         "reused_from_step_id": reused_from_step_id or None,
     }
+
+
+def normalize_evidence_backed_fact_projection_payloads(raw: Any) -> List[Dict[str, Any]]:
+    """规整 evidence-backed facts，只保留契约字段。"""
+    normalized_items: List[Dict[str, Any]] = []
+    for item in list(raw or []):
+        source = _extract_mapping_fields(
+            item,
+            (
+                "text",
+                "evidence_ids",
+                "fact_ids",
+                "artifact_ids",
+                "source_event_ids",
+                "user_confirmation_event_ids",
+            ),
+        )
+        text = normalize_step_result_text(source.get("text"))
+        if not text:
+            continue
+        normalized_items.append(
+            {
+                "text": text,
+                "evidence_ids": normalize_ref_list(source.get("evidence_ids")),
+                "fact_ids": normalize_ref_list(source.get("fact_ids")),
+                "artifact_ids": normalize_ref_list(source.get("artifact_ids")),
+                "source_event_ids": normalize_ref_list(source.get("source_event_ids")),
+                "user_confirmation_event_ids": normalize_ref_list(source.get("user_confirmation_event_ids")),
+            }
+        )
+    return normalized_items
 
 
 def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
@@ -395,6 +430,7 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "artifact_policy",
             "objective_key",
             "success_criteria",
+            "evidence_intent",
             "status",
             "outcome",
             "error",
@@ -408,6 +444,7 @@ def normalize_step_payload(raw: Any) -> Optional[Dict[str, Any]]:
         "description": normalize_string_value(source.get("description")),
         "objective_key": normalize_string_value(source.get("objective_key")),
         "success_criteria": normalize_text_list(source.get("success_criteria")),
+        "evidence_intent": dict(source.get("evidence_intent") or {}) if isinstance(source.get("evidence_intent"), dict) else {},
         "status": (
             normalize_controlled_value(source.get("status"), ExecutionStatus)
             or ExecutionStatus.PENDING.value

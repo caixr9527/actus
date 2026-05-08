@@ -60,6 +60,7 @@ class StepState(TypedDict, total=False):
     task_mode_hint: str
     output_mode: str
     artifact_policy: str
+    evidence_intent: Dict[str, Any]
     status: str
     outcome: Optional["StepOutcomeState"]
 
@@ -70,6 +71,7 @@ class StepOutcomeState(TypedDict, total=False):
     summary: str
     produced_artifacts: List[str]
     blockers: List[str]
+    evidence_backed_facts: List[Dict[str, Any]]
     facts_learned: List[str]
     open_questions: List[str]
 
@@ -350,19 +352,21 @@ class GraphStateContractMapper:
         return step_state
 
     @classmethod
-    def _normalize_step_control_state(cls, raw: Any) -> Dict[str, str]:
+    def _normalize_step_control_state(cls, raw: Any) -> Dict[str, Any]:
         """统一规整步骤执行语义，保证 plan、step_states、恢复链路使用同一套字段。"""
         if isinstance(raw, Step):
             raw_values = {
                 "task_mode_hint": getattr(raw, "task_mode_hint", None),
                 "output_mode": getattr(raw, "output_mode", None),
                 "artifact_policy": getattr(raw, "artifact_policy", None),
+                "evidence_intent": getattr(raw, "evidence_intent", None),
             }
         elif isinstance(raw, dict):
             raw_values = {
                 "task_mode_hint": raw.get("task_mode_hint"),
                 "output_mode": raw.get("output_mode"),
                 "artifact_policy": raw.get("artifact_policy"),
+                "evidence_intent": raw.get("evidence_intent"),
             }
         else:
             return {}
@@ -377,6 +381,9 @@ class GraphStateContractMapper:
             for key, value in normalized_values.items()
             if value
         }
+        evidence_intent = raw_values.get("evidence_intent")
+        if isinstance(evidence_intent, dict) and evidence_intent:
+            normalized_control["evidence_intent"] = dict(evidence_intent)
         return normalized_control
 
     @classmethod
@@ -395,6 +402,9 @@ class GraphStateContractMapper:
         blockers = normalize_text_list(normalized_payload.get("blockers"))
         if blockers:
             normalized_outcome["blockers"] = blockers
+        evidence_backed_facts = list(normalized_payload.get("evidence_backed_facts") or [])
+        if evidence_backed_facts:
+            normalized_outcome["evidence_backed_facts"] = evidence_backed_facts
         facts_learned = normalize_text_list(normalized_payload.get("facts_learned"))
         if facts_learned:
             normalized_outcome["facts_learned"] = facts_learned

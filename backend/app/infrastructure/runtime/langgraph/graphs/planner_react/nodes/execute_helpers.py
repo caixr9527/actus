@@ -33,6 +33,7 @@ from app.domain.services.runtime.contracts.final_output_contract import (
 )
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.evidence_ledger_contract import (
+    EvidenceBackedFactProjection,
     EvidenceResultHandle,
     RuntimeEvidenceContextResult,
 )
@@ -580,6 +581,21 @@ async def build_execute_interrupt_transition(
     )
 
 
+def _normalize_evidence_backed_facts(raw: Any) -> list[EvidenceBackedFactProjection]:
+    projections: list[EvidenceBackedFactProjection] = []
+    for item in list(raw or []):
+        try:
+            projection = (
+                item
+                if isinstance(item, EvidenceBackedFactProjection)
+                else EvidenceBackedFactProjection.model_validate(item)
+            )
+        except Exception:
+            continue
+        projections.append(projection)
+    return projections
+
+
 async def build_execute_completed_transition(
         *,
         state: PlannerReActLangGraphState,
@@ -614,12 +630,16 @@ async def build_execute_completed_transition(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
     )
     open_questions = normalize_text_list(normalized_execution.get("open_questions"))
+    evidence_backed_facts = _normalize_evidence_backed_facts(
+        normalized_execution.get("evidence_backed_facts")
+    )
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
         produced_artifacts=step_attachment_paths,
         blockers=normalize_text_list(normalized_execution.get("blockers")),
-        facts_learned=normalize_text_list(normalized_execution.get("facts_learned")),
+        evidence_backed_facts=evidence_backed_facts,
+        facts_learned=[item.text for item in evidence_backed_facts],
         open_questions=open_questions,
         deliver_result_as_attachment=step_deliver_result_as_attachment,
         next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),

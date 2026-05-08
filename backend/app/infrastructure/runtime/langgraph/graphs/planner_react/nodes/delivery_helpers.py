@@ -90,9 +90,7 @@ def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
 def _outcome_is_reusable(outcome: Optional[StepOutcome]) -> bool:
     if outcome is None or not outcome.done:
         return False
-    if normalize_step_result_text(outcome.summary):
-        return True
-    if len(normalize_text_list(list(outcome.facts_learned or []))) > 0:
+    if len(list(getattr(outcome, "evidence_backed_facts", []) or [])) > 0:
         return True
     return len(
         normalize_file_path_list(
@@ -327,7 +325,10 @@ def _merge_step_outcome_into_working_memory(
             open_question,
         )
 
-    for fact in list(outcome.facts_learned or []):
+    for projection in list(getattr(outcome, "evidence_backed_facts", []) or []):
+        fact = str(getattr(projection, "text", "") or "").strip()
+        if not fact:
+            continue
         updated_working_memory["facts_in_session"] = append_unique_text(
             list(updated_working_memory.get("facts_in_session") or []),
             fact,
@@ -357,7 +358,12 @@ def _build_reused_step_outcome(
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         ),
         blockers=normalize_text_list(list(source_outcome.blockers or [])),
-        facts_learned=normalize_text_list(list(source_outcome.facts_learned or [])),
+        evidence_backed_facts=list(getattr(source_outcome, "evidence_backed_facts", []) or []),
+        facts_learned=[
+            str(item.text or "").strip()
+            for item in list(getattr(source_outcome, "evidence_backed_facts", []) or [])
+            if str(item.text or "").strip()
+        ],
         open_questions=normalize_text_list(list(source_outcome.open_questions or [])),
         deliver_result_as_attachment=source_outcome.deliver_result_as_attachment,
         next_hint=normalize_step_result_text(source_outcome.next_hint),

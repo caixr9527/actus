@@ -42,6 +42,7 @@ from .control_state import (
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
 )
+from .evidence_context_guard import validate_stage_evidence_context_packet
 from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
@@ -83,6 +84,22 @@ async def replan_node(
         runtime_context_service=runtime_context_service,
         context_packet=replan_context_packet,
     )
+    evidence_guard = validate_stage_evidence_context_packet(
+        stage="replan",
+        context_packet=replan_context_packet,
+    )
+    if evidence_guard.blocked:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "重规划 evidence context 校验失败，已 fail closed",
+            state=state,
+            reason_code=evidence_guard.reason_code,
+        )
+        return {
+            **state,
+            **replan_context_updates,
+        }
     # replan 仅消费摘要字段，避免把完整步骤和整份计划 JSON 再次塞入 Prompt。
     current_step_snapshot = (
         dict(replan_context_packet.get("current_step") or {})
@@ -251,6 +268,23 @@ async def replan_node(
                 success_criteria_filtered_count=criteria_filtered_count,
                 attempt=attempt + 1,
             )
+        if filtered_steps:
+            evidence_filtered_steps, dropped_evidence_duplicate_steps = (
+                _REPLAN_MERGE_ENGINE.filter_structured_evidence_duplicate_steps(
+                    filtered_steps,
+                    evidence_context=dict(replan_context_packet.get("evidence_replan_context") or {}),
+                )
+            )
+            if dropped_evidence_duplicate_steps > 0:
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "重规划已过滤结构化 evidence 可识别重复步骤",
+                    state=state,
+                    dropped_step_count=dropped_evidence_duplicate_steps,
+                    attempt=attempt + 1,
+                )
+            filtered_steps = evidence_filtered_steps
         if filtered_steps:
             new_steps = filtered_steps
             break

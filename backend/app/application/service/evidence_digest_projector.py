@@ -15,6 +15,7 @@ from typing import Iterable
 from app.domain.models import Step
 from app.domain.models.evidence import (
     EvidenceAvailableArtifactResult,
+    EvidenceBackedFactProjection,
     EvidenceCompletedActionResult,
     EvidenceDigestResult,
     EvidenceDoNotRepeatResult,
@@ -41,6 +42,11 @@ _SUMMARY_LIMIT = 1200
 _SUMMARY_COMPLETED_ACTION_LIMIT = 8
 _SUMMARY_DO_NOT_REPEAT_LIMIT = 8
 _SUMMARY_GAP_LIMIT = 6
+_EVIDENCE_BACKED_FACT_TEXT_LIMIT = 300
+_SUMMARY_TOO_LONG_PROJECTION_TEXT = (
+    "该 step 已形成可审计 evidence，摘要过长未注入 prompt；"
+    "请通过 evidence refs/result handle 读取。"
+)
 
 
 @dataclass(frozen=True)
@@ -66,7 +72,7 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
             step: Step | None = None,
             task_mode: str = "",
     ) -> RuntimeEvidenceContextResult | None:
-        if stage not in {"execute", "replan"}:
+        if stage not in {"execute", "replan", "summary"}:
             return None
         digest = await self.build_digest(
             scope=scope,
@@ -151,6 +157,7 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
         completed_actions: list[EvidenceCompletedActionResult] = []
         available_artifacts: list[EvidenceAvailableArtifactResult] = []
         gaps: list[EvidenceGapResult] = []
+        evidence_backed_facts: list[EvidenceBackedFactProjection] = []
         do_not_repeat: list[EvidenceDoNotRepeatResult] = []
 
         for record in valid_records:
@@ -162,6 +169,10 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
             if record.evidence_kind == EvidenceKind.EVIDENCE_GAP:
                 gaps.append(_gap_result(record))
                 continue
+
+            projection = _evidence_backed_fact_projection(record)
+            if projection is not None:
+                evidence_backed_facts.append(projection)
 
             if record.evidence_kind == EvidenceKind.ARTIFACT_EVIDENCE and primary_handle is not None:
                 available_artifacts.append(_available_artifact(record, primary_handle))
@@ -191,6 +202,7 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
             completed_actions=completed_actions,
             available_artifacts=available_artifacts,
             evidence_gaps=gaps,
+            evidence_backed_facts=evidence_backed_facts,
             do_not_repeat=do_not_repeat,
             requires_verification=[
                 gap for gap in gaps if gap.reason_code in {"verification_action_missing", "result_ref_missing"}
@@ -252,6 +264,62 @@ def _gap_result(record: EvidenceRecord) -> EvidenceGapResult:
             for item in list(payload.get("missing_source_types") or [])
         ],
     )
+
+
+def _evidence_backed_fact_projection(record: EvidenceRecord) -> EvidenceBackedFactProjection | None:
+    text = _build_evidence_backed_projection_text(record)
+    if text is None:
+        return None
+    payload = dict(record.payload or {})
+    artifact_ids = _unique_strings(
+        [
+            *list(record.source_ref.artifact_ids or []),
+            *list(payload.get("supporting_artifact_ids") or []),
+            payload.get("artifact_id"),
+            record.primary_artifact_id,
+        ]
+    )
+    source_event_ids = _unique_strings(
+        [
+            record.source_ref.source_event_id,
+            record.source_event_id,
+            payload.get("source_event_id"),
+        ]
+    )
+    user_confirmation_event_ids = source_event_ids if record.source_ref.source_type == EvidenceSourceType.USER_CONFIRMATION else []
+    try:
+        return EvidenceBackedFactProjection(
+            text=text,
+            evidence_ids=[record.id],
+            fact_ids=_unique_strings(
+                [
+                    *list(record.source_ref.fact_ids or []),
+                    *list(payload.get("source_fact_ids") or []),
+                    *list(payload.get("supporting_fact_ids") or []),
+                    payload.get("source_fact_id"),
+                    record.primary_fact_id,
+                ]
+            ),
+            artifact_ids=artifact_ids,
+            source_event_ids=source_event_ids,
+            user_confirmation_event_ids=user_confirmation_event_ids,
+        )
+    except ValueError:
+        return None
+
+
+def _build_evidence_backed_projection_text(record: EvidenceRecord) -> str | None:
+    """构造可注入 prompt 的 evidence-backed 短投影文本。
+
+    Projection 只承载短摘要和 refs，不通过扩大 text 传递完整证据内容。
+    完整结果读取必须走 result handle / evidence refs。
+    """
+    summary = str(record.summary or "").strip()
+    if not summary:
+        return None
+    if len(summary) <= _EVIDENCE_BACKED_FACT_TEXT_LIMIT:
+        return summary
+    return _SUMMARY_TOO_LONG_PROJECTION_TEXT
 
 
 def _do_not_repeat(
@@ -398,6 +466,15 @@ def _result_refs_hash_matches(record: EvidenceRecord) -> bool:
 
 
 def _normalize_step_ids(values: Iterable[str]) -> list[str]:
+    normalized: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        if item and item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def _unique_strings(values: Iterable[object]) -> list[str]:
     normalized: list[str] = []
     for value in values:
         item = str(value or "").strip()

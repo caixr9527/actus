@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 
 from app.domain.models import (
+    EvidenceBackedFactProjection,
     ExecutionStatus,
     LongTermMemory,
     LongTermMemorySearchMode,
@@ -39,6 +40,10 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     PrivacyLevel,
     RetentionPolicyKind,
 )
+from app.domain.services.runtime.contracts.evidence_ledger_contract import (
+    EvidenceReuseSnapshot,
+    RuntimeEvidenceContextResult,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
     consolidate_memory_node,
     direct_wait_node,
@@ -51,7 +56,41 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
 )
 
 
-_TEST_RUNTIME_CONTEXT_SERVICE = RuntimeContextService()
+class _ReadyRuntimeContextService(RuntimeContextService):
+    async def _build_runtime_evidence_context(self, *, stage, state, step, task_mode):
+        if stage not in {"replan", "summary"}:
+            return await super()._build_runtime_evidence_context(
+                stage=stage,
+                state=state,
+                step=step,
+                task_mode=task_mode,
+            )
+        snapshot = EvidenceReuseSnapshot(
+            run_id="run-1",
+            current_step_id=None,
+            source_step_ids=["step-1"],
+            cursor="cursor-1",
+            do_not_repeat=[],
+            completed_actions=[],
+            available_artifacts=[],
+            verified_claims=[],
+            result_handles=[],
+        )
+        return RuntimeEvidenceContextResult(
+            run_id="run-1",
+            current_step_id=None,
+            source_step_ids=["step-1"],
+            has_previous_completed_steps=True,
+            prompt_digest="evidence digest",
+            evidence_reuse_snapshot=snapshot,
+            result_handles=[],
+            result_handle_index={},
+            evidence_gaps=[],
+            cursor="cursor-1",
+        )
+
+
+_TEST_RUNTIME_CONTEXT_SERVICE = _ReadyRuntimeContextService()
 
 
 class _FakeDataRetentionPolicyService:
@@ -185,7 +224,11 @@ class _FakeLongTermMemoryRepository:
 
 
 class _FakeLLM:
+    def __init__(self) -> None:
+        self.calls = []
+
     async def invoke(self, messages, tools, response_format):
+        self.calls.append({"messages": messages, "tools": tools, "response_format": response_format})
         return {
             "content": json.dumps(
                 {
@@ -198,6 +241,65 @@ class _FakeLLM:
                 },
                 ensure_ascii=False,
             )
+        }
+
+
+class _CursorMismatchRuntimeContextService(RuntimeContextService):
+    async def build_packet_async(self, **kwargs):
+        return {
+            "stage": "summary",
+            "task_mode": "general",
+            "evidence_context_cursor": "cursor-structured",
+            "summary_evidence_context": {
+                "evidence_prompt_digest": "digest",
+                "completed_actions": [],
+                "available_artifacts": [],
+                "verified_claims": [],
+                "evidence_gaps": [],
+                "cursor": "cursor-summary",
+            },
+            "prompt_visible_fields": ["summary_evidence_context"],
+        }
+
+
+class _MissingEvidenceRuntimeContextService(RuntimeContextService):
+    def __init__(self, *, reason_code: str = "evidence_context_missing") -> None:
+        super().__init__()
+        self.reason_code = reason_code
+
+    async def build_packet_async(self, **kwargs):
+        return {
+            "stage": kwargs.get("stage") or "summary",
+            "task_mode": "general",
+            "evidence_context_error": {
+                "reason_code": self.reason_code,
+                "stage": kwargs.get("stage") or "summary",
+                "completed_step_ids": ["step-1"],
+            },
+            "prompt_visible_fields": [],
+        }
+
+
+class _NoneEvidenceContextProvider:
+    async def build_context(self, **kwargs):
+        return None
+
+
+class _SummaryEvidenceRuntimeContextService(RuntimeContextService):
+    async def build_packet_async(self, **kwargs):
+        return {
+            "stage": "summary",
+            "task_mode": "general",
+            "evidence_context_cursor": "cursor-1",
+            "summary_evidence_context": {
+                "evidence_prompt_digest": "digest",
+                "completed_actions": [],
+                "available_artifacts": [],
+                "verified_claims": [],
+                "evidence_gaps": [],
+                "cursor": "cursor-1",
+            },
+            "prompt_visible_fields": ["summary_evidence_context"],
         }
 
 
@@ -248,7 +350,11 @@ class _CaptureSummaryPromptLLM:
 
 
 class _FakeLightSummaryLLM:
+    def __init__(self) -> None:
+        self.calls = []
+
     async def invoke(self, messages, tools, response_format):
+        self.calls.append({"messages": messages, "tools": tools, "response_format": response_format})
         return {
             "content": json.dumps(
                 {
@@ -282,7 +388,11 @@ class _FakeLegacyFinalMessageOnlySummaryLLM:
 
 
 class _FakeInvalidSummaryJsonLLM:
+    def __init__(self) -> None:
+        self.calls = []
+
     async def invoke(self, messages, tools, response_format):
+        self.calls.append({"messages": messages, "tools": tools, "response_format": response_format})
         return {"content": '{"\\n  ":", ","\\n  ":"'}
 
 
@@ -327,8 +437,10 @@ class _FailIfCalledSummaryLLM:
 class _FakeReplanLLM:
     def __init__(self, steps) -> None:
         self.steps = list(steps)
+        self.calls = []
 
     async def invoke(self, messages, tools, response_format):
+        self.calls.append({"messages": messages, "tools": tools, "response_format": response_format})
         return {
             "content": json.dumps(
                 {
@@ -733,6 +845,11 @@ def test_execute_step_node_should_capture_write_file_artifact_and_limit_notify_t
 
 
 def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> None:
+    projection = EvidenceBackedFactProjection(
+        text="报告结构已确定",
+        evidence_ids=["evidence-1"],
+        fact_ids=["fact-1"],
+    )
     completed_step = Step(
         id="step-1",
         title="生成报告",
@@ -744,7 +861,8 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
             done=True,
             summary="报告已经生成",
             produced_artifacts=["/tmp/report.md"],
-            facts_learned=["报告结构已确定"],
+            evidence_backed_facts=[projection],
+            facts_learned=[projection.text],
         ),
     )
     pending_duplicate_step = Step(
@@ -784,6 +902,49 @@ def test_guard_step_reuse_node_should_reuse_completed_step_in_current_run() -> N
     assert next_state["selected_artifacts"] == []
     assert next_state["working_memory"]["facts_in_session"] == ["报告结构已确定"]
     assert next_state.get("final_message", "") == ""
+
+
+def test_guard_step_reuse_node_should_not_reuse_only_legacy_facts_learned() -> None:
+    completed_step = Step(
+        id="step-1",
+        title="生成报告",
+        description="生成报告",
+        objective_key="objective-report",
+        success_criteria=["产出报告"],
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(
+            done=True,
+            summary="报告已经生成",
+            facts_learned=["没有 evidence refs 的模型文本"],
+        ),
+    )
+    pending_duplicate_step = Step(
+        id="step-2",
+        title="再次生成报告",
+        description="再次生成报告",
+        objective_key="objective-report",
+        success_criteria=["产出报告"],
+        status=ExecutionStatus.PENDING,
+    )
+    state = {
+        "run_id": "run-1",
+        "plan": Plan(
+            title="复用测试",
+            goal="避免重复执行",
+            language="zh",
+            steps=[completed_step, pending_duplicate_step],
+        ),
+        "working_memory": {},
+        "graph_metadata": {},
+        "selected_artifacts": [],
+        "emitted_events": [],
+        "execution_count": 0,
+    }
+
+    next_state = asyncio.run(guard_step_reuse_node(state))
+
+    assert next_state["plan"].steps[1].status == ExecutionStatus.PENDING
+    assert next_state["working_memory"] == {}
 
 
 def test_guard_step_reuse_node_should_not_reuse_historical_projection() -> None:
@@ -1188,7 +1349,7 @@ class _FakeWorkspaceRuntimeService:
 
 
 def _build_runtime_context_service_with_workspace_artifacts(*paths: str) -> RuntimeContextService:
-    return RuntimeContextService(
+    return _ReadyRuntimeContextService(
         workspace_runtime_service=_FakeWorkspaceRuntimeService(
             WorkspaceEnvironmentSnapshot(
                 workspace=Workspace(
@@ -1528,6 +1689,82 @@ def test_replan_node_should_regenerate_conflicting_step_ids_without_numeric_assu
     assert next_state["current_step_id"] == step_ids[1]
 
 
+def test_replan_should_fail_closed_when_evidence_context_missing() -> None:
+    completed_step = Step(
+        id="step-a",
+        title="完成已有步骤",
+        description="完成已有步骤",
+        objective_key="objective-step-a",
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(done=True, summary="已完成"),
+    )
+    plan = Plan(
+        title="重规划测试",
+        goal="验证 evidence context 缺失 fail closed",
+        steps=[completed_step],
+    )
+    state = {
+        "plan": plan,
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "emitted_events": [],
+    }
+    llm = _FakeReplanLLM(steps=[{"id": "step-new", "description": "不应生成"}])
+
+    next_state = asyncio.run(
+        _replan_node(
+            state,
+            llm,
+            runtime_context_service=_MissingEvidenceRuntimeContextService(),
+        )
+    )
+
+    assert llm.calls == []
+    assert next_state["plan"].steps == [completed_step]
+    assert "current_step_id" not in next_state
+
+
+def test_replan_should_fail_closed_when_real_runtime_context_provider_missing() -> None:
+    completed_step = Step(
+        id="step-a",
+        title="完成已有步骤",
+        description="完成已有步骤",
+        objective_key="objective-step-a",
+        status=ExecutionStatus.COMPLETED,
+        outcome=StepOutcome(done=True, summary="已完成"),
+    )
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "plan": Plan(
+            title="重规划测试",
+            goal="验证 provider 缺失 fail closed",
+            steps=[completed_step],
+        ),
+        "last_executed_step": completed_step.model_copy(deep=True),
+        "step_states": [{"step_id": "step-a", "status": ExecutionStatus.COMPLETED.value}],
+        "working_memory": {},
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+    llm = _FakeReplanLLM(steps=[{"id": "step-new", "description": "不应生成"}])
+
+    next_state = asyncio.run(
+        _replan_node(
+            state,
+            llm,
+            runtime_context_service=RuntimeContextService(evidence_context_provider=None),
+        )
+    )
+
+    assert llm.calls == []
+    assert next_state["plan"].steps == [completed_step]
+    assert "current_step_id" not in next_state
+
+
 def test_replan_node_should_clear_consumed_entry_upgrade_signal() -> None:
     completed_step = Step(
         id="atomic-action-step",
@@ -1788,7 +2025,13 @@ def test_summarize_should_not_generate_memory_candidates_and_consolidate_should_
         "emitted_events": [],
     }
 
-    summarized_state = asyncio.run(summarize_node(state, llm))
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=_SummaryEvidenceRuntimeContextService(),
+        )
+    )
 
     assert summarized_state["pending_memory_writes"] == pending_memory_writes
     assert summarized_state["selected_artifacts"] == []
@@ -1897,7 +2140,13 @@ def test_summarize_should_not_emit_false_success_when_last_step_failed() -> None
         "emitted_events": [],
     }
 
-    summarized_state = asyncio.run(summarize_node(state, llm))
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=_SummaryEvidenceRuntimeContextService(),
+        )
+    )
 
     assert "未完整完成" in summarized_state["final_answer_text"]
     assert "执行失败" in summarized_state["final_answer_text"]
@@ -2086,7 +2335,7 @@ def test_summarize_should_not_use_legacy_final_message_as_final_answer_text() ->
     assert message_event.message == "轻量总结"
 
 
-def test_summarize_should_fallback_to_step_draft_fact_when_summary_json_invalid() -> None:
+def test_summarize_should_not_fallback_to_step_draft_fact_when_summary_json_invalid() -> None:
     llm = _FakeInvalidSummaryJsonLLM()
     draft_text = "## LangChain Human-in-the-Loop 能力概述\n\n支持人工审核、编辑和拒绝工具调用。"
     final_step = Step(
@@ -2139,12 +2388,18 @@ def test_summarize_should_fallback_to_step_draft_fact_when_summary_json_invalid(
         "emitted_events": [],
     }
 
-    summarized_state = asyncio.run(summarize_node(state, llm))
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=_SummaryEvidenceRuntimeContextService(),
+        )
+    )
 
     assert summarized_state["final_message"] == "已读取并分析文档"
-    assert summarized_state["final_answer_text"] == draft_text
+    assert summarized_state["final_answer_text"] == "已读取并分析文档"
     message_event = summarized_state["emitted_events"][0]
-    assert message_event.message == draft_text
+    assert message_event.message == "已读取并分析文档"
 
 
 def test_summarize_should_not_reuse_generic_step_summary_as_final_message() -> None:
@@ -2309,7 +2564,20 @@ def test_summarize_should_build_summary_context_for_final_round(monkeypatch) -> 
 
     async def _capture_call(*args, **kwargs):
         called["value"] = True
-        return {"stable_background": {}, "current_turn": {}}
+        return {
+            "stable_background": {},
+            "current_turn": {},
+            "evidence_context_cursor": "cursor-1",
+            "summary_evidence_context": {
+                "evidence_prompt_digest": "digest",
+                "completed_actions": [],
+                "available_artifacts": [],
+                "verified_claims": [],
+                "evidence_gaps": [],
+                "cursor": "cursor-1",
+            },
+            "prompt_visible_fields": ["summary_evidence_context"],
+        }
 
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes._build_prompt_context_packet_async",
@@ -3958,3 +4226,172 @@ def test_graph_state_contract_should_include_user_id_in_runtime_metadata() -> No
     assert runtime_metadata["memory"]["recall_ids"] == ["mem-0"]
     assert runtime_metadata["memory"]["write_count"] == 2
     assert runtime_metadata["memory"]["write_ids"] == ["mem-1", "mem-2"]
+
+
+def test_summary_should_fail_closed_when_evidence_context_cursor_mismatch() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "总结",
+        "plan": _build_plan(),
+        "last_executed_step": _build_plan().steps[0],
+        "execution_count": 1,
+        "step_states": [{"step_id": "step-1", "status": ExecutionStatus.COMPLETED.value}],
+        "working_memory": {},
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=_CursorMismatchRuntimeContextService(),
+        )
+    )
+
+    assert llm.calls == []
+    assert "final_answer_text" not in summarized_state
+    assert "final_message" not in summarized_state
+    assert "selected_artifacts" not in summarized_state
+
+
+def test_summary_should_fail_closed_when_real_packet_cursor_metadata_mismatch() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "总结",
+        "plan": _build_plan(),
+        "last_executed_step": _build_plan().steps[0],
+        "execution_count": 1,
+        "step_states": [{"step_id": "step-1", "status": ExecutionStatus.COMPLETED.value}],
+        "working_memory": {},
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+    packet_service = _CursorMismatchRuntimeContextService()
+
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=packet_service,
+        )
+    )
+
+    assert llm.calls == []
+    assert "final_answer_text" not in summarized_state
+    assert "final_message" not in summarized_state
+    assert "selected_artifacts" not in summarized_state
+
+
+def test_summary_should_fail_closed_when_evidence_context_missing() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "总结",
+        "plan": _build_plan(),
+        "last_executed_step": _build_plan().steps[0],
+        "execution_count": 1,
+        "step_states": [{"step_id": "step-1", "status": ExecutionStatus.COMPLETED.value}],
+        "working_memory": {},
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=_MissingEvidenceRuntimeContextService(),
+        )
+    )
+
+    assert llm.calls == []
+    assert "final_answer_text" not in summarized_state
+    assert "final_message" not in summarized_state
+    assert "selected_artifacts" not in summarized_state
+
+
+def test_summary_should_fail_closed_when_real_runtime_context_scope_missing() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "总结",
+        "plan": _build_plan(),
+        "last_executed_step": _build_plan().steps[0],
+        "execution_count": 1,
+        "step_states": [{"step_id": "step-1", "status": ExecutionStatus.COMPLETED.value}],
+        "working_memory": {},
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=RuntimeContextService(
+                evidence_context_provider=_NoneEvidenceContextProvider(),
+            ),
+        )
+    )
+
+    assert llm.calls == []
+    assert "final_answer_text" not in summarized_state
+    assert "final_message" not in summarized_state
+    assert "selected_artifacts" not in summarized_state
+
+
+def test_summary_should_fail_closed_when_real_runtime_context_provider_returns_none() -> None:
+    llm = _FakeLLM()
+    state = {
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "user_message": "总结",
+        "plan": _build_plan(),
+        "last_executed_step": _build_plan().steps[0],
+        "execution_count": 1,
+        "step_states": [{"step_id": "step-1", "status": ExecutionStatus.COMPLETED.value}],
+        "working_memory": {},
+        "message_window": [],
+        "graph_metadata": {},
+        "emitted_events": [],
+    }
+
+    summarized_state = asyncio.run(
+        _summarize_node(
+            state,
+            llm,
+            runtime_context_service=RuntimeContextService(
+                evidence_context_provider=_NoneEvidenceContextProvider(),
+            ),
+        )
+    )
+
+    assert llm.calls == []
+    assert "final_answer_text" not in summarized_state
+    assert "final_message" not in summarized_state
+    assert "selected_artifacts" not in summarized_state

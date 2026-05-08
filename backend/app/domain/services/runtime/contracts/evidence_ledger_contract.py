@@ -140,6 +140,17 @@ FORBIDDEN_RESOLVED_PAYLOAD_RAW_KEYS = frozenset(
         "html",
     }
 )
+FORBIDDEN_PROJECTION_TEXT_TOKENS = frozenset(
+    {
+        "raw_stdout",
+        "stdout",
+        "full_text",
+        "file_content",
+        "page_content",
+        "document_text",
+        "html",
+    }
+)
 
 
 class EvidenceDuplicateDecision(str, Enum):
@@ -548,6 +559,26 @@ class EvidenceGapResult(BaseModel):
     missing_source_types: list[EvidenceSourceType] = Field(default_factory=list)
 
 
+class EvidenceBackedFactProjection(BaseModel):
+    """由 Evidence digest 投影出的短可读事实，保留可审计 refs。"""
+
+    model_config = ConfigDict(extra="forbid")
+    text: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    fact_ids: list[str] = Field(default_factory=list)
+    artifact_ids: list[str] = Field(default_factory=list)
+    source_event_ids: list[str] = Field(default_factory=list)
+    user_confirmation_event_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("text")
+    @classmethod
+    def _text_must_be_short_and_safe(cls, value: str) -> str:
+        normalized = _required_text(value, "evidence-backed fact text 不能为空")
+        normalized = _short_text(normalized, 300, "evidence-backed fact text 不能超过 300 字符")
+        _reject_raw_projection_text(normalized)
+        return normalized
+
+
 class EvidenceDoNotRepeatResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action_key: str
@@ -590,6 +621,7 @@ class EvidenceDigestResult(BaseModel):
     available_artifacts: list[EvidenceAvailableArtifactResult] = Field(default_factory=list)
     verified_claims: list[EvidenceVerifiedClaimResult] = Field(default_factory=list)
     evidence_gaps: list[EvidenceGapResult] = Field(default_factory=list)
+    evidence_backed_facts: list[EvidenceBackedFactProjection] = Field(default_factory=list)
     do_not_repeat: list[EvidenceDoNotRepeatResult] = Field(default_factory=list)
     requires_verification: list[EvidenceGapResult] = Field(default_factory=list)
     result_handles: list[EvidenceResultHandle] = Field(default_factory=list)
@@ -1081,6 +1113,12 @@ def _resolved_payload_has_forbidden_raw_key(payload: Any) -> bool:
     if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
         return any(_resolved_payload_has_forbidden_raw_key(item) for item in payload)
     return False
+
+
+def _reject_raw_projection_text(text: str) -> None:
+    normalized = str(text or "").lower()
+    if any(token in normalized for token in FORBIDDEN_PROJECTION_TEXT_TOKENS):
+        raise ValueError("evidence-backed fact text 禁止包含 raw/full content 字段名")
 
 
 def _validate_result_ref_recoverability(

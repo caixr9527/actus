@@ -4,7 +4,7 @@
 
 from typing import Any, Dict, List, Literal, TypedDict
 
-PromptStage = Literal["planner", "execute", "replan", "summary", "direct_answer"]
+PromptStage = Literal["planner", "execute", "replan", "summary", "direct_answer", "future_review"]
 
 
 class PendingConfirmationPacket(TypedDict, total=False):
@@ -42,3 +42,7 @@ class PromptContextPacket(TypedDict, total=False):
     prompt_visible_fields: List[str]
     audit_refs: Dict[str, Any]
     evidence_context: Dict[str, Any]
+    evidence_context_error: Dict[str, Any]
+    evidence_context_cursor: str
+    summary_evidence_context: Dict[str, Any]
+    evidence_replan_context: Dict[str, Any]

@@ -233,6 +233,7 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         "summary": "完成",
         "produced_artifacts": ["/tmp/file-1.md"],
         "blockers": [],
+        "evidence_backed_facts": [],
         "facts_learned": [],
         "open_questions": [],
         "deliver_result_as_attachment": None,

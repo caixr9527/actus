@@ -53,6 +53,7 @@ from .event import (
     A2AToolContent,
 )
 from .evidence import (
+    EvidenceBackedFactProjection,
     EvidenceKind,
     EvidenceQualityStatus,
     EvidenceRecord,
@@ -154,6 +155,7 @@ __all__ = [
     "build_step_objective_source",
     "RuntimeLLMConfig",
     "ExecutionStatus",
+    "EvidenceBackedFactProjection",
     "BaseEvent",
     "PlanEvent",
     "TitleEvent",

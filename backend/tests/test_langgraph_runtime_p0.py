@@ -2306,12 +2306,12 @@ def test_direct_wait_execute_step_should_allow_search_without_legacy_delivery_co
 
     next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[search_tool]))
 
-    assert search_tool.invoked == 1
-    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert search_tool.invoked == 0
+    assert next_state["last_executed_step"].status == ExecutionStatus.FAILED
     assert "direct_wait_original_task_executed" not in next_state["graph_metadata"]["control"]
     assert next_state["final_message"] == ""
     assert next_state["last_executed_step"].outcome is not None
-    assert next_state["last_executed_step"].outcome.summary == "已完成当前步骤"
+    assert "evidence reuse snapshot" in next_state["last_executed_step"].outcome.summary
 
 
 def test_execute_step_node_should_treat_selected_artifacts_as_available_file_context() -> None:
@@ -2453,7 +2453,8 @@ def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candi
     intermediate_events = [event for event in emitted_events if isinstance(event, MessageEvent)]
     assert len(intermediate_events) == 0
     assert next_state["plan"].steps[0].outcome is not None
-    assert next_state["plan"].steps[0].outcome.facts_learned == ["候选课程 A", "候选课程 B", "候选课程 C"]
+    assert next_state["plan"].steps[0].outcome.facts_learned == []
+    assert next_state["plan"].steps[0].outcome.evidence_backed_facts == []
     assert next_state["final_message"] == ""
 
 

@@ -155,6 +155,7 @@ class StepOutcomeData(BaseModel):
     summary: str = ""
     produced_artifacts: List[str] = Field(default_factory=list)
     blockers: List[str] = Field(default_factory=list)
+    evidence_backed_facts: List[Dict[str, Any]] = Field(default_factory=list)
     facts_learned: List[str] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
     next_hint: Optional[str] = None

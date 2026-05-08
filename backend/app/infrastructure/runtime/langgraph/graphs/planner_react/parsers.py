@@ -142,6 +142,7 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
             artifact_policy=artifact_policy,
             objective_key=str(payload.get("objective_key") or build_step_objective_key(title, description)),
             success_criteria=success_criteria,
+            evidence_intent=dict(payload.get("evidence_intent") or {}) if isinstance(payload.get("evidence_intent"), dict) else {},
             status=ExecutionStatus.PENDING,
         )
 

@@ -37,7 +37,7 @@ class EvidenceRuntimeContextProvider(EvidenceRuntimeContextProviderPort):
             step: Step | None = None,
             task_mode: str = "",
     ) -> RuntimeEvidenceContextResult | None:
-        if stage in {"execute", "replan"} and completed_step_ids:
+        if stage in {"execute", "replan", "summary"} and completed_step_ids:
             await self._ledger_service.reconcile_previous_steps_evidence(
                 scope=scope,
                 completed_step_ids=completed_step_ids,

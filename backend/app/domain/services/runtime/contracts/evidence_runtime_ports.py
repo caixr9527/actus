@@ -13,6 +13,7 @@ from typing import Protocol
 from app.domain.models import Step
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.evidence_ledger_contract import (
+    EvidenceBackedFactProjection,
     EvidenceResolvedResult,
     EvidenceResultHandle,
     RuntimeEvidenceContextResult,
@@ -54,6 +55,15 @@ class EvidenceStepReconcilerPort(Protocol):
             step: Step,
     ) -> object:
         """runner fail-safe 兜底写入 evidence_reconcile_failed gap。"""
+        ...
+
+    async def build_step_evidence_backed_facts(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+    ) -> list[EvidenceBackedFactProjection]:
+        """基于已落库 evidence 为 StepOutcome 生成可读事实投影。"""
         ...
 
 

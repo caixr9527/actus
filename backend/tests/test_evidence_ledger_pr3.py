@@ -20,8 +20,9 @@ from app.application.service.evidence_fact_assembler import (
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
-from app.domain.models import ExecutionStatus, Plan, Session, Step, StepEvent, ToolResult, WorkflowRun, Workspace
+from app.domain.models import ExecutionStatus, Plan, Session, Step, StepEvent, StepOutcome, ToolResult, WorkflowRun, Workspace
 from app.domain.models.evidence import (
+    EvidenceBackedFactProjection,
     EvidenceDuplicateDecision,
     EvidenceKind,
     EvidenceQualityStatus,
@@ -81,6 +82,12 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_nod
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import prepare_execute_step_input
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.prompt_context_helpers import (
     _append_prompt_context_to_prompt,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.replan import ReplanMergeEngine
+from app.domain.services.runtime.contracts.langgraph_settings import (
+    REPLAN_META_VALIDATION_ALLOW_PATTERN,
+    REPLAN_META_VALIDATION_DENY_PATTERN,
+    REPLAN_META_VALIDATION_STEP_PATTERN,
 )
 from app.domain.services.agent_task_runner import AgentTaskRunner
 
@@ -311,6 +318,65 @@ def test_digest_should_build_handles_only_from_persisted_result_refs() -> None:
     assert digest.result_handles
     assert digest.do_not_repeat
     assert digest.do_not_repeat[0].result_handle_id == digest.result_handles[0].result_handle_id
+    assert digest.evidence_backed_facts
+    assert digest.evidence_backed_facts[0].text == "safe summary"
+    assert digest.evidence_backed_facts[0].evidence_ids
+    assert digest.evidence_backed_facts[0].fact_ids == ["fact-1"]
+
+
+def test_digest_should_not_truncate_long_evidence_backed_projection_text() -> None:
+    long_summary = "前置条件：" + "需要保留完整限定条件。" * 30
+    fact = _fact(SandboxFactKind.FILE_READ)
+    evidence_repo = _EvidenceRepo()
+    service = _ledger_service(uow_factory=lambda: _UoW(facts=[fact], evidence=evidence_repo))
+    saved = asyncio.run(service.reconcile_step_evidence(scope=_scope("step-1"), step=Step(id="step-1")))
+    evidence_repo.records[0].summary = long_summary
+    projector = EvidenceDigestProjector(uow_factory=lambda: _UoW(evidence=evidence_repo))
+
+    digest = asyncio.run(projector.build_digest(
+        scope=_scope("step-2"),
+        current_step_id="step-2",
+        completed_step_ids=["step-1"],
+    ))
+    projections = asyncio.run(service.build_step_evidence_backed_facts(
+        scope=_scope("step-1"),
+        step=Step(id="step-1"),
+    ))
+
+    assert saved
+    assert digest is not None
+    projection = digest.evidence_backed_facts[0]
+    assert projection.text == "该 step 已形成可审计 evidence，摘要过长未注入 prompt；请通过 evidence refs/result handle 读取。"
+    assert len(projection.text) <= 300
+    assert projection.text != long_summary[:300]
+    assert projection.evidence_ids
+    assert projection.fact_ids == ["fact-1"]
+    assert projection.source_event_ids == ["event-1"]
+    assert projections[0].text == projection.text
+
+
+def test_step_outcome_should_keep_evidence_backed_facts_and_derive_facts_text() -> None:
+    projection = EvidenceBackedFactProjection(
+        text="已读取 /workspace/a.txt",
+        evidence_ids=["evidence-1"],
+        fact_ids=["fact-1"],
+        artifact_ids=[],
+        source_event_ids=["event-1"],
+        user_confirmation_event_ids=[],
+    )
+    step = Step(
+        id="step-1",
+        outcome=StepOutcome(
+            done=True,
+            summary="完成",
+            evidence_backed_facts=[projection],
+            facts_learned=[projection.text],
+        ),
+    )
+
+    assert step.outcome is not None
+    assert step.outcome.facts_learned == ["已读取 /workspace/a.txt"]
+    assert step.model_dump(mode="json")["outcome"]["evidence_backed_facts"][0]["fact_ids"] == ["fact-1"]
 
 
 def test_digest_prompt_summary_should_truncate_by_complete_lines_without_trimming_structured_context() -> None:
@@ -1215,6 +1281,25 @@ def test_agent_task_runner_should_reconcile_evidence_before_completed_step_event
     assert call["scope"].run_id == "run-1"
 
 
+def test_agent_task_runner_should_overwrite_step_outcome_with_evidence_backed_projection() -> None:
+    step = Step(
+        id="step-1",
+        outcome=StepOutcome(done=True, summary="完成", facts_learned=["model only fact"]),
+    )
+    event = StepEvent(step=step, status="completed")
+    runner = object.__new__(AgentTaskRunner)
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _RunnerUoW()
+    runner._evidence_step_reconciler = _ProjectionStepReconciler()
+
+    asyncio.run(runner._reconcile_evidence_before_step_completed(event))
+
+    assert event.step.outcome is not None
+    assert event.step.outcome.facts_learned == ["evidence backed fact"]
+    assert event.step.outcome.evidence_backed_facts[0].evidence_ids == ["evidence-1"]
+
+
 @pytest.mark.parametrize("failure_mode", ["fact_repo", "assembler", "record_evidence"])
 def test_reconcile_step_evidence_should_write_gap_when_reconcile_fails(failure_mode) -> None:
     fact = _fact(SandboxFactKind.FILE_READ)
@@ -1512,6 +1597,23 @@ class _ThrowingStepReconciler:
 class _NoneReturningStepReconciler:
     async def reconcile_step_evidence(self, *, scope, step):
         return None
+
+
+class _ProjectionStepReconciler:
+    async def reconcile_step_evidence(self, *, scope, step):
+        return [object()]
+
+    async def build_step_evidence_backed_facts(self, *, scope, step):
+        return [
+            EvidenceBackedFactProjection(
+                text="evidence backed fact",
+                evidence_ids=["evidence-1"],
+                fact_ids=["fact-1"],
+                artifact_ids=[],
+                source_event_ids=["event-1"],
+                user_confirmation_event_ids=[],
+            )
+        ]
 
 
 class _GapWritingReconciler:
