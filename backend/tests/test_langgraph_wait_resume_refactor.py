@@ -1401,3 +1401,76 @@ def test_execute_step_node_should_append_confirmed_facts_to_description_context(
     assert "已确认用户输入（仅作当前步骤执行上下文，不改写原步骤描述）" in llm.last_prompt_text
     assert "- course_name: AI 工程师课程" in llm.last_prompt_text
     assert "- budget: 3000" in llm.last_prompt_text
+
+
+def test_execute_step_node_should_flatten_same_key_single_field_confirmed_fact() -> None:
+    class _CapturePromptLLM:
+        def __init__(self) -> None:
+            self.last_prompt_text = ""
+
+        async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+            for message in messages:
+                if message.get("role") != "user":
+                    continue
+                content = message.get("content")
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            self.last_prompt_text = str(item.get("text") or "")
+                            break
+                elif isinstance(content, str):
+                    self.last_prompt_text = content
+            return {
+                "role": "assistant",
+                "content": '{"success": true, "result": "执行完成", "attachments": []}',
+            }
+
+    llm = _CapturePromptLLM()
+    plan = Plan(
+        title="旅行计划",
+        goal="验证确认事实降噪",
+        language="zh",
+        steps=[
+            Step(
+                id="step-trip",
+                title="执行旅行步骤",
+                description="根据用户输入继续处理",
+                status=ExecutionStatus.PENDING,
+            )
+        ],
+    )
+    state = {
+        "plan": plan,
+        "current_step_id": "step-trip",
+        "pending_interrupt": {},
+        "graph_metadata": {},
+        "message_window": [],
+        "working_memory": {
+            "confirmed_facts": {
+                "trip_prefs": {
+                    "trip_prefs": "从厦门出发去漳州，2人出行，预算2000，偏向自然风光"
+                },
+                "trip_details": {
+                    "departure_city": "厦门",
+                    "people_count": 2,
+                    "budget": 2000,
+                },
+            }
+        },
+        "execution_count": 0,
+        "user_message": "继续执行",
+        "input_parts": [],
+    }
+
+    next_state = asyncio.run(
+        execute_step_node(
+            state,
+            llm,
+            runtime_tools=[],
+        )
+    )
+
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert "- 从厦门出发去漳州，2人出行，预算2000，偏向自然风光" in llm.last_prompt_text
+    assert '- trip_prefs: {"trip_prefs":' not in llm.last_prompt_text
+    assert '- trip_details: {"departure_city": "厦门", "people_count": 2, "budget": 2000}' in llm.last_prompt_text

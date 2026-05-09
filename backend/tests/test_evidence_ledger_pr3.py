@@ -463,15 +463,19 @@ def test_runtime_context_service_should_consume_domain_port() -> None:
 
 def test_prompt_should_only_include_evidence_digest_not_structured_context() -> None:
     packet = {
-        "prompt_visible_fields": ["current_step", "evidence_context", "evidence_prompt_digest"],
+        "prompt_visible_fields": ["current_step", "evidence_context", "evidence_prompt_digest", "audit_refs"],
         "current_step": {"id": "step-2"},
         "evidence_prompt_digest": "safe digest",
         "evidence_context": _runtime_context().model_dump(mode="json"),
+        "audit_refs": {"run_id": "run-1", "thread_id": "thread-1", "current_step_id": "step-2"},
     }
 
     prompt = _append_prompt_context_to_prompt("base", packet)
 
     assert "safe digest" in prompt
+    assert "prompt_visible_fields" not in prompt
+    assert "audit_refs" not in prompt
+    assert "thread-1" not in prompt
     assert "evidence_reuse_snapshot" not in prompt
     assert "result_handle_index" not in prompt
     assert "result_handle_id" not in prompt

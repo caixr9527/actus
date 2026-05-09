@@ -61,6 +61,7 @@ def _build_prompt_safe_context_packet(context_packet: Dict[str, Any]) -> Dict[st
         if str(field_name) != "evidence_context"
     ]
     guard_only_fields = {
+        "audit_refs",
         "evidence_reuse_snapshot",
         "result_handle_index",
         "result_handle_id",
@@ -72,8 +73,6 @@ def _build_prompt_safe_context_packet(context_packet: Dict[str, Any]) -> Dict[st
         for field_name in visible_fields
         if field_name in context_packet and field_name not in guard_only_fields
     }
-    if "prompt_visible_fields" in context_packet:
-        safe_packet["prompt_visible_fields"] = visible_fields
     return safe_packet
 
 
