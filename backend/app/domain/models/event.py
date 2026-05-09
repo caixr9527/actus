@@ -209,6 +209,30 @@ class SandboxFactEvent(BaseEvent):
     step_id: Optional[str] = None
 
 
+class EvidenceEventRef(BaseModel):
+    """Evidence runtime event 中的轻量引用，不包含 raw payload。"""
+
+    evidence_id: str
+    evidence_kind: str
+    quality_status: str
+    support_level: str
+    summary: str = ""
+
+
+class EvidenceEvent(BaseEvent):
+    """Evidence Ledger 的 step 级聚合 runtime event。"""
+
+    type: Literal["evidence"] = "evidence"
+    step_id: str
+    evidence_refs: List[EvidenceEventRef] = Field(default_factory=list)
+    source_event_ids: List[str] = Field(default_factory=list)
+    quality_status_counts: Dict[str, int] = Field(default_factory=dict)
+    support_level_counts: Dict[str, int] = Field(default_factory=dict)
+    gap_count: int = 0
+    summary: str = ""
+    runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
@@ -281,6 +305,7 @@ Event = Annotated[
         MessageEvent,
         ToolEvent,
         SandboxFactEvent,
+        EvidenceEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,

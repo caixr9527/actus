@@ -139,6 +139,7 @@ async def build_run_engine(
     )
     # P0: 单步骤工具循环先做硬上限收口，避免错误回路被配置值无限放大。
     max_tool_iterations = max(1, min(int(agent_config.max_iterations), 20))
+    evidence_digest_projector = EvidenceDigestProjector(uow_factory=uow_factory)
     return LangGraphRunEngine(
         session_id=session_id,
         stage_llms=_build_stage_llms(llm),
@@ -152,8 +153,9 @@ async def build_run_engine(
                 ledger_service=EvidenceLedgerService(
                     uow_factory=uow_factory,
                     assembler=EvidenceFactAssembler(),
+                    step_projection=evidence_digest_projector,
                 ),
-                projector=EvidenceDigestProjector(uow_factory=uow_factory),
+                projector=evidence_digest_projector,
             ),
         ),
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),

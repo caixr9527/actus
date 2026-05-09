@@ -199,6 +199,7 @@ class AgentService:
             browser: Browser,
     ) -> AgentTaskRunner:
         """构建任务执行器，供 GraphRuntime 在创建任务时回调。"""
+        evidence_step_projection = EvidenceDigestProjector(uow_factory=self._uow_factory)
         return await AgentTaskRunner.create(
             llm=llm,
             agent_config=self._agent_config,
@@ -225,6 +226,7 @@ class AgentService:
             evidence_step_reconciler=EvidenceLedgerService(
                 uow_factory=self._uow_factory,
                 assembler=EvidenceFactAssembler(),
+                step_projection=evidence_step_projection,
             ),
             sandbox_fact_context_builder=SandboxFactProjectionContextBuilder(
                 access_control_service=self._get_access_control_service(),
@@ -333,6 +335,7 @@ class AgentService:
             user_id=session.user_id,
             uow_factory=self._uow_factory,
         )
+        evidence_digest_projector = EvidenceDigestProjector(uow_factory=self._uow_factory)
         inspector = LangGraphRunEngine(
             session_id=session.id,
             stage_llms=build_uniform_stage_llms(llm),
@@ -344,8 +347,9 @@ class AgentService:
                     ledger_service=EvidenceLedgerService(
                         uow_factory=self._uow_factory,
                         assembler=EvidenceFactAssembler(),
+                        step_projection=evidence_digest_projector,
                     ),
-                    projector=EvidenceDigestProjector(uow_factory=self._uow_factory),
+                    projector=evidence_digest_projector,
                 ),
             ),
             evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=self._uow_factory),

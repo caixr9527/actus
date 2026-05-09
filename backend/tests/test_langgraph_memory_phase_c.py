@@ -32,7 +32,6 @@ from app.infrastructure.runtime.langgraph.graphs import bind_live_event_sink, un
 from app.infrastructure.runtime.langgraph.graphs.planner_react.graph import (
     build_planner_react_langgraph_graph as _build_planner_react_langgraph_graph,
 )
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.runtime.contracts.data_access_contract import (
     DataClassificationResult,
     DataOrigin,
@@ -2348,7 +2347,7 @@ def test_summarize_should_not_fallback_to_step_draft_fact_when_summary_json_inva
             summary="已读取并分析文档",
             facts_learned=[
                 "普通事实不应作为最终正文",
-                f"{STEP_DRAFT_FACT_PREFIX}{draft_text}",
+                draft_text,
             ],
         ),
     )
@@ -2370,7 +2369,7 @@ def test_summarize_should_not_fallback_to_step_draft_fact_when_summary_json_inva
                     "summary": "已读取并分析文档",
                     "facts_learned": [
                         "普通事实不应作为最终正文",
-                        f"{STEP_DRAFT_FACT_PREFIX}{draft_text}",
+                        draft_text,
                     ],
                     "blockers": [],
                     "open_questions": [],

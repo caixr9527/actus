@@ -19,6 +19,7 @@ from app.domain.models import (
     ToolEvent,
     ToolEventStatus,
     SandboxFactEvent,
+    EvidenceEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
@@ -299,6 +300,55 @@ class SandboxFactSSEEvent(BaseSSEEvent):
         )
 
 
+class EvidenceEventRefData(BaseModel):
+    """Evidence 轻量引用数据；禁止携带 raw evidence payload。"""
+
+    evidence_id: str
+    evidence_kind: str
+    quality_status: str
+    support_level: str
+    summary: str = ""
+
+
+class EvidenceEventData(BaseEventData):
+    """Evidence step 聚合事件数据。"""
+
+    step_id: str
+    evidence_refs: List[EvidenceEventRefData] = Field(default_factory=list)
+    source_event_ids: List[str] = Field(default_factory=list)
+    quality_status_counts: Dict[str, int] = Field(default_factory=dict)
+    support_level_counts: Dict[str, int] = Field(default_factory=dict)
+    gap_count: int = 0
+    summary: str = ""
+    runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceSSEEvent(BaseSSEEvent):
+    """Evidence/Audit 专用回放事件，普通 timeline 默认隐藏。"""
+
+    event: Literal["evidence"] = "evidence"
+    data: EvidenceEventData
+
+    @classmethod
+    def from_event(cls, event: EvidenceEvent, runtime: RuntimeEventMeta) -> Self:
+        return cls(
+            data=EvidenceEventData(
+                **BaseEventData.base_event_data(event, runtime),
+                step_id=event.step_id,
+                evidence_refs=[
+                    EvidenceEventRefData.model_validate(ref.model_dump(mode="json"))
+                    for ref in event.evidence_refs
+                ],
+                source_event_ids=list(event.source_event_ids or []),
+                quality_status_counts=dict(event.quality_status_counts or {}),
+                support_level_counts=dict(event.support_level_counts or {}),
+                gap_count=event.gap_count,
+                summary=event.summary,
+                runtime_metadata=dict(event.runtime_metadata or {}),
+            )
+        )
+
+
 class DoneSSEEvent(BaseSSEEvent):
     """停止流式事件"""
     event: Literal["done"] = "done"
@@ -398,6 +448,7 @@ AgentSSEEvent = Union[
     PlanSSEEvent,
     ToolSSEEvent,
     SandboxFactSSEEvent,
+    EvidenceSSEEvent,
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,

@@ -445,6 +445,12 @@ class AgentTaskRunner(TaskRunner):
                         "reason_code": "evidence_reconcile_return_missing",
                     },
                 )
+            await self._persist_evidence_event_before_step_completed(
+                reconciler=reconciler,
+                scope=scope,
+                step=event.step,
+                records=list(saved or []),
+            )
             await self._overwrite_step_outcome_with_evidence_projection(
                 reconciler=reconciler,
                 scope=scope,
@@ -466,6 +472,40 @@ class AgentTaskRunner(TaskRunner):
                 reconciler=reconciler,
                 scope=scope,
                 step=event.step,
+            )
+
+    async def _persist_evidence_event_before_step_completed(
+            self,
+            *,
+            reconciler: EvidenceStepReconcilerPort,
+            scope: AccessScopeResult,
+            step,
+            records: list[object],
+    ) -> None:
+        build_event = getattr(reconciler, "build_step_evidence_event", None)
+        if not callable(build_event):
+            return
+        try:
+            evidence_event = await build_event(scope=scope, step=step, records=records)
+            if evidence_event is None:
+                return
+            async with self._uow_factory() as uow:
+                await uow.workflow_run.add_event_record_if_absent(
+                    session_id=str(scope.session_id),
+                    run_id=str(scope.run_id or ""),
+                    event=evidence_event,
+                )
+        except Exception as exc:
+            logger.exception(
+                "evidence_event_projection_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": str(getattr(step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_event_projection_failed",
+                },
             )
 
     @staticmethod

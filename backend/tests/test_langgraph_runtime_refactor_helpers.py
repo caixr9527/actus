@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 from app.domain.models import Step, ToolResult
 from app.domain.models.search import FetchedPage
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_failure_key,
@@ -224,7 +223,7 @@ def test_finalize_no_tool_call_should_preserve_text_outside_json_as_draft_fact()
     assert result.payload is not None
     facts = [str(item) for item in list(result.payload.get("facts_learned") or [])]
     assert "支持人工审核" in facts
-    assert any(item == f"{STEP_DRAFT_FACT_PREFIX}{markdown_text}" for item in facts)
+    assert markdown_text not in facts
 
 
 def test_build_execution_context_should_not_block_file_generating_organization_step() -> None:

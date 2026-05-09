@@ -36,9 +36,10 @@ from app.domain.models.evidence import (
     validate_evidence_payload,
 )
 from app.domain.models import Step
+from app.domain.models.event import EvidenceEvent, EvidenceEventRef
 from app.domain.models.sandbox_fact import SandboxFactRecord, SandboxFactScope
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
-from app.application.service.evidence_digest_projector import EvidenceDigestProjector
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepProjectionPort
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,14 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(\bcookie\b\s*[:=]\s*)['\"]?[^'\"\n,}]{8,}"),
     re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/-]{8,}"),
 )
+_EVENT_SUMMARY_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+_EVENT_SUMMARY_RAW_MARKER_PATTERN = re.compile(
+    r"(?i)\b(raw[_\s-]?stdout|raw[_\s-]?stderr|stdout|stderr|full[_\s-]?text|file[_\s-]?content|"
+    r"page[_\s-]?content|document[_\s-]?text|html)\b"
+)
+_EVIDENCE_EVENT_SUMMARY_MAX_CHARS = 160
+_EVIDENCE_EVENT_SUMMARY_OMITTED = "该 evidence 已持久化，事件摘要包含敏感或原始内容，已省略；请通过 evidence_refs 回查。"
+_EVIDENCE_EVENT_SUMMARY_TOO_LONG = "该 evidence 已持久化，摘要过长未注入事件；请通过 evidence_refs 回查。"
 
 
 class EvidenceAssemblyResultLike(Protocol):
@@ -85,9 +94,16 @@ class EvidenceSourceMissingError(EvidenceLedgerError):
 class EvidenceLedgerService:
     """Evidence 写入和查询的应用层唯一入口。"""
 
-    def __init__(self, *, uow_factory, assembler: EvidenceStepAssembler) -> None:
+    def __init__(
+            self,
+            *,
+            uow_factory,
+            assembler: EvidenceStepAssembler,
+            step_projection: EvidenceStepProjectionPort | None = None,
+    ) -> None:
         self._uow_factory = uow_factory
         self._assembler = assembler
+        self._step_projection = step_projection
 
     async def record_evidence(
             self,
@@ -287,16 +303,40 @@ class EvidenceLedgerService:
         step_id = str(step.id or scope.current_step_id or "").strip()
         if not step_id:
             return []
-        projector = EvidenceDigestProjector(uow_factory=self._uow_factory)
-        digest = await projector.build_digest(
-            scope=scope,
-            current_step_id=step_id,
-            completed_step_ids=[step_id],
-            stage="execute",
-        )
-        if digest is None:
+        if self._step_projection is None:
             return []
-        return list(digest.evidence_backed_facts or [])
+        return await self._step_projection.build_step_evidence_backed_facts(scope=scope, step=step)
+
+    async def build_step_evidence_event(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+            records: list[EvidenceRecord],
+    ) -> EvidenceEvent | None:
+        """基于本次 step 对账结果生成轻量 EvidenceEvent，不携带 raw payload。"""
+        self._validate_scope_basics(scope)
+        step_id = str(step.id or scope.current_step_id or "").strip()
+        if not step_id:
+            return None
+        if not _evidence_event_records_match_scope(scope=scope, step_id=step_id, records=records):
+            logger.error(
+                "evidence_event_projection_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "workspace_id": str(scope.workspace_id),
+                    "run_id": scope.run_id,
+                    "step_id": step_id,
+                    "reason_code": "evidence_event_scope_mismatch",
+                },
+            )
+            return None
+        return build_step_evidence_event(
+            step_id=step_id,
+            run_id=scope.run_id,
+            records=records,
+        )
 
     async def reconcile_previous_steps_evidence(
             self,
@@ -587,6 +627,119 @@ def _normalize_text_list(values: list[str]) -> list[str]:
         for value in list(values or [])
         if str(value or "").strip()
     ]
+
+
+def _evidence_event_records_match_scope(
+        *,
+        scope: AccessScopeResult,
+        step_id: str,
+        records: list[EvidenceRecord],
+) -> bool:
+    expected_user_id = str(scope.user_id or "").strip()
+    expected_session_id = str(scope.session_id or "").strip()
+    expected_workspace_id = str(scope.workspace_id or "").strip()
+    expected_run_id = str(scope.run_id or "").strip()
+    expected_step_id = str(step_id or "").strip()
+    if not expected_run_id or not expected_step_id:
+        return False
+    for record in list(records or []):
+        if not isinstance(record, EvidenceRecord):
+            return False
+        if str(record.user_id or "").strip() != expected_user_id:
+            return False
+        if str(record.session_id or "").strip() != expected_session_id:
+            return False
+        if str(record.workspace_id or "").strip() != expected_workspace_id:
+            return False
+        if str(record.run_id or "").strip() != expected_run_id:
+            return False
+        if str(record.step_id or record.source_step_id or "").strip() != expected_step_id:
+            return False
+        if str(record.source_step_id or record.step_id or "").strip() != expected_step_id:
+            return False
+    return True
+
+
+def build_step_evidence_event(
+        *,
+        step_id: str,
+        run_id: str | None,
+        records: list[EvidenceRecord],
+) -> EvidenceEvent | None:
+    """把本次对账 evidence 聚合为单条 runtime event。"""
+    evidence_records = [record for record in list(records or []) if isinstance(record, EvidenceRecord)]
+    if len(evidence_records) == 0:
+        return None
+    evidence_refs: list[EvidenceEventRef] = []
+    source_event_ids: list[str] = []
+    quality_status_counts: dict[str, int] = {}
+    support_level_counts: dict[str, int] = {}
+    gap_count = 0
+    for record in evidence_records:
+        quality_status = str(record.quality_status.value)
+        support_level = str(record.support_level.value)
+        quality_status_counts[quality_status] = quality_status_counts.get(quality_status, 0) + 1
+        support_level_counts[support_level] = support_level_counts.get(support_level, 0) + 1
+        if record.evidence_kind == EvidenceKind.EVIDENCE_GAP:
+            gap_count += 1
+        for source_event_id in [
+            record.source_ref.source_event_id,
+            record.source_event_id,
+        ]:
+            normalized_source_event_id = str(source_event_id or "").strip()
+            if normalized_source_event_id and normalized_source_event_id not in source_event_ids:
+                source_event_ids.append(normalized_source_event_id)
+        evidence_refs.append(
+            EvidenceEventRef(
+                evidence_id=record.id,
+                evidence_kind=str(record.evidence_kind.value),
+                quality_status=quality_status,
+                support_level=support_level,
+                summary=_safe_evidence_event_summary(record.summary),
+            )
+        )
+    return EvidenceEvent(
+        step_id=step_id,
+        evidence_refs=evidence_refs,
+        source_event_ids=source_event_ids,
+        quality_status_counts=quality_status_counts,
+        support_level_counts=support_level_counts,
+        gap_count=gap_count,
+        summary=_build_evidence_event_summary(
+            evidence_count=len(evidence_refs),
+            gap_count=gap_count,
+        ),
+        runtime_metadata={
+            "run_id": str(run_id or ""),
+            "event_scope": "step_evidence_reconcile",
+        },
+    )
+
+
+def _safe_evidence_event_summary(value: str) -> str:
+    summary = str(value or "").strip()
+    if not summary:
+        return ""
+    if _event_summary_contains_sensitive_content(summary):
+        return _EVIDENCE_EVENT_SUMMARY_OMITTED
+    sanitized = _sanitize_text(summary, max_chars=_EVIDENCE_EVENT_SUMMARY_MAX_CHARS + 1)
+    if len(sanitized) > _EVIDENCE_EVENT_SUMMARY_MAX_CHARS:
+        return _EVIDENCE_EVENT_SUMMARY_TOO_LONG
+    return sanitized
+
+
+def _event_summary_contains_sensitive_content(value: str) -> bool:
+    if _EVENT_SUMMARY_URL_PATTERN.search(value):
+        return True
+    if _EVENT_SUMMARY_RAW_MARKER_PATTERN.search(value):
+        return True
+    return any(pattern.search(value) for pattern in _SECRET_PATTERNS)
+
+
+def _build_evidence_event_summary(*, evidence_count: int, gap_count: int) -> str:
+    if gap_count > 0:
+        return f"step evidence 对账完成：{evidence_count} 条记录，其中 {gap_count} 条缺口。"
+    return f"step evidence 对账完成：{evidence_count} 条记录。"
 
 
 def _reconcile_failed_gap_input(*, step: Step, run_id: str) -> EvidenceRecordInput:

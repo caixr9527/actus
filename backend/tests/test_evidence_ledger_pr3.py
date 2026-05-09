@@ -328,10 +328,15 @@ def test_digest_should_not_truncate_long_evidence_backed_projection_text() -> No
     long_summary = "前置条件：" + "需要保留完整限定条件。" * 30
     fact = _fact(SandboxFactKind.FILE_READ)
     evidence_repo = _EvidenceRepo()
-    service = _ledger_service(uow_factory=lambda: _UoW(facts=[fact], evidence=evidence_repo))
+    uow_factory = lambda: _UoW(facts=[fact], evidence=evidence_repo)
+    projector = EvidenceDigestProjector(uow_factory=uow_factory)
+    service = EvidenceLedgerService(
+        uow_factory=uow_factory,
+        assembler=EvidenceFactAssembler(),
+        step_projection=projector,
+    )
     saved = asyncio.run(service.reconcile_step_evidence(scope=_scope("step-1"), step=Step(id="step-1")))
     evidence_repo.records[0].summary = long_summary
-    projector = EvidenceDigestProjector(uow_factory=lambda: _UoW(evidence=evidence_repo))
 
     digest = asyncio.run(projector.build_digest(
         scope=_scope("step-2"),

@@ -110,6 +110,25 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
             cursor=digest.cursor,
         )
 
+    async def build_step_evidence_backed_facts(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+    ) -> list[EvidenceBackedFactProjection]:
+        step_id = str(step.id or scope.current_step_id or "").strip()
+        if not step_id:
+            return []
+        digest = await self.build_digest(
+            scope=scope,
+            current_step_id=step_id,
+            completed_step_ids=[step_id],
+            stage="execute",
+        )
+        if digest is None:
+            return []
+        return list(digest.evidence_backed_facts or [])
+
     async def build_digest(
             self,
             *,

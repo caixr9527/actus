@@ -8,7 +8,6 @@ from typing import Any, Dict, Optional
 
 from app.domain.models import Step
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.runtime.normalizers import normalize_execution_response
 from app.domain.services.workspace_runtime.policies import (
     build_human_wait_missing_interrupt_payload as _build_human_wait_missing_interrupt_payload,
@@ -136,17 +135,6 @@ def finalize_no_tool_call(
             else f"步骤暂未完成：{step.description}"
         ),
     )
-    if inferred_success and extra_response_text:
-        # 执行模型有时会返回“正文 + JSON”。正文不是最终出口，但必须作为事实证据交给 summary。
-        facts_learned = [
-            str(item or "").strip()
-            for item in list(normalized_payload.get("facts_learned") or [])
-            if str(item or "").strip()
-        ]
-        draft_fact = f"{STEP_DRAFT_FACT_PREFIX}{extra_response_text}"
-        if draft_fact not in facts_learned:
-            facts_learned.append(draft_fact)
-        normalized_payload["facts_learned"] = facts_learned
     return NoToolCallFinalizationResult(
         action="return",
         payload=normalized_payload,

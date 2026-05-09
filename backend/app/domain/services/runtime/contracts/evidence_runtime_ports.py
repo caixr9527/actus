@@ -66,6 +66,29 @@ class EvidenceStepReconcilerPort(Protocol):
         """基于已落库 evidence 为 StepOutcome 生成可读事实投影。"""
         ...
 
+    async def build_step_evidence_event(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+            records: list[object],
+    ) -> object | None:
+        """基于本次对账记录生成 step 聚合 EvidenceEvent。"""
+        ...
+
+
+class EvidenceStepProjectionPort(Protocol):
+    """为 StepOutcome 提供 evidence-backed 可读投影。"""
+
+    async def build_step_evidence_backed_facts(
+            self,
+            *,
+            scope: AccessScopeResult,
+            step: Step,
+    ) -> list[EvidenceBackedFactProjection]:
+        """基于已落库 evidence 为 StepOutcome 生成可读事实投影。"""
+        ...
+
 
 class EvidenceResultHandleResolverPort(Protocol):
     """解析 PR1 result handle 的端口。"""
