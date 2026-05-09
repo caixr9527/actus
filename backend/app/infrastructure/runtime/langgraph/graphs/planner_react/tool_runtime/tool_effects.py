@@ -691,9 +691,9 @@ def _build_search_evidence_summaries(state: ExecutionState) -> List[Dict[str, st
             continue
         summaries.append(
             {
-                "title": title[:100],
-                "url": url[:240],
-                "snippet": snippet[:320],
+                "title": title,
+                "url": url,
+                "snippet": snippet,
             }
         )
     return summaries

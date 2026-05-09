@@ -100,6 +100,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool
     normalize_tool_execution_args,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import (
+    _build_search_evidence_summaries,
     apply_tool_preinvoke_effects,
     apply_rewrite_effects,
     apply_tool_result_effects,
@@ -2276,6 +2277,31 @@ def test_research_convergence_should_break_when_snippet_sufficient() -> None:
     assert result.reason_code == "research_snippet_evidence_ready"
     assert any("来源链接" in str(item) for item in list(result.payload["facts_learned"]))
     assert len(result.payload["facts_learned"]) >= 1
+
+
+def test_build_search_evidence_summaries_should_not_truncate_fields() -> None:
+    long_title = "标题" * 80
+    long_url = "https://example.com/" + ("very-long-path/" * 30)
+    long_snippet = "摘要内容" * 120
+    state = ExecutionState(
+        research_search_evidence_items=[
+            {
+                "title": long_title,
+                "url": long_url,
+                "snippet": long_snippet,
+            }
+        ]
+    )
+
+    summaries = _build_search_evidence_summaries(state)
+
+    assert summaries == [
+        {
+            "title": long_title,
+            "url": long_url,
+            "snippet": long_snippet,
+        }
+    ]
 
 
 def test_research_convergence_should_not_break_for_broad_scope_research_on_first_snippet_only() -> None:
