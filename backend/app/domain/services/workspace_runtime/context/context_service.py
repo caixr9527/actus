@@ -834,17 +834,17 @@ class RuntimeContextService:
                 self._normalize_search_evidence_items(research_progress.get("search_evidence_summaries"))
             )
             search_evidence = self._dedupe_evidence_items(search_evidence, key_names=("url", "snippet"))[:5]
+            progress_metrics = {
+                "candidate_url_count": int(research_progress.get("candidate_url_count") or len(search_evidence)),
+                "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
+                "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
+                "coverage_score": float(research_progress.get("coverage_score") or 0.0),
+                "latest_query": str(research_progress.get("latest_query") or "").strip(),
+                "missing_signals": normalize_text_list(research_progress.get("missing_signals")),
+            }
             if search_evidence:
                 projected["search_evidence_summaries"] = search_evidence
-                projected["research_progress"] = {
-                    "candidate_url_count": int(research_progress.get("candidate_url_count") or len(search_evidence)),
-                    "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
-                    "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
-                    "coverage_score": float(research_progress.get("coverage_score") or 0.0),
-                    "latest_query": str(research_progress.get("latest_query") or "").strip(),
-                    "missing_signals": normalize_text_list(research_progress.get("missing_signals")),
-                    "search_evidence_summaries": search_evidence,
-                }
+                projected["research_progress"] = progress_metrics
             web_evidence = self._normalize_web_reading_evidence_items(
                 source_digest.get("web_reading_evidence_summaries")
             )
@@ -854,7 +854,7 @@ class RuntimeContextService:
             web_evidence = self._dedupe_evidence_items(web_evidence, key_names=("url", "summary"))[:6]
             if web_evidence:
                 projected["web_reading_evidence_summaries"] = web_evidence
-                projected.setdefault("research_progress", {})["web_reading_evidence_summaries"] = web_evidence
+                projected.setdefault("research_progress", progress_metrics)
             explicit_url_state = source_digest.get("explicit_url_read_state") or research_progress.get(
                 "explicit_url_read_state"
             )

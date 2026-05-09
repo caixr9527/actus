@@ -2746,6 +2746,8 @@ def test_runtime_context_service_should_project_research_evidence_into_web_readi
     assert packet["recent_action_digest"]["search_evidence_summaries"][0]["url"] == (
         "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"
     )
+    assert "search_evidence_summaries" not in packet["recent_action_digest"]["research_progress"]
+    assert "web_reading_evidence_summaries" not in packet["recent_action_digest"]["research_progress"]
 
 
 def test_execute_step_with_prompt_should_seed_initial_recent_action_into_execution_state() -> None:
