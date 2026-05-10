@@ -189,6 +189,8 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             duration_ms=_optional_int(data.get("duration_ms")),
             stdout=stdout,
             stderr=stderr,
+            stdout_truncated=bool(data.get("stdout_truncated") or data.get("output_truncated")),
+            stderr_truncated=bool(data.get("stderr_truncated")),
             changed_paths=_string_list(data.get("changed_paths")),
             timeout=bool(data.get("timeout") or data.get("timed_out")),
         )
@@ -206,6 +208,7 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             **base,
             session_ref=_first_text(args.get("session_ref"), data.get("session_ref"), event.tool_call_id, default=event.id),
             output=_first_text(data.get("output"), data.get("console"), default=""),
+            output_truncated=bool(data.get("output_truncated") or data.get("truncated")),
             console_record_count=len(records),
             process_status=_first_text(data.get("process_status"), data.get("status"), default="unknown"),
             exit_code=_optional_int(data.get("exit_code")),

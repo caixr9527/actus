@@ -52,12 +52,7 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import (
 logger = logging.getLogger(__name__)
 
 
-MAX_LONG_EXCERPT_CHARS = 4000
-MAX_COMMAND_EXCERPT_CHARS = 500
-MAX_QUERY_EXCERPT_CHARS = 300
-MAX_ERROR_EXCERPT_CHARS = 1000
-MAX_SEARCH_RESULTS = 10
-MAX_FILE_SEARCH_MATCHES = 100
+MAX_SUMMARY_CHARS = 500
 REDACTED = "[REDACTED]"
 
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -112,6 +107,8 @@ class CommandExecutionFactInput(_FactInput):
     duration_ms: int | None
     stdout: str = ""
     stderr: str = ""
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
     changed_paths: list[str] = Field(default_factory=list)
     timeout: bool = False
 
@@ -120,6 +117,7 @@ class ShellOutputFactInput(_FactInput):
     fact_kind: Literal[SandboxFactKind.SHELL_OUTPUT] = SandboxFactKind.SHELL_OUTPUT
     session_ref: str
     output: str
+    output_truncated: bool = False
     console_record_count: int
     process_status: str
     exit_code: int | None = None
@@ -317,13 +315,6 @@ def redact_text(text: str) -> tuple[str, int]:
     return sanitize_fact_text(text)
 
 
-def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
-    normalized = str(text or "")
-    if len(normalized) <= max_chars:
-        return normalized, False
-    return normalized[:max_chars], True
-
-
 def hash_text(value: str) -> str:
     digest = hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
@@ -348,15 +339,14 @@ def url_origin(url: str | None) -> str:
     return f"{split.scheme.lower()}://{split.netloc.lower()}"
 
 
-def _sanitize_excerpt(text: str, *, max_chars: int) -> tuple[str, bool, int]:
+def _sanitize_payload_text(text: str) -> tuple[str, int]:
     redacted, redaction_count = sanitize_fact_text(text)
-    truncated, is_truncated = truncate_text(redacted, max_chars)
-    return truncated, is_truncated, redaction_count
+    return redacted, redaction_count
 
 
 def sanitize_summary(summary: str) -> str:
-    sanitized, _, _ = _sanitize_excerpt(summary, max_chars=500)
-    return sanitized
+    sanitized, _ = _sanitize_payload_text(summary)
+    return sanitized[:MAX_SUMMARY_CHARS]
 
 
 def _merge_missing_fields(existing: list[str] | None, extra: list[str]) -> list[str] | None:
@@ -369,12 +359,9 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
     """将 PR2 领域输入归一为 fact payload、subject ref 和默认摘要。"""
 
     if isinstance(fact_input, CommandExecutionFactInput):
-        stdout, stdout_truncated, _ = _sanitize_excerpt(fact_input.stdout, max_chars=MAX_LONG_EXCERPT_CHARS)
-        stderr, stderr_truncated, _ = _sanitize_excerpt(fact_input.stderr, max_chars=MAX_LONG_EXCERPT_CHARS)
-        command_excerpt, command_truncated, _ = _sanitize_excerpt(
-            fact_input.command,
-            max_chars=MAX_COMMAND_EXCERPT_CHARS,
-        )
+        stdout, _ = _sanitize_payload_text(fact_input.stdout)
+        stderr, _ = _sanitize_payload_text(fact_input.stderr)
+        command_excerpt, _ = _sanitize_payload_text(fact_input.command)
         payload = CommandExecutionPayload(
             command_fingerprint=hash_text(command_excerpt),
             cwd=fact_input.cwd,
@@ -382,24 +369,24 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             duration_ms=fact_input.duration_ms,
             stdout_excerpt=stdout,
             stderr_excerpt=stderr,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+            stdout_truncated=fact_input.stdout_truncated,
+            stderr_truncated=fact_input.stderr_truncated,
             changed_paths=fact_input.changed_paths,
             timeout=fact_input.timeout,
             command_excerpt=command_excerpt,
-            missing_fields=_merge_missing_fields(fact_input.missing_fields, ["command_excerpt"] if command_truncated else []),
-            reason_code=fact_input.reason_code or ("command_excerpt_truncated" if command_truncated else None),
+            missing_fields=fact_input.missing_fields,
+            reason_code=fact_input.reason_code,
         )
         subject = SandboxFactSubjectRef(subject_type="command", subject_key=payload.command_fingerprint)
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Command execution fact")
 
     if isinstance(fact_input, ShellOutputFactInput):
-        output, output_truncated, _ = _sanitize_excerpt(fact_input.output, max_chars=MAX_LONG_EXCERPT_CHARS)
+        output, _ = _sanitize_payload_text(fact_input.output)
         missing_fields = _merge_missing_fields(fact_input.missing_fields, ["exit_code"] if fact_input.exit_code is None else [])
         payload = ShellOutputPayload(
             session_ref=fact_input.session_ref,
             output_excerpt=output,
-            output_truncated=output_truncated,
+            output_truncated=fact_input.output_truncated,
             console_record_count=fact_input.console_record_count,
             process_status=fact_input.process_status,
             exit_code=fact_input.exit_code,
@@ -411,7 +398,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Shell output fact")
 
     if isinstance(fact_input, FileReadFactInput):
-        excerpt, excerpt_truncated, _ = _sanitize_excerpt(fact_input.content, max_chars=MAX_LONG_EXCERPT_CHARS)
+        excerpt, _ = _sanitize_payload_text(fact_input.content)
         payload = FileReadPayload(
             path=fact_input.path,
             exists=fact_input.exists,
@@ -421,7 +408,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             mime_type=fact_input.mime_type,
             line_range=fact_input.line_range,
             excerpt=excerpt,
-            is_truncated=fact_input.is_truncated or excerpt_truncated,
+            is_truncated=fact_input.is_truncated,
             mtime=fact_input.mtime,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
@@ -448,16 +435,16 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
 
     if isinstance(fact_input, FileSearchFactInput):
         matches = []
-        for item in fact_input.matches[:MAX_FILE_SEARCH_MATCHES]:
-            excerpt, _, _ = _sanitize_excerpt(item.excerpt, max_chars=500)
+        for item in fact_input.matches:
+            excerpt, _ = _sanitize_payload_text(item.excerpt)
             matches.append({"path": item.path, "line_number": item.line_number, "excerpt": excerpt})
         payload = FileSearchPayload(
             path=fact_input.path,
             regex_hash=hash_text(fact_input.regex),
             match_count=fact_input.match_count,
             matches=matches,
-            is_truncated=fact_input.is_truncated or len(fact_input.matches) > MAX_FILE_SEARCH_MATCHES,
-            regex_excerpt=_sanitize_excerpt(fact_input.regex, max_chars=300)[0],
+            is_truncated=fact_input.is_truncated,
+            regex_excerpt=_sanitize_payload_text(fact_input.regex)[0],
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
         )
@@ -468,8 +455,8 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         payload = FileListPayload(
             dir_path=fact_input.dir_path,
             entry_count=fact_input.entry_count,
-            entries=[item.model_dump(mode="json") for item in fact_input.entries[:MAX_SEARCH_RESULTS]],
-            is_truncated=fact_input.is_truncated or len(fact_input.entries) > MAX_SEARCH_RESULTS,
+            entries=[item.model_dump(mode="json") for item in fact_input.entries],
+            is_truncated=fact_input.is_truncated,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
         )
@@ -481,10 +468,10 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         payload = BrowserSnapshotPayload(
             url_hash=url_hash,
             url_origin=url_origin(fact_input.url),
-            title=_sanitize_excerpt(fact_input.title, max_chars=500)[0],
+            title=_sanitize_payload_text(fact_input.title)[0],
             screenshot_artifact_id=fact_input.screenshot_artifact_id,
             screenshot_artifact_path=fact_input.screenshot_artifact_path,
-            structured_summary=_sanitize_excerpt(fact_input.structured_summary, max_chars=MAX_LONG_EXCERPT_CHARS)[0],
+            structured_summary=_sanitize_payload_text(fact_input.structured_summary)[0],
             actionable_element_count=fact_input.actionable_element_count,
             degrade_reason=fact_input.degrade_reason,
             missing_fields=fact_input.missing_fields,
@@ -496,7 +483,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
     if isinstance(fact_input, BrowserActionFactInput):
         payload = BrowserActionPayload(
             action=fact_input.action,
-            target_summary=_sanitize_excerpt(fact_input.target_summary, max_chars=500)[0],
+            target_summary=_sanitize_payload_text(fact_input.target_summary)[0],
             url_hash_before=hash_url(fact_input.url_before),
             url_hash_after=hash_url(fact_input.url_after),
             success=fact_input.success,
@@ -509,22 +496,22 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
 
     if isinstance(fact_input, SearchResultFactInput):
         top_results = []
-        for item in fact_input.top_results[:MAX_SEARCH_RESULTS]:
+        for item in fact_input.top_results:
             top_results.append(
                 {
-                    "title": _sanitize_excerpt(item.title, max_chars=500)[0],
+                    "title": _sanitize_payload_text(item.title)[0],
                     "origin": url_origin(item.url),
                     "url_hash": hash_url(item.url) or hash_text(item.url),
-                    "snippet_excerpt": _sanitize_excerpt(item.snippet, max_chars=500)[0],
+                    "snippet_excerpt": _sanitize_payload_text(item.snippet)[0],
                 }
             )
-        query_excerpt = _sanitize_excerpt(fact_input.query, max_chars=MAX_QUERY_EXCERPT_CHARS)[0]
+        query_excerpt = _sanitize_payload_text(fact_input.query)[0]
         payload = SearchResultPayload(
             query_hash=hash_text(query_excerpt),
             query_excerpt=query_excerpt,
             result_count=fact_input.result_count,
             top_results=top_results,
-            is_truncated=fact_input.is_truncated or len(fact_input.top_results) > MAX_SEARCH_RESULTS,
+            is_truncated=fact_input.is_truncated,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
         )
@@ -532,16 +519,16 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Search result fact")
 
     if isinstance(fact_input, FetchedPageFactInput):
-        excerpt, excerpt_truncated, _ = _sanitize_excerpt(fact_input.content, max_chars=MAX_LONG_EXCERPT_CHARS)
+        excerpt, _ = _sanitize_payload_text(fact_input.content)
         fetched_url_hash = hash_url(fact_input.fetched_url) or hash_text(fact_input.fetched_url)
         payload = FetchedPagePayload(
             fetched_url_hash=fetched_url_hash,
             final_url_origin=url_origin(fact_input.final_url),
             status_code=fact_input.status_code,
             content_type=fact_input.content_type,
-            title=_sanitize_excerpt(fact_input.title, max_chars=500)[0],
+            title=_sanitize_payload_text(fact_input.title)[0],
             excerpt=excerpt,
-            is_truncated=fact_input.is_truncated or excerpt_truncated,
+            is_truncated=fact_input.is_truncated,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
         )
@@ -567,7 +554,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         raise ValueError("ProfileReferenceFactInput 需要由 service 结合 context.profile_ref 归一")
 
     if isinstance(fact_input, ToolFailureFactInput):
-        message, _, _ = _sanitize_excerpt(fact_input.message, max_chars=MAX_ERROR_EXCERPT_CHARS)
+        message, _ = _sanitize_payload_text(fact_input.message)
         payload = ToolFailurePayload(
             function_name=fact_input.function_name,
             reason_code=fact_input.reason_code,
@@ -580,7 +567,7 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
         return payload.model_dump(mode="json"), subject, sanitize_summary(fact_input.summary or "Tool failure fact")
 
     if isinstance(fact_input, HumanInteractionFactInput):
-        message, _, _ = _sanitize_excerpt(fact_input.message, max_chars=MAX_ERROR_EXCERPT_CHARS)
+        message, _ = _sanitize_payload_text(fact_input.message)
         payload = HumanInteractionPayload(
             interaction_type=fact_input.interaction_type,
             message_excerpt=message,

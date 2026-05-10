@@ -315,6 +315,34 @@ def test_shell_tool_event_should_record_command_fact() -> None:
     assert facts[0].step_id == "step-1"
 
 
+def test_shell_tool_event_should_preserve_long_stdout_and_source_truncation_flag() -> None:
+    repo = _SandboxFactRepo()
+    long_stdout = "x" * 6000
+    event = ToolEvent(
+        id="tool-event-long-output",
+        tool_call_id="call-long-output",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q", "cwd": "/workspace"},
+        function_result=ToolResult(
+            success=True,
+            data={
+                "stdout": long_stdout,
+                "stdout_truncated": True,
+                "stderr": "",
+                "exit_code": 0,
+                "duration_ms": 10,
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts[0].payload["stdout_excerpt"] == long_stdout
+    assert facts[0].payload["stdout_truncated"] is True
+
+
 def test_failed_tool_event_should_record_tool_failure_fact() -> None:
     repo = _SandboxFactRepo()
     event = ToolEvent(

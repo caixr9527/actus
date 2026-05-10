@@ -9,6 +9,10 @@ from app.application.service.sandbox_fact_ledger_service import (
     CommandExecutionFactInput,
     DocumentContextFactInput,
     FetchedPageFactInput,
+    FileListEntryFactInput,
+    FileListFactInput,
+    FileSearchFactInput,
+    FileSearchMatchInput,
     HumanInteractionFactInput,
     ProfileReferenceFactInput,
     SandboxFactLedgerService,
@@ -104,7 +108,7 @@ def _service(repo: _SandboxFactRepo) -> SandboxFactLedgerService:
     return SandboxFactLedgerService(uow_factory=lambda: _UoW(repo))
 
 
-def test_normalizer_should_redact_secret_and_truncate_command_output() -> None:
+def test_normalizer_should_redact_secret_without_truncating_command_output() -> None:
     long_stdout = '"api_key": "abcdefghijklmnop" ' + "x" * 5000
     payload, subject_ref, _ = normalize_fact_input(
         CommandExecutionFactInput(
@@ -121,9 +125,70 @@ def test_normalizer_should_redact_secret_and_truncate_command_output() -> None:
     assert "[REDACTED]" in payload["stderr_excerpt"]
     assert "abcdefghijklmnop" not in str(payload)
     assert "secret12345" not in str(payload)
-    assert len(payload["stdout_excerpt"]) == 4000
-    assert payload["stdout_truncated"] is True
+    assert len(payload["stdout_excerpt"]) == len('[REDACTED] ' + "x" * 5000)
+    assert payload["stdout_truncated"] is False
     assert subject_ref.subject_type == "command"
+
+
+def test_normalizer_should_not_truncate_sandbox_fact_payload_fields_or_lists() -> None:
+    long_content = "A" * 6000
+    payload, _, _ = normalize_fact_input(
+        FetchedPageFactInput(
+            fetched_url="https://example.com/page",
+            final_url="https://example.com/page",
+            status_code=200,
+            content_type="text/html",
+            title="T" * 800,
+            content=long_content,
+        )
+    )
+    assert payload["excerpt"] == long_content
+    assert payload["title"] == "T" * 800
+    assert payload["is_truncated"] is False
+
+    entries = [FileListEntryFactInput(name=f"file-{index}.txt") for index in range(15)]
+    payload, _, _ = normalize_fact_input(
+        FileListFactInput(
+            dir_path="/workspace",
+            entry_count=len(entries),
+            entries=entries,
+        )
+    )
+    assert len(payload["entries"]) == 15
+    assert payload["is_truncated"] is False
+
+    matches = [
+        FileSearchMatchInput(path="/workspace/a.txt", line_number=index, excerpt="M" * 700)
+        for index in range(120)
+    ]
+    payload, _, _ = normalize_fact_input(
+        FileSearchFactInput(
+            path="/workspace",
+            regex="needle",
+            match_count=len(matches),
+            matches=matches,
+        )
+    )
+    assert len(payload["matches"]) == 120
+    assert payload["matches"][0]["excerpt"] == "M" * 700
+    assert payload["is_truncated"] is False
+
+
+def test_normalizer_should_preserve_source_truncation_flags_without_cutting_payload() -> None:
+    payload, _, _ = normalize_fact_input(
+        CommandExecutionFactInput(
+            command="pytest -q",
+            cwd="/workspace",
+            exit_code=0,
+            duration_ms=12,
+            stdout="x" * 6000,
+            stderr="",
+            stdout_truncated=True,
+        )
+    )
+
+    assert payload["stdout_excerpt"] == "x" * 6000
+    assert payload["stdout_truncated"] is True
 
 
 def test_record_fact_should_write_classified_sanitized_command_fact() -> None:
