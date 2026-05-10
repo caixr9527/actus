@@ -628,6 +628,7 @@ async def execute_step_with_prompt(
         lifecycle = build_tool_call_lifecycle(
             selected_tool_call=selected_tool_call,
             parse_tool_call_args=_parse_tool_call_args,
+            step_id=str(step.id or ""),
         )
         if lifecycle is None:
             # 缺少受控反馈

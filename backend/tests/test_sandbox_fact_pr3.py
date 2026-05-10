@@ -144,6 +144,76 @@ def test_projection_context_builder_should_build_available_profile_context() -> 
     assert context.current_step_id == "step-1"
 
 
+def test_projection_context_builder_should_fill_missing_scope_step_id_from_runner_step() -> None:
+    builder = SandboxFactProjectionContextBuilder(
+        access_control_service=_AccessControl(scope=AccessScopeResult(
+            tenant_id="user-1",
+            user_id="user-1",
+            session_id="session-1",
+            workspace_id="workspace-1",
+            run_id="run-1",
+            current_step_id=None,
+        )),
+        workspace_runtime_service=_WorkspaceRuntime(workspace=_Workspace(), profile=_Profile()),
+        user_id="user-1",
+        session_id="session-1",
+    )
+
+    context = asyncio.run(builder.build_for_tool_event(
+        source_event_id="stream-event-1",
+        current_step_id="atomic-action-step",
+    ))
+
+    assert context.current_step_id == "atomic-action-step"
+    assert context.scope.current_step_id == "atomic-action-step"
+
+
+def test_projection_context_builder_should_accept_matching_runner_step_id() -> None:
+    builder = SandboxFactProjectionContextBuilder(
+        access_control_service=_AccessControl(scope=AccessScopeResult(
+            tenant_id="user-1",
+            user_id="user-1",
+            session_id="session-1",
+            workspace_id="workspace-1",
+            run_id="run-1",
+            current_step_id="step-a",
+        )),
+        workspace_runtime_service=_WorkspaceRuntime(workspace=_Workspace(), profile=_Profile()),
+        user_id="user-1",
+        session_id="session-1",
+    )
+
+    context = asyncio.run(builder.build_for_tool_event(
+        source_event_id="stream-event-1",
+        current_step_id="step-a",
+    ))
+
+    assert context.current_step_id == "step-a"
+    assert context.scope.current_step_id == "step-a"
+
+
+def test_projection_context_builder_should_reject_mismatched_runner_step_id() -> None:
+    builder = SandboxFactProjectionContextBuilder(
+        access_control_service=_AccessControl(scope=AccessScopeResult(
+            tenant_id="user-1",
+            user_id="user-1",
+            session_id="session-1",
+            workspace_id="workspace-1",
+            run_id="run-1",
+            current_step_id="step-a",
+        )),
+        workspace_runtime_service=_WorkspaceRuntime(workspace=_Workspace(), profile=_Profile()),
+        user_id="user-1",
+        session_id="session-1",
+    )
+
+    with pytest.raises(ValueError, match="Sandbox fact current_step_id 与 access scope 不一致"):
+        asyncio.run(builder.build_for_tool_event(
+            source_event_id="stream-event-1",
+            current_step_id="step-b",
+        ))
+
+
 def test_projection_context_builder_should_preserve_missing_profile_ref() -> None:
     builder = SandboxFactProjectionContextBuilder(
         access_control_service=_AccessControl(),

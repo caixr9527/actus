@@ -265,6 +265,30 @@ class EntryCompiler:
             _log_compiled_contract(contract)
             return contract
 
+        if signals["has_explicit_step_sequence"] or signals["has_repeat_same_action_intent"]:
+            reason_codes: List[str] = []
+            if signals["has_explicit_step_sequence"]:
+                reason_codes.append(rc.EXPLICIT_SEQUENCE_REQUIRES_PLAN)
+            if signals["has_repeat_same_action_intent"]:
+                reason_codes.append(rc.REPEAT_SAME_ACTION_REQUIRES_PLAN)
+            contract = _contract(
+                route=EntryRoute.PLANNED_TASK,
+                task_mode=task_mode,
+                context_profile=EntryContextProfile.FULL,
+                tool_budget=EntryToolBudget.PLANNER_CONTROLLED,
+                needs_summary=True,
+                plan_only=plan_only,
+                risk_level=risk_level,
+                complexity_score=complexity_score,
+                tool_need_score=tool_need_score,
+                freshness_score=freshness_score,
+                context_need_score=context_need_score,
+                reason_codes=reason_codes,
+                source=source,
+            )
+            _log_compiled_contract(contract)
+            return contract
+
         needs_planner = _needs_planner(signals, complexity_score=complexity_score, risk_score=risk_score)
         if signals["needs_human_wait"]:
             if needs_planner or (tool_need_score > 0 and (complexity_score >= 3 or int(signals["char_count"]) >= 48)):

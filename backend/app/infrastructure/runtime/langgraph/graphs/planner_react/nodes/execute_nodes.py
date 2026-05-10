@@ -356,6 +356,15 @@ async def _resolve_pending_evidence_reuse(
             "loop_break_reason": "result_handle_resolve_failed",
             "data": {**data, "reason_code": "evidence_scope_missing"},
         }
+    _log_pending_evidence_resolution(
+        event_name="evidence_result_handle_resolution_started",
+        state=state,
+        current_step_id=str(scope.current_step_id or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=handle.read_strategy.value,
+        status="started",
+        reason_code="pending_resolution",
+    )
     resolved = await evidence_result_handle_resolver.resolve(scope=scope, handle=handle)
     if resolved.status != EvidenceResolvedStatus.RESOLVED:
         _log_pending_evidence_resolution(
@@ -390,6 +399,15 @@ async def _resolve_pending_evidence_reuse(
         read_strategy=handle.read_strategy.value,
         status=resolved.status.value,
         reason_code=resolved.reason_code or "resolved",
+    )
+    _log_pending_evidence_resolution(
+        event_name="evidence_reuse_virtual_tool_result_returned",
+        state=state,
+        current_step_id=str(scope.current_step_id or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=handle.read_strategy.value,
+        status="resolved",
+        reason_code="evidence_reuse_allowed",
     )
     return {
         **llm_message,

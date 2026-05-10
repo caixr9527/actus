@@ -1365,7 +1365,7 @@ def test_two_step_fact_to_evidence_reuse_closed_loop_should_resolve_without_exec
     assert resolved["data"]["result_handle_resolved"] is True
 
 
-def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executor() -> None:
+def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executor(caplog) -> None:
     fact = _fact(SandboxFactKind.FILE_READ, step_id="step-1")
     evidence_repo = _EvidenceRepo()
     uow_factory = lambda: _UoW(facts=[fact], evidence=evidence_repo)
@@ -1393,14 +1393,15 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
         EvidenceResultHandleResolver(uow_factory=uow_factory)
     )
 
-    next_state = asyncio.run(execute_step_node(
-        state,
-        _FakeToolCallLLM("read_file", {"path": "/workspace/a.txt"}),
-        context_service,
-        evidence_result_handle_resolver=resolver,
-        runtime_tools=[tool],
-        max_tool_iterations=1,
-    ))
+    with caplog.at_level(logging.INFO):
+        next_state = asyncio.run(execute_step_node(
+            state,
+            _FakeToolCallLLM("read_file", {"path": "/workspace/a.txt"}),
+            context_service,
+            evidence_result_handle_resolver=resolver,
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+        ))
 
     assert resolver.called is True
     assert tool.invocations == []
@@ -1414,6 +1415,16 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
     assert len(called_events) == 1
     assert called_events[0].function_name == "read_file"
     assert called_events[0].function_result.data["result_handle_id"] == resolver.result_handle_id
+    log_text = caplog.text
+    expected_log_events = [
+        "reuse_existing_evidence_pending_resolution",
+        "evidence_result_handle_resolution_started",
+        "evidence_result_handle_resolved",
+        "evidence_reuse_virtual_tool_result_returned",
+    ]
+    positions = [log_text.index(event_name) for event_name in expected_log_events]
+    assert positions == sorted(positions)
+    assert "开始执行真实工具调用" not in log_text
 
 
 @pytest.mark.parametrize(

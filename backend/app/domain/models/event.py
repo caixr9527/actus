@@ -182,6 +182,7 @@ ToolContent = Union[
 class ToolEvent(BaseEvent):
     """工具事件模型"""
     type: Literal["tool"] = "tool"
+    step_id: Optional[str] = None
     tool_call_id: str = ""  # 工具调用ID
     tool_name: str = ""  # 工具名称
     tool_content: Optional[ToolContent] = None  # 工具扩展内容

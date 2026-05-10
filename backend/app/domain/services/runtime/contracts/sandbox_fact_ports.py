@@ -31,6 +31,7 @@ class SandboxFactProjectionContextBuilderPort(Protocol):
             self,
             *,
             source_event_id: str,
+            current_step_id: str | None = None,
     ) -> SandboxFactProjectionContext:
         """由 runner/runtime 上游集中构造 ToolEvent fact 投影上下文。"""
         ...

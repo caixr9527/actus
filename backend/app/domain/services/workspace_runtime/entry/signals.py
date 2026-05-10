@@ -20,6 +20,16 @@ FRESHNESS_PATTERN = re.compile(
     r"(最新|当前|现在|今天|今日|今年|最近|近况|新闻|价格|政策|版本|榜单|可用|available|latest|current|today|recent|news|price|version)",
     re.IGNORECASE,
 )
+EXPLICIT_STEP_SEQUENCE_PATTERN = re.compile(
+    r"(然后|下一步|第二步|接着|then|next\s+step|second\s+step)",
+    re.IGNORECASE,
+)
+LEADING_STEP_SEQUENCE_PATTERN = re.compile(r"(先|first)", re.IGNORECASE)
+REPEAT_SAME_ACTION_PATTERN = re.compile(
+    r"(再次|再读取|再搜索|重复|同一个问题|同一个\s*URL|同一个文件|again|repeat|same\s+(?:question|url|file))",
+    re.IGNORECASE,
+)
+NO_CHANGE_PATTERN = re.compile(r"(不要换|do\s+not\s+change)", re.IGNORECASE)
 
 
 def collect_entry_signals(user_message: str) -> Dict[str, Any]:
@@ -27,6 +37,16 @@ def collect_entry_signals(user_message: str) -> Dict[str, Any]:
     signals = analyze_text_intent(user_message)
     text = str(signals.get("text") or "")
     signals["has_freshness_signal"] = bool(FRESHNESS_PATTERN.search(text))
+    has_following_step_marker = bool(EXPLICIT_STEP_SEQUENCE_PATTERN.search(text))
+    has_repeat_same_action_intent = (
+        bool(REPEAT_SAME_ACTION_PATTERN.search(text))
+        or (has_following_step_marker and bool(NO_CHANGE_PATTERN.search(text)))
+    )
+    signals["has_explicit_step_sequence"] = (
+        has_following_step_marker
+        or (has_repeat_same_action_intent and bool(LEADING_STEP_SEQUENCE_PATTERN.search(text)))
+    )
+    signals["has_repeat_same_action_intent"] = has_repeat_same_action_intent
     signals["has_environment_write_intent"] = has_environment_write_intent(signals)
     signals["task_mode"] = classify_confirmed_user_task_mode(user_message)
     return signals

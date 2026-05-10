@@ -331,7 +331,7 @@ class _DocumentFactContextBuilder:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def build_for_tool_event(self, *, source_event_id: str):
+    async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
         raise AssertionError("document input fact 不应调用 tool event context builder")
 
     async def build_for_document_input(self, *, source_event_id: str, scope: AccessScopeResult):

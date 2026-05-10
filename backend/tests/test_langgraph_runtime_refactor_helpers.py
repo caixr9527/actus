@@ -106,6 +106,8 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool
     apply_tool_result_effects,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
+    build_called_event,
+    build_calling_event,
     build_tool_call_lifecycle,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_handlers import (
@@ -143,6 +145,25 @@ def test_finalize_no_tool_call_should_retry_empty_payload_and_block_human_wait()
     assert wait_result.payload is not None
     assert wait_result.payload.get("success") is False
     assert isinstance(wait_result.payload.get("blockers"), list)
+
+
+def test_tool_call_lifecycle_should_project_step_id_to_tool_events() -> None:
+    lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "/workspace/a.txt"}'},
+        },
+        parse_tool_call_args=json.loads,
+        step_id="atomic-action-step",
+    )
+
+    assert lifecycle is not None
+    calling_event = build_calling_event(lifecycle)
+    called_event = build_called_event(lifecycle, ToolResult(success=True, data={"path": "/workspace/a.txt"}))
+
+    assert calling_event.step_id == "atomic-action-step"
+    assert called_event.step_id == "atomic-action-step"
 
 
 def test_finalize_no_tool_call_should_retry_web_reading_without_contract_evidence() -> None:

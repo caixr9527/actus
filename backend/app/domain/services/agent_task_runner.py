@@ -375,7 +375,10 @@ class AgentTaskRunner(TaskRunner):
             )
             return
         try:
-            context = await context_builder.build_for_tool_event(source_event_id=source_event_id)
+            context = await context_builder.build_for_tool_event(
+                source_event_id=source_event_id,
+                current_step_id=str(getattr(event, "step_id", "") or "").strip() or None,
+            )
             facts = await recorder.record_from_tool_event(context=context, event=event)
             if event_projector is not None:
                 fact_event = await event_projector.project_tool_event_facts(context=context, facts=facts)

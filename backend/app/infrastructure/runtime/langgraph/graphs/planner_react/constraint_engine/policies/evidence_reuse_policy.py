@@ -108,6 +108,16 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
                 break
         if handle is None:
             return _block_duplicate(matched, reason_code="result_handle_missing")
+        log_runtime(
+            logging.getLogger(__name__),
+            logging.INFO,
+            "reuse_existing_evidence_pending_resolution",
+            step_id=str(getattr(constraint_input.step, "id", "") or ""),
+            action_key=str(matched.action_key or ""),
+            subject_key=str(matched.subject_key or ""),
+            result_handle_id=str(matched.result_handle_id or ""),
+            reason_code=REASON_EVIDENCE_REUSE_PENDING_RESOLUTION,
+        )
         data = _base_data(matched)
         data["result_handle"] = handle.model_dump(mode="json")
         return ConstraintDecision(

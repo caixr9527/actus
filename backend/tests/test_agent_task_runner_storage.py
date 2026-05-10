@@ -7,6 +7,7 @@ import pytest
 from app.domain.models import (
     ContinueCancelledTaskInput,
     DoneEvent,
+    EvidenceEvent,
     ErrorEvent,
     ExecutionStatus,
     File,
@@ -21,6 +22,7 @@ from app.domain.models import (
     SessionStatus,
     Step,
     StepEvent,
+    StepEventStatus,
     TextStreamChannel,
     TextStreamDeltaEvent,
     ToolEvent,
@@ -75,6 +77,44 @@ class _DummySessionRepo:
 class _DummyUoW:
     def __init__(self) -> None:
         self.session = _DummySessionRepo()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _EvidenceScopeSessionRepo:
+    async def get_by_id(self, *, session_id, user_id=None):
+        return Session(id=session_id, user_id=user_id, workspace_id="workspace-1", current_run_id="run-1")
+
+
+class _EvidenceScopeWorkspaceRepo:
+    async def get_by_id_for_user(self, *, workspace_id, user_id):
+        return Workspace(id=workspace_id, user_id=user_id, session_id="session-1", current_run_id="run-1")
+
+    async def get_by_session_id_for_user(self, *, session_id, user_id):
+        return Workspace(id="workspace-1", user_id=user_id, session_id=session_id, current_run_id="run-1")
+
+
+class _EvidenceScopeWorkflowRunRepo:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def get_by_id_for_user(self, *, run_id, user_id):
+        return WorkflowRun(id=run_id, user_id=user_id, session_id="session-1", current_step_id=None)
+
+    async def add_event_record_if_absent(self, *, session_id, run_id, event):
+        self.events.append(event)
+        return True
+
+
+class _EvidenceScopeUoW:
+    def __init__(self, workflow_run_repo: _EvidenceScopeWorkflowRunRepo) -> None:
+        self.session = _EvidenceScopeSessionRepo()
+        self.workspace = _EvidenceScopeWorkspaceRepo()
+        self.workflow_run = workflow_run_repo
 
     async def __aenter__(self):
         return self
@@ -1396,11 +1436,11 @@ def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_i
 
     class _ContextBuilder:
         def __init__(self) -> None:
-            self.source_event_ids: list[str] = []
+            self.calls: list[dict] = []
 
-        async def build_for_tool_event(self, *, source_event_id: str):
-            self.source_event_ids.append(source_event_id)
-            return {"source_event_id": source_event_id}
+        async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+            self.calls.append({"source_event_id": source_event_id, "current_step_id": current_step_id})
+            return {"source_event_id": source_event_id, "current_step_id": current_step_id}
 
     class _Recorder:
         def __init__(self) -> None:
@@ -1432,6 +1472,7 @@ def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_i
         function_args={"command": "pytest -q"},
         function_result=ToolResult(success=True, data={}),
         status=ToolEventStatus.CALLED,
+        step_id="atomic-action-step",
     )
 
     asyncio.run(
@@ -1441,9 +1482,58 @@ def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_i
         )
     )
 
-    assert context_builder.source_event_ids == ["stream-record-1"]
-    assert recorder.calls == [({"source_event_id": "stream-record-1"}, event)]
-    assert event_projector.calls == [({"source_event_id": "stream-record-1"}, ["fact-1"])]
+    assert context_builder.calls == [
+        {"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}
+    ]
+    assert recorder.calls == [({"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}, event)]
+    assert event_projector.calls == [({"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}, ["fact-1"])]
+
+
+def test_atomic_action_evidence_reconcile_should_preserve_current_step_id() -> None:
+    runner = _new_runner()
+    workflow_run_repo = _EvidenceScopeWorkflowRunRepo()
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _EvidenceScopeUoW(workflow_run_repo)
+
+    class _Reconciler:
+        def __init__(self) -> None:
+            self.reconcile_scope_step_id = ""
+            self.event_scope_step_id = ""
+
+        async def reconcile_step_evidence(self, *, scope, step):
+            self.reconcile_scope_step_id = str(scope.current_step_id or "")
+            assert scope.current_step_id == "atomic-action-step"
+            assert step.id == "atomic-action-step"
+            return [object()]
+
+        async def build_step_evidence_event(self, *, scope, step, records):
+            self.event_scope_step_id = str(scope.current_step_id or "")
+            assert scope.current_step_id == "atomic-action-step"
+            assert step.id == "atomic-action-step"
+            return EvidenceEvent(
+                step_id="atomic-action-step",
+                quality_status_counts={"valid": 1},
+                support_level_counts={"strong": 1},
+                summary="atomic evidence event",
+            )
+
+        async def build_step_evidence_backed_facts(self, *, scope, step):
+            assert scope.current_step_id == "atomic-action-step"
+            return []
+
+    reconciler = _Reconciler()
+    runner._evidence_step_reconciler = reconciler
+    event = StepEvent(
+        step=Step(id="atomic-action-step", status=ExecutionStatus.COMPLETED),
+        status=StepEventStatus.COMPLETED,
+    )
+
+    asyncio.run(runner._reconcile_evidence_before_step_completed(event))
+
+    assert reconciler.reconcile_scope_step_id == "atomic-action-step"
+    assert reconciler.event_scope_step_id == "atomic-action-step"
+    assert len(workflow_run_repo.events) == 1
 
 
 def test_record_sandbox_facts_for_tool_event_should_emit_fact_event_without_rollback_on_failure() -> None:
@@ -1452,7 +1542,7 @@ def test_record_sandbox_facts_for_tool_event_should_emit_fact_event_without_roll
     put_calls: list[None] = []
 
     class _ContextBuilder:
-        async def build_for_tool_event(self, *, source_event_id: str):
+        async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
             return {"source_event_id": source_event_id}
 
     class _Recorder:
@@ -1499,7 +1589,7 @@ def test_record_sandbox_facts_for_tool_event_should_skip_without_source_event_id
     runner = _new_runner()
 
     class _ContextBuilder:
-        async def build_for_tool_event(self, *, source_event_id: str):
+        async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
             raise AssertionError("source_event_id 缺失时不应构造 context")
 
     class _Recorder:

@@ -106,6 +106,14 @@ def test_compile_should_route_single_tool_tasks_to_atomic_action(
     assert contract.upgrade_policy.upgrade_on_open_questions is True
 
 
+def test_compile_should_keep_single_search_with_topic_constraint_on_atomic_action() -> None:
+    contract = _compile("帮我查一下厦门到漳州交通方式，不要换主题。")
+
+    assert contract.route != EntryRoute.PLANNED_TASK
+    assert rc.EXPLICIT_SEQUENCE_REQUIRES_PLAN not in contract.reason_codes
+    assert rc.REPEAT_SAME_ACTION_REQUIRES_PLAN not in contract.reason_codes
+
+
 def test_compile_should_route_freshness_request_to_atomic_action() -> None:
     contract = _compile("现在 OpenAI 最新模型是什么？")
 
@@ -114,6 +122,33 @@ def test_compile_should_route_freshness_request_to_atomic_action() -> None:
     assert contract.tool_budget == EntryToolBudget.SINGLE_CALL
     assert contract.freshness_score > 0
     assert rc.FRESHNESS_REQUIRES_TOOL in contract.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("user_message", "reason_code"),
+    [
+        (
+            "帮我查询漳州南靖土楼从厦门出发的交通方式，先搜索一次并记录结果，然后下一步再次确认同一个问题，不要换查询主题。",
+            rc.EXPLICIT_SEQUENCE_REQUIRES_PLAN,
+        ),
+        (
+            "帮我打开并读取这个页面 https://example.com/a ，读取完成后，下一步再次读取同一个 URL，不要换 URL。",
+            rc.REPEAT_SAME_ACTION_REQUIRES_PLAN,
+        ),
+    ],
+)
+def test_compile_should_route_explicit_sequence_or_repeat_requests_to_planned_task(
+        user_message: str,
+        reason_code: str,
+) -> None:
+    contract = _compile(user_message)
+
+    assert contract.route == EntryRoute.PLANNED_TASK
+    assert contract.context_profile == EntryContextProfile.FULL
+    assert contract.tool_budget == EntryToolBudget.PLANNER_CONTROLLED
+    assert reason_code in contract.reason_codes
+    assert rc.SINGLE_SEARCH_ATOMIC_ACTION not in contract.reason_codes
+    assert rc.SINGLE_URL_ATOMIC_ACTION not in contract.reason_codes
 
 
 @pytest.mark.parametrize(

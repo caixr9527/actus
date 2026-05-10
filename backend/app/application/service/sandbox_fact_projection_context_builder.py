@@ -35,6 +35,7 @@ class SandboxFactProjectionContextBuilder(SandboxFactProjectionContextBuilderPor
             self,
             *,
             source_event_id: str,
+            current_step_id: str | None = None,
     ) -> SandboxFactProjectionContext:
         if not self._user_id:
             raise ValueError("Sandbox fact projection context 需要 user_id")
@@ -43,7 +44,22 @@ class SandboxFactProjectionContextBuilder(SandboxFactProjectionContextBuilderPor
             session_id=self._session_id,
             action=DataAccessAction.READ,
         )
+        resolved_step_id = self._resolve_current_step_id(scope=scope, current_step_id=current_step_id)
+        if resolved_step_id != scope.current_step_id:
+            scope = scope.model_copy(update={"current_step_id": resolved_step_id})
         return await self._build_context(source_event_id=source_event_id, scope=scope)
+
+    @staticmethod
+    def _resolve_current_step_id(
+            *,
+            scope: AccessScopeResult,
+            current_step_id: str | None,
+    ) -> str | None:
+        scope_step_id = str(scope.current_step_id or "").strip() or None
+        requested_step_id = str(current_step_id or "").strip() or None
+        if scope_step_id and requested_step_id and scope_step_id != requested_step_id:
+            raise ValueError("Sandbox fact current_step_id 与 access scope 不一致")
+        return scope_step_id or requested_step_id
 
     async def build_for_document_input(
             self,
