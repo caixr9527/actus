@@ -12,6 +12,7 @@ from app.domain.models import ExecutionStatus, StepEvent, StepEventStatus, ToolE
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.contracts.langgraph_settings import STEP_EXECUTION_TIMEOUT_SECONDS
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
 from app.domain.models.evidence import EvidenceResolvedStatus
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
@@ -60,6 +61,7 @@ async def execute_step_node(
         skill_runtime: Optional[SkillGraphRuntime] = None,
         runtime_tools: Optional[List[BaseTool]] = None,
         max_tool_iterations: int = 5,
+        evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
 ) -> PlannerReActLangGraphState:
     """执行单个步骤；当前批次未完成时继续跑后续步骤，整批完成后再统一重规划。"""
     started_at = now_perf()
@@ -134,6 +136,7 @@ async def execute_step_node(
                     artifact_paths=prepared_execute_input.available_file_context_refs,
                     has_available_file_context=prepared_execute_input.available_file_context,
                     initial_runtime_recent_action=prepared_execute_input.initial_runtime_recent_action,
+                    sandbox_capability_profile=prepared_execute_input.sandbox_capability_profile,
                     runtime_evidence_context=prepared_execute_input.runtime_evidence_context,
                     has_previous_completed_steps=prepared_execute_input.has_previous_completed_steps,
                 )
@@ -274,6 +277,7 @@ async def execute_step_node(
         user_message=user_message,
         working_memory=working_memory,
         is_entry_wait_execute_step=is_entry_wait_execute_step,
+        evidence_step_reconciler=evidence_step_reconciler,
     )
     await emit_events(*completed_transition.events[len([started_event, *tool_events]):])
     log_runtime(

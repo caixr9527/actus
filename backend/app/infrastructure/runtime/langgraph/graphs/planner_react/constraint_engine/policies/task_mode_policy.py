@@ -123,15 +123,6 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
             )
 
     if normalized_function_name not in blocked_names:
-        if (
-                task_mode == "web_reading"
-                and normalized_function_name == "fetch_page"
-                and bool(dict(web_reading_progress_state.get("progress") or {}).get("contract_satisfied"))
-        ):
-            return _hard_block(
-                REASON_TASK_MODE_TOOL_BLOCKED,
-                "当前网页阅读步骤已经具备强页面证据，请直接基于已有页面内容完成，不要继续重复抓取。",
-            )
         return None
 
     if _is_system_rewritten_evidence_verification_call(constraint_input):

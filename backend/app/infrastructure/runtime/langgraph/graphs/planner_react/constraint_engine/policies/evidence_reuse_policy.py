@@ -42,19 +42,28 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
     )
     if snapshot is None:
         if has_previous_completed_steps:
-            return ConstraintDecision(
-                action="block",
-                reason_code=REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING,
-                block_mode="hard_block_break",
-                loop_break_reason=REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING,
-                tool_result_payload=ConstraintToolResultPayload(
-                    success=False,
-                    message="前序 completed step 存在，但 execute context 缺少 evidence reuse snapshot。",
-                    data={"duplicate_decision": "snapshot_missing_with_previous_completed_step"},
-                ),
-                message_for_model="前序步骤 evidence context 缺失，已停止真实工具调用。",
+            return _block_snapshot_missing(
+                message="前序 completed step 存在，但 execute context 缺少 evidence reuse snapshot。",
+                data={
+                    "duplicate_decision": "snapshot_missing_with_previous_completed_step",
+                    "source_step_ids": [],
+                    "do_not_repeat_count": 0,
+                    "result_handle_count": 0,
+                    "cursor": "",
+                },
             )
         return None
+    if has_previous_completed_steps and _snapshot_is_empty_for_previous_steps(snapshot):
+        return _block_snapshot_missing(
+            message="前序 completed step 存在，但 evidence reuse snapshot 为空，已停止真实工具调用。",
+            data={
+                "duplicate_decision": "snapshot_empty_with_previous_completed_step",
+                "source_step_ids": list(snapshot.source_step_ids or []),
+                "do_not_repeat_count": len(list(snapshot.do_not_repeat or [])),
+                "result_handle_count": len(list(snapshot.result_handles or [])),
+                "cursor": str(snapshot.cursor or ""),
+            },
+        )
 
     function_args = dict(constraint_input.function_args or {})
     verification_rewrite = _build_verification_rewrite_decision(
@@ -186,6 +195,29 @@ def _strict_snapshot(raw) -> EvidenceReuseSnapshot | None:
     if isinstance(raw, EvidenceReuseSnapshot):
         return raw
     return EvidenceReuseSnapshot.model_validate(raw)
+
+
+def _snapshot_is_empty_for_previous_steps(snapshot: EvidenceReuseSnapshot) -> bool:
+    return (
+        bool(snapshot.source_step_ids)
+        and len(list(snapshot.do_not_repeat or [])) == 0
+        and len(list(snapshot.result_handles or [])) == 0
+    )
+
+
+def _block_snapshot_missing(*, message: str, data: dict) -> ConstraintDecision:
+    return ConstraintDecision(
+        action="block",
+        reason_code=REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING,
+        block_mode="hard_block_break",
+        loop_break_reason=REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING,
+        tool_result_payload=ConstraintToolResultPayload(
+            success=False,
+            message=message,
+            data=data,
+        ),
+        message_for_model="前序步骤 evidence context 缺失或为空，已停止真实工具调用。",
+    )
 
 
 def _base_data(item) -> dict:

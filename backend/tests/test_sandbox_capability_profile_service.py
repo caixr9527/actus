@@ -657,7 +657,9 @@ def test_record_runtime_tool_snapshot_should_write_snapshot_and_rehash(caplog) -
 
     assert profile.profile_hash != old_hash
     assert profile.runtime_tool_capabilities.items[0].capability_id == "search"
+    assert "search" in profile.prompt_summary.available_tools
     assert _stored_profile(workspace_repo)["runtime_tool_capabilities"]["items"][0]["capability_id"] == "search"
+    assert "search" in _stored_profile(workspace_repo)["prompt_summary"]["available_tools"]
     assert any(record.message == "sandbox_profile_runtime_tool_snapshot_recorded" for record in caplog.records)
 
 

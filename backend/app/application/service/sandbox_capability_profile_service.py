@@ -216,6 +216,19 @@ class SandboxCapabilityProfileService(
                 existing_profile=existing_profile,
                 snapshot=snapshot,
             )
+            if snapshot.items and not profile.prompt_summary.available_tools:
+                logger.error(
+                    "sandbox_runtime_tool_snapshot_invalid",
+                    extra={
+                        "user_id": scope.user_id,
+                        "session_id": str(scope.session_id),
+                        "workspace_id": str(scope.workspace_id),
+                        "run_id": scope.run_id,
+                        "runtime_tool_count": len(list(snapshot.items or [])),
+                        "reason_code": "sandbox_runtime_tool_snapshot_invalid",
+                    },
+                )
+                raise RuntimeError("runtime tools 非空但 sandbox prompt summary available_tools 为空")
             await self._record_profile(profile=profile)
             self._log_runtime_tool_snapshot_recorded(profile=profile)
             return profile
@@ -606,8 +619,21 @@ class SandboxCapabilityProfileService(
             snapshot: RuntimeToolCapabilitySnapshot,
     ) -> SandboxCapabilityProfile:
         payload = existing_profile.model_dump()
+        prompt_summary = existing_profile.prompt_summary.model_dump()
+        runtime_tool_families = sorted({
+            str(item.tool_family or "").strip()
+            for item in list(snapshot.items or [])
+            if item.enabled and str(item.tool_family or "").strip()
+        })
+        if runtime_tool_families:
+            prompt_summary["available_tools"] = sorted(set([
+                *list(prompt_summary.get("available_tools") or []),
+                *runtime_tool_families,
+            ]))
+            prompt_summary["sandbox_profile_stale"] = False
         payload.update({
             "runtime_tool_capabilities": snapshot,
+            "prompt_summary": prompt_summary,
             "last_refresh_error": None,
         })
         payload.pop("profile_hash", None)

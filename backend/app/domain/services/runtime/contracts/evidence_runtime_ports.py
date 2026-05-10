@@ -76,6 +76,15 @@ class EvidenceStepReconcilerPort(Protocol):
         """基于本次对账记录生成 step 聚合 EvidenceEvent。"""
         ...
 
+    async def persist_step_evidence_event(
+            self,
+            *,
+            scope: AccessScopeResult,
+            event: object,
+    ) -> None:
+        """持久化 graph 主链路生成的 EvidenceEvent；不推进 runtime 状态。"""
+        ...
+
 
 class EvidenceStepProjectionPort(Protocol):
     """为 StepOutcome 提供 evidence-backed 可读投影。"""

@@ -74,6 +74,7 @@ class StepOutcomeState(TypedDict, total=False):
     evidence_backed_facts: List[Dict[str, Any]]
     facts_learned: List[str]
     open_questions: List[str]
+    evidence_reconcile_metadata: Dict[str, Any]
 
 
 class RetrievedMemoryState(TypedDict, total=False):
@@ -411,6 +412,9 @@ class GraphStateContractMapper:
         open_questions = normalize_text_list(normalized_payload.get("open_questions"))
         if open_questions:
             normalized_outcome["open_questions"] = open_questions
+        evidence_reconcile_metadata = normalized_payload.get("evidence_reconcile_metadata")
+        if isinstance(evidence_reconcile_metadata, dict) and evidence_reconcile_metadata:
+            normalized_outcome["evidence_reconcile_metadata"] = dict(evidence_reconcile_metadata)
         return normalized_outcome or None
 
     @classmethod

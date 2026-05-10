@@ -60,6 +60,8 @@ from app.domain.services.runtime.contracts.evidence_key_normalizer import (
     hash_query,
     hash_url,
 )
+from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
+from app.domain.services.runtime.normalizers import normalize_step_outcome_payload
 from app.domain.services.tools import BaseTool
 from app.domain.services.tools.base import tool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -79,6 +81,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.eng
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_nodes import (
     _resolve_pending_evidence_reuse,
     execute_step_node,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.evidence_completion_gate import (
+    reconcile_step_evidence_before_state_return,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import prepare_execute_step_input
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.prompt_context_helpers import (
@@ -930,6 +935,41 @@ def test_evidence_reuse_policy_should_block_invalid_verification_fetch_page(func
     assert decision is not None
     assert decision.reason_code == "evidence_reuse_requires_verification"
     assert decision.tool_result_payload.data["verification_gap"]["reason_code"] == "verification_action_missing"
+
+
+def test_evidence_reuse_policy_should_block_empty_snapshot_with_previous_steps() -> None:
+    snapshot = EvidenceReuseSnapshot(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        cursor="cursor-empty",
+        do_not_repeat=[],
+        result_handles=[],
+    )
+
+    decision = evaluate_evidence_reuse_policy(
+        ConstraintInput(
+            step=Step(id="step-2"),
+            task_mode="general",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": "query"},
+            matched_tool=None,
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            external_signals_snapshot={
+                "evidence_reuse_snapshot": snapshot,
+                "has_previous_completed_steps": True,
+            },
+            runtime_tools=[],
+        )
+    )
+
+    assert decision is not None
+    assert decision.action == "block"
+    assert decision.reason_code == "evidence_reuse_snapshot_missing"
+    assert decision.tool_result_payload.data["duplicate_decision"] == "snapshot_empty_with_previous_completed_step"
 
 
 @pytest.mark.parametrize(
@@ -1833,6 +1873,117 @@ def test_agent_task_runner_should_reconcile_evidence_before_completed_step_event
     assert call["scope"].run_id == "run-1"
 
 
+def test_graph_completion_gate_should_reconcile_before_next_step_context() -> None:
+    reconciler = _ProjectionStepReconciler()
+    step = Step(id="step-1", outcome=StepOutcome(done=True, summary="done"))
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+    }
+
+    asyncio.run(reconcile_step_evidence_before_state_return(
+        state=state,
+        step=step,
+        reconciler=reconciler,
+    ))
+
+    assert reconciler.reconcile_calls[0]["scope"].current_step_id == "step-1"
+    assert step.outcome is not None
+    assert step.outcome.facts_learned == ["evidence backed fact"]
+    assert step.outcome.evidence_reconcile_metadata["graph_completion_gate"] is True
+
+
+def test_execute_step_node_should_return_graph_gate_marker_in_state_and_completed_event() -> None:
+    reconciler = _ProjectionStepReconciler()
+    plan = Plan(
+        steps=[
+            Step(id="step-1", title="完成步骤", description="完成步骤"),
+            Step(id="step-2", title="下一步", description="下一步"),
+        ]
+    )
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": "完成第一步",
+        "plan": plan,
+        "step_states": [],
+        "graph_metadata": {},
+        "working_memory": {},
+        "emitted_events": [],
+    }
+
+    next_state = asyncio.run(execute_step_node(
+        state,
+        _FinalJsonLLM({"success": True, "summary": "done"}),
+        RuntimeContextService(),
+        runtime_tools=[],
+        evidence_step_reconciler=reconciler,
+    ))
+
+    completed_step = next_state["plan"].steps[0]
+    last_step = next_state["last_executed_step"]
+    assert completed_step.outcome.evidence_reconcile_metadata["graph_completion_gate"] is True
+    assert last_step.outcome.evidence_reconcile_metadata["graph_completion_gate"] is True
+    assert AgentTaskRunner._graph_evidence_already_reconciled(last_step) is True
+    assert next_state["step_states"][0]["outcome"]["evidence_reconcile_metadata"] == {
+        "graph_completion_gate": True,
+    }
+
+
+def test_normalize_step_outcome_payload_should_preserve_graph_gate_marker() -> None:
+    outcome = StepOutcome(
+        done=True,
+        summary="done",
+        evidence_reconcile_metadata={"graph_completion_gate": True},
+    )
+
+    normalized = normalize_step_outcome_payload(outcome)
+    restored = StepOutcome.model_validate(normalized)
+
+    assert normalized["evidence_reconcile_metadata"] == {"graph_completion_gate": True}
+    assert restored.evidence_reconcile_metadata == {"graph_completion_gate": True}
+    assert GraphStateContractMapper._normalize_step_outcome_state(outcome)[
+        "evidence_reconcile_metadata"
+    ] == {"graph_completion_gate": True}
+
+
+def test_normalize_step_outcome_payload_should_drop_invalid_graph_gate_marker() -> None:
+    normalized = normalize_step_outcome_payload(
+        {
+            "done": True,
+            "summary": "done",
+            "evidence_reconcile_metadata": "bad",
+        }
+    )
+
+    assert normalized["evidence_reconcile_metadata"] == {}
+
+
+def test_agent_task_runner_should_skip_reconcile_when_graph_gate_already_reconciled() -> None:
+    step = Step(
+        id="step-1",
+        outcome=StepOutcome(
+            done=True,
+            summary="done",
+            evidence_reconcile_metadata={"graph_completion_gate": True},
+        ),
+    )
+    event = StepEvent(step=step, status="completed")
+    runner = object.__new__(AgentTaskRunner)
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _RunnerUoW()
+    runner._evidence_step_reconciler = _StepReconciler()
+
+    asyncio.run(runner._reconcile_evidence_before_step_completed(event))
+
+    assert runner._evidence_step_reconciler.calls == []
+
+
 def test_agent_task_runner_should_overwrite_step_outcome_with_evidence_backed_projection() -> None:
     step = Step(
         id="step-1",
@@ -2078,6 +2229,16 @@ class _FakeToolCallLLM:
         return {"content": json.dumps({"success": True, "summary": "done"}, ensure_ascii=False)}
 
 
+class _FinalJsonLLM:
+    def __init__(self, payload: dict) -> None:
+        self.payload = dict(payload)
+        self.calls = 0
+
+    async def invoke(self, **kwargs):
+        self.calls += 1
+        return {"content": json.dumps(self.payload, ensure_ascii=False)}
+
+
 class _CountingRuntimeTool(BaseTool):
     name = "counting-tool"
 
@@ -2177,7 +2338,11 @@ class _NoneReturningStepReconciler:
 
 
 class _ProjectionStepReconciler:
+    def __init__(self) -> None:
+        self.reconcile_calls = []
+
     async def reconcile_step_evidence(self, *, scope, step):
+        self.reconcile_calls.append({"scope": scope, "step": step})
         return [object()]
 
     async def build_step_evidence_backed_facts(self, *, scope, step):

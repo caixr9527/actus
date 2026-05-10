@@ -21,6 +21,7 @@ from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine,
 from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -102,6 +103,7 @@ async def build_run_engine(
         tool_runtime_adapter: ToolRuntimeAdapter | None = None,
         runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
         sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+        evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
 ) -> RunEngine:
     """根据配置选择运行时引擎（BE-LG-12 起仅支持 LangGraph）。"""
     settings = get_settings()
@@ -140,6 +142,11 @@ async def build_run_engine(
     # P0: 单步骤工具循环先做硬上限收口，避免错误回路被配置值无限放大。
     max_tool_iterations = max(1, min(int(agent_config.max_iterations), 20))
     evidence_digest_projector = EvidenceDigestProjector(uow_factory=uow_factory)
+    evidence_ledger_service = evidence_step_reconciler or EvidenceLedgerService(
+        uow_factory=uow_factory,
+        assembler=EvidenceFactAssembler(),
+        step_projection=evidence_digest_projector,
+    )
     return LangGraphRunEngine(
         session_id=session_id,
         stage_llms=_build_stage_llms(llm),
@@ -150,15 +157,12 @@ async def build_run_engine(
         runtime_context_service=RuntimeContextService(
             workspace_runtime_service=workspace_runtime_service,
             evidence_context_provider=EvidenceRuntimeContextProvider(
-                ledger_service=EvidenceLedgerService(
-                    uow_factory=uow_factory,
-                    assembler=EvidenceFactAssembler(),
-                    step_projection=evidence_digest_projector,
-                ),
+                ledger_service=evidence_ledger_service,
                 projector=evidence_digest_projector,
             ),
         ),
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
+        evidence_step_reconciler=evidence_ledger_service,
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         data_retention_policy_service=DataRetentionPolicyService(),

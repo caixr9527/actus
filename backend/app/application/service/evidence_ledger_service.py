@@ -338,6 +338,21 @@ class EvidenceLedgerService:
             records=records,
         )
 
+    async def persist_step_evidence_event(
+            self,
+            *,
+            scope: AccessScopeResult,
+            event: EvidenceEvent,
+    ) -> None:
+        """持久化 step EvidenceEvent；事件不参与 runtime 状态推进。"""
+        self._validate_scope_basics(scope)
+        async with self._uow_factory() as uow:
+            await uow.workflow_run.add_event_record_if_absent(
+                session_id=str(scope.session_id),
+                run_id=str(scope.run_id or ""),
+                event=event,
+            )
+
     async def reconcile_previous_steps_evidence(
             self,
             *,

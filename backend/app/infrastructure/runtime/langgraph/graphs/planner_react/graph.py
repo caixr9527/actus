@@ -15,7 +15,10 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     DataClassificationPolicy,
     DefaultDataClassificationPolicy,
 )
-from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceResultHandleResolverPort
+from app.domain.services.runtime.contracts.evidence_runtime_ports import (
+    EvidenceResultHandleResolverPort,
+    EvidenceStepReconcilerPort,
+)
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
@@ -58,6 +61,7 @@ def build_planner_react_langgraph_graph(
         memory_consolidation_service: Optional[MemoryConsolidationService] = None,
         data_retention_policy_service: Optional[DataClassificationPolicy] = None,
         evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
+        evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         *,
         runtime_context_service: RuntimeContextService,
 ) -> Any:
@@ -118,6 +122,8 @@ def build_planner_react_langgraph_graph(
         }
         if evidence_result_handle_resolver is not None:
             execute_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver
+        if evidence_step_reconciler is not None:
+            execute_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
         return await execute_step_node(
             state,
             stage_llm_map["executor"],

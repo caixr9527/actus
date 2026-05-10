@@ -353,12 +353,14 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
             "next_hint",
             "reused_from_run_id",
             "reused_from_step_id",
+            "evidence_reconcile_metadata",
         ),
     )
 
     next_hint = normalize_step_result_text(source.get("next_hint"))
     reused_from_run_id = normalize_string_value(source.get("reused_from_run_id"))
     reused_from_step_id = normalize_string_value(source.get("reused_from_step_id"))
+    evidence_reconcile_metadata = source.get("evidence_reconcile_metadata")
     return {
         "done": bool(source.get("done", False)),
         "summary": normalize_step_result_text(source.get("summary")),
@@ -373,6 +375,11 @@ def normalize_step_outcome_payload(raw: Any) -> Optional[Dict[str, Any]]:
         "next_hint": next_hint or None,
         "reused_from_run_id": reused_from_run_id or None,
         "reused_from_step_id": reused_from_step_id or None,
+        "evidence_reconcile_metadata": (
+            dict(evidence_reconcile_metadata)
+            if isinstance(evidence_reconcile_metadata, dict)
+            else {}
+        ),
     }
 
 

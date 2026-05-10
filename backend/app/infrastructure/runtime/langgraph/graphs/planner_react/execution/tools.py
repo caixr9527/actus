@@ -129,6 +129,23 @@ def collect_available_tools(runtime_tools: Optional[List[BaseTool]]) -> List[Dic
     return available_tools
 
 
+def _sandbox_profile_blocks_file_step(
+        *,
+        task_mode: str,
+        available_function_names: set[str],
+        sandbox_capability_profile: Optional[Dict[str, Any]],
+) -> bool:
+    if str(task_mode or "").strip().lower() != "file_processing":
+        return False
+    profile = dict(sandbox_capability_profile or {})
+    if not profile:
+        return False
+    if not bool(profile.get("sandbox_profile_stale")):
+        return False
+    required_any = {"read_file", "write_file", "replace_in_file", "list_files", "shell_execute"}
+    return len(required_any.intersection(set(available_function_names or set()))) == 0
+
+
 def _has_pending_research_candidate_urls(execution_state: ExecutionState) -> bool:
     fetched_keys = {
         normalize_url_value(url, drop_query=True)
@@ -202,7 +219,6 @@ def pick_preferred_tool_call(
         function_name = extract_function_name(tool_schema)
         if function_name:
             available_function_names.add(function_name)
-
     ranked_candidates: List[Tuple[int, int, Dict[str, Any]]] = []
     for index, raw_call in enumerate(tool_calls):
         if not isinstance(raw_call, dict):
@@ -411,6 +427,7 @@ async def execute_step_with_prompt(
         artifact_paths: Optional[List[str]] = None,
         has_available_file_context: bool = False,
         initial_runtime_recent_action: Optional[Dict[str, Any]] = None,
+        sandbox_capability_profile: Optional[Dict[str, Any]] = None,
         runtime_evidence_context: Optional[RuntimeEvidenceContextResult] = None,
         has_previous_completed_steps: bool = False,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
@@ -439,6 +456,25 @@ async def execute_step_with_prompt(
         function_name = extract_function_name(tool_schema)
         if function_name:
             available_function_names.add(function_name)
+    if _sandbox_profile_blocks_file_step(
+            task_mode=task_mode,
+            available_function_names=available_function_names,
+            sandbox_capability_profile=sandbox_capability_profile,
+    ):
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "sandbox_runtime_tool_snapshot_invalid",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            available_tool_count=len(available_tools),
+            reason_code="sandbox_runtime_tool_snapshot_invalid",
+        )
+        return _build_loop_break_payload(
+            step=step,
+            blocker="当前 sandbox capability profile 已过期，且文件/命令运行时工具不可用，已停止文件类步骤执行。",
+            next_hint="请刷新 sandbox capability profile 并确认文件读取工具可用后再继续。",
+        ), event_dispatcher.emitted_events
     # P3 重构：上下文构建统一沉淀到独立模块，tools.py 仅保留编排职责。
     execution_context = build_execution_context(
         step=step,

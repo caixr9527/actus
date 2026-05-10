@@ -37,6 +37,7 @@ from app.domain.services.runtime.contracts.evidence_ledger_contract import (
     EvidenceResultHandle,
     RuntimeEvidenceContextResult,
 )
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_execution_response,
@@ -60,6 +61,7 @@ from .delivery_helpers import (
     _infer_step_attachment_delivery_preference,
     _merge_step_outcome_into_working_memory,
 )
+from .evidence_completion_gate import reconcile_step_evidence_before_state_return
 from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
@@ -92,6 +94,7 @@ class ExecuteStepPreparedInput:
     available_file_context: bool
     execute_context_updates: Dict[str, Any]
     initial_runtime_recent_action: Dict[str, Any]
+    sandbox_capability_profile: Dict[str, Any]
     runtime_evidence_context: Optional[RuntimeEvidenceContextResult]
     has_previous_completed_steps: bool
     result_handle_index: Dict[str, EvidenceResultHandle]
@@ -413,6 +416,7 @@ async def prepare_execute_step_input(
     initial_runtime_recent_action = runtime_context_service.normalize_runtime_recent_action(
         execute_context_packet.get("recent_action_digest")
     )
+    sandbox_capability_profile = _extract_sandbox_capability_profile(execute_context_packet)
     user_message_prompt = _append_prompt_context_to_prompt(user_message_prompt, execute_context_packet)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
     return ExecuteStepPreparedInput(
@@ -426,6 +430,7 @@ async def prepare_execute_step_input(
         available_file_context=available_file_context,
         execute_context_updates=execute_context_updates,
         initial_runtime_recent_action=initial_runtime_recent_action,
+        sandbox_capability_profile=sandbox_capability_profile,
         runtime_evidence_context=runtime_evidence_context,
         has_previous_completed_steps=bool(completed_step_ids),
         result_handle_index=(
@@ -444,6 +449,14 @@ def _extract_runtime_evidence_context(context_packet: Dict[str, Any]) -> Optiona
     if raw_context is None:
         return None
     return RuntimeEvidenceContextResult.model_validate(raw_context)
+
+
+def _extract_sandbox_capability_profile(context_packet: Dict[str, Any]) -> Dict[str, Any]:
+    environment_digest = context_packet.get("environment_digest")
+    if not isinstance(environment_digest, dict):
+        return {}
+    profile = environment_digest.get("sandbox_capability_profile")
+    return dict(profile or {}) if isinstance(profile, dict) else {}
 
 
 def _collect_completed_step_ids_for_execute(
@@ -612,6 +625,7 @@ async def build_execute_completed_transition(
         user_message: str,
         working_memory: Dict[str, Any],
         is_entry_wait_execute_step: bool,
+        evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
 ) -> ExecuteStepCompletedTransition:
     """构造 execute 节点 completed 分支的结果落账与状态写回。"""
     step_success = bool(normalized_execution.get("success", True))
@@ -645,6 +659,11 @@ async def build_execute_completed_transition(
         next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),
     )
     step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
+    await reconcile_step_evidence_before_state_return(
+        state=state,
+        step=step,
+        reconciler=evidence_step_reconciler,
+    )
     completed_event = StepEvent(
         step=step.model_copy(deep=True),
         status=step.status,

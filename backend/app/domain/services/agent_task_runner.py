@@ -206,6 +206,7 @@ class AgentTaskRunner(TaskRunner):
             run_engine_factory=run_engine_factory,
             runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
+            evidence_step_reconciler=evidence_step_reconciler,
         )
         return cls(
             mcp_config=mcp_config,
@@ -248,6 +249,7 @@ class AgentTaskRunner(TaskRunner):
             run_engine_factory: Callable[..., Awaitable[RunEngine]],
             runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
     ) -> RunEngine:
         return await run_engine_factory(
             llm=llm,
@@ -267,6 +269,7 @@ class AgentTaskRunner(TaskRunner):
             tool_runtime_adapter=tool_runtime_adapter,
             runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
+            evidence_step_reconciler=evidence_step_reconciler,
         )
 
     def _require_run_engine(self) -> RunEngine:
@@ -419,6 +422,17 @@ class AgentTaskRunner(TaskRunner):
     async def _reconcile_evidence_before_step_completed(self, event: StepEvent) -> None:
         reconciler = getattr(self, "_evidence_step_reconciler", None)
         if reconciler is None or event.status != StepEventStatus.COMPLETED:
+            return
+        if self._graph_evidence_already_reconciled(event.step):
+            logger.info(
+                "evidence_reconcile_skipped_graph_already_reconciled",
+                extra={
+                    "user_id": getattr(self, "_user_id", None),
+                    "session_id": getattr(self, "_session_id", None),
+                    "step_id": str(getattr(event.step, "id", "") or ""),
+                    "reason_code": "graph_evidence_already_reconciled",
+                },
+            )
             return
         scope: AccessScopeResult | None = None
         try:
@@ -591,6 +605,14 @@ class AgentTaskRunner(TaskRunner):
             run_id=run_id,
             current_step_id=str(current_step_id or "").strip() or None,
         )
+
+    @staticmethod
+    def _graph_evidence_already_reconciled(step) -> bool:
+        outcome = getattr(step, "outcome", None)
+        if outcome is None:
+            return False
+        marker = getattr(outcome, "evidence_reconcile_metadata", None)
+        return isinstance(marker, dict) and marker.get("graph_completion_gate") is True
 
     async def _emit_request_started(self, task: Task, request_id: str) -> None:
         await self._put_stream_record(

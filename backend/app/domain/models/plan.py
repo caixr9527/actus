@@ -105,6 +105,7 @@ class StepOutcome(BaseModel):
     next_hint: Optional[str] = None
     reused_from_run_id: Optional[str] = None
     reused_from_step_id: Optional[str] = None
+    evidence_reconcile_metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("facts_learned")
     @classmethod
