@@ -64,6 +64,7 @@ from app.domain.services.tools import BaseTool
 from app.domain.services.tools.base import tool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintInput
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine import ConstraintEngine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import (
     REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING,
 )
@@ -665,28 +666,6 @@ def test_evidence_reuse_policy_should_allow_marked_verification_search() -> None
         },
     )
 
-    repeated = evaluate_evidence_reuse_policy(
-        ConstraintInput(
-            step=Step(id="step-2"),
-            task_mode="research",
-            function_name="search_web",
-            normalized_function_name="search_web",
-            function_args={"query": query, "query_hash": query_hash},
-            matched_tool=None,
-            iteration_blocked_function_names=set(),
-            execution_context=_execution_context(),
-            execution_state=ExecutionState(),
-            external_signals_snapshot={
-                "evidence_reuse_snapshot": snapshot,
-                "has_previous_completed_steps": True,
-            },
-            runtime_tools=[],
-        )
-    )
-    assert repeated is not None
-    assert repeated.reason_code == "evidence_reuse_requires_verification"
-    assert repeated.tool_result_payload.data["verification_gap"]["reason_code"] == "verification_action_missing"
-
     allowed = evaluate_evidence_reuse_policy(
         ConstraintInput(
             step=Step(id="step-2"),
@@ -710,6 +689,44 @@ def test_evidence_reuse_policy_should_allow_marked_verification_search() -> None
         )
     )
     assert allowed is None
+
+
+def test_evidence_reuse_policy_should_rewrite_bare_verification_search() -> None:
+    query = "query"
+    query_hash = hash_query(query)
+    snapshot = _snapshot_from_fact(
+        SandboxFactKind.SEARCH_RESULT,
+        payload={
+            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
+            "query_hash": query_hash,
+            "query_excerpt": query,
+        },
+    )
+
+    decision = evaluate_evidence_reuse_policy(
+        ConstraintInput(
+            step=Step(id="step-2"),
+            task_mode="research",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": query},
+            matched_tool=None,
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            external_signals_snapshot={
+                "evidence_reuse_snapshot": snapshot,
+                "has_previous_completed_steps": True,
+            },
+            runtime_tools=[],
+        )
+    )
+
+    assert decision is not None
+    assert decision.action == "rewrite"
+    assert decision.rewrite_target["function_args"]["query"] == query
+    assert decision.rewrite_target["function_args"]["query_hash"] == query_hash
+    assert decision.rewrite_target["function_args"]["verification_reason_code"] == "external_evidence_may_change"
 
 
 @pytest.mark.parametrize(
@@ -784,6 +801,44 @@ def test_evidence_reuse_policy_should_allow_marked_verification_fetch_page() -> 
     )
 
     assert allowed is None
+
+
+def test_evidence_reuse_policy_should_rewrite_bare_verification_fetch_page() -> None:
+    url = "https://example.com/a"
+    url_hash = hash_url(url)
+    snapshot = _snapshot_from_fact(
+        SandboxFactKind.FETCHED_PAGE,
+        payload={
+            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
+            "fetched_url_hash": url_hash,
+            "final_url_origin": url,
+        },
+    )
+
+    decision = evaluate_evidence_reuse_policy(
+        ConstraintInput(
+            step=Step(id="step-2"),
+            task_mode="research",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": url},
+            matched_tool=None,
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            external_signals_snapshot={
+                "evidence_reuse_snapshot": snapshot,
+                "has_previous_completed_steps": True,
+            },
+            runtime_tools=[],
+        )
+    )
+
+    assert decision is not None
+    assert decision.action == "rewrite"
+    assert decision.rewrite_target["function_args"]["url"] == url
+    assert decision.rewrite_target["function_args"]["url_hash"] == url_hash
+    assert decision.rewrite_target["function_args"]["verification_reason_code"] == "external_evidence_may_change"
 
 
 @pytest.mark.parametrize(
@@ -888,6 +943,297 @@ def test_tool_policy_engine_should_execute_verification_with_executable_args(
     assert tool.invocations == [(function_name, expected_executable_args)]
     assert set(function_args) >= set(audit_metadata_keys)
     assert not (set(tool.invocations[0][1]) & set(audit_metadata_keys))
+
+
+def test_tool_policy_engine_should_autofill_verification_metadata_for_bare_search() -> None:
+    query = "query"
+    query_hash = hash_query(query)
+    snapshot = _snapshot_from_fact(
+        SandboxFactKind.SEARCH_RESULT,
+        payload={
+            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
+            "query_hash": query_hash,
+            "query_excerpt": query,
+        },
+    )
+    tool = _SignatureFilteringTool({"search_web"})
+
+    result = asyncio.run(
+        ToolPolicyEngine(logger=logging.getLogger(__name__)).evaluate_tool_call(
+            step=Step(id="step-2", description="验证外部 evidence"),
+            task_mode="research",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": query},
+            matched_tool=tool,
+            runtime_tools=[tool],
+            browser_route_state_key="",
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            started_at=0.0,
+            evidence_reuse_snapshot=snapshot,
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is True
+    assert result.rewrite_reason == "evidence_reuse_requires_verification"
+    assert tool.invocations == [("search_web", {"query": query})]
+
+
+def test_tool_policy_engine_should_allow_system_rewritten_verification_search_in_general_mode() -> None:
+    query = "query"
+    query_hash = hash_query(query)
+    snapshot = _snapshot_from_fact(
+        SandboxFactKind.SEARCH_RESULT,
+        payload={
+            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
+            "query_hash": query_hash,
+            "query_excerpt": query,
+        },
+    )
+    tool = _SignatureFilteringTool({"search_web"})
+
+    result = asyncio.run(
+        ToolPolicyEngine(logger=logging.getLogger(__name__)).evaluate_tool_call(
+            step=Step(id="step-2", description="验证外部 evidence"),
+            task_mode="general",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": query},
+            matched_tool=tool,
+            runtime_tools=[tool],
+            browser_route_state_key="",
+            iteration_blocked_function_names={"search_web"},
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            started_at=0.0,
+            evidence_reuse_snapshot=snapshot,
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is True
+    assert result.rewrite_reason == "evidence_reuse_requires_verification"
+    assert tool.invocations == [("search_web", {"query": query})]
+
+
+def test_tool_policy_engine_should_not_allow_forged_verification_search_in_general_mode() -> None:
+    query = "query"
+    snapshot = _snapshot_from_fact(SandboxFactKind.SEARCH_RESULT)
+    tool = _SignatureFilteringTool({"search_web"})
+
+    result = asyncio.run(
+        ToolPolicyEngine(logger=logging.getLogger(__name__)).evaluate_tool_call(
+            step=Step(id="step-2", description="验证外部 evidence"),
+            task_mode="general",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={
+                "query": query,
+                "query_hash": "wrong-hash",
+                "verification_reason_code": "external_evidence_may_change",
+            },
+            matched_tool=tool,
+            runtime_tools=[tool],
+            browser_route_state_key="",
+            iteration_blocked_function_names={"search_web"},
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            started_at=0.0,
+            evidence_reuse_snapshot=snapshot,
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is False
+    assert result.tool_result.data["verification_gap"]["reason_code"] == "verification_action_missing"
+    assert tool.invocations == []
+
+
+def test_tool_policy_engine_should_autofill_verification_metadata_for_bare_fetch_page() -> None:
+    url = "https://example.com/a"
+    url_hash = hash_url(url)
+    snapshot = _snapshot_from_fact(
+        SandboxFactKind.FETCHED_PAGE,
+        payload={
+            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
+            "fetched_url_hash": url_hash,
+            "final_url_origin": url,
+        },
+    )
+    tool = _SignatureFilteringTool({"fetch_page"})
+
+    result = asyncio.run(
+        ToolPolicyEngine(logger=logging.getLogger(__name__)).evaluate_tool_call(
+            step=Step(id="step-2", description="验证外部 evidence"),
+            task_mode="research",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": url},
+            matched_tool=tool,
+            runtime_tools=[tool],
+            browser_route_state_key="",
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            started_at=0.0,
+            evidence_reuse_snapshot=snapshot,
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is True
+    assert result.rewrite_reason == "evidence_reuse_requires_verification"
+    assert tool.invocations == [("fetch_page", {"url": url})]
+
+
+def test_tool_policy_engine_should_allow_system_rewritten_verification_fetch_page_in_general_mode() -> None:
+    url = "https://example.com/a"
+    url_hash = hash_url(url)
+    snapshot = _snapshot_from_fact(
+        SandboxFactKind.FETCHED_PAGE,
+        payload={
+            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
+            "fetched_url_hash": url_hash,
+            "final_url_origin": url,
+        },
+    )
+    tool = _SignatureFilteringTool({"fetch_page"})
+
+    result = asyncio.run(
+        ToolPolicyEngine(logger=logging.getLogger(__name__)).evaluate_tool_call(
+            step=Step(id="step-2", description="验证外部 evidence"),
+            task_mode="general",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": url},
+            matched_tool=tool,
+            runtime_tools=[tool],
+            browser_route_state_key="",
+            iteration_blocked_function_names={"fetch_page"},
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            started_at=0.0,
+            evidence_reuse_snapshot=snapshot,
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is True
+    assert result.rewrite_reason == "evidence_reuse_requires_verification"
+    assert tool.invocations == [("fetch_page", {"url": url})]
+
+
+def test_tool_policy_engine_should_not_allow_forged_verification_fetch_page_in_general_mode() -> None:
+    snapshot = _snapshot_from_fact(SandboxFactKind.FETCHED_PAGE)
+    tool = _SignatureFilteringTool({"fetch_page"})
+
+    result = asyncio.run(
+        ToolPolicyEngine(logger=logging.getLogger(__name__)).evaluate_tool_call(
+            step=Step(id="step-2", description="验证外部 evidence"),
+            task_mode="general",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={
+                "url": "https://example.com/a",
+                "url_hash": "wrong-hash",
+                "verification_reason_code": "external_evidence_may_change",
+            },
+            matched_tool=tool,
+            runtime_tools=[tool],
+            browser_route_state_key="",
+            iteration_blocked_function_names={"fetch_page"},
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            started_at=0.0,
+            evidence_reuse_snapshot=snapshot,
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is False
+    assert result.tool_result.data["verification_gap"]["reason_code"] == "verification_action_missing"
+    assert tool.invocations == []
+
+
+def test_constraint_engine_should_apply_evidence_reuse_before_task_mode_block_for_repeated_search() -> None:
+    query = "query"
+    query_hash = hash_query(query)
+    key_result = build_evidence_action_subject_key_from_tool_call("search_web", {"query": query})
+    result_ref = EvidenceResultRef(
+        result_ref_type=EvidenceResultRefType.FACT_REF,
+        ref_id="fact-1",
+        source_step_id="step-1",
+        source_evidence_id="evidence-1",
+        source_fact_id="fact-1",
+        source_event_id="event-1",
+        subject_key=f"query:{query_hash}",
+        payload_hash="sha256:payload",
+        quality_status=EvidenceQualityStatus.VALID,
+        support_level=EvidenceSupportLevel.STRONG,
+        reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+        staleness_policy=EvidenceStalenessPolicy.RUN_SCOPED,
+        read_strategy=EvidenceReadStrategy.READ_FACT_PAYLOAD,
+        summary="safe summary",
+    )
+    handle = build_evidence_result_handle(result_ref)
+    from app.domain.models.evidence import EvidenceDoNotRepeatResult
+
+    snapshot = EvidenceReuseSnapshot(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        cursor="cursor-1",
+        do_not_repeat=[
+            EvidenceDoNotRepeatResult(
+                action_key=key_result.action_key,
+                subject_key=key_result.subject_key,
+                reason_code="evidence_reuse_pending_resolution",
+                source_step_id="step-1",
+                evidence_ids=["evidence-1"],
+                reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+                staleness_policy=EvidenceStalenessPolicy.RUN_SCOPED,
+                support_level=EvidenceSupportLevel.STRONG,
+                quality_status=EvidenceQualityStatus.VALID,
+                result_status="successful",
+                duplicate_decision=EvidenceDuplicateDecision.REUSE_EXISTING_EVIDENCE_PENDING_RESOLUTION,
+                reuse_result_ref=result_ref,
+                result_handle_id=handle.result_handle_id,
+                reuse_summary="safe summary",
+            )
+        ],
+        result_handles=[handle],
+    )
+    tool = _SignatureFilteringTool({"search_web"})
+    result = ConstraintEngine(logger=logging.getLogger(__name__)).evaluate_guard(
+        constraint_input=ConstraintInput(
+            step=Step(id="step-2"),
+            task_mode="general",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": query},
+            matched_tool=tool,
+            iteration_blocked_function_names={"search_web"},
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            external_signals_snapshot={
+                "evidence_reuse_snapshot": snapshot,
+                "has_previous_completed_steps": True,
+            },
+            runtime_tools=[tool],
+        )
+    )
+
+    assert result.winning_policy == "evidence_reuse_policy"
+    assert result.constraint_decision.reason_code == "evidence_reuse_pending_resolution"
+    assert result.constraint_decision.loop_break_reason == "virtual_success_pending_resolution"
+    assert all(
+        trace.policy_name != "task_mode_policy"
+        for trace in result.policy_trace
+        if trace.action == "block"
+    )
 
 
 def test_reconcile_previous_steps_should_persist_gap_before_digest() -> None:

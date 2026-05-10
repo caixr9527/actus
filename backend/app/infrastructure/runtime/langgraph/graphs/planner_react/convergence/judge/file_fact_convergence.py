@@ -43,19 +43,18 @@ class FileFactConvergenceJudge:
             runtime_recent_action: Optional[Dict[str, Any]],
     ) -> ConvergenceDecision:
         """在文件处理任务中判定“已满足事实，直接收敛成功”。"""
-        if task_mode not in {"file_processing", "coding"}:
-            return ConvergenceDecision(should_break=False)
         if not tool_result_success:
             return ConvergenceDecision(should_break=False)
-        if task_mode == "coding" and not self._is_simple_coding_file_task(step):
-            return ConvergenceDecision(should_break=False)
-
-        self._accumulate_file_context(
+        self.accumulate_file_context(
             context=step_file_context,
             function_name=recent_function_name,
             function_args=function_args,
             tool_result_data=tool_result_data,
         )
+        if task_mode not in {"file_processing", "coding"}:
+            return ConvergenceDecision(should_break=False)
+        if task_mode == "coding" and not self._is_simple_coding_file_task(step):
+            return ConvergenceDecision(should_break=False)
 
         if not self._step_allows_file_fact_convergence(step):
             return ConvergenceDecision(should_break=False)
@@ -101,6 +100,13 @@ class FileFactConvergenceJudge:
             step_file_context: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """在达到最大轮次时，优先尝试按事实收敛，避免误判失败。"""
+        artifact_payload = FileFactConvergenceJudge._build_artifact_output_convergence_payload(
+            step=step,
+            step_file_context=step_file_context,
+            runtime_recent_action=runtime_recent_action,
+        )
+        if artifact_payload is not None:
+            return artifact_payload
         if task_mode not in {"file_processing", "coding"}:
             return None
         if task_mode == "coding" and not FileFactConvergenceJudge._is_simple_coding_file_task(step):
@@ -126,7 +132,7 @@ class FileFactConvergenceJudge:
         }
 
     @staticmethod
-    def _accumulate_file_context(
+    def accumulate_file_context(
             *,
             context: Dict[str, Any],
             function_name: str,
@@ -220,6 +226,56 @@ class FileFactConvergenceJudge:
         artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
         return output_mode in {"",
                                StepOutputMode.NONE.value} and artifact_policy != StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+
+    @staticmethod
+    def _step_requires_or_allows_file_output(step: Step) -> bool:
+        output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+        artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
+        return (
+                output_mode == StepOutputMode.FILE.value
+                or artifact_policy in {
+                    StepArtifactPolicy.ALLOW_FILE_OUTPUT.value,
+                    StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value,
+                }
+        )
+
+    @staticmethod
+    def _build_artifact_output_convergence_payload(
+            *,
+            step: Step,
+            step_file_context: Dict[str, Any],
+            runtime_recent_action: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not FileFactConvergenceJudge._step_requires_or_allows_file_output(step):
+            return None
+        written_files = [
+            str(path or "").strip()
+            for path in list((step_file_context or {}).get("written_files") or [])
+            if str(path or "").strip()
+        ]
+        if not written_files:
+            return None
+        summary = FileFactConvergenceJudge._build_artifact_output_summary(
+            step=step,
+            written_files=written_files,
+        )
+        return {
+            "success": True,
+            "summary": summary,
+            "result": summary,
+            "attachments": written_files,
+            "blockers": [],
+            "facts_learned": [],
+            "open_questions": [],
+            "next_hint": "",
+            "runtime_recent_action": runtime_recent_action or {},
+        }
+
+    @staticmethod
+    def _build_artifact_output_summary(*, step: Step, written_files: List[str]) -> str:
+        if len(written_files) == 1:
+            return f"当前步骤已生成文件：{written_files[0]}"
+        return "当前步骤已生成文件：" + "、".join(written_files)
 
     @staticmethod
     def _is_simple_coding_file_task(step: Step) -> bool:

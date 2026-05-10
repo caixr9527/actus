@@ -11,6 +11,7 @@ from app.domain.models.evidence import (
     EvidenceDuplicateDecision,
     EvidenceReuseSnapshot,
 )
+from app.domain.services.runtime.contracts.langgraph_settings import ASK_USER_FUNCTION_NAME
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.evidence_key_normalizer import (
     build_evidence_action_subject_key_from_tool_call,
@@ -30,6 +31,10 @@ from ..reason_codes import (
 
 def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optional[ConstraintDecision]:
     """基于 EvidenceReuseSnapshot 在真实 executor 前拦截重复动作。"""
+
+    function_name = str(constraint_input.normalized_function_name or constraint_input.function_name or "").strip().lower()
+    if function_name == ASK_USER_FUNCTION_NAME:
+        return None
 
     snapshot = _strict_snapshot(constraint_input.external_signals_snapshot.get("evidence_reuse_snapshot"))
     has_previous_completed_steps = bool(
@@ -51,10 +56,16 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
             )
         return None
 
-    key_result = build_evidence_action_subject_key_from_tool_call(
-        constraint_input.normalized_function_name or constraint_input.function_name,
-        constraint_input.function_args,
+    function_args = dict(constraint_input.function_args or {})
+    verification_rewrite = _build_verification_rewrite_decision(
+        snapshot=snapshot,
+        function_name=function_name,
+        function_args=function_args,
     )
+    if verification_rewrite is not None:
+        return verification_rewrite
+
+    key_result = build_evidence_action_subject_key_from_tool_call(function_name, function_args)
     if key_result.normalization_status != "normalized" or not key_result.action_key or not key_result.subject_key:
         return None
 
@@ -66,8 +77,8 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
     if matched is None:
         verification_mismatch = _verification_candidate_for_function(
             snapshot=snapshot,
-            function_name=constraint_input.normalized_function_name or constraint_input.function_name,
-            function_args=constraint_input.function_args,
+            function_name=function_name,
+            function_args=function_args,
         )
         if verification_mismatch is not None:
             data = _base_data(verification_mismatch)
@@ -115,13 +126,13 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
     if matched.duplicate_decision == EvidenceDuplicateDecision.REQUIRE_VERIFICATION:
         if _is_allowed_verification_call(
                 matched=matched,
-                function_name=constraint_input.normalized_function_name or constraint_input.function_name,
-                function_args=constraint_input.function_args,
+                function_name=function_name,
+                function_args=function_args,
         ):
             _log_verification_allowed(
                 constraint_input=constraint_input,
                 matched=matched,
-                function_name=constraint_input.normalized_function_name or constraint_input.function_name,
+                function_name=function_name,
             )
             return None
         data = _base_data(matched)
@@ -175,6 +186,76 @@ def _base_data(item) -> dict:
         "reuse_result_ref": item.reuse_result_ref.model_dump(mode="json") if item.reuse_result_ref else None,
         "result_handle_id": item.result_handle_id,
     }
+
+
+def _build_verification_rewrite_decision(
+        *,
+        snapshot: EvidenceReuseSnapshot,
+        function_name: str,
+        function_args: dict,
+) -> ConstraintDecision | None:
+    normalized_function = str(function_name or "").strip().lower()
+    if normalized_function not in {"search_web", "fetch_page"}:
+        return None
+    if function_args.get("verification_reason_code"):
+        return None
+    if normalized_function == "search_web":
+        query = str((function_args or {}).get("query") or "").strip()
+        if not query:
+            return None
+        metadata_hash = hash_query(query)
+        expected_subject_key = f"query:{metadata_hash}"
+        audit_key = "query_hash"
+    else:
+        url = str((function_args or {}).get("url") or "").strip()
+        if not url:
+            return None
+        metadata_hash = hash_url(url)
+        expected_subject_key = f"page:{metadata_hash}"
+        audit_key = "url_hash"
+
+    for item in snapshot.do_not_repeat:
+        if item.duplicate_decision != EvidenceDuplicateDecision.REQUIRE_VERIFICATION:
+            continue
+        result_ref = item.reuse_result_ref
+        if result_ref is None:
+            continue
+        allowed_actions = {
+            str(action or "").strip().lower()
+            for action in list(result_ref.allowed_verification_actions or [])
+            if str(action or "").strip()
+        }
+        if normalized_function not in allowed_actions:
+            continue
+        expected_subject_keys = {
+            str(value or "").strip()
+            for value in (item.subject_key, result_ref.subject_key)
+            if str(value or "").strip()
+        }
+        if expected_subject_key not in expected_subject_keys:
+            continue
+        reason_code = str(result_ref.reason_code or "").strip()
+        if not reason_code:
+            continue
+        rewritten_args = dict(function_args or {})
+        rewritten_args[audit_key] = metadata_hash
+        rewritten_args["verification_reason_code"] = reason_code
+        return ConstraintDecision(
+            action="rewrite",
+            reason_code=REASON_EVIDENCE_REUSE_REQUIRES_VERIFICATION,
+            rewrite_target={
+                "function_name": normalized_function,
+                "normalized_function_name": normalized_function,
+                "function_args": rewritten_args,
+            },
+            metadata={
+                "rewrite_type": "evidence_verification_audit_metadata",
+                "action_key": item.action_key,
+                "subject_key": item.subject_key,
+                "verification_reason_code": reason_code,
+            },
+        )
+    return None
 
 
 def _is_allowed_verification_call(*, matched, function_name: str, function_args: dict) -> bool:

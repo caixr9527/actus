@@ -134,6 +134,9 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
             )
         return None
 
+    if _is_system_rewritten_evidence_verification_call(constraint_input):
+        return None
+
     downstream_owned_blocked_names = set()
     downstream_owned_blocked_names.update(ctx.read_only_file_blocked_function_names or set())
     downstream_owned_blocked_names.update(ctx.artifact_policy_blocked_function_names or set())
@@ -170,6 +173,35 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
 
     message = f"当前步骤的任务模式 {task_mode} 不允许调用工具: {function_name}"
     return _hard_block(REASON_TASK_MODE_TOOL_BLOCKED, message)
+
+
+def _is_system_rewritten_evidence_verification_call(constraint_input: ConstraintInput) -> bool:
+    normalized_function_name = str(constraint_input.normalized_function_name or "").strip().lower()
+    if normalized_function_name not in {"search_web", "fetch_page"}:
+        return False
+    rewrite_marker = dict(
+        (constraint_input.external_signals_snapshot or {}).get("evidence_verification_rewrite") or {}
+    )
+    if rewrite_marker.get("rewrite_type") != "evidence_verification_audit_metadata":
+        return False
+    if str(rewrite_marker.get("function_name") or "").strip().lower() != normalized_function_name:
+        return False
+    function_args = dict(constraint_input.function_args or {})
+    reason_code = str(function_args.get("verification_reason_code") or "").strip()
+    if not reason_code:
+        return False
+    if normalized_function_name == "search_web":
+        return bool(
+            str(function_args.get("query") or "").strip()
+            and str(function_args.get("query_hash") or "").strip()
+        )
+    return bool(
+        str(function_args.get("url") or "").strip()
+        and (
+            str(function_args.get("url_hash") or "").strip()
+            or str(function_args.get("fetched_url_hash") or "").strip()
+        )
+    )
 
 
 def _hard_block(reason_code: str, message: str) -> ConstraintDecision:

@@ -306,7 +306,7 @@ def sanitize_fact_text(text: str) -> tuple[str, int]:
     redacted = str(text or "")
     redaction_count = 0
     for pattern in _SECRET_PATTERNS:
-        redacted, count = pattern.subn(lambda match: f"{match.group(1)}{REDACTED}", redacted)
+        redacted, count = pattern.subn(REDACTED, redacted)
         redaction_count += count
     return redacted, redaction_count
 

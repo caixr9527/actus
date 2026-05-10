@@ -1206,6 +1206,62 @@ def test_finalize_max_iterations_should_converge_success_when_file_facts_ready()
     assert "收敛成功" in str(payload["summary"])
 
 
+def test_finalize_max_iterations_should_converge_success_when_file_output_written() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        description="生成周末出行方案文件",
+        task_mode_hint="general",
+        output_mode="file",
+        artifact_policy="allow_file_output",
+    )
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="general",
+        llm_message={"content": ""},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=3,
+        iteration_count=3,
+        runtime_recent_action={},
+        step_file_context={
+            "called_functions": {"write_file", "read_file"},
+            "written_files": ["/home/ubuntu/漳州周末自驾游计划.md"],
+            "last_read_file": "/home/ubuntu/漳州周末自驾游计划.md",
+        },
+    )
+
+    assert payload["success"] is True
+    assert payload["attachments"] == ["/home/ubuntu/漳州周末自驾游计划.md"]
+    assert payload["blockers"] == []
+    assert payload["facts_learned"] == []
+
+
+def test_finalize_max_iterations_should_fail_when_required_file_output_missing() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        description="生成周末出行方案文件",
+        task_mode_hint="general",
+        output_mode="file",
+        artifact_policy="require_file_output",
+    )
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="general",
+        llm_message={"content": ""},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=3,
+        iteration_count=3,
+        runtime_recent_action={},
+        step_file_context={"called_functions": {"read_file"}},
+    )
+
+    assert payload["success"] is False
+    assert payload["blockers"] == ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"]
+
+
 def test_finalize_max_iterations_should_include_research_gap_hint() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="调研并给出结论")
@@ -3185,6 +3241,45 @@ class _CountingTool:
         return ToolResult(success=True, data={"path": kwargs.get("path")})
 
 
+class _FileMutationTool:
+    name = "file-mutation-tool"
+
+    def __init__(self) -> None:
+        self.invocations: List[tuple[str, Dict[str, Any]]] = []
+
+    def get_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "write file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == "write_file"
+
+    async def invoke(self, function_name: str, **kwargs: Any) -> ToolResult:
+        self.invocations.append((str(function_name or "").strip(), dict(kwargs)))
+        path = str(kwargs.get("path") or kwargs.get("filepath") or "").strip()
+        return ToolResult(
+            success=True,
+            data={
+                "filepath": path,
+                "bytes_written": len(str(kwargs.get("content") or "")),
+            },
+        )
+
+
 def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missing_ask_user() -> None:
     llm = _FakeNoToolLLM({"content": '{"success": true, "summary": "ok"}'})
     step = Step(description="等待用户确认后继续")
@@ -3214,6 +3309,64 @@ def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missi
     blockers = [str(item) for item in list(payload.get("blockers") or [])]
     assert any("缺少可用的 message_ask_user 工具" in item for item in blockers)
     assert tool_events == []
+
+
+def test_execute_step_with_prompt_should_converge_success_when_file_output_written_at_max_iteration() -> None:
+    llm = _FakeSequentialToolCallLLM(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-write",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps(
+                                {
+                                    "path": "/home/ubuntu/漳州周末自驾游计划.md",
+                                    "content": "周末自驾游计划",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    tool = _FileMutationTool()
+
+    payload, events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="step-file",
+                description="生成周末出行方案文件",
+                task_mode_hint="general",
+                output_mode="file",
+                artifact_policy="allow_file_output",
+            ),
+            runtime_tools=[tool],  # type: ignore[list-item]
+            max_tool_iterations=1,
+            task_mode="general",
+            user_message="生成周末出行方案文件",
+        )
+    )
+
+    assert tool.invocations == [
+        (
+            "write_file",
+            {
+                "path": "/home/ubuntu/漳州周末自驾游计划.md",
+                "content": "周末自驾游计划",
+            },
+        )
+    ]
+    assert payload["success"] is True
+    assert payload["attachments"] == ["/home/ubuntu/漳州周末自驾游计划.md"]
+    assert payload["blockers"] == []
+    assert payload["facts_learned"] == []
+    assert any(getattr(event, "function_name", "") == "write_file" for event in events)
 
 
 def test_constraint_engine_should_resolve_rewritten_matched_tool_from_runtime_tools() -> None:
@@ -3305,8 +3458,8 @@ def test_constraint_engine_should_block_when_rewrite_target_tool_is_missing() ->
     assert result.final_function_name == "fetch_page"
 
 
-def test_constraint_engine_should_prefer_task_mode_policy_by_fixed_order() -> None:
-    logger = logging.getLogger("runtime-fixed-policy-order")
+def test_constraint_engine_should_still_block_invalid_tool_after_evidence_policy_allows() -> None:
+    logger = logging.getLogger("runtime-invalid-tool-order")
     engine = ConstraintEngine(logger=logger)
     step = Step(description="普通步骤")
     execution_context = ExecutionContext(
@@ -3353,6 +3506,8 @@ def test_constraint_engine_should_prefer_task_mode_policy_by_fixed_order() -> No
     assert result.constraint_decision.action == "block"
     assert result.constraint_decision.reason_code == "task_mode_tool_blocked"
     assert result.winning_policy == "task_mode_policy"
+    assert result.policy_trace[0].policy_name == "evidence_reuse_policy"
+    assert result.policy_trace[0].reason_code == REASON_ALLOW
 
 
 def test_build_loop_break_result_should_append_research_progress_hint() -> None:
