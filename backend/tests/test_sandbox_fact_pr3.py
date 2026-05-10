@@ -431,6 +431,27 @@ def test_failed_tool_event_should_record_tool_failure_fact() -> None:
     assert facts[0].payload["reason_code"] == "file_not_found"
 
 
+def test_read_file_tool_event_should_compute_hash_when_tool_omits_hash() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-read-file-hash",
+        tool_call_id="call-read-file-hash",
+        tool_name="file",
+        function_name="read_file",
+        function_args={"filepath": "/workspace/a.txt"},
+        function_result=ToolResult(success=True, data={"content": "hello"}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts[0].fact_kind == SandboxFactKind.FILE_READ
+    assert facts[0].payload["content_sha256"].startswith("sha256:")
+    assert facts[0].payload["content_sha256_kind"] == "read_content_sha256"
+    assert facts[0].payload["reason_code"] is None
+    assert facts[0].payload["missing_fields"] is None
+
+
 def test_tool_event_fact_projection_should_not_depend_on_tool_content() -> None:
     repo = _SandboxFactRepo()
     event = ToolEvent(

@@ -481,8 +481,13 @@ def _file_evidence(*, fact: SandboxFactRecord, key_result: EvidenceActionSubject
     payload = dict(fact.payload or {})
     operation = str(payload.get("operation") or fact.fact_kind.value.replace("file_", ""))
     mutation_intent_hash = str(payload.get("mutation_intent_hash") or "").strip()
-    content_hash = str(payload.get("content_sha256") or payload.get("after_content_sha256") or "").strip() or None
-    is_valid = not bool(payload.get("is_truncated")) and not bool(payload.get("reason_code"))
+    content_hash = str(
+        payload.get("content_sha256")
+        or payload.get("read_content_sha256")
+        or payload.get("after_content_sha256")
+        or ""
+    ).strip() or None
+    is_valid = not bool(payload.get("is_truncated")) and not bool(payload.get("reason_code")) and bool(content_hash)
     result_ref = _fact_ref(
         fact=fact,
         key_result=key_result,

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,6 +17,7 @@ from app.domain.models import (
     normalize_wait_payload,
 )
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceRuntimeContextProviderPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
@@ -33,6 +35,8 @@ from app.domain.services.runtime.normalizers import (
 from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot, WorkspaceRuntimeService
 from .contracts import PendingConfirmationPacket, PromptContextPacket, PromptStage
 from .policies import ContextPolicy, get_context_policy
+
+logger = logging.getLogger(__name__)
 
 # P2 上下文裁剪常量集中在这里，避免 domain 反向依赖 infrastructure settings。
 _ARTIFACT_LIMIT = 6
@@ -113,6 +117,22 @@ class RuntimeContextService:
         )
         has_completed_steps = self._has_completed_steps(state=state)
         if evidence_context is not None:
+            snapshot = evidence_context.evidence_reuse_snapshot
+            log_runtime(
+                logger,
+                logging.INFO,
+                "runtime_evidence_context_built",
+                run_id=str(evidence_context.run_id or ""),
+                current_step_id=str(evidence_context.current_step_id or ""),
+                source_step_ids=list(evidence_context.source_step_ids or []),
+                do_not_repeat_count=(
+                    len(list(snapshot.do_not_repeat or []))
+                    if snapshot is not None
+                    else 0
+                ),
+                result_handle_count=len(list(evidence_context.result_handles or [])),
+                cursor=str(evidence_context.cursor or ""),
+            )
             packet.update(
                 self._build_stage_evidence_packet_fields(
                     stage=stage,

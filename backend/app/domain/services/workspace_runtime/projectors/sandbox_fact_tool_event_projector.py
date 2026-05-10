@@ -29,7 +29,10 @@ from app.application.service.sandbox_fact_ledger_service import (
 )
 from app.domain.models import ToolEvent, ToolEventStatus
 from app.domain.models.sandbox_fact import SandboxFactRecord, SandboxFactScope, SandboxFactSourceType
-from app.domain.services.runtime.contracts.evidence_key_normalizer import build_file_mutation_intent_hash
+from app.domain.services.runtime.contracts.evidence_key_normalizer import (
+    build_file_mutation_intent_hash,
+    short_hash,
+)
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactProjectionContext,
     SandboxFactRecorderPort,
@@ -223,20 +226,33 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             data: Mapping[str, Any],
     ) -> FileReadFactInput:
         path = _first_text(data.get("filepath"), data.get("path"), args.get("filepath"), args.get("file_path"), default="")
+        content = _first_text(data.get("content"), data.get("excerpt"), default="")
+        content_sha256 = _optional_text(
+            data.get("content_sha256")
+            or data.get("read_content_sha256")
+            or data.get("sha256")
+        )
+        if not content_sha256 and content:
+            content_sha256 = short_hash(content)
+        content_sha256_kind = _sha256_kind(
+            data.get("content_sha256_kind")
+            or data.get("sha256_kind")
+            or ("read_content_sha256" if content_sha256 else None)
+        )
         return FileReadFactInput(
             **_with_overrides(
                 base,
-                missing_fields=_missing_fields(base, ["content_sha256"] if not _optional_text(data.get("content_sha256") or data.get("sha256")) else []),
-                reason_code=_reason_code(base, "content_sha256_missing" if not _optional_text(data.get("content_sha256") or data.get("sha256")) else None),
+                missing_fields=_missing_fields(base, ["content_sha256"] if not content_sha256 else []),
+                reason_code=_reason_code(base, "content_sha256_missing" if not content_sha256 else None),
             ),
             path=path,
             exists=bool(data.get("exists", True)),
             size=_optional_int(data.get("size") or data.get("content_length")),
-            content_sha256=_optional_text(data.get("content_sha256") or data.get("sha256")),
-            content_sha256_kind=_sha256_kind(data.get("content_sha256_kind") or data.get("sha256_kind")),
+            content_sha256=content_sha256,
+            content_sha256_kind=content_sha256_kind,
             mime_type=_first_text(data.get("mime_type"), data.get("content_type"), default="text/plain"),
             line_range=_line_range(args=args, data=data),
-            content=_first_text(data.get("content"), data.get("excerpt"), default=""),
+            content=content,
             is_truncated=bool(data.get("is_truncated") or data.get("truncated")),
         )
 

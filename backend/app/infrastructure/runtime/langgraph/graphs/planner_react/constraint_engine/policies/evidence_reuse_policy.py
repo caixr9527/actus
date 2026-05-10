@@ -145,6 +145,11 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
                 function_name=function_name,
             )
             return None
+        _log_verification_blocked(
+            constraint_input=constraint_input,
+            matched=matched,
+            function_name=function_name,
+        )
         data = _base_data(matched)
         data["verification_gap"] = {
             "reason_code": "verification_action_missing",
@@ -250,6 +255,16 @@ def _build_verification_rewrite_decision(
         rewritten_args = dict(function_args or {})
         rewritten_args[audit_key] = metadata_hash
         rewritten_args["verification_reason_code"] = reason_code
+        log_runtime(
+            logging.getLogger(__name__),
+            logging.INFO,
+            "evidence_reuse_verification_rewritten",
+            function_name=normalized_function,
+            action_key=str(item.action_key or ""),
+            subject_key=str(item.subject_key or ""),
+            verification_reason_code=reason_code,
+            reason_code=REASON_EVIDENCE_REUSE_REQUIRES_VERIFICATION,
+        )
         return ConstraintDecision(
             action="rewrite",
             reason_code=REASON_EVIDENCE_REUSE_REQUIRES_VERIFICATION,
@@ -262,6 +277,8 @@ def _build_verification_rewrite_decision(
                 "rewrite_type": "evidence_verification_audit_metadata",
                 "action_key": item.action_key,
                 "subject_key": item.subject_key,
+                "source_step_id": item.source_step_id,
+                "result_handle_id": item.result_handle_id,
                 "verification_reason_code": reason_code,
             },
         )
@@ -372,6 +389,21 @@ def _log_verification_allowed(*, constraint_input: ConstraintInput, matched, fun
         subject_key=str(matched.subject_key or ""),
         verification_reason_code=str(getattr(result_ref, "reason_code", "") or ""),
         allowed_action=str(function_name or "").strip().lower(),
+    )
+
+
+def _log_verification_blocked(*, constraint_input: ConstraintInput, matched, function_name: str) -> None:
+    result_ref = matched.reuse_result_ref
+    log_runtime(
+        logging.getLogger(__name__),
+        logging.INFO,
+        "evidence_reuse_verification_blocked",
+        step_id=str(getattr(constraint_input.step, "id", "") or ""),
+        function_name=str(function_name or "").strip().lower(),
+        action_key=str(matched.action_key or ""),
+        subject_key=str(matched.subject_key or ""),
+        verification_reason_code=str(getattr(result_ref, "reason_code", "") or ""),
+        reason_code=REASON_EVIDENCE_REUSE_REQUIRES_VERIFICATION,
     )
 
 

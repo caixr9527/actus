@@ -268,6 +268,55 @@ def test_assembler_should_register_documented_evidence_strategies() -> None:
     assert assembler._strategies_by_kind[SandboxFactKind.HUMAN_INTERACTION].__class__ is HumanConfirmationEvidenceStrategy
 
 
+def test_file_evidence_should_accept_read_content_sha256_for_successful_file_read() -> None:
+    fact = _fact(
+        SandboxFactKind.FILE_READ,
+        payload={
+            **_payload_for_fact(SandboxFactKind.FILE_READ),
+            "content_sha256": None,
+            "read_content_sha256": "sha256:read",
+            "content_sha256_kind": "read_content_sha256",
+            "reason_code": None,
+            "missing_fields": None,
+        },
+    )
+
+    result = EvidenceFactAssembler().assemble_step(step=Step(id="step-1"), facts=[fact])
+    evidence_input = result.evidence_inputs[0]
+
+    assert evidence_input.evidence_kind == EvidenceKind.FILE_EVIDENCE
+    assert evidence_input.quality_status == EvidenceQualityStatus.VALID
+    assert evidence_input.support_level == EvidenceSupportLevel.STRONG
+    assert evidence_input.reusable is True
+    assert evidence_input.reuse_policy == EvidenceReusePolicy.REUSE_ALLOWED
+    assert evidence_input.result_refs[0].content_hash == "sha256:read"
+    assert evidence_input.payload["content_sha256"] == "sha256:read"
+    assert evidence_input.result_refs[0].read_strategy == EvidenceReadStrategy.READ_FACT_PAYLOAD
+
+
+def test_file_evidence_should_not_be_strong_or_reusable_without_content_hash() -> None:
+    fact = _fact(
+        SandboxFactKind.FILE_READ,
+        payload={
+            **_payload_for_fact(SandboxFactKind.FILE_READ),
+            "content_sha256": None,
+            "read_content_sha256": None,
+            "content_sha256_kind": "unknown",
+            "reason_code": None,
+            "missing_fields": None,
+        },
+    )
+
+    result = EvidenceFactAssembler().assemble_step(step=Step(id="step-1"), facts=[fact])
+    evidence_input = result.evidence_inputs[0]
+
+    assert evidence_input.quality_status == EvidenceQualityStatus.PARTIAL
+    assert evidence_input.support_level == EvidenceSupportLevel.PARTIAL
+    assert evidence_input.reusable is False
+    assert evidence_input.reuse_policy != EvidenceReusePolicy.REUSE_ALLOWED
+    assert evidence_input.result_refs[0].content_hash is None
+
+
 def test_document_evidence_should_treat_parsed_as_strong_reusable() -> None:
     result = EvidenceFactAssembler().assemble_step(
         step=Step(id="step-1"),
@@ -727,6 +776,9 @@ def test_evidence_reuse_policy_should_rewrite_bare_verification_search() -> None
     assert decision.rewrite_target["function_args"]["query"] == query
     assert decision.rewrite_target["function_args"]["query_hash"] == query_hash
     assert decision.rewrite_target["function_args"]["verification_reason_code"] == "external_evidence_may_change"
+    assert decision.metadata["rewrite_type"] == "evidence_verification_audit_metadata"
+    assert decision.metadata["source_step_id"] == "step-1"
+    assert decision.metadata["result_handle_id"] == snapshot.do_not_repeat[0].result_handle_id
 
 
 @pytest.mark.parametrize(
@@ -839,6 +891,9 @@ def test_evidence_reuse_policy_should_rewrite_bare_verification_fetch_page() -> 
     assert decision.rewrite_target["function_args"]["url"] == url
     assert decision.rewrite_target["function_args"]["url_hash"] == url_hash
     assert decision.rewrite_target["function_args"]["verification_reason_code"] == "external_evidence_may_change"
+    assert decision.metadata["rewrite_type"] == "evidence_verification_audit_metadata"
+    assert decision.metadata["source_step_id"] == "step-1"
+    assert decision.metadata["result_handle_id"] == snapshot.do_not_repeat[0].result_handle_id
 
 
 @pytest.mark.parametrize(
@@ -1427,6 +1482,137 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
     assert "开始执行真实工具调用" not in log_text
 
 
+def test_execute_step_node_should_run_controlled_page_verification_before_task_mode_policy(caplog) -> None:
+    url = "https://example.com/a"
+    url_hash = hash_url(url)
+    fact = _fact(
+        SandboxFactKind.FETCHED_PAGE,
+        step_id="step-1",
+        payload={
+            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
+            "fetched_url_hash": url_hash,
+            "final_url_origin": url,
+        },
+    )
+    evidence_repo = _EvidenceRepo()
+    uow_factory = lambda: _UoW(facts=[fact], evidence=evidence_repo)
+    ledger_service = _ledger_service(uow_factory=uow_factory)
+    asyncio.run(ledger_service.reconcile_step_evidence(scope=_scope("step-1"), step=Step(id="step-1")))
+    provider = EvidenceRuntimeContextProvider(
+        ledger_service=ledger_service,
+        projector=EvidenceDigestProjector(uow_factory=uow_factory),
+    )
+    context_service = RuntimeContextService(evidence_context_provider=provider)
+    step1 = Step(id="step-1", status=ExecutionStatus.COMPLETED)
+    step2 = Step(id="step-2", description="再次读取页面", task_mode_hint="web_reading")
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": "再次读取页面",
+        "plan": Plan(steps=[step1, step2]),
+        "step_states": [{"step_id": "step-1", "status": "completed"}],
+        "graph_metadata": {},
+    }
+    tool = _CountingRuntimeTool({"fetch_page"})
+
+    with caplog.at_level(logging.INFO):
+        next_state = asyncio.run(execute_step_node(
+            state,
+            _FakeToolCallLLM("fetch_page", {"url": url}),
+            context_service,
+            evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+        ))
+
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert next_state["last_executed_step"].status == ExecutionStatus.FAILED
+    evidence_kinds = [record.evidence_kind for record in evidence_repo.records]
+    assert evidence_kinds.count(EvidenceKind.PAGE_EVIDENCE) == 1
+    assert EvidenceKind.TOOL_FAILURE_EVIDENCE not in evidence_kinds
+    log_text = caplog.text
+    expected_log_events = [
+        "runtime_evidence_context_built",
+        "evidence_reuse_snapshot_attached_to_guard",
+        "evidence_reuse_verification_rewritten",
+        "evidence_reuse_verification_allowed",
+        "开始执行真实工具调用",
+    ]
+    positions = [log_text.index(event_name) for event_name in expected_log_events]
+    assert positions == sorted(positions)
+    assert "task_mode_tool_blocked" not in log_text
+
+
+def test_execute_step_node_should_resolve_run_scoped_page_reuse_without_task_mode_policy(caplog) -> None:
+    url = "https://example.com/a"
+    url_hash = hash_url(url)
+    result_ref = EvidenceResultRef(
+        result_ref_type=EvidenceResultRefType.FACT_REF,
+        ref_id="fact-1",
+        source_step_id="step-1",
+        source_evidence_id="evidence-1",
+        source_fact_id="fact-1",
+        source_event_id="event-1",
+        subject_key=f"page:{url_hash}",
+        payload_hash="sha256:payload",
+        quality_status=EvidenceQualityStatus.VALID,
+        support_level=EvidenceSupportLevel.STRONG,
+        reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+        staleness_policy=EvidenceStalenessPolicy.RUN_SCOPED,
+        read_strategy=EvidenceReadStrategy.READ_FACT_PAYLOAD,
+        summary="safe summary",
+    )
+    runtime_context = _runtime_context_for_ref(
+        result_ref=result_ref,
+        action_key=f"fetch:{url_hash}",
+        subject_key=f"page:{url_hash}",
+    )
+    context_service = RuntimeContextService(evidence_context_provider=_Provider(runtime_context))
+    step1 = Step(id="step-1", status=ExecutionStatus.COMPLETED)
+    step2 = Step(id="step-2", description="再次读取页面", task_mode_hint="web_reading")
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": "再次读取页面",
+        "plan": Plan(steps=[step1, step2]),
+        "step_states": [{"step_id": "step-1", "status": "completed"}],
+        "graph_metadata": {},
+    }
+    tool = _CountingRuntimeTool({"fetch_page"})
+    resolver = _Resolver(runtime_context.result_handles[0])
+
+    with caplog.at_level(logging.INFO):
+        next_state = asyncio.run(execute_step_node(
+            state,
+            _FakeToolCallLLM("fetch_page", {"url": url}),
+            context_service,
+            evidence_result_handle_resolver=resolver,
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+        ))
+
+    assert resolver.called is True
+    assert tool.invocations == []
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    log_text = caplog.text
+    expected_log_events = [
+        "runtime_evidence_context_built",
+        "evidence_reuse_snapshot_attached_to_guard",
+        "reuse_existing_evidence_pending_resolution",
+        "evidence_result_handle_resolution_started",
+        "evidence_result_handle_resolved",
+        "evidence_reuse_virtual_tool_result_returned",
+    ]
+    positions = [log_text.index(event_name) for event_name in expected_log_events]
+    assert positions == sorted(positions)
+    assert "task_mode_tool_blocked" not in log_text
+    assert "开始执行真实工具调用" not in log_text
+
+
 @pytest.mark.parametrize(
     ("function_name", "function_args", "payload"),
     [
@@ -1734,8 +1920,26 @@ def test_graph_execute_closure_should_capture_evidence_result_handle_resolver() 
 
 
 def _runtime_context():
-    handle = build_evidence_result_handle(_result_ref())
-    do_not_repeat = _do_not_repeat(handle.result_handle_id)
+    return _runtime_context_for_ref(
+        result_ref=_result_ref(),
+        action_key="file_read:/workspace/a.txt",
+        subject_key="file:/workspace/a.txt",
+    )
+
+
+def _runtime_context_for_ref(
+        *,
+        result_ref: EvidenceResultRef,
+        action_key: str,
+        subject_key: str,
+):
+    handle = build_evidence_result_handle(result_ref)
+    do_not_repeat = _do_not_repeat(
+        handle.result_handle_id,
+        result_ref=result_ref,
+        action_key=action_key,
+        subject_key=subject_key,
+    )
     snapshot = EvidenceReuseSnapshot(
         run_id="run-1",
         current_step_id="step-2",
@@ -1778,12 +1982,19 @@ def _result_ref() -> EvidenceResultRef:
     )
 
 
-def _do_not_repeat(result_handle_id: str):
+def _do_not_repeat(
+        result_handle_id: str,
+        *,
+        result_ref: EvidenceResultRef | None = None,
+        action_key: str = "file_read:/workspace/a.txt",
+        subject_key: str = "file:/workspace/a.txt",
+):
     from app.domain.models.evidence import EvidenceDoNotRepeatResult
+    reuse_result_ref = result_ref or _result_ref()
 
     return EvidenceDoNotRepeatResult(
-        action_key="file_read:/workspace/a.txt",
-        subject_key="file:/workspace/a.txt",
+        action_key=action_key,
+        subject_key=subject_key,
         reason_code="evidence_reuse_pending_resolution",
         source_step_id="step-1",
         evidence_ids=["evidence-1"],
@@ -1793,7 +2004,7 @@ def _do_not_repeat(result_handle_id: str):
         quality_status=EvidenceQualityStatus.VALID,
         result_status="successful",
         duplicate_decision=EvidenceDuplicateDecision.REUSE_EXISTING_EVIDENCE_PENDING_RESOLUTION,
-        reuse_result_ref=_result_ref(),
+        reuse_result_ref=reuse_result_ref,
         result_handle_id=result_handle_id,
         reuse_summary="safe summary",
     )

@@ -106,6 +106,30 @@ class ToolPolicyEngine:
         - 返回值中的 `final_function_*` 是已经过 rewrite 收口后的最终执行目标；
         - `tool_result` 与 `loop_break_reason` 已经过 effects 域统一归并，可直接供 tools 主循环消费。
         """
+        if isinstance(evidence_reuse_snapshot, EvidenceReuseSnapshot):
+            log_runtime(
+                self._logger,
+                logging.INFO,
+                "evidence_reuse_snapshot_attached_to_guard",
+                run_id=str(evidence_reuse_snapshot.run_id or ""),
+                current_step_id=str(evidence_reuse_snapshot.current_step_id or ""),
+                source_step_ids=list(evidence_reuse_snapshot.source_step_ids or []),
+                do_not_repeat_count=len(list(evidence_reuse_snapshot.do_not_repeat or [])),
+                result_handle_count=len(list(evidence_reuse_snapshot.result_handles or [])),
+                cursor=str(evidence_reuse_snapshot.cursor or ""),
+            )
+        elif has_previous_completed_steps:
+            log_runtime(
+                self._logger,
+                logging.INFO,
+                "evidence_reuse_snapshot_missing",
+                current_step_id=str(getattr(step, "id", "") or ""),
+                source_step_ids=[],
+                do_not_repeat_count=0,
+                result_handle_count=0,
+                cursor="",
+                reason_code="evidence_reuse_snapshot_missing",
+            )
         engine_result = self._constraint_engine.evaluate_guard(
             constraint_input=ConstraintInput(
                 step=step,

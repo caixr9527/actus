@@ -163,6 +163,7 @@ class FileReadPayload(_StrictPayload):
     exists: bool
     size: int | None
     content_sha256: str | None
+    read_content_sha256: str | None = None
     content_sha256_kind: Literal["full_file_sha256", "read_content_sha256", "unknown"]
     mime_type: str
     line_range: dict[str, Any] | None
@@ -171,6 +172,14 @@ class FileReadPayload(_StrictPayload):
     mtime: datetime | None = None
     missing_fields: list[str] | None = None
     reason_code: str | None = None
+
+    @model_validator(mode="after")
+    def _canonicalize_hash_fields(self) -> "FileReadPayload":
+        if self.read_content_sha256 and not self.content_sha256:
+            self.content_sha256 = self.read_content_sha256
+        if self.content_sha256 and not self.read_content_sha256:
+            self.read_content_sha256 = self.content_sha256
+        return self
 
 
 class FileMutationPayload(_StrictPayload):
@@ -463,8 +472,40 @@ def stable_json_dumps(payload: Mapping[str, Any]) -> str:
 def build_sandbox_fact_payload_hash(payload: Mapping[str, Any]) -> str:
     """对已脱敏、已归一的 payload 计算 sha256。"""
 
-    digest = hashlib.sha256(stable_json_dumps(payload).encode("utf-8")).hexdigest()
+    normalized_payload = _normalize_payload_for_hash(payload)
+    digest = hashlib.sha256(stable_json_dumps(normalized_payload).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _normalize_payload_for_hash(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload or {})
+    if _looks_like_file_read_payload(normalized):
+        content_hash = str(
+            normalized.get("content_sha256")
+            or normalized.get("read_content_sha256")
+            or ""
+        ).strip()
+        if content_hash:
+            normalized["content_sha256"] = content_hash
+            normalized["read_content_sha256"] = content_hash
+        else:
+            normalized.pop("content_sha256", None)
+            normalized.pop("read_content_sha256", None)
+    return normalized
+
+
+def _looks_like_file_read_payload(payload: Mapping[str, Any]) -> bool:
+    keys = set(payload.keys())
+    return {
+        "path",
+        "exists",
+        "size",
+        "content_sha256_kind",
+        "mime_type",
+        "line_range",
+        "excerpt",
+        "is_truncated",
+    }.issubset(keys) and "operation" not in keys and "mutation_intent_hash" not in keys
 
 
 def build_sandbox_fact_idempotency_key(
