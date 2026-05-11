@@ -104,6 +104,7 @@ class ExecuteStepPreparedInput:
     sandbox_capability_profile: Dict[str, Any]
     runtime_evidence_context: Optional[RuntimeEvidenceContextResult]
     has_previous_completed_steps: bool
+    previous_completed_step_task_modes: Dict[str, str]
     result_handle_index: Dict[str, EvidenceResultHandle]
     pending_evidence_resolution: Dict[str, Any]
     pending_resolution_tool_result: Optional[Any]
@@ -420,6 +421,11 @@ async def prepare_execute_step_input(
     )
     runtime_evidence_context = _extract_runtime_evidence_context(execute_context_packet)
     completed_step_ids = _collect_completed_step_ids_for_execute(state=state, current_step=step)
+    previous_completed_step_task_modes = _collect_completed_step_task_modes_for_execute(
+        state=state,
+        current_step=step,
+        completed_step_ids=completed_step_ids,
+    )
     initial_runtime_recent_action = runtime_context_service.normalize_runtime_recent_action(
         execute_context_packet.get("recent_action_digest")
     )
@@ -440,6 +446,7 @@ async def prepare_execute_step_input(
         sandbox_capability_profile=sandbox_capability_profile,
         runtime_evidence_context=runtime_evidence_context,
         has_previous_completed_steps=bool(completed_step_ids),
+        previous_completed_step_task_modes=previous_completed_step_task_modes,
         result_handle_index=(
             dict(runtime_evidence_context.result_handle_index)
             if runtime_evidence_context is not None
@@ -489,6 +496,43 @@ def _collect_completed_step_ids_for_execute(
         if getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED:
             completed_ids.append(step_id)
     return completed_ids
+
+
+def _collect_completed_step_task_modes_for_execute(
+        *,
+        state: PlannerReActLangGraphState,
+        current_step: Step,
+        completed_step_ids: list[str],
+) -> Dict[str, str]:
+    completed_id_set = {str(step_id or "").strip() for step_id in list(completed_step_ids or [])}
+    completed_id_set.discard("")
+    if not completed_id_set:
+        return {}
+    current_step_id = str(getattr(current_step, "id", "") or "").strip()
+    task_modes: Dict[str, str] = {}
+    for item in list(state.get("step_states") or []):
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("step_id") or "").strip()
+        if not step_id or step_id == current_step_id or step_id not in completed_id_set:
+            continue
+        mode = _normalize_step_task_mode_value(item.get("task_mode_hint") or item.get("task_mode"))
+        if mode:
+            task_modes[step_id] = mode
+    plan = state.get("plan")
+    for plan_step in list(getattr(plan, "steps", []) or []):
+        step_id = str(getattr(plan_step, "id", "") or "").strip()
+        if not step_id or step_id == current_step_id or step_id not in completed_id_set:
+            continue
+        mode = _normalize_step_task_mode_value(getattr(plan_step, "task_mode_hint", ""))
+        if mode:
+            task_modes[step_id] = mode
+    return task_modes
+
+
+def _normalize_step_task_mode_value(raw_mode: Any) -> str:
+    raw_value = getattr(raw_mode, "value", raw_mode)
+    return str(raw_value or "").strip().lower()
 
 
 def build_timeout_execution_message(*, step: Step, timeout_seconds: int) -> Dict[str, Any]:

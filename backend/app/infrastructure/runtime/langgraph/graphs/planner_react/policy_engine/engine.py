@@ -98,6 +98,7 @@ class ToolPolicyEngine:
             started_at: float,
             evidence_reuse_snapshot: EvidenceReuseSnapshot | None = None,
             has_previous_completed_steps: bool = False,
+            previous_completed_step_task_modes: Optional[Dict[str, str]] = None,
     ) -> PolicyEvaluationResult:
         """统一执行 `constraint guard -> executor -> effects`。
 
@@ -144,6 +145,7 @@ class ToolPolicyEngine:
                 external_signals_snapshot={
                     "evidence_reuse_snapshot": evidence_reuse_snapshot,
                     "has_previous_completed_steps": has_previous_completed_steps,
+                    "previous_completed_step_task_modes": dict(previous_completed_step_task_modes or {}),
                 },
                 runtime_tools=list(runtime_tools or []),
             ),

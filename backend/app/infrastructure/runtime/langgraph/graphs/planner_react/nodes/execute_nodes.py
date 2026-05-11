@@ -139,6 +139,7 @@ async def execute_step_node(
                     sandbox_capability_profile=prepared_execute_input.sandbox_capability_profile,
                     runtime_evidence_context=prepared_execute_input.runtime_evidence_context,
                     has_previous_completed_steps=prepared_execute_input.has_previous_completed_steps,
+                    previous_completed_step_task_modes=prepared_execute_input.previous_completed_step_task_modes,
                     evidence_result_handle_resolver=evidence_result_handle_resolver,
                     evidence_resolution_state=state,
                 )

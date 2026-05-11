@@ -47,6 +47,7 @@ from app.domain.models.evidence import (
     EvidenceResultRefType,
     EvidenceReusePolicy,
     EvidenceReuseSnapshot,
+    RuntimeEvidenceContextResult,
     EvidenceScope,
     EvidenceSourceRef,
     EvidenceSourceType,
@@ -820,6 +821,51 @@ def test_prepare_execute_input_should_keep_structured_snapshot_when_prompt_diges
     assert prepared.result_handle_index
 
 
+def test_prepare_execute_input_should_collect_previous_completed_step_task_modes() -> None:
+    provider = _Provider(runtime_context=RuntimeEvidenceContextResult(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        has_previous_completed_steps=True,
+        prompt_digest="",
+        evidence_reuse_snapshot=EvidenceReuseSnapshot(
+            run_id="run-1",
+            current_step_id="step-2",
+            source_step_ids=["step-1"],
+            cursor="cursor-empty",
+            do_not_repeat=[],
+            result_handles=[],
+        ),
+        result_handles=[],
+        result_handle_index={},
+        evidence_gaps=[],
+        cursor="cursor-empty",
+    ))
+    service = RuntimeContextService(evidence_context_provider=provider)
+    step1 = Step(id="step-1", status=ExecutionStatus.COMPLETED, task_mode_hint="human_wait")
+    step2 = Step(id="step-2", task_mode_hint="research")
+
+    prepared = asyncio.run(prepare_execute_step_input(
+        state={
+            "user_id": "user-1",
+            "session_id": "session-1",
+            "workspace_id": "workspace-1",
+            "run_id": "run-1",
+            "plan": Plan(steps=[step1, step2]),
+            "step_states": [{"step_id": "step-1", "status": "completed"}],
+            "graph_metadata": {},
+        },
+        step=step2,
+        llm=object(),
+        runtime_context_service=service,
+        task_mode="research",
+        user_message="继续检索",
+    ))
+
+    assert prepared.has_previous_completed_steps is True
+    assert prepared.previous_completed_step_task_modes == {"step-1": "human_wait"}
+
+
 def test_execute_should_fail_closed_when_completed_step_exists_but_evidence_context_missing() -> None:
     prepared = asyncio.run(prepare_execute_step_input(
         state={
@@ -858,6 +904,45 @@ def test_execute_should_fail_closed_when_completed_step_exists_but_evidence_cont
     assert payload["loop_break_reason"] == REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING
     assert tool.invocations == []
     assert any(event.status.value == "called" for event in tool_events)
+
+
+def test_execute_should_allow_new_search_after_human_wait_empty_snapshot() -> None:
+    runtime_context = RuntimeEvidenceContextResult(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        has_previous_completed_steps=True,
+        prompt_digest="",
+        evidence_reuse_snapshot=EvidenceReuseSnapshot(
+            run_id="run-1",
+            current_step_id="step-2",
+            source_step_ids=["step-1"],
+            cursor="cursor-empty",
+            do_not_repeat=[],
+            result_handles=[],
+        ),
+        result_handles=[],
+        result_handle_index={},
+        evidence_gaps=[],
+        cursor="cursor-empty",
+    )
+    tool = _CountingRuntimeTool({"search_web"})
+
+    payload, _tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("search_web", {"query": "漳州自然风光景点推荐"}),
+        step=Step(id="step-2", description="根据用户确认信息检索目的地", task_mode_hint="research"),
+        runtime_tools=[tool],
+        max_tool_iterations=2,
+        task_mode="research",
+        user_message="继续检索",
+        runtime_evidence_context=runtime_context,
+        has_previous_completed_steps=True,
+        previous_completed_step_task_modes={"step-1": "human_wait"},
+    ))
+
+    assert payload["success"] is True
+    assert payload.get("loop_break_reason") != REASON_EVIDENCE_REUSE_SNAPSHOT_MISSING
+    assert tool.invocations == [("search_web", {"query": "漳州自然风光景点推荐"})]
 
 
 def test_evidence_reuse_policy_should_return_pending_resolution_from_snapshot_handle() -> None:
@@ -908,6 +993,34 @@ def test_evidence_reuse_policy_should_fail_for_non_strict_snapshot_dict() -> Non
                 runtime_tools=[],
             )
         )
+
+
+def test_evidence_reuse_policy_should_block_missing_snapshot_with_previous_steps() -> None:
+    decision = evaluate_evidence_reuse_policy(
+        ConstraintInput(
+            step=Step(id="step-2"),
+            task_mode="research",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": "query"},
+            matched_tool=None,
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            external_signals_snapshot={
+                "evidence_reuse_snapshot": None,
+                "has_previous_completed_steps": True,
+            },
+            runtime_tools=[],
+        )
+    )
+
+    assert decision is not None
+    assert decision.action == "block"
+    assert decision.reason_code == "evidence_reuse_snapshot_missing"
+    assert decision.tool_result_payload.data["duplicate_decision"] == (
+        "snapshot_missing_with_previous_completed_step"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1160,7 +1273,7 @@ def test_evidence_reuse_policy_should_block_invalid_verification_fetch_page(func
     assert decision.tool_result_payload.data["verification_gap"]["reason_code"] == "verification_action_missing"
 
 
-def test_evidence_reuse_policy_should_block_empty_snapshot_with_previous_steps() -> None:
+def test_evidence_reuse_policy_should_block_empty_snapshot_for_executable_previous_step() -> None:
     snapshot = EvidenceReuseSnapshot(
         run_id="run-1",
         current_step_id="step-2",
@@ -1184,6 +1297,7 @@ def test_evidence_reuse_policy_should_block_empty_snapshot_with_previous_steps()
             external_signals_snapshot={
                 "evidence_reuse_snapshot": snapshot,
                 "has_previous_completed_steps": True,
+                "previous_completed_step_task_modes": {"step-1": "research"},
             },
             runtime_tools=[],
         )
@@ -1192,7 +1306,42 @@ def test_evidence_reuse_policy_should_block_empty_snapshot_with_previous_steps()
     assert decision is not None
     assert decision.action == "block"
     assert decision.reason_code == "evidence_reuse_snapshot_missing"
-    assert decision.tool_result_payload.data["duplicate_decision"] == "snapshot_empty_with_previous_completed_step"
+    assert decision.tool_result_payload.data["duplicate_decision"] == (
+        "snapshot_empty_with_executable_previous_completed_step"
+    )
+
+
+def test_evidence_reuse_policy_should_allow_empty_snapshot_after_human_wait() -> None:
+    snapshot = EvidenceReuseSnapshot(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        cursor="cursor-empty",
+        do_not_repeat=[],
+        result_handles=[],
+    )
+
+    decision = evaluate_evidence_reuse_policy(
+        ConstraintInput(
+            step=Step(id="step-2"),
+            task_mode="research",
+            function_name="search_web",
+            normalized_function_name="search_web",
+            function_args={"query": "query"},
+            matched_tool=None,
+            iteration_blocked_function_names=set(),
+            execution_context=_execution_context(),
+            execution_state=ExecutionState(),
+            external_signals_snapshot={
+                "evidence_reuse_snapshot": snapshot,
+                "has_previous_completed_steps": True,
+                "previous_completed_step_task_modes": {"step-1": "human_wait"},
+            },
+            runtime_tools=[],
+        )
+    )
+
+    assert decision is None
 
 
 @pytest.mark.parametrize(

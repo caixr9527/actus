@@ -40,6 +40,9 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
     has_previous_completed_steps = bool(
         constraint_input.external_signals_snapshot.get("has_previous_completed_steps")
     )
+    previous_completed_step_task_modes = _normalize_previous_step_task_modes(
+        constraint_input.external_signals_snapshot.get("previous_completed_step_task_modes")
+    )
     if snapshot is None:
         if has_previous_completed_steps:
             return _block_snapshot_missing(
@@ -53,18 +56,25 @@ def evaluate_evidence_reuse_policy(constraint_input: ConstraintInput) -> Optiona
                 },
             )
         return None
-    if has_previous_completed_steps and _snapshot_is_empty_for_previous_steps(snapshot):
+    if (
+            has_previous_completed_steps
+            and _snapshot_is_empty_for_previous_steps(snapshot)
+            and not _previous_steps_are_non_action_sources(
+                source_step_ids=snapshot.source_step_ids,
+                previous_completed_step_task_modes=previous_completed_step_task_modes,
+            )
+    ):
         return _block_snapshot_missing(
-            message="前序 completed step 存在，但 evidence reuse snapshot 为空，已停止真实工具调用。",
+            message="前序执行型 completed step 存在，但 evidence reuse snapshot 没有可复用动作，已停止真实工具调用。",
             data={
-                "duplicate_decision": "snapshot_empty_with_previous_completed_step",
+                "duplicate_decision": "snapshot_empty_with_executable_previous_completed_step",
                 "source_step_ids": list(snapshot.source_step_ids or []),
                 "do_not_repeat_count": len(list(snapshot.do_not_repeat or [])),
                 "result_handle_count": len(list(snapshot.result_handles or [])),
                 "cursor": str(snapshot.cursor or ""),
+                "previous_completed_step_task_modes": dict(previous_completed_step_task_modes),
             },
         )
-
     function_args = dict(constraint_input.function_args or {})
     verification_rewrite = _build_verification_rewrite_decision(
         snapshot=snapshot,
@@ -197,12 +207,41 @@ def _strict_snapshot(raw) -> EvidenceReuseSnapshot | None:
     return EvidenceReuseSnapshot.model_validate(raw)
 
 
+def _normalize_previous_step_task_modes(raw) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for raw_step_id, raw_mode in raw.items():
+        step_id = str(raw_step_id or "").strip()
+        raw_mode_value = getattr(raw_mode, "value", raw_mode)
+        mode = str(raw_mode_value or "").strip().lower()
+        if step_id and mode:
+            normalized[step_id] = mode
+    return normalized
+
+
 def _snapshot_is_empty_for_previous_steps(snapshot: EvidenceReuseSnapshot) -> bool:
     return (
         bool(snapshot.source_step_ids)
         and len(list(snapshot.do_not_repeat or [])) == 0
         and len(list(snapshot.result_handles or [])) == 0
     )
+
+
+def _previous_steps_are_non_action_sources(
+        *,
+        source_step_ids: list[str],
+        previous_completed_step_task_modes: dict[str, str],
+) -> bool:
+    normalized_source_ids = [str(step_id or "").strip() for step_id in list(source_step_ids or [])]
+    if not normalized_source_ids:
+        return False
+    non_action_modes = {"human_wait", "direct_wait"}
+    for step_id in normalized_source_ids:
+        mode = previous_completed_step_task_modes.get(step_id)
+        if mode not in non_action_modes:
+            return False
+    return True
 
 
 def _block_snapshot_missing(*, message: str, data: dict) -> ConstraintDecision:

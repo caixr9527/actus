@@ -474,6 +474,7 @@ async def execute_step_with_prompt(
         sandbox_capability_profile: Optional[Dict[str, Any]] = None,
         runtime_evidence_context: Optional[RuntimeEvidenceContextResult] = None,
         has_previous_completed_steps: bool = False,
+        previous_completed_step_task_modes: Optional[Dict[str, str]] = None,
         evidence_result_handle_resolver: Any = None,
         evidence_resolution_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
@@ -778,6 +779,7 @@ async def execute_step_with_prompt(
                 if runtime_evidence_context is not None
                 else bool(has_previous_completed_steps)
             ),
+            previous_completed_step_task_modes=dict(previous_completed_step_task_modes or {}),
         )
         log_runtime(
             logger,
