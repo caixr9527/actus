@@ -9,7 +9,6 @@ import os
 import platform
 import re
 import shutil
-from typing import Any
 from urllib.parse import urlparse
 
 from app.models import ProcessInfo
@@ -20,13 +19,11 @@ from app.models.capabilities import (
 )
 from app.services import SearXNGService, SupervisorService
 
-
 COMMAND_PROBE_TIMEOUT_SECONDS = 2
 SUPERVISOR_PROBE_TIMEOUT_SECONDS = 3
 SEARCH_PROBE_TIMEOUT_SECONDS = 3
-DIRECTORY_CANDIDATES = ("/workspace", "/sandbox", "/tmp", "/home/ubuntu")
+DIRECTORY_CANDIDATES = ("/tmp", "/home/ubuntu")
 COMMAND_PROBES: dict[str, tuple[str, ...]] = {
-    "python": ("python", "--version"),
     "python3": ("python3", "--version"),
     "pip": ("pip", "--version"),
     "node": ("node", "--version"),
