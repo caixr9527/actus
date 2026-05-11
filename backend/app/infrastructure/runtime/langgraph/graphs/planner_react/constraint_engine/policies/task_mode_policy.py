@@ -75,6 +75,16 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
         return None
 
     if (
+            task_mode == "web_reading"
+            and normalized_function_name in {"fetch_page", "browser_read_current_page_structured", "browser_extract_main_content"}
+            and bool(dict(web_reading_progress_state.get("progress") or {}).get("contract_satisfied"))
+    ):
+        return _hard_block(
+            REASON_TASK_MODE_TOOL_BLOCKED,
+            "当前步骤已有结构化 strong 页面证据，禁止继续重复读取页面。",
+        )
+
+    if (
             bool(ctx.browser_route_enabled)
             and normalized_function_name == "browser_click"
             and state.browser_page_type in {

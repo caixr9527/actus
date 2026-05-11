@@ -150,6 +150,11 @@ def apply_tool_result_effects(
     - failure 路径：沉淀 recent_action、失败计数、黑名单与降级信息；
     - 这是 executor 与 convergence 之间唯一的状态归并入口。
     """
+    if str(loop_break_reason or "").strip() == "virtual_success_pending_resolution":
+        return ToolEffectsResult(
+            tool_result=tool_result,
+            loop_break_reason=loop_break_reason,
+        )
     if bool(tool_result.success):
         execution_state.consecutive_failure_count = 0
         execution_state.last_successful_tool_call = {
@@ -671,9 +676,9 @@ def _build_research_progress_snapshot(state: ExecutionState) -> Dict[str, Any]:
         "missing_signals": missing_signals,
         "latest_query": str(state.research_query_history[-1] if state.research_query_history else ""),
         "latest_fetched_url": str(state.research_fetched_urls[-1] if state.research_fetched_urls else ""),
-        # 搜索摘要证据是 research 收敛的一等输入，供 max-iteration 降级收敛与后续 summary 消费。
+        # 搜索候选摘要只用于后续模型选择来源，不作为 Evidence Ledger evidence 或完成判定依据。
         "search_evidence_summaries": _build_search_evidence_summaries(state),
-        # 页面读取证据供 web_reading/general 收敛消费，避免 browser 成功后继续抓取。
+        # 页面候选摘要只用于进度展示；完成/阻断必须消费 evidence-backed/fact-backed 投影。
         "web_reading_evidence_summaries": _build_web_reading_evidence_summaries(state),
         "explicit_url_read_state": _build_explicit_url_read_state(state),
     }

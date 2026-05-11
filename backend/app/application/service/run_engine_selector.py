@@ -24,6 +24,7 @@ from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.runtime.stage_llm import REQUIRED_STAGE_LLM_NAMES
 from app.domain.services.tools import MCPTool, A2ATool, ToolRuntimeAdapter, CapabilityBuildContext
@@ -104,6 +105,7 @@ async def build_run_engine(
         runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
         sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+        runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
 ) -> RunEngine:
     """根据配置选择运行时引擎（BE-LG-12 起仅支持 LangGraph）。"""
     settings = get_settings()
@@ -163,6 +165,7 @@ async def build_run_engine(
         ),
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
         evidence_step_reconciler=evidence_ledger_service,
+        runtime_tool_event_persistence=runtime_tool_event_persistence,
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         data_retention_policy_service=DataRetentionPolicyService(),

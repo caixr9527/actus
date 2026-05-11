@@ -67,3 +67,25 @@ class SandboxFactEventProjectorPort(Protocol):
     ) -> SandboxFactEvent | None:
         """PR4 将已入库 fact 转换为轻量 runtime event。"""
         ...
+
+
+class ToolEventFactProjectionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_event_id: str
+    fact_count: int = 0
+    sandbox_fact_event_persisted: bool = False
+    event_inserted: bool = False
+
+
+class RuntimeToolEventPersistencePort(Protocol):
+    async def persist_tool_event_and_record_facts(
+            self,
+            *,
+            event: ToolEvent,
+            run_id: str,
+            session_id: str,
+            current_step_id: str,
+    ) -> ToolEventFactProjectionResult:
+        """在 graph 主链路中持久化 ToolEvent，并完成 Sandbox Fact 投影。"""
+        ...

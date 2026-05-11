@@ -33,6 +33,17 @@ from app.domain.models import (
     WorkflowRun,
     WorkflowRunStatus,
 )
+from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
+from app.domain.models.sandbox_fact import (
+    SandboxFactKind,
+    SandboxFactRecord,
+    SandboxFactScope,
+    SandboxFactSourceRef,
+    SandboxFactSourceType,
+    SandboxFactSubjectRef,
+    build_sandbox_fact_idempotency_key,
+    build_sandbox_fact_payload_hash,
+)
 from app.domain.models.tool_result import ToolResult
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
@@ -749,10 +760,18 @@ class _SerialInvokeTask:
 class _NoopOutputStream:
     def __init__(self) -> None:
         self.sequence = 0
+        self.records: list[str] = []
+        self.deleted: list[str] = []
 
     async def put(self, _message: str) -> str:
         self.sequence += 1
-        return f"evt-{self.sequence}"
+        event_id = f"evt-{self.sequence}"
+        self.records.append(event_id)
+        return event_id
+
+    async def delete_message(self, message_id: str) -> bool:
+        self.deleted.append(message_id)
+        return True
 
 
 def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
@@ -1487,6 +1506,315 @@ def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_i
     ]
     assert recorder.calls == [({"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}, event)]
     assert event_projector.calls == [({"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}, ["fact-1"])]
+
+
+def test_invoke_should_not_repersist_graph_projected_tool_event() -> None:
+    runner = _new_runner()
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    persisted_events = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(request_id="req-1", payload=message_event)
+
+    async def _run_flow(_message):
+        yield ToolEvent(
+            id="stream-tool-1",
+            tool_call_id="call-1",
+            tool_name="search",
+            function_name="search_web",
+            function_args={"query": "q"},
+            function_result=ToolResult(success=True, data={}),
+            status=ToolEventStatus.CALLED,
+            runtime_fact_projection={
+                "graph_main_chain": True,
+                "source_event_id": "stream-tool-1",
+            },
+        )
+        yield DoneEvent()
+
+    async def _put_and_add_event(**kwargs):
+        persisted_events.append(kwargs["event"])
+        return "new-stream-id"
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._sandbox_fact_recorder = object()
+    runner._sandbox_fact_context_builder = object()
+    runner._sandbox_fact_event_projector = None
+
+    asyncio.run(runner.invoke(task))
+
+    assert [type(event).__name__ for event in persisted_events] == ["DoneEvent"]
+
+
+def test_invoke_should_not_repersist_graph_projected_calling_tool_event() -> None:
+    runner = _new_runner()
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    persisted_events = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(request_id="req-1", payload=message_event)
+
+    async def _run_flow(_message):
+        yield ToolEvent(
+            id="stream-tool-calling-1",
+            tool_call_id="call-1",
+            tool_name="search",
+            function_name="search_web",
+            function_args={"query": "q"},
+            status=ToolEventStatus.CALLING,
+            runtime_fact_projection={
+                "graph_main_chain": True,
+                "source_event_id": "stream-tool-calling-1",
+                "fact_count": 0,
+            },
+        )
+        yield DoneEvent()
+
+    async def _put_and_add_event(**kwargs):
+        persisted_events.append(kwargs["event"])
+        return "new-stream-id"
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._sandbox_fact_recorder = object()
+    runner._sandbox_fact_context_builder = object()
+    runner._sandbox_fact_event_projector = None
+
+    asyncio.run(runner.invoke(task))
+
+    assert [type(event).__name__ for event in persisted_events] == ["DoneEvent"]
+
+
+def test_tool_event_runtime_fact_projection_should_not_serialize() -> None:
+    event = ToolEvent(
+        id="tool-event-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+        runtime_fact_projection={
+            "graph_main_chain": True,
+            "source_event_id": "stream-tool-1",
+        },
+    )
+
+    assert AgentTaskRunner._graph_tool_event_fact_projected(event) is True
+    assert "runtime_fact_projection" not in event.model_dump(mode="json")
+
+
+def test_runtime_tool_event_persistence_should_mark_calling_event_as_graph_projected() -> None:
+    task = _SerialInvokeTask([])
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=_PersistingCoordinator(),
+        sandbox_fact_recorder=_FactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        status=ToolEventStatus.CALLING,
+    )
+
+    result = asyncio.run(service.persist_tool_event_and_record_facts(
+        event=event,
+        run_id="run-1",
+        session_id="session-1",
+        current_step_id="step-1",
+    ))
+
+    assert result.source_event_id == "evt-1"
+    assert result.fact_count == 0
+    assert event.runtime_fact_projection["graph_main_chain"] is True
+    assert event.runtime_fact_projection["source_event_id"] == "evt-1"
+    assert event.runtime_fact_projection["fact_count"] == 0
+    assert "runtime_fact_projection" not in event.model_dump(mode="json")
+
+
+def test_runtime_tool_event_persistence_should_keep_stream_when_fact_projection_fails_after_db_persist() -> None:
+    task = _SerialInvokeTask([])
+    coordinator = _PersistingCoordinator()
+    recorder = _FailingFactRecorder()
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=coordinator,
+        sandbox_fact_recorder=recorder,
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    with pytest.raises(RuntimeError, match="fact failed"):
+        asyncio.run(service.persist_tool_event_and_record_facts(
+            event=event,
+            run_id="run-1",
+            session_id="session-1",
+            current_step_id="step-1",
+        ))
+
+    assert task.output_stream.records == ["evt-1"]
+    assert task.output_stream.deleted == []
+    assert coordinator.persisted_event_ids == ["evt-1"]
+
+
+def test_runtime_tool_event_persistence_should_delete_stream_when_db_persist_fails() -> None:
+    task = _SerialInvokeTask([])
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=_FailingCoordinator(),
+        sandbox_fact_recorder=_FactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    with pytest.raises(RuntimeError, match="db failed"):
+        asyncio.run(service.persist_tool_event_and_record_facts(
+            event=event,
+            run_id="run-1",
+            session_id="session-1",
+            current_step_id="step-1",
+        ))
+
+    assert task.output_stream.records == ["evt-1"]
+    assert task.output_stream.deleted == ["evt-1"]
+
+
+class _PersistingCoordinator:
+    def __init__(self) -> None:
+        self.persisted_event_ids: list[str] = []
+
+    async def persist_runtime_event(self, *, session_id, event, projection=None, allow_status_transition=True):
+        self.persisted_event_ids.append(event.id)
+        return type("PersistResult", (), {"event_inserted": True})()
+
+
+class _FailingCoordinator:
+    async def persist_runtime_event(self, **_kwargs):
+        raise RuntimeError("db failed")
+
+
+class _StaticFactContextBuilder:
+    async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+        from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+        from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext
+
+        return SandboxFactProjectionContext(
+            scope=AccessScopeResult(
+                tenant_id="user-1",
+                user_id="user-1",
+                session_id="session-1",
+                workspace_id="workspace-1",
+                run_id="run-1",
+                current_step_id=current_step_id,
+            ),
+            profile_ref={},
+            source_event_id=source_event_id,
+            current_step_id=current_step_id,
+        )
+
+
+class _FactRecorder:
+    async def record_from_tool_event(self, *, context, event):
+        payload = {"query": "q", "result_count": 0, "top_results": []}
+        payload_hash = build_sandbox_fact_payload_hash(payload)
+        source_ref = SandboxFactSourceRef(
+            source_type=SandboxFactSourceType.SANDBOX_API,
+            source_event_id=context.source_event_id,
+            source_event_status="available",
+            tool_event_id=event.id,
+            tool_call_id=event.tool_call_id,
+            function_name=event.function_name,
+        )
+        subject_ref = SandboxFactSubjectRef(subject_type="search", subject_key="search:q")
+        return [
+            SandboxFactRecord(
+                id="fact-1",
+                user_id="user-1",
+                session_id="session-1",
+                workspace_id="workspace-1",
+                fact_scope=SandboxFactScope.STEP,
+                run_id="run-1",
+                step_id="step-1",
+                fact_kind=SandboxFactKind.SEARCH_RESULT,
+                source_ref=source_ref,
+                subject_ref=subject_ref,
+                summary="search fact",
+                payload=payload,
+                payload_hash=payload_hash,
+                idempotency_key=build_sandbox_fact_idempotency_key(
+                    user_id="user-1",
+                    session_id="session-1",
+                    workspace_id="workspace-1",
+                    fact_scope=SandboxFactScope.STEP,
+                    run_id="run-1",
+                    step_id="step-1",
+                    fact_kind=SandboxFactKind.SEARCH_RESULT,
+                    source_event_id=context.source_event_id,
+                    tool_call_id=event.tool_call_id,
+                    subject_key=subject_ref.subject_key,
+                    payload_hash=payload_hash,
+                ),
+            )
+        ]
+
+
+class _FailingFactRecorder:
+    async def record_from_tool_event(self, **_kwargs):
+        raise RuntimeError("fact failed")
 
 
 def test_atomic_action_evidence_reconcile_should_preserve_current_step_id() -> None:

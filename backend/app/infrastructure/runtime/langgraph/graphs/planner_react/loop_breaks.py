@@ -32,6 +32,20 @@ def build_loop_break_result(
             "data": data if isinstance(data, dict) else {},
             "runtime_recent_action": runtime_recent_action or {},
         }
+    if loop_break_reason == "evidence_reuse_allowed":
+        data = getattr(tool_result, "data", None)
+        message_text = str(getattr(tool_result, "message", "") or "").strip()
+        return {
+            "success": True,
+            "summary": message_text or "已复用前序 evidence 结果。",
+            "result": message_text,
+            "attachments": [],
+            "blockers": [],
+            "next_hint": "",
+            "loop_break_reason": "evidence_reuse_allowed",
+            "data": data if isinstance(data, dict) else {},
+            "runtime_recent_action": runtime_recent_action or {},
+        }
     if loop_break_reason == "evidence_reuse_snapshot_missing":
         data = getattr(tool_result, "data", None)
         message_text = str(getattr(tool_result, "message", "") or "").strip()

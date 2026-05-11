@@ -17,7 +17,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.judge
 class ResearchConvergenceRule(IterationConvergenceRule, MaxIterationConvergenceRule):
     name = "research"
     log_message = "研究证据满足，提前收敛步骤"
-    max_iteration_log_message = "达到最大工具轮次但研究摘要证据可用，按阶段性结果收敛"
+    max_iteration_log_message = "达到最大工具轮次且结构化研究证据可用，按阶段性结果收敛"
 
     def __init__(self) -> None:
         self._judge = ResearchConvergenceJudge()
@@ -52,7 +52,7 @@ class ResearchConvergenceRule(IterationConvergenceRule, MaxIterationConvergenceR
         return ConvergenceDecision(
             should_break=True,
             payload=payload,
-            reason_code="research_max_iteration_snippet_fallback",
+            reason_code="research_max_iteration_evidence_ready",
             rule_name=self.name,
             log_message=self.max_iteration_log_message,
         )

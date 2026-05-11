@@ -20,7 +20,21 @@ from app.application.service.evidence_fact_assembler import (
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
-from app.domain.models import ExecutionStatus, Plan, Session, Step, StepEvent, StepOutcome, ToolResult, WorkflowRun, Workspace
+from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
+from app.domain.models import (
+    ExecutionStatus,
+    FetchedPage,
+    Plan,
+    Session,
+    Step,
+    StepEvent,
+    StepOutcome,
+    ToolEvent,
+    ToolEventStatus,
+    ToolResult,
+    WorkflowRun,
+    Workspace,
+)
 from app.domain.models.evidence import (
     EvidenceBackedFactProjection,
     EvidenceDuplicateDecision,
@@ -60,11 +74,19 @@ from app.domain.services.runtime.contracts.evidence_key_normalizer import (
     hash_query,
     hash_url,
 )
+from app.domain.services.runtime.contracts.sandbox_fact_contract import SandboxFactProfileRef
+from app.domain.services.runtime.contracts.sandbox_fact_ports import (
+    SandboxFactProjectionContext,
+    ToolEventFactProjectionResult,
+)
 from app.domain.services.runtime.langgraph_state import GraphStateContractMapper
 from app.domain.services.runtime.normalizers import normalize_step_outcome_payload
 from app.domain.services.tools import BaseTool
 from app.domain.services.tools.base import tool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.projectors.sandbox_fact_tool_event_projector import (
+    SandboxFactToolEventProjector,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import ConstraintInput
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.engine import ConstraintEngine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.reason_codes import (
@@ -78,14 +100,14 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.executi
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import ExecutionState
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import execute_step_with_prompt
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import ToolPolicyEngine
-from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_nodes import (
-    _resolve_pending_evidence_reuse,
-    execute_step_node,
-)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_nodes import execute_step_node
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.evidence_completion_gate import (
     reconcile_step_evidence_before_state_return,
 )
-from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import prepare_execute_step_input
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import (
+    persist_current_step_tool_events_before_evidence_gate,
+    prepare_execute_step_input,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.prompt_context_helpers import (
     _append_prompt_context_to_prompt,
 )
@@ -114,10 +136,13 @@ class _EvidenceRepo:
     async def list_by_step(self, *, step_id, **kwargs):
         return [record for record in self.records if record.step_id == step_id]
 
+    async def list_by_ids(self, *, evidence_ids, **kwargs):
+        return [record for record in self.records if record.id in set(evidence_ids)]
+
 
 class _FactRepo:
     def __init__(self, facts=None) -> None:
-        self.facts = list(facts or [])
+        self.facts = facts if facts is not None else []
         self.raise_on_list_by_scope = False
 
     async def list_by_scope(self, **kwargs):
@@ -131,10 +156,20 @@ class _FactRepo:
     async def list_by_ids(self, *, fact_ids, **kwargs):
         return [fact for fact in self.facts if fact.id in set(fact_ids)]
 
+    async def save_once(self, fact):
+        for existing in self.facts:
+            if existing.idempotency_key == fact.idempotency_key:
+                return existing
+        self.facts.append(fact)
+        return fact
+
 
 class _WorkflowRunRepo:
     async def get_event_record_by_event_id(self, **kwargs):
         return object()
+
+    async def add_event_record_if_absent(self, **kwargs):
+        return None
 
 
 class _ArtifactRepo:
@@ -145,7 +180,7 @@ class _ArtifactRepo:
 class _UoW:
     def __init__(self, *, evidence=None, facts=None) -> None:
         self.evidence = evidence or _EvidenceRepo()
-        self.sandbox_fact = _FactRepo(facts or [])
+        self.sandbox_fact = _FactRepo(facts if facts is not None else [])
         self.workflow_run = _WorkflowRunRepo()
         self.workspace_artifact = _ArtifactRepo()
 
@@ -160,6 +195,47 @@ class _FailingFactUoW(_UoW):
     def __init__(self, *, evidence) -> None:
         super().__init__(evidence=evidence)
         self.sandbox_fact.raise_on_list_by_scope = True
+
+
+class _InMemoryToolEventPersistence:
+    def __init__(self, *, uow_factory) -> None:
+        self._projector = SandboxFactToolEventProjector(
+            ledger_service=SandboxFactLedgerService(uow_factory=uow_factory),
+        )
+        self.persisted_events = []
+
+    async def persist_tool_event_and_record_facts(
+            self,
+            *,
+            event: ToolEvent,
+            run_id: str,
+            session_id: str,
+            current_step_id: str,
+    ) -> ToolEventFactProjectionResult:
+        source_event_id = str(event.id or f"event-{len(self.persisted_events) + 1}")
+        event.id = source_event_id
+        if not event.step_id:
+            event.step_id = current_step_id
+        context = SandboxFactProjectionContext(
+            scope=_scope(current_step_id),
+            profile_ref=SandboxFactProfileRef(status="missing"),
+            source_event_id=source_event_id,
+            current_step_id=current_step_id,
+        )
+        facts = await self._projector.record_from_tool_event(context=context, event=event)
+        event.runtime_fact_projection = {
+            "source_event_id": source_event_id,
+            "fact_count": len(facts),
+            "sandbox_fact_event_persisted": False,
+            "event_inserted": True,
+        }
+        self.persisted_events.append(event)
+        return ToolEventFactProjectionResult(
+            source_event_id=source_event_id,
+            fact_count=len(facts),
+            sandbox_fact_event_persisted=False,
+            event_inserted=True,
+        )
 
 
 def _scope(current_step_id: str = "step-2") -> AccessScopeResult:
@@ -194,6 +270,108 @@ def _snapshot_from_fact(kind: SandboxFactKind, *, payload=None) -> EvidenceReuse
     )
     assert context.evidence_reuse_snapshot is not None
     return context.evidence_reuse_snapshot
+
+
+def _verification_required_search_snapshot(*, query: str = "query") -> EvidenceReuseSnapshot:
+    query_hash = hash_query(query)
+    key_result = build_evidence_action_subject_key_from_tool_call("search_web", {"query": query})
+    result_ref = EvidenceResultRef(
+        result_ref_type=EvidenceResultRefType.FACT_REF,
+        ref_id="fact-1",
+        source_step_id="step-1",
+        source_evidence_id="evidence-1",
+        source_fact_id="fact-1",
+        source_event_id="event-1",
+        subject_key=f"query:{query_hash}",
+        payload_hash="sha256:payload",
+        quality_status=EvidenceQualityStatus.VALID,
+        support_level=EvidenceSupportLevel.STRONG,
+        reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+        staleness_policy=EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE,
+        read_strategy=EvidenceReadStrategy.READ_FACT_PAYLOAD,
+        reason_code="external_evidence_may_change",
+        allowed_verification_actions=["search_web"],
+        summary="safe summary",
+    )
+    handle = build_evidence_result_handle(result_ref)
+    from app.domain.models.evidence import EvidenceDoNotRepeatResult
+
+    return EvidenceReuseSnapshot(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        cursor="cursor-1",
+        do_not_repeat=[
+            EvidenceDoNotRepeatResult(
+                action_key=key_result.action_key,
+                subject_key=key_result.subject_key,
+                reason_code="evidence_reuse_requires_verification",
+                source_step_id="step-1",
+                evidence_ids=["evidence-1"],
+                reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+                staleness_policy=EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE,
+                support_level=EvidenceSupportLevel.STRONG,
+                quality_status=EvidenceQualityStatus.VALID,
+                result_status="successful",
+                duplicate_decision=EvidenceDuplicateDecision.REQUIRE_VERIFICATION,
+                reuse_result_ref=result_ref,
+                result_handle_id=handle.result_handle_id,
+                reuse_summary="safe summary",
+            )
+        ],
+        result_handles=[handle],
+    )
+
+
+def _verification_required_page_snapshot(*, url: str = "https://example.com/a") -> EvidenceReuseSnapshot:
+    url_hash = hash_url(url)
+    key_result = build_evidence_action_subject_key_from_tool_call("fetch_page", {"url": url})
+    result_ref = EvidenceResultRef(
+        result_ref_type=EvidenceResultRefType.FACT_REF,
+        ref_id="fact-1",
+        source_step_id="step-1",
+        source_evidence_id="evidence-1",
+        source_fact_id="fact-1",
+        source_event_id="event-1",
+        subject_key=f"page:{url_hash}",
+        payload_hash="sha256:payload",
+        quality_status=EvidenceQualityStatus.VALID,
+        support_level=EvidenceSupportLevel.STRONG,
+        reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+        staleness_policy=EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE,
+        read_strategy=EvidenceReadStrategy.READ_FACT_PAYLOAD,
+        reason_code="external_evidence_may_change",
+        allowed_verification_actions=["fetch_page"],
+        summary="safe summary",
+    )
+    handle = build_evidence_result_handle(result_ref)
+    from app.domain.models.evidence import EvidenceDoNotRepeatResult
+
+    return EvidenceReuseSnapshot(
+        run_id="run-1",
+        current_step_id="step-2",
+        source_step_ids=["step-1"],
+        cursor="cursor-1",
+        do_not_repeat=[
+            EvidenceDoNotRepeatResult(
+                action_key=key_result.action_key,
+                subject_key=key_result.subject_key,
+                reason_code="evidence_reuse_requires_verification",
+                source_step_id="step-1",
+                evidence_ids=["evidence-1"],
+                reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
+                staleness_policy=EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE,
+                support_level=EvidenceSupportLevel.STRONG,
+                quality_status=EvidenceQualityStatus.VALID,
+                result_status="successful",
+                duplicate_decision=EvidenceDuplicateDecision.REQUIRE_VERIFICATION,
+                reuse_result_ref=result_ref,
+                result_handle_id=handle.result_handle_id,
+                reuse_summary="safe summary",
+            )
+        ],
+        result_handles=[handle],
+    )
 
 
 def _fact(kind: SandboxFactKind, *, fact_id: str = "fact-1", step_id: str = "step-1", payload=None) -> SandboxFactRecord:
@@ -271,6 +449,48 @@ def test_assembler_should_register_documented_evidence_strategies() -> None:
     assert assembler._strategies_by_kind[SandboxFactKind.DOCUMENT_CONTEXT].__class__ is DocumentEvidenceStrategy
     assert assembler._strategies_by_kind[SandboxFactKind.TOOL_FAILURE].__class__ is ToolFailureEvidenceStrategy
     assert assembler._strategies_by_kind[SandboxFactKind.HUMAN_INTERACTION].__class__ is HumanConfirmationEvidenceStrategy
+
+
+def test_page_evidence_should_be_run_scoped_reusable_when_valid() -> None:
+    result = EvidenceFactAssembler().assemble_step(
+        step=Step(id="step-1"),
+        facts=[_fact(SandboxFactKind.FETCHED_PAGE)],
+    )
+
+    evidence_input = result.evidence_inputs[0]
+    assert evidence_input.evidence_kind == EvidenceKind.PAGE_EVIDENCE
+    assert evidence_input.quality_status == EvidenceQualityStatus.VALID
+    assert evidence_input.support_level == EvidenceSupportLevel.STRONG
+    assert evidence_input.reusable is True
+    assert evidence_input.reuse_policy == EvidenceReusePolicy.REUSE_ALLOWED
+    assert evidence_input.staleness_policy == EvidenceStalenessPolicy.RUN_SCOPED
+    assert evidence_input.result_refs[0].allowed_verification_actions == []
+    assert evidence_input.result_refs[0].reason_code is None
+
+
+def test_page_evidence_should_require_verification_when_partial() -> None:
+    result = EvidenceFactAssembler().assemble_step(
+        step=Step(id="step-1"),
+        facts=[
+            _fact(
+                SandboxFactKind.FETCHED_PAGE,
+                payload={
+                    **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
+                    "excerpt": "",
+                    "is_truncated": True,
+                    "reason_code": "page_content_truncated",
+                },
+            )
+        ],
+    )
+
+    evidence_input = result.evidence_inputs[0]
+    assert evidence_input.quality_status == EvidenceQualityStatus.PARTIAL
+    assert evidence_input.support_level == EvidenceSupportLevel.PARTIAL
+    assert evidence_input.reusable is False
+    assert evidence_input.reuse_policy == EvidenceReusePolicy.VERIFY_BEFORE_REUSE
+    assert evidence_input.staleness_policy == EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE
+    assert evidence_input.result_refs[0].allowed_verification_actions == ["fetch_page"]
 
 
 def test_file_evidence_should_accept_read_content_sha256_for_successful_file_read() -> None:
@@ -377,6 +597,39 @@ def test_digest_should_build_handles_only_from_persisted_result_refs() -> None:
     assert digest.evidence_backed_facts[0].text == "safe summary"
     assert digest.evidence_backed_facts[0].evidence_ids
     assert digest.evidence_backed_facts[0].fact_ids == ["fact-1"]
+
+
+def test_digest_should_include_valid_page_evidence_in_do_not_repeat() -> None:
+    url = "https://example.com/a"
+    url_hash = hash_url(url)
+    fact = _fact(
+        SandboxFactKind.FETCHED_PAGE,
+        payload={
+            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
+            "fetched_url_hash": url_hash,
+            "final_url_origin": url,
+        },
+    )
+    evidence_repo = _EvidenceRepo()
+    service = _ledger_service(uow_factory=lambda: _UoW(facts=[fact], evidence=evidence_repo))
+    asyncio.run(service.reconcile_step_evidence(scope=_scope("step-1"), step=Step(id="step-1")))
+    projector = EvidenceDigestProjector(uow_factory=lambda: _UoW(evidence=evidence_repo))
+
+    digest = asyncio.run(projector.build_digest(
+        scope=_scope("step-2"),
+        current_step_id="step-2",
+        completed_step_ids=["step-1"],
+    ))
+
+    assert digest is not None
+    assert digest.result_handles
+    assert digest.do_not_repeat
+    assert digest.do_not_repeat[0].action_key == f"fetch:{url_hash}"
+    assert digest.do_not_repeat[0].subject_key == f"page:{url_hash}"
+    assert digest.do_not_repeat[0].duplicate_decision == (
+        EvidenceDuplicateDecision.REUSE_EXISTING_EVIDENCE_PENDING_RESOLUTION
+    )
+    assert digest.do_not_repeat[0].result_handle_id == digest.result_handles[0].result_handle_id
 
 
 def test_digest_should_not_truncate_long_evidence_backed_projection_text() -> None:
@@ -711,14 +964,7 @@ def test_write_tool_call_key_should_skip_without_pre_execute_hash(tool_name, too
 def test_evidence_reuse_policy_should_allow_marked_verification_search() -> None:
     query = "query"
     query_hash = hash_query(query)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.SEARCH_RESULT,
-        payload={
-            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
-            "query_hash": query_hash,
-            "query_excerpt": query,
-        },
-    )
+    snapshot = _verification_required_search_snapshot(query=query)
 
     allowed = evaluate_evidence_reuse_policy(
         ConstraintInput(
@@ -748,14 +994,7 @@ def test_evidence_reuse_policy_should_allow_marked_verification_search() -> None
 def test_evidence_reuse_policy_should_rewrite_bare_verification_search() -> None:
     query = "query"
     query_hash = hash_query(query)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.SEARCH_RESULT,
-        payload={
-            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
-            "query_hash": query_hash,
-            "query_excerpt": query,
-        },
-    )
+    snapshot = _verification_required_search_snapshot(query=query)
 
     decision = evaluate_evidence_reuse_policy(
         ConstraintInput(
@@ -790,13 +1029,12 @@ def test_evidence_reuse_policy_should_rewrite_bare_verification_search() -> None
     "function_args",
     [
         {"query_hash": "q1", "verification_reason_code": "external_evidence_may_change"},
-        {"query": "query", "query_hash": "q1"},
         {"query": "query", "query_hash": "q1", "verification_reason_code": "external_evidence_may_change"},
         {"query": "same meaning", "query_hash": "q1", "verification_reason_code": "external_evidence_may_change"},
     ],
 )
 def test_evidence_reuse_policy_should_block_invalid_verification_search(function_args) -> None:
-    snapshot = _snapshot_from_fact(SandboxFactKind.SEARCH_RESULT)
+    snapshot = _verification_required_search_snapshot()
 
     decision = evaluate_evidence_reuse_policy(
         ConstraintInput(
@@ -825,14 +1063,7 @@ def test_evidence_reuse_policy_should_block_invalid_verification_search(function
 def test_evidence_reuse_policy_should_allow_marked_verification_fetch_page() -> None:
     url = "https://example.com/a"
     url_hash = hash_url(url)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.FETCHED_PAGE,
-        payload={
-            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
-            "fetched_url_hash": url_hash,
-            "final_url_origin": url,
-        },
-    )
+    snapshot = _verification_required_page_snapshot(url=url)
 
     allowed = evaluate_evidence_reuse_policy(
         ConstraintInput(
@@ -863,14 +1094,7 @@ def test_evidence_reuse_policy_should_allow_marked_verification_fetch_page() -> 
 def test_evidence_reuse_policy_should_rewrite_bare_verification_fetch_page() -> None:
     url = "https://example.com/a"
     url_hash = hash_url(url)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.FETCHED_PAGE,
-        payload={
-            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
-            "fetched_url_hash": url_hash,
-            "final_url_origin": url,
-        },
-    )
+    snapshot = _verification_required_page_snapshot(url=url)
 
     decision = evaluate_evidence_reuse_policy(
         ConstraintInput(
@@ -905,13 +1129,12 @@ def test_evidence_reuse_policy_should_rewrite_bare_verification_fetch_page() -> 
     "function_args",
     [
         {"url_hash": "u1", "verification_reason_code": "external_evidence_may_change"},
-        {"url": "https://example.com/a", "url_hash": "u1"},
         {"url": "https://example.com/a", "url_hash": "u1", "verification_reason_code": "external_evidence_may_change"},
         {"url": "https://example.com/other", "url_hash": "u1", "verification_reason_code": "external_evidence_may_change"},
     ],
 )
 def test_evidence_reuse_policy_should_block_invalid_verification_fetch_page(function_args) -> None:
-    snapshot = _snapshot_from_fact(SandboxFactKind.FETCHED_PAGE)
+    snapshot = _verification_required_page_snapshot()
 
     decision = evaluate_evidence_reuse_policy(
         ConstraintInput(
@@ -1009,10 +1232,9 @@ def test_tool_policy_engine_should_execute_verification_with_executable_args(
     """verification metadata 只供 policy 审计，executor 只能收到真实工具参数。"""
     payload = _payload_for_fact(kind)
     if kind == SandboxFactKind.SEARCH_RESULT:
-        payload = {**payload, "query_hash": function_args["query_hash"], "query_excerpt": function_args["query"]}
+        snapshot = _verification_required_search_snapshot(query=function_args["query"])
     else:
-        payload = {**payload, "fetched_url_hash": function_args["url_hash"], "final_url_origin": function_args["url"]}
-    snapshot = _snapshot_from_fact(kind, payload=payload)
+        snapshot = _verification_required_page_snapshot(url=function_args["url"])
     tool = _SignatureFilteringTool({function_name})
 
     result = asyncio.run(
@@ -1042,15 +1264,7 @@ def test_tool_policy_engine_should_execute_verification_with_executable_args(
 
 def test_tool_policy_engine_should_autofill_verification_metadata_for_bare_search() -> None:
     query = "query"
-    query_hash = hash_query(query)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.SEARCH_RESULT,
-        payload={
-            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
-            "query_hash": query_hash,
-            "query_excerpt": query,
-        },
-    )
+    snapshot = _verification_required_search_snapshot(query=query)
     tool = _SignatureFilteringTool({"search_web"})
 
     result = asyncio.run(
@@ -1079,15 +1293,7 @@ def test_tool_policy_engine_should_autofill_verification_metadata_for_bare_searc
 
 def test_tool_policy_engine_should_allow_system_rewritten_verification_search_in_general_mode() -> None:
     query = "query"
-    query_hash = hash_query(query)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.SEARCH_RESULT,
-        payload={
-            **_payload_for_fact(SandboxFactKind.SEARCH_RESULT),
-            "query_hash": query_hash,
-            "query_excerpt": query,
-        },
-    )
+    snapshot = _verification_required_search_snapshot(query=query)
     tool = _SignatureFilteringTool({"search_web"})
 
     result = asyncio.run(
@@ -1116,7 +1322,7 @@ def test_tool_policy_engine_should_allow_system_rewritten_verification_search_in
 
 def test_tool_policy_engine_should_not_allow_forged_verification_search_in_general_mode() -> None:
     query = "query"
-    snapshot = _snapshot_from_fact(SandboxFactKind.SEARCH_RESULT)
+    snapshot = _verification_required_search_snapshot(query=query)
     tool = _SignatureFilteringTool({"search_web"})
 
     result = asyncio.run(
@@ -1149,15 +1355,7 @@ def test_tool_policy_engine_should_not_allow_forged_verification_search_in_gener
 
 def test_tool_policy_engine_should_autofill_verification_metadata_for_bare_fetch_page() -> None:
     url = "https://example.com/a"
-    url_hash = hash_url(url)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.FETCHED_PAGE,
-        payload={
-            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
-            "fetched_url_hash": url_hash,
-            "final_url_origin": url,
-        },
-    )
+    snapshot = _verification_required_page_snapshot(url=url)
     tool = _SignatureFilteringTool({"fetch_page"})
 
     result = asyncio.run(
@@ -1186,15 +1384,7 @@ def test_tool_policy_engine_should_autofill_verification_metadata_for_bare_fetch
 
 def test_tool_policy_engine_should_allow_system_rewritten_verification_fetch_page_in_general_mode() -> None:
     url = "https://example.com/a"
-    url_hash = hash_url(url)
-    snapshot = _snapshot_from_fact(
-        SandboxFactKind.FETCHED_PAGE,
-        payload={
-            **_payload_for_fact(SandboxFactKind.FETCHED_PAGE),
-            "fetched_url_hash": url_hash,
-            "final_url_origin": url,
-        },
-    )
+    snapshot = _verification_required_page_snapshot(url=url)
     tool = _SignatureFilteringTool({"fetch_page"})
 
     result = asyncio.run(
@@ -1222,7 +1412,7 @@ def test_tool_policy_engine_should_allow_system_rewritten_verification_fetch_pag
 
 
 def test_tool_policy_engine_should_not_allow_forged_verification_fetch_page_in_general_mode() -> None:
-    snapshot = _snapshot_from_fact(SandboxFactKind.FETCHED_PAGE)
+    snapshot = _verification_required_page_snapshot()
     tool = _SignatureFilteringTool({"fetch_page"})
 
     result = asyncio.run(
@@ -1439,25 +1629,36 @@ def test_two_step_fact_to_evidence_reuse_closed_loop_should_resolve_without_exec
     assert policy_result.loop_break_reason == "virtual_success_pending_resolution"
     assert tool.invocations == []
 
-    resolved = asyncio.run(_resolve_pending_evidence_reuse(
-        llm_message={
-            "success": False,
-            "loop_break_reason": policy_result.loop_break_reason,
-            "data": policy_result.tool_result.data,
-        },
-        prepared_input=prepared,
-        state={
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("read_file", {"path": "/workspace/a.txt"}),
+        step=Step(id="step-2", description="读取文件"),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="general",
+        user_content=prepared.user_content,
+        user_message=prepared.user_message,
+        runtime_evidence_context=prepared.runtime_evidence_context,
+        has_previous_completed_steps=prepared.has_previous_completed_steps,
+        evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
+        evidence_resolution_state={
             "user_id": "user-1",
             "session_id": "session-1",
             "workspace_id": "workspace-1",
             "run_id": "run-1",
+            "current_step_id": "step-2",
         },
-        evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
     ))
 
-    assert resolved["success"] is True
-    assert resolved["loop_break_reason"] == "evidence_reuse_allowed"
-    assert resolved["data"]["result_handle_resolved"] is True
+    assert payload["success"] is True
+    assert payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert payload["data"]["result_handle_resolved"] is True
+    assert tool.invocations == []
+    called_events = [
+        event for event in tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "read_file"
+    ]
+    assert len(called_events) == 1
+    assert called_events[0].function_result.success is True
 
 
 def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executor(caplog) -> None:
@@ -1466,6 +1667,17 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
     uow_factory = lambda: _UoW(facts=[fact], evidence=evidence_repo)
     ledger_service = _ledger_service(uow_factory=uow_factory)
     asyncio.run(ledger_service.reconcile_step_evidence(scope=_scope("step-1"), step=Step(id="step-1")))
+    digest = asyncio.run(EvidenceDigestProjector(uow_factory=uow_factory).build_digest(
+        scope=_scope("step-2"),
+        current_step_id="step-2",
+        completed_step_ids=["step-1"],
+        stage="execute",
+    ))
+    assert digest is not None
+    assert digest.do_not_repeat
+    assert digest.do_not_repeat[0].duplicate_decision == (
+        EvidenceDuplicateDecision.REUSE_EXISTING_EVIDENCE_PENDING_RESOLUTION
+    )
     provider = EvidenceRuntimeContextProvider(
         ledger_service=ledger_service,
         projector=EvidenceDigestProjector(uow_factory=uow_factory),
@@ -1522,6 +1734,634 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
     assert "开始执行真实工具调用" not in log_text
 
 
+def test_search_evidence_reuse_main_chain_should_resolve_without_second_executor_call(caplog) -> None:
+    query = "漳州南靖土楼从厦门出发的交通方式"
+    facts: list[SandboxFactRecord] = []
+    evidence_repo = _EvidenceRepo()
+    uow_factory = lambda: _UoW(facts=facts, evidence=evidence_repo)
+    ledger_service = _ledger_service(uow_factory=uow_factory)
+    context_service = RuntimeContextService(
+        evidence_context_provider=EvidenceRuntimeContextProvider(
+            ledger_service=ledger_service,
+            projector=EvidenceDigestProjector(uow_factory=uow_factory),
+        )
+    )
+    persistence = _InMemoryToolEventPersistence(uow_factory=uow_factory)
+    tool = _SearchMainChainTool()
+
+    step1 = Step(id="step-1", description="搜索漳州南靖土楼从厦门出发的交通方式")
+    first_message, first_tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("search_web", {"query": query}),
+        step=step1,
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="research",
+        user_message=query,
+    ))
+
+    assert tool.invocations == [("search_web", {"query": query})]
+    called_events = [
+        event for event in first_tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "search_web"
+    ]
+    assert len(called_events) == 1
+    assert called_events[0].function_result is not None
+    assert called_events[0].function_result.success is True
+
+    step1.status = ExecutionStatus.COMPLETED
+    step1.outcome = StepOutcome(done=True, summary=str(first_message.get("summary") or "search completed"))
+    first_state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+    }
+    asyncio.run(persist_current_step_tool_events_before_evidence_gate(
+        state=first_state,
+        step=step1,
+        tool_events=first_tool_events,
+        runtime_tool_event_persistence=persistence,
+    ))
+
+    assert len(persistence.persisted_events) == 1
+    assert len(facts) == 1
+    assert facts[0].fact_kind == SandboxFactKind.SEARCH_RESULT
+    assert facts[0].payload["query_hash"] == hash_query(query)
+    assert facts[0].payload["result_count"] > 0
+
+    asyncio.run(reconcile_step_evidence_before_state_return(
+        state=first_state,
+        step=step1,
+        reconciler=ledger_service,
+    ))
+
+    search_evidence = [
+        record for record in evidence_repo.records
+        if record.evidence_kind == EvidenceKind.SEARCH_EVIDENCE
+    ]
+    assert len(search_evidence) == 1
+    assert search_evidence[0].support_level == EvidenceSupportLevel.STRONG
+    assert search_evidence[0].quality_status == EvidenceQualityStatus.VALID
+
+    digest = asyncio.run(EvidenceDigestProjector(uow_factory=uow_factory).build_digest(
+        scope=_scope("step-2"),
+        current_step_id="step-2",
+        completed_step_ids=["step-1"],
+        stage="execute",
+    ))
+    assert digest is not None
+    assert digest.result_handles
+    assert digest.do_not_repeat
+    assert digest.do_not_repeat[0].duplicate_decision == (
+        EvidenceDuplicateDecision.REUSE_EXISTING_EVIDENCE_PENDING_RESOLUTION
+    )
+
+    state_base = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": "下一步再次确认同一个问题，不要换查询主题。",
+    }
+    step2 = Step(id="step-2", description="再次确认同一个交通方式问题")
+    state = {
+        **state_base,
+        "plan": Plan(steps=[step1, step2]),
+        "step_states": [{"step_id": "step-1", "status": "completed"}],
+        "graph_metadata": {},
+    }
+    resolver = _SpyEvidenceResultHandleResolver(EvidenceResultHandleResolver(uow_factory=uow_factory))
+
+    with caplog.at_level(logging.INFO):
+        next_state = asyncio.run(execute_step_node(
+            state,
+            _FakeToolCallLLM("search_web", {"query": query}),
+            context_service,
+            evidence_result_handle_resolver=resolver,
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+        ))
+
+    assert resolver.called is True
+    assert tool.invocations == [("search_web", {"query": query})]
+
+    prepared = asyncio.run(prepare_execute_step_input(
+        state={
+            **state_base,
+            "plan": Plan(steps=[step1, Step(id="step-2", description="再次确认同一个交通方式问题")]),
+            "step_states": [{"step_id": "step-1", "status": "completed"}],
+            "graph_metadata": {},
+        },
+        step=Step(id="step-2", description="再次确认同一个交通方式问题"),
+        llm=object(),
+        runtime_context_service=context_service,
+        task_mode="general",
+        user_message=state_base["user_message"],
+    ))
+    live_events = []
+
+    async def capture_live_event(event):
+        live_events.append(event)
+
+    direct_resolver = _SpyEvidenceResultHandleResolver(EvidenceResultHandleResolver(uow_factory=uow_factory))
+    direct_payload, direct_tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("search_web", {"query": query}),
+        step=Step(id="step-2", description="再次确认同一个交通方式问题"),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="general",
+        on_tool_event=capture_live_event,
+        user_content=prepared.user_content,
+        user_message=prepared.user_message,
+        runtime_evidence_context=prepared.runtime_evidence_context,
+        has_previous_completed_steps=prepared.has_previous_completed_steps,
+        evidence_result_handle_resolver=direct_resolver,
+        evidence_resolution_state={
+            **state_base,
+            "current_step_id": "step-2",
+        },
+    ))
+
+    assert direct_resolver.called is True
+    assert direct_payload["success"] is True
+    assert direct_payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert tool.invocations == [("search_web", {"query": query})]
+    live_called_events = [
+        event for event in live_events
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "search_web"
+    ]
+    assert len(live_called_events) == 1
+    assert live_called_events[0].function_result.success is True
+    assert live_called_events[0].function_result.data["result_handle_resolved"] is True
+    assert not [
+        event for event in live_events
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "search_web"
+           and event.function_result is not None
+           and event.function_result.success is False
+           and event.function_result.data.get("duplicate_decision") == "reuse_existing_evidence_pending_resolution"
+    ]
+    assert direct_tool_events == live_events
+
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert next_state["last_executed_step"].outcome.done is True
+    assert "技术问题" not in next_state["last_executed_step"].outcome.summary
+    second_called_events = [
+        event for event in next_state["emitted_events"]
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "search_web"
+    ]
+    assert len(second_called_events) == 1
+    assert second_called_events[0].function_result.success is True
+    assert second_called_events[0].function_result.data["result_handle_resolved"] is True
+
+    log_text = caplog.text
+    assert "reuse_existing_evidence_pending_resolution" in log_text
+    assert "evidence_result_handle_resolved" in log_text
+    assert "evidence_reuse_virtual_tool_result_returned" in log_text
+    assert "evidence_reuse_snapshot_missing" not in log_text
+    assert "开始执行真实工具调用" not in log_text
+
+
+def test_fetch_page_reuse_main_chain_should_resolve_without_second_executor_call(caplog) -> None:
+    url = "http://zhangzhou.bendibao.com/tour/2025125/17804.shtm"
+    url_hash = hash_url(url)
+    facts: list[SandboxFactRecord] = []
+    evidence_repo = _EvidenceRepo()
+    uow_factory = lambda: _UoW(facts=facts, evidence=evidence_repo)
+    ledger_service = _ledger_service(uow_factory=uow_factory)
+    context_service = RuntimeContextService(
+        evidence_context_provider=EvidenceRuntimeContextProvider(
+            ledger_service=ledger_service,
+            projector=EvidenceDigestProjector(uow_factory=uow_factory),
+        )
+    )
+    persistence = _InMemoryToolEventPersistence(uow_factory=uow_factory)
+    tool = _FetchPageMainChainTool()
+
+    step1 = Step(id="step-1", description="读取指定 URL 页面内容", task_mode_hint="web_reading")
+    first_message, first_tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("fetch_page", {"url": url}),
+        step=step1,
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="web_reading",
+        user_message=f"读取这个页面：{url}",
+    ))
+
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    first_called_events = [
+        event for event in first_tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "fetch_page"
+    ]
+    assert len(first_called_events) == 1
+    assert first_called_events[0].function_result.success is True
+
+    step1.status = ExecutionStatus.COMPLETED
+    step1.outcome = StepOutcome(done=True, summary=str(first_message.get("summary") or "page completed"))
+    first_state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+    }
+    asyncio.run(persist_current_step_tool_events_before_evidence_gate(
+        state=first_state,
+        step=step1,
+        tool_events=first_tool_events,
+        runtime_tool_event_persistence=persistence,
+    ))
+
+    assert len(persistence.persisted_events) == 1
+    assert len(facts) == 1
+    assert facts[0].fact_kind == SandboxFactKind.FETCHED_PAGE
+    assert facts[0].payload["fetched_url_hash"] == url_hash
+
+    asyncio.run(reconcile_step_evidence_before_state_return(
+        state=first_state,
+        step=step1,
+        reconciler=ledger_service,
+    ))
+
+    page_evidence = [
+        record for record in evidence_repo.records
+        if record.evidence_kind == EvidenceKind.PAGE_EVIDENCE
+    ]
+    assert len(page_evidence) == 1
+    assert page_evidence[0].action_key == f"fetch:{url_hash}"
+    assert page_evidence[0].subject_key == f"page:{url_hash}"
+    assert page_evidence[0].reuse_policy == EvidenceReusePolicy.REUSE_ALLOWED
+    assert page_evidence[0].staleness_policy == EvidenceStalenessPolicy.RUN_SCOPED
+    assert page_evidence[0].support_level == EvidenceSupportLevel.STRONG
+    assert page_evidence[0].quality_status == EvidenceQualityStatus.VALID
+
+    digest = asyncio.run(EvidenceDigestProjector(uow_factory=uow_factory).build_digest(
+        scope=_scope("step-2"),
+        current_step_id="step-2",
+        completed_step_ids=["step-1"],
+        stage="execute",
+    ))
+    assert digest is not None
+    assert digest.source_step_ids == ["step-1"]
+    assert digest.result_handles
+    assert digest.do_not_repeat
+    assert digest.do_not_repeat[0].duplicate_decision == (
+        EvidenceDuplicateDecision.REUSE_EXISTING_EVIDENCE_PENDING_RESOLUTION
+    )
+
+    step2 = Step(id="step-2", description="再次读取同一个 URL 确认内容", task_mode_hint="web_reading")
+    state_base = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": f"再次读取同一个 URL 确认内容，不要更换 URL：{url}",
+    }
+    state = {
+        **state_base,
+        "plan": Plan(steps=[step1, step2]),
+        "step_states": [{"step_id": "step-1", "status": "completed"}],
+        "graph_metadata": {},
+    }
+    resolver = _SpyEvidenceResultHandleResolver(EvidenceResultHandleResolver(uow_factory=uow_factory))
+
+    with caplog.at_level(logging.INFO):
+        next_state = asyncio.run(execute_step_node(
+            state,
+            _FakeToolCallLLM("fetch_page", {"url": url}),
+            context_service,
+            evidence_result_handle_resolver=resolver,
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+        ))
+
+    assert resolver.called is True
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert next_state["last_executed_step"].outcome.done is True
+    second_called_events = [
+        event for event in next_state["emitted_events"]
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "fetch_page"
+    ]
+    assert len(second_called_events) == 1
+    assert second_called_events[0].function_result.success is True
+    assert second_called_events[0].function_result.data["result_handle_resolved"] is True
+
+    prepared = asyncio.run(prepare_execute_step_input(
+        state={
+            **state_base,
+            "plan": Plan(steps=[step1, Step(id="step-2", description="再次读取同一个 URL 确认内容", task_mode_hint="web_reading")]),
+            "step_states": [{"step_id": "step-1", "status": "completed"}],
+            "graph_metadata": {},
+        },
+        step=Step(id="step-2", description="再次读取同一个 URL 确认内容", task_mode_hint="web_reading"),
+        llm=object(),
+        runtime_context_service=context_service,
+        task_mode="web_reading",
+        user_message=state_base["user_message"],
+    ))
+    live_events = []
+
+    async def capture_live_event(event):
+        live_events.append(event)
+
+    direct_resolver = _SpyEvidenceResultHandleResolver(EvidenceResultHandleResolver(uow_factory=uow_factory))
+    direct_payload, direct_tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("fetch_page", {"url": url}),
+        step=Step(id="step-2", description="再次读取同一个 URL 确认内容", task_mode_hint="web_reading"),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="web_reading",
+        on_tool_event=capture_live_event,
+        user_content=prepared.user_content,
+        user_message=prepared.user_message,
+        runtime_evidence_context=prepared.runtime_evidence_context,
+        has_previous_completed_steps=prepared.has_previous_completed_steps,
+        evidence_result_handle_resolver=direct_resolver,
+        evidence_resolution_state={
+            **state_base,
+            "current_step_id": "step-2",
+        },
+    ))
+
+    assert direct_resolver.called is True
+    assert direct_payload["success"] is True
+    assert direct_payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    live_called_events = [
+        event for event in live_events
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "fetch_page"
+    ]
+    assert len(live_called_events) == 1
+    assert live_called_events[0].function_result.success is True
+    assert live_called_events[0].function_result.data["result_handle_resolved"] is True
+    assert not [
+        event for event in live_events
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "fetch_page"
+           and event.function_result is not None
+           and event.function_result.success is False
+           and event.function_result.data.get("duplicate_decision") == "reuse_existing_evidence_pending_resolution"
+    ]
+    assert direct_tool_events == live_events
+
+    log_text = caplog.text
+    assert "reuse_existing_evidence_pending_resolution" in log_text
+    assert "evidence_result_handle_resolution_started" in log_text
+    assert "evidence_result_handle_resolved" in log_text
+    assert "evidence_reuse_virtual_tool_result_returned" in log_text
+    assert "evidence_reuse_snapshot_missing" not in log_text
+    assert "browser_extract_main_content" not in log_text
+    assert "browser_view" not in log_text
+    assert "开始执行真实工具调用" not in log_text
+
+
+def test_web_reading_fetch_page_success_should_stop_before_no_tool_completion() -> None:
+    url = "http://zhangzhou.bendibao.com/tour/2025125/17804.shtm"
+    tool = _FetchPageMainChainTool()
+    llm = _FakeToolCallLLM("fetch_page", {"url": url})
+
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=llm,
+        step=Step(id="step-1", description="读取指定 URL 页面内容", task_mode_hint="web_reading"),
+        runtime_tools=[tool],
+        max_tool_iterations=3,
+        task_mode="web_reading",
+        user_message=f"读取这个页面：{url}",
+    ))
+
+    assert llm.calls == 1
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert payload["success"] is False
+    assert payload["loop_break_reason"] == "page_evidence_pending_gate"
+    assert payload["data"]["reason_code"] == "page_evidence_pending_gate"
+    assert len([
+        event for event in tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "fetch_page"
+    ]) == 1
+
+
+def test_web_reading_fetch_page_model_result_should_stop_before_no_tool_completion() -> None:
+    url = "http://zhangzhou.bendibao.com/tour/2025125/17804.shtm"
+    tool = _FetchPageModelMainChainTool()
+    llm = _FakeToolCallLLM("fetch_page", {"url": url})
+
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=llm,
+        step=Step(id="step-1", description="读取指定 URL 页面内容", task_mode_hint="web_reading"),
+        runtime_tools=[tool],
+        max_tool_iterations=3,
+        task_mode="web_reading",
+        user_message=f"读取这个页面：{url}",
+    ))
+
+    assert llm.calls == 1
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert payload["loop_break_reason"] == "page_evidence_pending_gate"
+    called_events = [
+        event for event in tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "fetch_page"
+    ]
+    assert len(called_events) == 1
+    assert isinstance(called_events[0].function_result.data, FetchedPage)
+    fact_inputs = SandboxFactToolEventProjector(
+        ledger_service=SandboxFactLedgerService(uow_factory=lambda: _UoW(facts=[], evidence=_EvidenceRepo())),
+    )._build_fact_inputs(context=SandboxFactProjectionContext(
+        scope=_scope("step-1"),
+        profile_ref=SandboxFactProfileRef(status="missing"),
+        source_event_id="event-1",
+        current_step_id="step-1",
+    ), event=called_events[0])
+    assert len(fact_inputs) == 1
+    assert fact_inputs[0].fact_kind == SandboxFactKind.FETCHED_PAGE
+
+
+def test_fetch_page_gate_should_complete_failed_web_reading_then_reuse_next_step(caplog) -> None:
+    url = "http://zhangzhou.bendibao.com/tour/2025125/17804.shtm"
+    facts: list[SandboxFactRecord] = []
+    evidence_repo = _EvidenceRepo()
+    uow_factory = lambda: _UoW(facts=facts, evidence=evidence_repo)
+    ledger_service = _ledger_service(uow_factory=uow_factory)
+    context_service = RuntimeContextService(
+        evidence_context_provider=EvidenceRuntimeContextProvider(
+            ledger_service=ledger_service,
+            projector=EvidenceDigestProjector(uow_factory=uow_factory),
+        )
+    )
+    tool = _FetchPageMainChainTool()
+    persistence = _InMemoryToolEventPersistence(uow_factory=uow_factory)
+    step1 = Step(id="step-1", description="读取指定 URL 页面内容", task_mode_hint="web_reading")
+    step2 = Step(id="step-2", description="再次读取同一个 URL 确认内容", task_mode_hint="web_reading")
+    base_state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": f"读取这个页面，之后再次读取同一个 URL 确认内容：{url}",
+        "plan": Plan(steps=[step1, step2]),
+        "step_states": [],
+        "graph_metadata": {},
+    }
+
+    with caplog.at_level(logging.INFO):
+        first_state = asyncio.run(execute_step_node(
+            base_state,
+            first_llm := _FakeToolCallLLM("fetch_page", {"url": url}),
+            context_service,
+            evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+            evidence_step_reconciler=ledger_service,
+            runtime_tool_event_persistence=persistence,
+        ))
+
+    assert first_llm.calls == 1
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert first_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert first_state["last_executed_step"].outcome.done is True
+    assert first_state["last_executed_step"].outcome.blockers == []
+    first_log_text = caplog.text
+    assert "page_evidence_pending_gate" in first_log_text
+    assert "未调用工具直接完成当前轮次" not in first_log_text
+    assert first_log_text.index("tool_event_fact_projection_completed_before_evidence_gate") < first_log_text.index(
+        "evidence_step_completion_gate_reconciled"
+    )
+    assert any(record.evidence_kind == EvidenceKind.PAGE_EVIDENCE for record in evidence_repo.records)
+    assert any(fact.fact_kind == SandboxFactKind.FETCHED_PAGE for fact in facts)
+    digest_after_step1 = asyncio.run(EvidenceDigestProjector(uow_factory=uow_factory).build_digest(
+        scope=_scope("step-2"),
+        current_step_id="step-2",
+        completed_step_ids=["step-1"],
+        stage="execute",
+    ))
+    assert digest_after_step1 is not None
+
+    next_plan = first_state["plan"]
+    state_for_second = {
+        **first_state,
+        "plan": next_plan,
+        "step_states": [{"step_id": "step-1", "status": "completed"}],
+    }
+    resolver = _SpyEvidenceResultHandleResolver(EvidenceResultHandleResolver(uow_factory=uow_factory))
+
+    with caplog.at_level(logging.INFO):
+        second_state = asyncio.run(execute_step_node(
+            state_for_second,
+            _FakeToolCallLLM("fetch_page", {"url": url}),
+            context_service,
+            evidence_result_handle_resolver=resolver,
+            runtime_tools=[tool],
+            max_tool_iterations=1,
+            evidence_step_reconciler=ledger_service,
+            runtime_tool_event_persistence=persistence,
+        ))
+
+    assert resolver.called is True
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert second_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert second_state["last_executed_step"].outcome.done is True
+    assert [fact.fact_kind for fact in facts] == [SandboxFactKind.FETCHED_PAGE]
+    assert [record.evidence_kind for record in evidence_repo.records].count(EvidenceKind.PAGE_EVIDENCE) == 1
+    assert persistence.persisted_events[-1].step_id == "step-2"
+    assert persistence.persisted_events[-1].runtime_fact_projection["fact_count"] == 0
+    second_called_events = [
+        event for event in second_state["emitted_events"]
+        if getattr(event, "type", "") == "tool"
+           and event.status == ToolEventStatus.CALLED
+           and event.function_name == "fetch_page"
+    ]
+    assert second_called_events
+    assert second_called_events[-1].function_result.success is True
+    assert second_called_events[-1].function_result.data["result_handle_resolved"] is True
+    assert second_called_events[-1].runtime_fact_projection["fact_count"] == 0
+
+    final_digest = asyncio.run(EvidenceDigestProjector(uow_factory=uow_factory).build_digest(
+        scope=_scope("step-3"),
+        current_step_id="step-3",
+        completed_step_ids=["step-1", "step-2"],
+        stage="execute",
+    ))
+    assert final_digest is not None
+    assert [
+        item for item in final_digest.do_not_repeat
+        if item.subject_key == f"page:{hash_url(url)}"
+    ] == [
+        digest_item for digest_item in digest_after_step1.do_not_repeat
+        if digest_item.subject_key == f"page:{hash_url(url)}"
+    ]
+    assert [
+        handle for handle in final_digest.result_handles
+        if handle.subject_key == f"page:{hash_url(url)}"
+    ] == [
+        handle for handle in digest_after_step1.result_handles
+        if handle.subject_key == f"page:{hash_url(url)}"
+    ]
+
+    log_text = caplog.text
+    assert "reuse_existing_evidence_pending_resolution" in log_text
+    assert "evidence_reuse_virtual_tool_result_returned" in log_text
+    assert "evidence_reuse_snapshot_missing" not in log_text
+    assert '事件="研究链路状态已写回执行态"' not in log_text
+    assert "consecutive_failure_count=1" not in log_text
+
+
+def test_fetch_page_gate_should_not_complete_partial_web_reading() -> None:
+    url = "http://zhangzhou.bendibao.com/tour/2025125/17804.shtm"
+    facts: list[SandboxFactRecord] = []
+    evidence_repo = _EvidenceRepo()
+    uow_factory = lambda: _UoW(facts=facts, evidence=evidence_repo)
+    ledger_service = _ledger_service(uow_factory=uow_factory)
+    context_service = RuntimeContextService(
+        evidence_context_provider=EvidenceRuntimeContextProvider(
+            ledger_service=ledger_service,
+            projector=EvidenceDigestProjector(uow_factory=uow_factory),
+        )
+    )
+    tool = _FetchPageMainChainTool(content="页面只返回了截断片段", is_truncated=True)
+    persistence = _InMemoryToolEventPersistence(uow_factory=uow_factory)
+    step1 = Step(id="step-1", description="读取指定 URL 页面内容", task_mode_hint="web_reading")
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        "user_message": f"读取这个页面：{url}",
+        "plan": Plan(steps=[step1]),
+        "step_states": [],
+        "graph_metadata": {},
+    }
+
+    next_state = asyncio.run(execute_step_node(
+        state,
+        _FakeToolCallLLM("fetch_page", {"url": url}),
+        context_service,
+        evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        evidence_step_reconciler=ledger_service,
+        runtime_tool_event_persistence=persistence,
+    ))
+
+    assert tool.invocations == [("fetch_page", {"url": url})]
+    assert next_state["last_executed_step"].status == ExecutionStatus.FAILED
+    assert next_state["last_executed_step"].outcome.done is False
+    page_records = [record for record in evidence_repo.records if record.evidence_kind == EvidenceKind.PAGE_EVIDENCE]
+    assert not [
+        record for record in page_records
+        if record.support_level == EvidenceSupportLevel.STRONG
+           and record.quality_status == EvidenceQualityStatus.VALID
+    ]
+
+
 def test_execute_step_node_should_run_controlled_page_verification_before_task_mode_policy(caplog) -> None:
     url = "https://example.com/a"
     url_hash = hash_url(url)
@@ -1567,8 +2407,9 @@ def test_execute_step_node_should_run_controlled_page_verification_before_task_m
             max_tool_iterations=1,
         ))
 
-    assert tool.invocations == [("fetch_page", {"url": url})]
-    assert next_state["last_executed_step"].status == ExecutionStatus.FAILED
+    assert tool.invocations == []
+    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert next_state["last_executed_step"].outcome.done is True
     evidence_kinds = [record.evidence_kind for record in evidence_repo.records]
     assert evidence_kinds.count(EvidenceKind.PAGE_EVIDENCE) == 1
     assert EvidenceKind.TOOL_FAILURE_EVIDENCE not in evidence_kinds
@@ -1576,12 +2417,13 @@ def test_execute_step_node_should_run_controlled_page_verification_before_task_m
     expected_log_events = [
         "runtime_evidence_context_built",
         "evidence_reuse_snapshot_attached_to_guard",
-        "evidence_reuse_verification_rewritten",
-        "evidence_reuse_verification_allowed",
-        "开始执行真实工具调用",
+        "reuse_existing_evidence_pending_resolution",
+        "evidence_result_handle_resolved",
+        "evidence_reuse_virtual_tool_result_returned",
     ]
     positions = [log_text.index(event_name) for event_name in expected_log_events]
     assert positions == sorted(positions)
+    assert "开始执行真实工具调用" not in log_text
     assert "task_mode_tool_blocked" not in log_text
 
 
@@ -1822,37 +2664,39 @@ def test_file_mutation_duplicate_should_normalize_fact_and_tool_paths() -> None:
 def test_execute_node_should_resolve_pending_result_before_virtual_success() -> None:
     runtime_context = _runtime_context()
     handle = runtime_context.result_handles[0]
-    prepared = type(
-        "Prepared",
-        (),
-        {
-            "result_handle_index": runtime_context.result_handle_index,
-            "runtime_evidence_context": runtime_context,
-        },
-    )()
     resolver = _Resolver(handle)
-    pending_message = {
-        "success": False,
-        "loop_break_reason": "virtual_success_pending_resolution",
-        "data": {"result_handle_id": handle.result_handle_id, "reuse_summary": "safe summary"},
-    }
+    tool = _CountingRuntimeTool({"read_file"})
 
-    resolved = asyncio.run(_resolve_pending_evidence_reuse(
-        llm_message=pending_message,
-        prepared_input=prepared,
-        state={
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("read_file", {"path": "/workspace/a.txt"}),
+        step=Step(id="step-2", description="读取文件"),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="general",
+        runtime_evidence_context=runtime_context,
+        has_previous_completed_steps=True,
+        evidence_result_handle_resolver=resolver,
+        evidence_resolution_state={
             "user_id": "user-1",
             "session_id": "session-1",
             "workspace_id": "workspace-1",
             "run_id": "run-1",
+            "current_step_id": "step-2",
         },
-        evidence_result_handle_resolver=resolver,
     ))
 
     assert resolver.called is True
-    assert resolved["success"] is True
-    assert resolved["loop_break_reason"] == "evidence_reuse_allowed"
-    assert resolved["data"]["result_handle_resolved"] is True
+    assert tool.invocations == []
+    assert payload["success"] is True
+    assert payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert payload["data"]["result_handle_resolved"] is True
+    called_events = [
+        event for event in tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "read_file"
+    ]
+    assert len(called_events) == 1
+    assert called_events[0].function_result.success is True
+    assert called_events[0].function_result.data["result_handle_id"] == handle.result_handle_id
 
 
 def test_agent_task_runner_should_reconcile_evidence_before_completed_step_event_persisted() -> None:
@@ -1893,6 +2737,110 @@ def test_graph_completion_gate_should_reconcile_before_next_step_context() -> No
     assert step.outcome is not None
     assert step.outcome.facts_learned == ["evidence backed fact"]
     assert step.outcome.evidence_reconcile_metadata["graph_completion_gate"] is True
+
+
+def test_execute_helper_should_persist_tool_event_facts_before_graph_gate() -> None:
+    persistence = _RuntimeToolEventPersistenceSpy()
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "漳州南靖土楼从厦门出发的交通方式"},
+        function_result=ToolResult(success=True, data={"results": []}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(persist_current_step_tool_events_before_evidence_gate(
+        state={
+            "user_id": "user-1",
+            "session_id": "session-1",
+            "workspace_id": "workspace-1",
+            "run_id": "run-1",
+        },
+        step=Step(id="step-1"),
+        tool_events=[event],
+        runtime_tool_event_persistence=persistence,
+    ))
+
+    assert len(persistence.calls) == 1
+    call = persistence.calls[0]
+    assert call["run_id"] == "run-1"
+    assert call["session_id"] == "session-1"
+    assert call["current_step_id"] == "step-1"
+    assert call["event"] is event
+    assert event.runtime_fact_projection["graph_main_chain"] is True
+
+
+@pytest.mark.parametrize(
+    ("state_overrides", "step"),
+    [
+        ({"run_id": ""}, Step(id="step-1")),
+        ({"session_id": ""}, Step(id="step-1")),
+        ({}, Step(id="")),
+    ],
+)
+def test_execute_helper_should_fail_closed_when_tool_event_scope_missing(state_overrides, step) -> None:
+    persistence = _RuntimeToolEventPersistenceSpy()
+    state = {
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "workspace_id": "workspace-1",
+        "run_id": "run-1",
+        **state_overrides,
+    }
+
+    with pytest.raises(ValueError, match="ToolEvent fact 投影缺少 run_id/session_id/current_step_id"):
+        asyncio.run(persist_current_step_tool_events_before_evidence_gate(
+            state=state,
+            step=step,
+            tool_events=[
+                ToolEvent(
+                    id="tool-event-1",
+                    step_id=str(step.id or "") or None,
+                    tool_call_id="call-1",
+                    tool_name="search",
+                    function_name="search_web",
+                    function_args={"query": "q"},
+                    function_result=ToolResult(success=True, data={}),
+                    status=ToolEventStatus.CALLED,
+                )
+            ],
+            runtime_tool_event_persistence=persistence,
+        ))
+
+    assert persistence.calls == []
+
+
+def test_execute_helper_should_fail_closed_when_tool_event_step_id_mismatch() -> None:
+    persistence = _RuntimeToolEventPersistenceSpy()
+
+    with pytest.raises(ValueError, match="ToolEvent step_id 与当前 step 不一致"):
+        asyncio.run(persist_current_step_tool_events_before_evidence_gate(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-1",
+            },
+            step=Step(id="step-1"),
+            tool_events=[
+                ToolEvent(
+                    id="tool-event-1",
+                    step_id="other-step",
+                    tool_call_id="call-1",
+                    tool_name="search",
+                    function_name="search_web",
+                    function_args={"query": "q"},
+                    function_result=ToolResult(success=True, data={}),
+                    status=ToolEventStatus.CALLED,
+                )
+            ],
+            runtime_tool_event_persistence=persistence,
+        ))
+
+    assert persistence.calls == []
 
 
 def test_execute_step_node_should_return_graph_gate_marker_in_state_and_completed_event() -> None:
@@ -1982,6 +2930,32 @@ def test_agent_task_runner_should_skip_reconcile_when_graph_gate_already_reconci
     asyncio.run(runner._reconcile_evidence_before_step_completed(event))
 
     assert runner._evidence_step_reconciler.calls == []
+
+
+def test_agent_task_runner_should_skip_tool_fact_projection_when_graph_already_projected() -> None:
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={"results": []}),
+        status=ToolEventStatus.CALLED,
+        runtime_fact_projection={"graph_main_chain": True},
+    )
+    runner = object.__new__(AgentTaskRunner)
+    runner._sandbox_fact_recorder = object()
+    runner._sandbox_fact_context_builder = object()
+    runner._sandbox_fact_event_projector = None
+
+    asyncio.run(runner._record_sandbox_facts_for_tool_event(
+        task=None,
+        event=event,
+        source_event_id="tool-event-1",
+    ))
+
+    assert AgentTaskRunner._graph_tool_event_fact_projected(event) is True
 
 
 def test_agent_task_runner_should_overwrite_step_outcome_with_evidence_backed_projection() -> None:
@@ -2268,6 +3242,125 @@ class _CountingRuntimeTool(BaseTool):
         return ToolResult(success=True, data={"invoked": function_name, **dict(kwargs)})
 
 
+class _SearchMainChainTool(BaseTool):
+    name = "search-main-chain-tool"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.invocations = []
+
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == "search_web"
+
+    @tool(name="search_web", description="search", parameters={}, required=["query"])
+    async def search_web(self, query: str):
+        self.invocations.append(("search_web", {"query": query}))
+        return ToolResult(
+            success=True,
+            data={
+                "query": query,
+                "total_results": 0,
+                "results": [
+                    {
+                        "title": "厦门到南靖土楼交通",
+                        "url": "https://example.com/xiamen-to-nanjing-tulou",
+                        "snippet": "可从厦门乘动车或大巴到南靖，再转乘景区交通前往土楼。",
+                    },
+                    {
+                        "title": "无 URL 结果不进入 top_results",
+                        "snippet": "该条只用于确认 result_count 不被 top_results 数量误伤。",
+                    },
+                ],
+            },
+        )
+
+
+class _FetchPageMainChainTool(BaseTool):
+    name = "fetch-page-main-chain-tool"
+
+    def __init__(self, *, content: str | None = None, is_truncated: bool = False) -> None:
+        super().__init__()
+        self.invocations = []
+        self.content = (
+            content
+            if content is not None
+            else "从厦门出发可先乘坐动车或大巴到南靖，再换乘土楼景区交通。"
+                 "页面还介绍了班次、换乘方式、景区路线和适合一日游的行程安排。" * 4
+        )
+        self.is_truncated = is_truncated
+
+    def get_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "fetch_page",
+                    "description": "fetch",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"url": {"type": "string"}},
+                        "required": ["url"],
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == "fetch_page"
+
+    @tool(name="fetch_page", description="fetch", parameters={}, required=["url"])
+    async def fetch_page(self, url: str):
+        self.invocations.append(("fetch_page", {"url": url}))
+        return ToolResult(
+            success=True,
+            data={
+                "url": url,
+                "final_url": url,
+                "title": "漳州南靖土楼交通指南",
+                "content": self.content,
+                "is_truncated": self.is_truncated,
+                "status_code": 200,
+                "content_type": "text/html",
+            },
+        )
+
+
+class _FetchPageModelMainChainTool(_FetchPageMainChainTool):
+    name = "fetch-page-model-main-chain-tool"
+
+    @tool(name="fetch_page", description="fetch", parameters={}, required=["url"])
+    async def fetch_page(self, url: str):
+        self.invocations.append(("fetch_page", {"url": url}))
+        return ToolResult(
+            success=True,
+            data=FetchedPage(
+                url=url,
+                final_url=url,
+                title="漳州南靖土楼交通指南",
+                content=self.content,
+                status_code=200,
+                content_type="text/html",
+                truncated=self.is_truncated,
+            ),
+        )
+
+
 class _SignatureFilteringTool(BaseTool):
     name = "signature-filtering-tool"
 
@@ -2356,6 +3449,43 @@ class _ProjectionStepReconciler:
                 user_confirmation_event_ids=[],
             )
         ]
+
+
+class _RuntimeToolEventPersistenceSpy:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def persist_tool_event_and_record_facts(
+            self,
+            *,
+            event,
+            run_id,
+            session_id,
+            current_step_id,
+    ):
+        self.calls.append(
+            {
+                "event": event,
+                "run_id": run_id,
+                "session_id": session_id,
+                "current_step_id": current_step_id,
+            }
+        )
+        event.runtime_fact_projection = {
+            "graph_main_chain": True,
+            "source_event_id": event.id,
+            "fact_count": 1,
+        }
+
+        return type(
+            "ToolEventFactProjectionResult",
+            (),
+            {
+                "source_event_id": event.id,
+                "fact_count": 1,
+                "sandbox_fact_event_persisted": True,
+            },
+        )()
 
 
 class _GapWritingReconciler:

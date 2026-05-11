@@ -39,6 +39,7 @@ class TaskRunnerFactory(Protocol):
             self,
             *,
             session: Session,
+            task: Task,
             llm: LLM,
             sandbox: Sandbox,
             browser: Browser,
@@ -227,6 +228,7 @@ class DefaultGraphRuntime(GraphRuntime):
     ) -> None:
         task_runner = await self._task_runner_factory(
             session=session,
+            task=task,
             llm=llm,
             sandbox=sandbox,
             browser=browser,

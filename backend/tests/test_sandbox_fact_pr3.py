@@ -11,7 +11,7 @@ from app.application.service.sandbox_fact_ledger_service import (
     SandboxFactProfileMismatchError,
 )
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
-from app.domain.models import ToolEvent, ToolEventStatus, ToolResult
+from app.domain.models import SearchResultItem, SearchResults, ToolEvent, ToolEventStatus, ToolResult
 from app.domain.models.sandbox_fact import SandboxFactKind, SandboxFactProfileRef, SandboxFactRecord
 from app.domain.services.runtime.contracts.evidence_key_normalizer import build_file_mutation_intent_hash
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext, SandboxFactRecorderPort
@@ -431,6 +431,32 @@ def test_failed_tool_event_should_record_tool_failure_fact() -> None:
     assert facts[0].payload["reason_code"] == "file_not_found"
 
 
+def test_evidence_reuse_virtual_success_should_not_project_sandbox_fact() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-virtual-reuse",
+        tool_call_id="call-virtual-reuse",
+        tool_name="fetch",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/page"},
+        function_result=ToolResult(
+            success=True,
+            data={
+                "result_handle_resolved": True,
+                "duplicate_decision": "reuse_existing_evidence",
+                "url": "https://example.com/page",
+                "content": "resolved previous page content",
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts == []
+    assert repo.saved == []
+
+
 def test_read_file_tool_event_should_compute_hash_when_tool_omits_hash() -> None:
     repo = _SandboxFactRepo()
     event = ToolEvent(
@@ -472,6 +498,106 @@ def test_tool_event_fact_projection_should_not_depend_on_tool_content() -> None:
 
     assert facts[0].fact_kind == SandboxFactKind.SEARCH_RESULT
     assert facts[0].payload["result_count"] == 1
+
+
+def test_search_web_tool_event_should_project_search_results_model_data() -> None:
+    repo = _SandboxFactRepo()
+    result_item = SearchResultItem(
+        title="南靖土楼交通攻略",
+        url="https://example.com/nanjing-tulou",
+        snippet="厦门出发可乘动车或大巴前往南靖土楼。",
+    )
+    event = ToolEvent(
+        id="tool-event-search-model",
+        tool_call_id="call-search-model",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "漳州南靖土楼从厦门出发的交通方式"},
+        function_result=ToolResult(
+            success=True,
+            data=SearchResults(
+                query="data 中的旧查询不应覆盖 args",
+                total_results=0,
+                results=[
+                    result_item,
+                    SearchResultItem(title="无链接结果", url="", snippet="缺少 URL 不应进入 top_results"),
+                ],
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    projector = _projector(repo)
+    fact_inputs = projector._build_fact_inputs(context=_context(), event=event)
+
+    assert len(fact_inputs) == 1
+    assert fact_inputs[0].top_results[0].title == result_item.title
+    assert fact_inputs[0].top_results[0].url == result_item.url
+    assert fact_inputs[0].top_results[0].snippet == result_item.snippet
+
+    facts = asyncio.run(projector.record_from_tool_event(context=_context(), event=event))
+
+    assert len(facts) == 1
+    assert facts[0].fact_kind == SandboxFactKind.SEARCH_RESULT
+    assert facts[0].source_ref.source_event_id == "stream-event-1"
+    assert facts[0].payload["query_excerpt"] == "漳州南靖土楼从厦门出发的交通方式"
+    assert facts[0].payload["result_count"] == 2
+    assert len(facts[0].payload["top_results"]) == 1
+    top_result = facts[0].payload["top_results"][0]
+    assert top_result["title"] == result_item.title
+    assert top_result["origin"] == "https://example.com"
+    assert top_result["snippet_excerpt"] == result_item.snippet
+
+
+def test_search_web_tool_event_should_use_result_length_when_count_missing() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-search-count",
+        tool_call_id="call-search-count",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "南靖土楼交通"},
+        function_result=ToolResult(
+            success=True,
+            data={
+                "query": "南靖土楼交通",
+                "results": [
+                    {"title": "A", "url": "https://example.com/a", "snippet": "a"},
+                    {"title": "B", "url": "", "snippet": "b"},
+                ],
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert facts[0].payload["result_count"] == 2
+    assert len(facts[0].payload["top_results"]) == 1
+
+
+def test_search_web_tool_event_should_project_empty_model_dump_data() -> None:
+    repo = _SandboxFactRepo()
+    event = ToolEvent(
+        id="tool-event-search-empty",
+        tool_call_id="call-search-empty",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "南靖土楼门票"},
+        function_result=ToolResult(
+            success=True,
+            data=SearchResults(query="南靖土楼门票", total_results=0, results=[]).model_dump(mode="json"),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
+
+    assert len(facts) == 1
+    assert facts[0].fact_kind == SandboxFactKind.SEARCH_RESULT
+    assert facts[0].payload["query_excerpt"] == "南靖土楼门票"
+    assert facts[0].payload["result_count"] == 0
+    assert facts[0].payload["top_results"] == []
 
 
 def test_tool_event_without_current_step_should_downgrade_to_run_scope() -> None:

@@ -55,6 +55,7 @@ from app.domain.services.runtime.contracts.access_scope_contract import AccessSc
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
+    RuntimeToolEventPersistencePort,
     SandboxFactEventProjectorPort,
     SandboxFactProjectionContextBuilderPort,
     SandboxFactRecorderPort,
@@ -96,6 +97,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -121,6 +123,7 @@ class AgentTaskRunner(TaskRunner):
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._evidence_step_reconciler = evidence_step_reconciler
+        self._runtime_tool_event_persistence = runtime_tool_event_persistence
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -170,6 +173,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
             raise RuntimeError(
@@ -207,6 +211,7 @@ class AgentTaskRunner(TaskRunner):
             runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             evidence_step_reconciler=evidence_step_reconciler,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
         )
         return cls(
             mcp_config=mcp_config,
@@ -227,6 +232,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
             evidence_step_reconciler=evidence_step_reconciler,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
         )
 
     @staticmethod
@@ -250,6 +256,7 @@ class AgentTaskRunner(TaskRunner):
             runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> RunEngine:
         return await run_engine_factory(
             llm=llm,
@@ -270,6 +277,7 @@ class AgentTaskRunner(TaskRunner):
             runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             evidence_step_reconciler=evidence_step_reconciler,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
         )
 
     def _require_run_engine(self) -> RunEngine:
@@ -366,6 +374,8 @@ class AgentTaskRunner(TaskRunner):
         event_projector = getattr(self, "_sandbox_fact_event_projector", None)
         if recorder is None or context_builder is None:
             return
+        if self._graph_tool_event_fact_projected(event):
+            return
         if not source_event_id:
             logger.warning(
                 "sandbox_fact_record_skipped",
@@ -418,6 +428,13 @@ class AgentTaskRunner(TaskRunner):
                     "error_type": exc.__class__.__name__,
                 },
             )
+
+    @staticmethod
+    def _graph_tool_event_fact_projected(event: ToolEvent) -> bool:
+        projection = getattr(event, "runtime_fact_projection", None)
+        if not isinstance(projection, dict):
+            projection = (getattr(event, "__pydantic_extra__", None) or {}).get("runtime_fact_projection")
+        return isinstance(projection, dict) and projection.get("graph_main_chain") is True
 
     async def _reconcile_evidence_before_step_completed(self, event: StepEvent) -> None:
         reconciler = getattr(self, "_evidence_step_reconciler", None)
@@ -934,6 +951,8 @@ class AgentTaskRunner(TaskRunner):
                         # 其他事件：仅记录事件历史。
                         if isinstance(event, StepEvent):
                             await self._reconcile_evidence_before_step_completed(event)
+                        if isinstance(event, ToolEvent) and self._graph_tool_event_fact_projected(event):
+                            continue
                         source_event_id = await self._put_and_add_event(task=task, event=event)
                         if isinstance(event, ToolEvent):
                             await self._record_sandbox_facts_for_tool_event(

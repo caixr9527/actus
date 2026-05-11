@@ -34,10 +34,14 @@ from app.domain.services.runtime.contracts.final_output_contract import (
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.evidence_ledger_contract import (
     EvidenceBackedFactProjection,
+    EvidenceKind,
+    EvidenceQualityStatus,
     EvidenceResultHandle,
+    EvidenceSupportLevel,
     RuntimeEvidenceContextResult,
 )
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_execution_response,
@@ -609,6 +613,73 @@ def _normalize_evidence_backed_facts(raw: Any) -> list[EvidenceBackedFactProject
     return projections
 
 
+async def persist_current_step_tool_events_before_evidence_gate(
+        *,
+        state: PlannerReActLangGraphState,
+        step: Step,
+        tool_events: List[ToolEvent],
+        runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None,
+) -> None:
+    if runtime_tool_event_persistence is None:
+        return
+    run_id = str(state.get("run_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    current_step_id = str(getattr(step, "id", "") or "").strip()
+    if not run_id or not session_id or not current_step_id:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "tool_event_fact_projection_scope_missing",
+            state=state,
+            step_id=current_step_id,
+            run_id=run_id,
+            session_id=session_id,
+            reason_code="tool_event_fact_projection_scope_missing",
+        )
+        raise ValueError("ToolEvent fact 投影缺少 run_id/session_id/current_step_id")
+
+    for event in tool_events:
+        event_status = getattr(event, "status", "")
+        normalized_status = str(getattr(event_status, "value", event_status) or "")
+        if normalized_status != "called":
+            continue
+        event_step_id = str(getattr(event, "step_id", "") or "").strip()
+        if event_step_id and event_step_id != current_step_id:
+            raise ValueError("ToolEvent step_id 与当前 step 不一致")
+        try:
+            result = await runtime_tool_event_persistence.persist_tool_event_and_record_facts(
+                event=event,
+                run_id=run_id,
+                session_id=session_id,
+                current_step_id=current_step_id,
+            )
+            log_runtime(
+                logger,
+                logging.INFO,
+                "tool_event_fact_projection_completed_before_evidence_gate",
+                state=state,
+                step_id=current_step_id,
+                function_name=str(getattr(event, "function_name", "") or ""),
+                source_event_id=result.source_event_id,
+                fact_count=result.fact_count,
+                sandbox_fact_event_persisted=result.sandbox_fact_event_persisted,
+                reason_code="tool_event_fact_projection_completed_before_evidence_gate",
+            )
+        except Exception as exc:
+            log_runtime(
+                logger,
+                logging.ERROR,
+                "tool_event_fact_projection_failed_before_evidence_gate",
+                state=state,
+                step_id=current_step_id,
+                function_name=str(getattr(event, "function_name", "") or ""),
+                tool_event_id=str(getattr(event, "id", "") or ""),
+                error_type=exc.__class__.__name__,
+                reason_code="tool_event_fact_projection_failed_before_evidence_gate",
+            )
+            raise
+
+
 async def build_execute_completed_transition(
         *,
         state: PlannerReActLangGraphState,
@@ -626,6 +697,7 @@ async def build_execute_completed_transition(
         working_memory: Dict[str, Any],
         is_entry_wait_execute_step: bool,
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+        runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
 ) -> ExecuteStepCompletedTransition:
     """构造 execute 节点 completed 分支的结果落账与状态写回。"""
     step_success = bool(normalized_execution.get("success", True))
@@ -659,11 +731,26 @@ async def build_execute_completed_transition(
         next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),
     )
     step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
-    await reconcile_step_evidence_before_state_return(
+    await persist_current_step_tool_events_before_evidence_gate(
+        state=state,
+        step=step,
+        tool_events=tool_events,
+        runtime_tool_event_persistence=runtime_tool_event_persistence,
+    )
+    evidence_records = await reconcile_step_evidence_before_state_return(
         state=state,
         step=step,
         reconciler=evidence_step_reconciler,
     )
+    if _should_complete_web_reading_from_page_evidence(task_mode=task_mode, evidence_records=evidence_records):
+        step_success = True
+        step.status = ExecutionStatus.COMPLETED
+        step_summary = _build_web_reading_evidence_summary(step=step, evidence_records=evidence_records)
+        if step.outcome is not None:
+            step.outcome.done = True
+            step.outcome.summary = step_summary
+            step.outcome.blockers = []
+            step.outcome.next_hint = ""
     completed_event = StepEvent(
         step=step.model_copy(deep=True),
         status=step.status,
@@ -745,3 +832,36 @@ async def build_execute_completed_transition(
         blocker_count=len(list(step.outcome.blockers or [])),
         open_question_count=len(list(step.outcome.open_questions or [])),
     )
+
+
+def _should_complete_web_reading_from_page_evidence(
+        *,
+        task_mode: str,
+        evidence_records: List[object],
+) -> bool:
+    if str(task_mode or "").strip().lower() != "web_reading":
+        return False
+    return any(_is_valid_strong_page_evidence(record) for record in list(evidence_records or []))
+
+
+def _is_valid_strong_page_evidence(record: object) -> bool:
+    evidence_kind = getattr(record, "evidence_kind", None)
+    support_level = getattr(record, "support_level", None)
+    quality_status = getattr(record, "quality_status", None)
+    return (
+        evidence_kind == EvidenceKind.PAGE_EVIDENCE
+        and support_level == EvidenceSupportLevel.STRONG
+        and quality_status == EvidenceQualityStatus.VALID
+    )
+
+
+def _build_web_reading_evidence_summary(*, step: Step, evidence_records: List[object]) -> str:
+    for record in list(evidence_records or []):
+        if not _is_valid_strong_page_evidence(record):
+            continue
+        payload = dict(getattr(record, "payload", None) or {})
+        title = str(payload.get("title") or "").strip()
+        origin = str(payload.get("origin") or "").strip()
+        target = title or origin or _build_step_label(step)
+        return f"当前网页阅读步骤已基于页面证据完成：{target}"
+    return f"当前网页阅读步骤已基于页面证据完成：{_build_step_label(step)}"

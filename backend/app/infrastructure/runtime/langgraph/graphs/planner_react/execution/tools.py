@@ -7,11 +7,16 @@ import logging
 from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from pydantic import BaseModel
+
 from app.domain.external import LLM
 from app.domain.models import (
     Step,
     ToolEvent,
+    ToolResult,
 )
+from app.domain.models.evidence import EvidenceResolvedStatus
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.prompts import SYSTEM_PROMPT, REACT_SYSTEM_PROMPT
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ASK_USER_FUNCTION_NAME,
@@ -166,7 +171,7 @@ def _has_pending_research_candidate_urls(execution_state: ExecutionState) -> boo
 def _should_prefer_fetch_page_for_research(execution_state: ExecutionState) -> bool:
     """判断 research 多工具候选中是否应优先执行 fetch_page。
 
-    search_web 返回的 snippet 是研究链路的一等证据；只有摘要证据不足且仍有未读取候选链接时，
+    search_web 返回的 snippet 只是候选来源信号；只有候选摘要不足且仍有未读取候选链接时，
     才在同轮多工具调用中偏向 fetch_page，避免无条件进入页面抓取。
     """
     if bool(execution_state.research_snippet_sufficient):
@@ -346,7 +351,7 @@ def _build_tool_feedback_content_with_runtime_progress(
         parsed_feedback["recommended_fetch_urls"] = list(execution_state.research_recommended_fetch_urls)
     search_evidence_summaries = _build_search_evidence_feedback_summaries(execution_state)
     if search_evidence_summaries:
-        # 最近搜索证据摘要作为同一步内的显式证据基底，避免模型忽略已拿到的 snippet。
+        # 最近搜索候选摘要只帮助模型选择下一步来源，不是 Evidence Ledger evidence，也不参与完成判定。
         parsed_feedback["search_evidence_summaries"] = search_evidence_summaries
     missing_signals = list(research_progress.get("missing_signals") or [])
     if missing_signals:
@@ -359,7 +364,7 @@ def _build_tool_feedback_content_with_runtime_progress(
 
 
 def _build_search_evidence_feedback_summaries(execution_state: ExecutionState) -> List[Dict[str, str]]:
-    """构造给下一轮模型消费的搜索摘要证据，避免模型忽略 search_web snippet。"""
+    """构造给下一轮模型消费的候选来源摘要，不作为 guard/completion 的证据来源。"""
     summaries: List[Dict[str, str]] = []
     for item in list(execution_state.research_search_evidence_items or [])[:5]:
         if not isinstance(item, dict):
@@ -430,6 +435,8 @@ async def execute_step_with_prompt(
         sandbox_capability_profile: Optional[Dict[str, Any]] = None,
         runtime_evidence_context: Optional[RuntimeEvidenceContextResult] = None,
         has_previous_completed_steps: bool = False,
+        evidence_result_handle_resolver: Any = None,
+        evidence_resolution_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。
 
@@ -770,6 +777,24 @@ async def execute_step_with_prompt(
         tool_result = policy_result.tool_result
         loop_break_reason = policy_result.loop_break_reason
         tool_cost_ms = policy_result.tool_cost_ms
+        if loop_break_reason == "virtual_success_pending_resolution":
+            resolved_message = await _resolve_pending_evidence_reuse_before_emit(
+                llm_message={
+                    "success": bool(tool_result.success),
+                    "message": str(tool_result.message or ""),
+                    "loop_break_reason": loop_break_reason,
+                    "data": dict(tool_result.data or {}),
+                },
+                runtime_evidence_context=runtime_evidence_context,
+                evidence_result_handle_resolver=evidence_result_handle_resolver,
+                state=evidence_resolution_state or {},
+            )
+            tool_result = ToolResult(
+                success=bool(resolved_message.get("success", False)),
+                message=str(resolved_message.get("summary") or resolved_message.get("message") or tool_result.message),
+                data=dict(resolved_message.get("data") or {}),
+            )
+            loop_break_reason = str(resolved_message.get("loop_break_reason") or loop_break_reason)
 
         await event_dispatcher.emit(build_called_event(lifecycle, tool_result))
         interrupt_request = extract_interrupt_request(tool_result)
@@ -812,6 +837,27 @@ async def execute_step_with_prompt(
                 interrupt_request=interrupt_request,
                 runtime_recent_action=execution_state.runtime_recent_action,
             ), event_dispatcher.emitted_events
+        if _is_valid_web_reading_fetch_result(
+                task_mode=task_mode,
+                function_name=lifecycle.normalized_function_name,
+                tool_result=tool_result,
+        ):
+            log_runtime(
+                logger,
+                logging.INFO,
+                "page_evidence_pending_gate",
+                step_id=str(step.id or ""),
+                function_name=lifecycle.function_name,
+                reason_code="page_evidence_pending_gate",
+            )
+            return {
+                "success": False,
+                "summary": "页面抓取已完成，等待 evidence gate 校验页面证据",
+                "loop_break_reason": "page_evidence_pending_gate",
+                "data": {
+                    "reason_code": "page_evidence_pending_gate",
+                },
+            }, event_dispatcher.emitted_events
         messages.append(
             build_tool_feedback_message(
                 lifecycle=lifecycle,
@@ -851,3 +897,191 @@ async def execute_step_with_prompt(
         runtime_recent_action=execution_state.runtime_recent_action,
         step_file_context=step_file_context,
     ), event_dispatcher.emitted_events
+
+
+def _is_valid_web_reading_fetch_result(
+        *,
+        task_mode: str,
+        function_name: str,
+        tool_result: ToolResult,
+) -> bool:
+    if str(task_mode or "").strip().lower() != "web_reading":
+        return False
+    if str(function_name or "").strip().lower() != "fetch_page":
+        return False
+    if not bool(tool_result.success):
+        return False
+    data = _normalize_tool_result_data(tool_result.data)
+    if data.get("result_handle_resolved") is True:
+        return False
+    has_content = bool(str(data.get("content") or data.get("excerpt") or "").strip())
+    is_truncated = bool(data.get("is_truncated") or data.get("truncated"))
+    return has_content and not is_truncated
+
+
+def _normalize_tool_result_data(value: Any) -> Dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+async def _resolve_pending_evidence_reuse_before_emit(
+        *,
+        llm_message: Dict[str, Any],
+        runtime_evidence_context: RuntimeEvidenceContextResult | None,
+        evidence_result_handle_resolver: Any,
+        state: Dict[str, Any],
+) -> Dict[str, Any]:
+    if evidence_result_handle_resolver is None or runtime_evidence_context is None:
+        return llm_message
+    data = llm_message.get("data")
+    if not isinstance(data, dict):
+        return llm_message
+    result_handle_id = str(data.get("result_handle_id") or "").strip()
+    handle = runtime_evidence_context.result_handle_index.get(result_handle_id)
+    current_step_id = str(runtime_evidence_context.current_step_id or state.get("current_step_id") or "").strip()
+    if handle is None:
+        _log_pending_evidence_resolution(
+            event_name="evidence_result_handle_resolve_failed",
+            state=state,
+            current_step_id=current_step_id,
+            result_handle_id=result_handle_id,
+            read_strategy="",
+            status="missing",
+            reason_code="result_handle_missing",
+        )
+        return {
+            **llm_message,
+            "success": False,
+            "loop_break_reason": "result_handle_missing",
+            "data": {**data, "reason_code": "result_handle_missing"},
+        }
+    scope = _build_resolver_scope(state=state, current_step_id=current_step_id)
+    if scope is None:
+        _log_pending_evidence_resolution(
+            event_name="evidence_result_handle_resolve_failed",
+            state=state,
+            current_step_id=current_step_id,
+            result_handle_id=result_handle_id,
+            read_strategy=handle.read_strategy.value,
+            status="scope_missing",
+            reason_code="evidence_scope_missing",
+        )
+        return {
+            **llm_message,
+            "success": False,
+            "loop_break_reason": "result_handle_resolve_failed",
+            "data": {**data, "reason_code": "evidence_scope_missing"},
+        }
+    _log_pending_evidence_resolution(
+        event_name="evidence_result_handle_resolution_started",
+        state=state,
+        current_step_id=str(scope.current_step_id or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=handle.read_strategy.value,
+        status="started",
+        reason_code="pending_resolution",
+    )
+    resolved = await evidence_result_handle_resolver.resolve(scope=scope, handle=handle)
+    if resolved.status != EvidenceResolvedStatus.RESOLVED:
+        _log_pending_evidence_resolution(
+            event_name=(
+                "evidence_result_handle_stale"
+                if resolved.status == EvidenceResolvedStatus.STALE
+                else "evidence_result_handle_resolve_failed"
+            ),
+            state=state,
+            current_step_id=str(scope.current_step_id or ""),
+            result_handle_id=result_handle_id,
+            read_strategy=handle.read_strategy.value,
+            status=resolved.status.value,
+            reason_code=resolved.reason_code,
+        )
+        return {
+            **llm_message,
+            "success": False,
+            "loop_break_reason": "result_handle_resolve_failed",
+            "data": {
+                **data,
+                "result_handle_resolved": False,
+                "resolved_status": resolved.status.value,
+                "reason_code": resolved.reason_code,
+            },
+        }
+    _log_pending_evidence_resolution(
+        event_name="evidence_result_handle_resolved",
+        state=state,
+        current_step_id=str(scope.current_step_id or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=handle.read_strategy.value,
+        status=resolved.status.value,
+        reason_code=resolved.reason_code or "resolved",
+    )
+    _log_pending_evidence_resolution(
+        event_name="evidence_reuse_virtual_tool_result_returned",
+        state=state,
+        current_step_id=str(scope.current_step_id or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=handle.read_strategy.value,
+        status="resolved",
+        reason_code="evidence_reuse_allowed",
+    )
+    return {
+        **llm_message,
+        "success": True,
+        "summary": str(resolved.summary or data.get("reuse_summary") or "已复用前序证据结果"),
+        "loop_break_reason": "evidence_reuse_allowed",
+        "data": {
+            **data,
+            "duplicate_decision": "reuse_existing_evidence",
+            "result_handle_resolved": True,
+            "resolved_result": resolved.model_dump(mode="json"),
+        },
+    }
+
+
+def _build_resolver_scope(
+        *,
+        state: Dict[str, Any],
+        current_step_id: str,
+) -> AccessScopeResult | None:
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    workspace_id = str(state.get("workspace_id") or "").strip()
+    run_id = str(state.get("run_id") or "").strip()
+    if not user_id or not session_id or not workspace_id or not run_id:
+        return None
+    return AccessScopeResult(
+        tenant_id=user_id,
+        user_id=user_id,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        current_step_id=current_step_id or str(state.get("current_step_id") or "").strip() or None,
+    )
+
+
+def _log_pending_evidence_resolution(
+        *,
+        event_name: str,
+        state: Dict[str, Any],
+        current_step_id: str,
+        result_handle_id: str,
+        read_strategy: str,
+        status: str,
+        reason_code: str | None,
+) -> None:
+    log_runtime(
+        logger,
+        logging.INFO,
+        event_name,
+        state={**state, "current_step_id": current_step_id or state.get("current_step_id")},
+        user_id=str(state.get("user_id") or ""),
+        workspace_id=str(state.get("workspace_id") or ""),
+        result_handle_id=result_handle_id,
+        read_strategy=read_strategy,
+        status=status,
+        reason_code=str(reason_code or ""),
+    )

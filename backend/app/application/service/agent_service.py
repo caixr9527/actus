@@ -24,6 +24,7 @@ from app.application.service.runtime_access_control_service import RuntimeAccess
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
+from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
 from app.application.service.sandbox_capability_profile_service import SandboxCapabilityProfileService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
@@ -194,12 +195,38 @@ class AgentService:
     async def _build_task_runner(
             self,
             session: Session,
+            task: Task,
             llm: LLM,
             sandbox: Sandbox,
             browser: Browser,
     ) -> AgentTaskRunner:
         """构建任务执行器，供 GraphRuntime 在创建任务时回调。"""
         evidence_step_projection = EvidenceDigestProjector(uow_factory=self._uow_factory)
+        sandbox_fact_recorder = SandboxFactToolEventProjector(
+            ledger_service=SandboxFactLedgerService(uow_factory=self._uow_factory),
+        )
+        sandbox_fact_event_projector = SandboxFactEventProjector(
+            uow_factory=self._uow_factory,
+        )
+        sandbox_fact_context_builder = SandboxFactProjectionContextBuilder(
+            access_control_service=self._get_access_control_service(),
+            workspace_runtime_service=WorkspaceRuntimeService(
+                session_id=session.id,
+                user_id=session.user_id,
+                uow_factory=self._uow_factory,
+            ),
+            user_id=session.user_id,
+            session_id=session.id,
+        )
+        runtime_tool_event_persistence = RuntimeToolEventPersistenceService(
+            session_id=session.id,
+            task=task,
+            uow_factory=self._uow_factory,
+            runtime_state_coordinator=self._get_runtime_state_coordinator(),
+            sandbox_fact_recorder=sandbox_fact_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            sandbox_fact_event_projector=sandbox_fact_event_projector,
+        )
         return await AgentTaskRunner.create(
             llm=llm,
             agent_config=self._agent_config,
@@ -217,27 +244,15 @@ class AgentService:
             tool_runtime_adapter=self._tool_runtime_adapter,
             runtime_state_coordinator=self._get_runtime_state_coordinator(),
             runtime_tool_snapshot_recorder=self._sandbox_capability_profile_service,
-            sandbox_fact_recorder=SandboxFactToolEventProjector(
-                ledger_service=SandboxFactLedgerService(uow_factory=self._uow_factory),
-            ),
-            sandbox_fact_event_projector=SandboxFactEventProjector(
-                uow_factory=self._uow_factory,
-            ),
+            sandbox_fact_recorder=sandbox_fact_recorder,
+            sandbox_fact_event_projector=sandbox_fact_event_projector,
             evidence_step_reconciler=EvidenceLedgerService(
                 uow_factory=self._uow_factory,
                 assembler=EvidenceFactAssembler(),
                 step_projection=evidence_step_projection,
             ),
-            sandbox_fact_context_builder=SandboxFactProjectionContextBuilder(
-                access_control_service=self._get_access_control_service(),
-                workspace_runtime_service=WorkspaceRuntimeService(
-                    session_id=session.id,
-                    user_id=session.user_id,
-                    uow_factory=self._uow_factory,
-                ),
-                user_id=session.user_id,
-                session_id=session.id,
-            ),
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
         )
 
     async def _ensure_periodic_sandbox_profile(self, *, user_id: str, session_id: str) -> None:

@@ -267,6 +267,12 @@ def _base_input(
         staleness_policy: EvidenceStalenessPolicy = EvidenceStalenessPolicy.RUN_SCOPED,
         result_refs: list[EvidenceResultRef] | None = None,
 ) -> EvidenceRecordInput:
+    has_result_refs = bool(result_refs)
+    resolved_reuse_policy = (
+        reuse_policy
+        if reusable or (has_result_refs and reuse_policy != EvidenceReusePolicy.REUSE_ALLOWED)
+        else EvidenceReusePolicy.DO_NOT_REUSE
+    )
     return EvidenceRecordInput(
         evidence_scope=EvidenceScope.STEP,
         evidence_kind=evidence_kind,
@@ -281,8 +287,8 @@ def _base_input(
         summary=fact.summary,
         payload=payload,
         confidence=0.8 if quality_status == EvidenceQualityStatus.VALID else 0.4,
-        reusable=reusable and bool(result_refs),
-        reuse_policy=reuse_policy if reusable and result_refs else EvidenceReusePolicy.DO_NOT_REUSE,
+        reusable=reusable and has_result_refs,
+        reuse_policy=resolved_reuse_policy if has_result_refs else EvidenceReusePolicy.DO_NOT_REUSE,
         staleness_policy=staleness_policy,
         result_refs=list(result_refs or []),
     )
@@ -416,8 +422,9 @@ def _search_evidence(*, fact: SandboxFactRecord, key_result: EvidenceActionSubje
         key_result=key_result,
         reason_code=None if is_valid else str(payload.get("reason_code") or "search_result_partial"),
     )
-    result_ref.allowed_verification_actions = ["search_web"]
-    result_ref.reason_code = result_ref.reason_code or verification_reason_code
+    if not is_valid:
+        result_ref.allowed_verification_actions = ["search_web"]
+        result_ref.reason_code = result_ref.reason_code or verification_reason_code
     return _base_input(
         fact=fact,
         key_result=key_result,
@@ -439,7 +446,12 @@ def _search_evidence(*, fact: SandboxFactRecord, key_result: EvidenceActionSubje
         support_level=EvidenceSupportLevel.STRONG if is_valid else EvidenceSupportLevel.PARTIAL,
         quality_status=EvidenceQualityStatus.VALID if is_valid else EvidenceQualityStatus.PARTIAL,
         reusable=is_valid,
-        staleness_policy=EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE,
+        reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED if is_valid else EvidenceReusePolicy.VERIFY_BEFORE_REUSE,
+        staleness_policy=(
+            EvidenceStalenessPolicy.RUN_SCOPED
+            if is_valid
+            else EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE
+        ),
         result_refs=[result_ref],
     )
 
@@ -453,8 +465,9 @@ def _page_evidence(*, fact: SandboxFactRecord, key_result: EvidenceActionSubject
         key_result=key_result,
         reason_code=None if is_valid else str(payload.get("reason_code") or "page_content_partial"),
     )
-    result_ref.allowed_verification_actions = ["fetch_page"]
-    result_ref.reason_code = result_ref.reason_code or verification_reason_code
+    if not is_valid:
+        result_ref.allowed_verification_actions = ["fetch_page"]
+        result_ref.reason_code = result_ref.reason_code or verification_reason_code
     return _base_input(
         fact=fact,
         key_result=key_result,
@@ -472,7 +485,12 @@ def _page_evidence(*, fact: SandboxFactRecord, key_result: EvidenceActionSubject
         support_level=EvidenceSupportLevel.STRONG if is_valid else EvidenceSupportLevel.PARTIAL,
         quality_status=EvidenceQualityStatus.VALID if is_valid else EvidenceQualityStatus.PARTIAL,
         reusable=is_valid,
-        staleness_policy=EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE,
+        reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED if is_valid else EvidenceReusePolicy.VERIFY_BEFORE_REUSE,
+        staleness_policy=(
+            EvidenceStalenessPolicy.RUN_SCOPED
+            if is_valid
+            else EvidenceStalenessPolicy.EXTERNAL_MAY_CHANGE
+        ),
         result_refs=[result_ref],
     )
 

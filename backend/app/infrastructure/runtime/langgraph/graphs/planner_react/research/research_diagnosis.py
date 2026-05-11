@@ -111,28 +111,64 @@ def get_page_reading_contract_state(
 ) -> Dict[str, Any]:
     """统一页面证据合同，供 route/convergence/finalizer 共享。"""
     recent_action = dict(runtime_recent_action or {})
-    evidence_items = [
+    candidate_page_summaries = [
         item for item in list(recent_action.get("web_reading_evidence_summaries") or [])
         if isinstance(item, dict)
     ]
-    if len(evidence_items) == 0 and execution_state is not None:
-        evidence_items = [
+    if len(candidate_page_summaries) == 0 and execution_state is not None:
+        candidate_page_summaries = [
             item for item in list(execution_state.web_reading_evidence_items or [])
             if isinstance(item, dict)
         ]
-    strong_evidence_items = [
-        item for item in evidence_items
-        if str(item.get("quality") or "").strip().lower() == "strong"
-    ]
+    strong_evidence_items = _extract_evidence_backed_page_items(recent_action)
     explicit_url_state = dict(recent_action.get("explicit_url_read_state") or {})
     degraded = bool(explicit_url_state.get("degraded"))
     return {
-        "has_any_evidence": len(evidence_items) > 0,
-        "evidence_items": evidence_items,
+        "has_any_evidence": len(strong_evidence_items) > 0,
+        "evidence_items": strong_evidence_items,
+        "candidate_page_summaries": candidate_page_summaries,
         "has_strong_evidence": len(strong_evidence_items) > 0,
         "strong_evidence_items": strong_evidence_items,
         "degraded": degraded,
         "explicit_url_state": explicit_url_state,
+    }
+
+
+def _extract_evidence_backed_page_items(recent_action: Dict[str, Any]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for raw_item in list(recent_action.get("evidence_backed_facts") or []):
+        item = _normalize_evidence_backed_page_item(raw_item)
+        if item:
+            items.append(item)
+    research_progress = recent_action.get("research_progress")
+    if isinstance(research_progress, dict):
+        for raw_item in list(research_progress.get("evidence_backed_facts") or []):
+            item = _normalize_evidence_backed_page_item(raw_item)
+            if item:
+                items.append(item)
+    return items
+
+
+def _normalize_evidence_backed_page_item(raw_item: Any) -> Dict[str, Any]:
+    source = raw_item if isinstance(raw_item, dict) else {}
+    if not source:
+        text = str(getattr(raw_item, "text", "") or "").strip()
+        source_event_ids = list(getattr(raw_item, "source_event_ids", []) or [])
+        fact_ids = list(getattr(raw_item, "fact_ids", []) or [])
+    else:
+        text = str(source.get("text") or source.get("summary") or "").strip()
+        source_event_ids = list(source.get("source_event_ids") or [])
+        fact_ids = list(source.get("fact_ids") or [])
+    if not text:
+        return {}
+    return {
+        "title": str(source.get("title") or "结构化页面证据").strip() if source else "结构化页面证据",
+        "url": str(source.get("url") or "").strip() if source else "",
+        "summary": text,
+        "content_length": int(source.get("content_length") or len(text)) if source else len(text),
+        "link_count": int(source.get("link_count") or len(source_event_ids or fact_ids)) if source else len(source_event_ids or fact_ids),
+        "quality": "strong",
+        "function_name": str(source.get("function_name") or "evidence_backed_fact").strip() if source else "evidence_backed_fact",
     }
 
 

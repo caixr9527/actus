@@ -100,6 +100,8 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             return [self._tool_failure_input(context=context, event=event, reason_code="tool_result_missing")]
         if not bool(result.success):
             return [self._tool_failure_input(context=context, event=event, reason_code="tool_failed")]
+        if _is_evidence_reuse_virtual_success(event):
+            return []
         if function_name in DOCUMENT_FUNCTIONS:
             return []
 
@@ -356,18 +358,26 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             data: Mapping[str, Any],
     ) -> SearchResultFactInput:
         raw_results = _sequence(data.get("results"))
-        items = [
-            SearchResultItemInput(
-                title=_first_text(_to_mapping(item).get("title"), default=""),
-                url=_first_text(_to_mapping(item).get("url"), default=""),
-                snippet=_first_text(_to_mapping(item).get("snippet"), _to_mapping(item).get("content"), default=""),
+        items: list[SearchResultItemInput] = []
+        for item in raw_results:
+            item_data = _to_mapping(item)
+            url = _first_text(item_data.get("url"), default="")
+            if not url:
+                continue
+            items.append(
+                SearchResultItemInput(
+                    title=_first_text(item_data.get("title"), default=""),
+                    url=url,
+                    snippet=_first_text(item_data.get("snippet"), item_data.get("content"), default=""),
+                )
             )
-            for item in raw_results
-        ]
+        raw_count = data.get("total_results") if data.get("total_results") is not None else data.get("result_count")
+        parsed_count = _optional_int(raw_count) if raw_count is not None else None
+        result_count = parsed_count if parsed_count and parsed_count > 0 else len(raw_results)
         return SearchResultFactInput(
             **base,
-            query=_first_text(data.get("query"), args.get("query"), default=""),
-            result_count=_optional_int(data.get("total_results") or data.get("result_count")) if (data.get("total_results") or data.get("result_count")) is not None else len(items),
+            query=_first_text(args.get("query"), data.get("query"), default=""),
+            result_count=result_count,
             top_results=items,
         )
 
@@ -471,6 +481,17 @@ def _to_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
     return {}
+
+
+def _is_evidence_reuse_virtual_success(event: ToolEvent) -> bool:
+    result = event.function_result
+    if result is None or not bool(result.success):
+        return False
+    data = result.data if isinstance(result.data, dict) else {}
+    return (
+        data.get("result_handle_resolved") is True
+        or data.get("duplicate_decision") == "reuse_existing_evidence"
+    )
 
 
 def _sequence(value: Any) -> list[Any]:

@@ -10,7 +10,7 @@ from io import StringIO
 from typing import Any, Dict, List
 from unittest.mock import patch
 
-from app.domain.models import Step, ToolResult
+from app.domain.models import Step, StepArtifactPolicy, StepOutputMode, ToolResult
 from app.domain.models.search import FetchedPage
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
@@ -190,7 +190,7 @@ def test_finalize_no_tool_call_should_retry_web_reading_without_contract_evidenc
     assert result.action == "retry"
 
 
-def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -> None:
+def test_finalize_no_tool_call_should_allow_web_reading_with_evidence_backed_fact() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="读取页面正文并概括重点")
 
@@ -203,11 +203,10 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -
         started_at=time.perf_counter(),
         iteration=0,
         runtime_recent_action={
-            "web_reading_evidence_summaries": [
+            "evidence_backed_facts": [
                 {
-                    "url": "https://example.com",
-                    "summary": "页面正文包含核心要点",
-                    "quality": "strong",
+                    "text": "页面正文包含核心要点",
+                    "source_event_ids": ["evt-page-1"],
                 }
             ]
         },
@@ -1334,7 +1333,7 @@ def test_finalize_max_iterations_should_include_query_rewrite_hint_for_low_recal
     assert "单主题自然语言短句" in str(payload.get("next_hint") or "")
 
 
-def test_finalize_max_iterations_should_converge_research_when_snippets_available() -> None:
+def test_finalize_max_iterations_should_not_converge_research_when_only_snippets_available() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="调研 LangGraph human-in-the-loop 常见实现模式")
 
@@ -1360,10 +1359,9 @@ def test_finalize_max_iterations_should_converge_research_when_snippets_availabl
         },
     )
 
-    assert payload["success"] is True
-    assert any("LangGraph 支持通过 interrupt" in str(item) for item in list(payload["facts_learned"]))
-    assert any("来源链接：https://docs.langchain.com/langgraph-platform/human-in-the-loop" == str(item) for item in
-               list(payload["facts_learned"]))
+    assert payload["success"] is False
+    assert "当前步骤暂时未能完成" in payload["summary"]
+    assert "仍未形成可交付结果" in payload["blockers"][0]
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -1421,7 +1419,7 @@ def test_apply_tool_result_effects_should_update_research_search_state() -> None
     assert execution_state.last_search_evidence_quality["reason_code"] == "snippet_insufficient"
 
 
-def test_apply_tool_result_effects_should_capture_search_snippet_evidence() -> None:
+def test_apply_tool_result_effects_should_capture_search_snippet_candidates() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="调研 OpenAI 文档并提炼要点")
     execution_context = ExecutionContext(
@@ -1614,6 +1612,53 @@ def test_apply_tool_result_effects_should_persist_cross_domain_repeat_blocks() -
         tool_executed=False,
     )
     assert execution_state.research_cross_domain_repeat_blocks == 1
+
+
+def test_apply_tool_result_effects_should_not_count_pending_evidence_reuse_as_failure() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="复用前序页面")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "再次读取同一页面"}],
+        available_tools=[],
+        available_function_names={"fetch_page", "search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+    )
+    execution_state = ExecutionState()
+
+    result = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://example.com/page"},
+        tool_result=ToolResult(
+            success=False,
+            message="reuse pending",
+            data={"duplicate_decision": "reuse_existing_evidence_pending_resolution"},
+        ),
+        loop_break_reason="virtual_success_pending_resolution",
+        guard_reason_code="evidence_reuse_pending_resolution",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+        tool_executed=False,
+    )
+
+    assert result.loop_break_reason == "virtual_success_pending_resolution"
+    assert execution_state.consecutive_failure_count == 0
+    assert execution_state.consecutive_fetch_failure_count == 0
+    assert "last_failed_action" not in execution_state.runtime_recent_action
+    assert "research_progress" not in execution_state.runtime_recent_action
 
 
 def test_apply_tool_result_effects_should_not_mark_browser_high_level_failed_on_soft_block_retry_reason() -> None:
@@ -2327,7 +2372,7 @@ def test_convergence_engine_should_reuse_rules_for_max_iteration() -> None:
     assert any("hello.txt" in str(item) for item in list(decision.payload["facts_learned"]))
 
 
-def test_research_convergence_should_break_when_snippet_sufficient() -> None:
+def test_research_convergence_should_not_break_when_only_snippet_sufficient() -> None:
     judge = ResearchConvergenceJudge()
     state = ExecutionState(
         research_snippet_sufficient=True,
@@ -2348,15 +2393,77 @@ def test_research_convergence_should_break_when_snippet_sufficient() -> None:
         execution_state=state,
     )
 
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_research_convergence_should_break_when_evidence_backed_fact_exists() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "LangGraph HITL",
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "snippet": "LangGraph 支持通过 interrupt 和 resume 将人工输入接入执行流。",
+            }
+        ],
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "evidence_backed_facts": [
+                {
+                    "text": "已形成 SEARCH_EVIDENCE：LangGraph 支持通过 interrupt 和 resume 接入人工输入。",
+                    "source_event_ids": ["evt-1"],
+                }
+            ],
+        },
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="收集 LangGraph human-in-the-loop 候选资料"),
+        task_mode="research",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
     assert result.should_break is True
     assert result.payload is not None
     assert result.payload["success"] is True
-    assert result.reason_code == "research_snippet_evidence_ready"
-    assert any("来源链接" in str(item) for item in list(result.payload["facts_learned"]))
+    assert result.reason_code == "research_evidence_ready"
+    assert any("SEARCH_EVIDENCE" in str(item) for item in list(result.payload["facts_learned"]))
     assert len(result.payload["facts_learned"]) >= 1
 
 
-def test_build_search_evidence_summaries_should_not_truncate_fields() -> None:
+def test_research_convergence_should_not_break_for_file_save_step_with_snippet_only() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "资料来源",
+                "url": "https://example.com/source",
+                "snippet": "搜索摘要只能作为候选来源，不能代表文件已经保存。",
+            }
+        ],
+        runtime_recent_action={"research_diagnosis": {"code": "search_snippet_sufficient"}},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(
+            description="搜索资料并保存到文件",
+            output_mode=StepOutputMode.NONE,
+            artifact_policy=StepArtifactPolicy.DEFAULT,
+        ),
+        task_mode="research",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_build_search_candidate_summaries_should_not_truncate_fields() -> None:
     long_title = "标题" * 80
     long_url = "https://example.com/" + ("very-long-path/" * 30)
     long_snippet = "摘要内容" * 120
@@ -2673,17 +2780,18 @@ def test_general_convergence_should_not_break_non_synthesis_general_without_file
 def test_web_reading_convergence_should_break_when_browser_evidence_ready() -> None:
     judge = WebReadingConvergenceJudge()
     state = ExecutionState(
-        web_reading_evidence_items=[
-            {
-                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
-                "title": "LangGraph HITL",
-                "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
-                "content_length": 48,
-                "link_count": 3,
-                "quality": "strong",
-            }
-        ],
-        runtime_recent_action={},
+        runtime_recent_action={
+            "evidence_backed_facts": [
+                {
+                    "text": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "source_event_ids": ["evt-page-1"],
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "content_length": 180,
+                    "link_count": 3,
+                }
+            ]
+        },
     )
 
     result = judge.evaluate_after_iteration(
@@ -2697,6 +2805,34 @@ def test_web_reading_convergence_should_break_when_browser_evidence_ready() -> N
     assert result.payload is not None
     assert result.reason_code == "web_reading_page_evidence_ready"
     assert any("页面证据" in str(item) or "来源链接" in str(item) for item in list(result.payload["facts_learned"]))
+
+
+def test_web_reading_convergence_should_not_break_when_only_summary_marked_strong() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        runtime_recent_action={
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "content_length": 180,
+                    "link_count": 3,
+                    "quality": "strong",
+                }
+            ]
+        },
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取显式 URL 页面并概括要点"),
+        task_mode="web_reading",
+        recent_function_name="browser_extract_main_content",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
 
 
 def test_web_reading_convergence_should_not_break_when_only_weak_browser_evidence_exists() -> None:
@@ -2782,6 +2918,64 @@ def test_web_reading_convergence_should_not_break_on_insufficient_non_explicit_u
 
 def test_web_reading_completion_progress_should_record_remaining_page_count() -> None:
     state = ExecutionState(
+        runtime_recent_action={
+            "evidence_backed_facts": [
+                {
+                    "text": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "source_event_ids": ["evt-page-1"],
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "content_length": 180,
+                    "link_count": 3,
+                }
+            ]
+        },
+    )
+
+    progress_state = WebReadingConvergenceJudge.get_completion_progress(
+        step=Step(description="至少读取 3 个页面，并附上来源链接"),
+        runtime_recent_action=state.runtime_recent_action,
+        execution_state=state,
+    )
+
+    progress = dict(progress_state["progress"])
+    assert progress["current_page_count"] == 1
+    assert progress["required_page_count"] == 3
+    assert progress["remaining_page_count"] == 2
+    assert progress["contract_satisfied"] is False
+
+
+def test_web_reading_completion_progress_should_ignore_summary_only_items() -> None:
+    state = ExecutionState(
+        runtime_recent_action={
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "content_length": 180,
+                    "link_count": 3,
+                    "quality": "strong",
+                }
+            ]
+        },
+    )
+
+    progress_state = WebReadingConvergenceJudge.get_completion_progress(
+        step=Step(description="读取 1 个页面，并附上来源链接"),
+        runtime_recent_action=state.runtime_recent_action,
+        execution_state=state,
+    )
+
+    progress = dict(progress_state["progress"])
+    assert progress["current_page_count"] == 0
+    assert progress["required_page_count"] == 1
+    assert progress["remaining_page_count"] == 1
+    assert progress["contract_satisfied"] is False
+
+
+def test_web_reading_completion_progress_should_not_use_runtime_summary_as_evidence() -> None:
+    state = ExecutionState(
         web_reading_evidence_items=[
             {
                 "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
@@ -2802,9 +2996,9 @@ def test_web_reading_completion_progress_should_record_remaining_page_count() ->
     )
 
     progress = dict(progress_state["progress"])
-    assert progress["current_page_count"] == 1
+    assert progress["current_page_count"] == 0
     assert progress["required_page_count"] == 3
-    assert progress["remaining_page_count"] == 2
+    assert progress["remaining_page_count"] == 3
     assert progress["contract_satisfied"] is False
 
 
@@ -2917,7 +3111,7 @@ def test_web_reading_convergence_should_break_when_explicit_url_degraded() -> No
     assert any("浏览器已打开页面" in item for item in degraded_facts)
 
 
-def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_evidence_exists() -> None:
+def test_evaluate_task_mode_policy_should_not_block_web_reading_fetch_for_summary_only() -> None:
     step = Step(description="读取页面正文并概括要点", task_mode_hint="web_reading")
     decision = evaluate_task_mode_policy(
         ConstraintInput(
@@ -2958,9 +3152,53 @@ def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_ev
         )
     )
 
+    assert decision is None
+
+
+def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_evidence_backed_fact_exists() -> None:
+    step = Step(description="读取页面正文并概括要点", task_mode_hint="web_reading")
+    decision = evaluate_task_mode_policy(
+        ConstraintInput(
+            step=step,
+            task_mode="web_reading",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"fetch_page"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                requested_max_tool_iterations=4,
+                effective_max_tool_iterations=4,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=True,
+            ),
+            execution_state=ExecutionState(
+                runtime_recent_action={
+                    "evidence_backed_facts": [
+                        {
+                            "text": "页面正文已经包含 interrupt、resume 与审批流程说明。",
+                            "source_event_ids": ["evt-page-1"],
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+
     assert decision is not None
     assert decision.reason_code == "task_mode_tool_blocked"
-    assert "强页面证据" in str(decision.message_for_model or "")
+    assert "结构化 strong 页面证据" in str(decision.message_for_model or "")
 
 
 def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_not_met() -> None:

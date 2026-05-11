@@ -25,6 +25,7 @@ from app.domain.models import (
     WorkflowRunSummary,
     SessionContextSnapshot,
     WorkflowRunStatus,
+    ToolEvent,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.memory_consolidation import MemoryConsolidationService
@@ -66,15 +67,16 @@ from app.application.service.document_input_service import (
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.evidence_runtime_ports import (
     EvidenceResultHandleResolverPort,
     EvidenceStepReconcilerPort,
 )
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
-    bind_live_event_sink,
+    bind_live_event_sinks,
     build_planner_react_langgraph_graph,
-    unbind_live_event_sink,
+    unbind_live_event_sinks,
 )
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
 from app.infrastructure.external.llm import OllamaLLMFactory
@@ -163,6 +165,7 @@ class LangGraphRunEngine(RunEngine):
             access_control_service: RuntimeAccessControlService | None = None,
             evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
@@ -178,6 +181,7 @@ class LangGraphRunEngine(RunEngine):
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._evidence_result_handle_resolver = evidence_result_handle_resolver
         self._evidence_step_reconciler = evidence_step_reconciler
+        self._runtime_tool_event_persistence = runtime_tool_event_persistence
         self._access_control_service = access_control_service or (
             RuntimeAccessControlService(uow_factory=uow_factory)
             if uow_factory is not None
@@ -206,6 +210,7 @@ class LangGraphRunEngine(RunEngine):
             data_retention_policy_service=self._data_retention_policy_service,
             evidence_result_handle_resolver=self._evidence_result_handle_resolver,
             evidence_step_reconciler=self._evidence_step_reconciler,
+            runtime_tool_event_persistence=self._runtime_tool_event_persistence,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -238,6 +243,7 @@ class LangGraphRunEngine(RunEngine):
             data_retention_policy_service: DataClassificationPolicy | None,
             evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
@@ -252,6 +258,7 @@ class LangGraphRunEngine(RunEngine):
         graph_kwargs["runtime_context_service"] = runtime_context_service
         graph_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver
         graph_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
+        graph_kwargs["runtime_tool_event_persistence"] = runtime_tool_event_persistence
 
         log_runtime(
             logger,
@@ -959,11 +966,14 @@ class LangGraphRunEngine(RunEngine):
             run_id=run_id,
             graph_input_type=type(graph_input).__name__,
         )
+        self._current_run_id = str(run_id or "")
 
-        async def _enqueue_live_event(base_event: BaseEvent) -> None:
-            await live_event_queue.put(base_event)
+        async def _ack_live_event(base_event: BaseEvent) -> BaseEvent:
+            persisted_event = await self._persist_live_event_before_graph_continues(base_event)
+            await live_event_queue.put(persisted_event)
+            return persisted_event
 
-        sink_token = bind_live_event_sink(_enqueue_live_event)
+        sink_binding = bind_live_event_sinks(None, _ack_live_event)
         graph_task: asyncio.Task | None = None
         try:
             graph_task = asyncio.create_task(
@@ -1004,7 +1014,7 @@ class LangGraphRunEngine(RunEngine):
                     emitted_event_count=len(list((state or {}).get("emitted_events") or [])),
                 )
         finally:
-            unbind_live_event_sink(sink_token)
+            unbind_live_event_sinks(sink_binding)
             if graph_task is not None and not graph_task.done():
                 graph_task.cancel()
                 with suppress(Exception):
@@ -1032,6 +1042,7 @@ class LangGraphRunEngine(RunEngine):
                 run_id=run_id,
                 elapsed_ms=elapsed_ms(started_at),
             )
+            self._current_run_id = ""
 
         for event in self._resolve_output_events(state=state, baseline_state=fallback_state):
             if deduplicator.should_emit(event):
@@ -1134,3 +1145,38 @@ class LangGraphRunEngine(RunEngine):
             if deduplicator.should_emit(event):
                 # 对外输出副本，避免下游写入 event.id 反向污染 graph state 中的同一对象。
                 yield event.model_copy(deep=True)
+
+    async def _persist_live_event_before_graph_continues(self, event: BaseEvent) -> BaseEvent:
+        if self._runtime_tool_event_persistence is None or not isinstance(event, ToolEvent):
+            return event
+        function_name = str(getattr(event, "function_name", "") or "")
+        try:
+            result = await self._runtime_tool_event_persistence.persist_tool_event_and_record_facts(
+                event=event,
+                run_id=str(getattr(self, "_current_run_id", "") or ""),
+                session_id=self._session_id,
+                current_step_id=str(getattr(event, "step_id", "") or "").strip(),
+            )
+            log_runtime(
+                logger,
+                logging.INFO,
+                "tool_event_persisted_before_graph_continues",
+                session_id=self._session_id,
+                source_event_id=result.source_event_id,
+                function_name=function_name,
+                fact_count=result.fact_count,
+                reason_code="tool_event_persisted_before_graph_continues",
+            )
+        except Exception as exc:
+            log_runtime(
+                logger,
+                logging.ERROR,
+                "tool_event_live_persistence_failed",
+                session_id=self._session_id,
+                tool_event_id=str(getattr(event, "id", "") or ""),
+                function_name=function_name,
+                error_type=exc.__class__.__name__,
+                reason_code="tool_event_live_persistence_failed",
+            )
+            raise
+        return event
