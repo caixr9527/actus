@@ -150,6 +150,29 @@ def _raw_profile(*, python_version: str = "3.12.1", node_version: str = "20.18.0
                 "path": "/usr/bin/node",
                 "details": {},
             },
+            {
+                "kind": "network",
+                "name": "network_egress",
+                "status": "available",
+                "version": "",
+                "path": "",
+                "details": {
+                    "dns_resolved": True,
+                    "https_reachable": True,
+                    "probe_targets": ["connectivity_check"],
+                },
+            },
+            {
+                "kind": "proxy",
+                "name": "proxy_configuration",
+                "status": "available",
+                "version": "",
+                "path": "",
+                "details": {
+                    "configured": False,
+                    "host_categories": [],
+                },
+            },
         ],
         "resource_limits": {
             "max_file_read_bytes": 10000,
@@ -275,6 +298,44 @@ def test_refresh_profile_should_probe_and_write_workspace_profile() -> None:
     assert profile.sandbox_id == "sandbox-1"
     assert profile.health_status == SandboxCapabilityStatus.AVAILABLE
     assert _stored_profile(workspace_repo)["profile_hash"] == profile.profile_hash
+
+
+def test_prompt_summary_should_expose_network_egress_but_not_proxy_configuration() -> None:
+    service, workspace_repo = _build_service()
+
+    profile = asyncio.run(service.refresh_profile(
+        user_id="user-1",
+        session_id="session-1",
+        reason=SandboxProfileRefreshReason.SANDBOX_CREATED,
+    ))
+
+    prompt_summary = profile.prompt_summary
+    assert "network" in prompt_summary.available_tools
+    assert "proxy" not in prompt_summary.available_tools
+    assert "proxy_configuration" not in prompt_summary.unavailable_capabilities
+    assert "network_policy" not in prompt_summary.resource_limits
+    assert _stored_profile(workspace_repo)["prompt_summary"]["available_tools"] == prompt_summary.available_tools
+
+
+def test_prompt_summary_should_not_treat_network_policy_as_network_egress() -> None:
+    service, _ = _build_service()
+    raw_profile = _raw_profile()
+    raw_profile["capabilities"] = [
+        item for item in raw_profile["capabilities"]
+        if item["name"] != "network_egress"
+    ]
+    _FakeSandbox.result = ToolResult[SandboxCapabilityProbePayload](
+        success=True,
+        data=SandboxCapabilityProbePayload(raw_profile=raw_profile),
+    )
+
+    profile = asyncio.run(service.refresh_profile(
+        user_id="user-1",
+        session_id="session-1",
+        reason=SandboxProfileRefreshReason.SANDBOX_CREATED,
+    ))
+
+    assert "network" not in profile.prompt_summary.available_tools
 
 
 def test_refresh_should_reject_cross_user_before_sandbox_lookup() -> None:

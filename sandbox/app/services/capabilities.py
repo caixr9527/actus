@@ -9,7 +9,11 @@ import os
 import platform
 import re
 import shutil
+import socket
+import time
 from urllib.parse import urlparse
+
+import httpx
 
 from app.models import ProcessInfo
 from app.models.capabilities import (
@@ -22,7 +26,12 @@ from app.services import SearXNGService, SupervisorService
 COMMAND_PROBE_TIMEOUT_SECONDS = 2
 SUPERVISOR_PROBE_TIMEOUT_SECONDS = 3
 SEARCH_PROBE_TIMEOUT_SECONDS = 3
+NETWORK_EGRESS_PROBE_TIMEOUT_SECONDS = 3
 DIRECTORY_CANDIDATES = ("/tmp", "/home/ubuntu")
+NETWORK_EGRESS_PROBE_TARGETS = (
+    ("connectivity_check", "https://example.com/"),
+)
+NETWORK_DNS_PROBE_HOSTS = ("example.com",)
 COMMAND_PROBES: dict[str, tuple[str, ...]] = {
     "python3": ("python3", "--version"),
     "pip": ("pip", "--version"),
@@ -80,6 +89,10 @@ class SandboxCapabilityProbeService:
 
         resource_limits = self._build_resource_limits()
         capabilities.extend(self._build_network_capabilities(resource_limits))
+        network_egress_item, network_egress_reason_code = await self._probe_network_egress_capability()
+        capabilities.append(network_egress_item)
+        if network_egress_reason_code:
+            reason_codes.append(network_egress_reason_code)
         raw_profile = {
             "health_status": self._resolve_health_status(capabilities),
             "cwd": self._safe_getcwd(),
@@ -368,14 +381,115 @@ class SandboxCapabilityProbeService:
             SandboxCapabilityItem(
                 kind="proxy",
                 name="proxy_configuration",
-                status="available" if proxy_configured else "unavailable",
+                status="available",
                 details={
                     "configured": proxy_configured,
                     "host_categories": proxy_categories,
                 },
-                reason_code="" if proxy_configured else "proxy_not_configured",
+                reason_code="",
             ),
         ]
+
+    async def _probe_network_egress_capability(self) -> tuple[SandboxCapabilityItem, str]:
+        started_at = time.monotonic()
+        try:
+            dns_resolved = await self._probe_dns_resolution()
+            if not dns_resolved:
+                reason_code = "network_dns_probe_failed"
+                return (
+                    SandboxCapabilityItem(
+                        kind="network",
+                        name="network_egress",
+                        status="degraded",
+                        details={
+                            "dns_resolved": False,
+                            "https_reachable": False,
+                            "probe_targets": [target for target, _ in NETWORK_EGRESS_PROBE_TARGETS],
+                            "duration_ms": self._elapsed_ms(started_at),
+                        },
+                        reason_code=reason_code,
+                    ),
+                    reason_code,
+                )
+
+            timeout = httpx.Timeout(NETWORK_EGRESS_PROBE_TIMEOUT_SECONDS)
+            async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=timeout,
+                    trust_env=True,
+            ) as client:
+                for target_name, target_url in NETWORK_EGRESS_PROBE_TARGETS:
+                    try:
+                        response = await client.head(target_url)
+                    except httpx.HTTPError:
+                        continue
+                    if response.status_code < 500:
+                        return (
+                            SandboxCapabilityItem(
+                                kind="network",
+                                name="network_egress",
+                                status="available",
+                                details={
+                                    "dns_resolved": True,
+                                    "https_reachable": True,
+                                    "probe_targets": [target_name],
+                                    "status_class": f"{response.status_code // 100}xx",
+                                    "duration_ms": self._elapsed_ms(started_at),
+                                },
+                            ),
+                            "",
+                        )
+
+            reason_code = "network_https_egress_unavailable"
+            return (
+                SandboxCapabilityItem(
+                    kind="network",
+                    name="network_egress",
+                    status="degraded",
+                    details={
+                        "dns_resolved": True,
+                        "https_reachable": False,
+                        "probe_targets": [target for target, _ in NETWORK_EGRESS_PROBE_TARGETS],
+                        "duration_ms": self._elapsed_ms(started_at),
+                    },
+                    reason_code=reason_code,
+                ),
+                reason_code,
+            )
+        except Exception:
+            reason_code = "network_egress_probe_error"
+            return (
+                SandboxCapabilityItem(
+                    kind="network",
+                    name="network_egress",
+                    status="unknown",
+                    details={
+                        "dns_resolved": False,
+                        "https_reachable": False,
+                        "probe_targets": [target for target, _ in NETWORK_EGRESS_PROBE_TARGETS],
+                        "duration_ms": self._elapsed_ms(started_at),
+                    },
+                    reason_code=reason_code,
+                ),
+                reason_code,
+            )
+
+    @staticmethod
+    async def _probe_dns_resolution() -> bool:
+        for host in NETWORK_DNS_PROBE_HOSTS:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM),
+                    timeout=NETWORK_EGRESS_PROBE_TIMEOUT_SECONDS,
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return max(0, int((time.monotonic() - started_at) * 1000))
 
     @staticmethod
     def _build_process_capability(

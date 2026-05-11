@@ -1,9 +1,11 @@
 import os
 import unittest
+from contextlib import AbstractAsyncContextManager
 from unittest.mock import patch
 
 from app.interfaces.endpoints.capabilities import get_profile
 from app.models import ProcessInfo, SandboxCapabilityProbePayload, SearXNGStatusResult
+from app.models.capabilities import SandboxCapabilityItem
 from app.services.capabilities import SandboxCapabilityProbeService
 
 
@@ -46,6 +48,24 @@ class _FakeSearXNGService:
         )
 
 
+def _available_network_egress() -> tuple:
+    return (
+        SandboxCapabilityItem(
+            kind="network",
+            name="network_egress",
+            status="available",
+            details={
+                "dns_resolved": True,
+                "https_reachable": True,
+                "probe_targets": ["connectivity_check"],
+                "status_class": "2xx",
+                "duration_ms": 1,
+            },
+        ),
+        "",
+    )
+
+
 class CapabilityProfileTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_probe_profile_should_return_sandbox_raw_profile_without_backend_fields(self) -> None:
         service = SandboxCapabilityProbeService(
@@ -53,7 +73,11 @@ class CapabilityProfileTestCase(unittest.IsolatedAsyncioTestCase):
             searxng_service=_FakeSearXNGService(),
         )
 
-        with patch("app.services.capabilities.shutil.which", return_value="/usr/bin/tool"):
+        with (
+            patch("app.services.capabilities.shutil.which", return_value="/usr/bin/tool"),
+            patch.object(SandboxCapabilityProbeService, "_probe_network_egress_capability",
+                         return_value=_available_network_egress()),
+        ):
             payload = await service.probe_profile()
 
         raw_profile = payload.raw_profile
@@ -99,12 +123,90 @@ class CapabilityProfileTestCase(unittest.IsolatedAsyncioTestCase):
             },
         )
         capability_names = {item["name"] for item in raw_profile["capabilities"]}
-        self.assertTrue({"python", "python3", "pip", "node", "npm", "git", "curl", "wget"}.issubset(capability_names))
+        self.assertTrue({"python3", "pip", "node", "npm", "git", "curl", "wget"}.issubset(capability_names))
         self.assertIn("chromium", capability_names)
         self.assertIn("x11vnc", capability_names)
         self.assertIn("searxng", capability_names)
         self.assertIn("network_policy", capability_names)
         self.assertIn("proxy_configuration", capability_names)
+        self.assertIn("network_egress", capability_names)
+
+    async def test_network_capabilities_should_not_mark_missing_proxy_as_unavailable(self) -> None:
+        service = SandboxCapabilityProbeService(
+            supervisor_service=_FakeSupervisorService(),
+            searxng_service=_FakeSearXNGService(),
+        )
+        env_patch = {
+            "HTTPS_PROXY": "",
+            "HTTP_PROXY": "",
+            "ALL_PROXY": "",
+            "https_proxy": "",
+            "http_proxy": "",
+            "all_proxy": "",
+        }
+
+        with patch.dict(os.environ, env_patch, clear=False):
+            resource_limits = service._build_resource_limits()
+            capabilities = SandboxCapabilityProbeService._build_network_capabilities(resource_limits)
+
+        capabilities = {item.name: item for item in capabilities}
+        self.assertEqual(resource_limits.network_policy, "restricted")
+        self.assertEqual(capabilities["proxy_configuration"].status, "available")
+        self.assertFalse(capabilities["proxy_configuration"].details["configured"])
+        self.assertEqual(capabilities["proxy_configuration"].reason_code, "")
+        self.assertEqual(
+            SandboxCapabilityProbeService._resolve_health_status(list(capabilities.values())),
+            "available",
+        )
+
+    async def test_network_egress_probe_should_return_degraded_when_dns_fails(self) -> None:
+        service = SandboxCapabilityProbeService(
+            supervisor_service=_FakeSupervisorService(),
+            searxng_service=_FakeSearXNGService(),
+        )
+
+        with patch.object(SandboxCapabilityProbeService, "_probe_dns_resolution", return_value=False):
+            item, reason_code = await service._probe_network_egress_capability()
+
+        self.assertEqual(item.name, "network_egress")
+        self.assertEqual(item.status, "degraded")
+        self.assertEqual(reason_code, "network_dns_probe_failed")
+        self.assertFalse(item.details["dns_resolved"])
+
+    async def test_network_egress_probe_should_not_expose_probe_url_or_response_body(self) -> None:
+        service = SandboxCapabilityProbeService(
+            supervisor_service=_FakeSupervisorService(),
+            searxng_service=_FakeSearXNGService(),
+        )
+
+        class _FakeResponse:
+            status_code = 204
+
+        class _FakeAsyncClient(AbstractAsyncContextManager):
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def head(self, url: str):
+                return _FakeResponse()
+
+        with (
+            patch.object(SandboxCapabilityProbeService, "_probe_dns_resolution", return_value=True),
+            patch("app.services.capabilities.httpx.AsyncClient", _FakeAsyncClient),
+        ):
+            item, reason_code = await service._probe_network_egress_capability()
+
+        serialized = str(item.model_dump(mode="json"))
+        self.assertEqual(item.status, "available")
+        self.assertEqual(reason_code, "")
+        self.assertIn("connectivity_check", item.details["probe_targets"])
+        self.assertNotIn("https://example.com", serialized)
+        self.assertNotIn("secret body", serialized)
 
     async def test_probe_profile_should_return_resource_limits_and_sanitized_proxy(self) -> None:
         service = SandboxCapabilityProbeService(
@@ -118,7 +220,11 @@ class CapabilityProfileTestCase(unittest.IsolatedAsyncioTestCase):
             "NO_PROXY": "",
         }
 
-        with patch.dict(os.environ, env_patch, clear=False):
+        with (
+            patch.dict(os.environ, env_patch, clear=False),
+            patch.object(SandboxCapabilityProbeService, "_probe_network_egress_capability",
+                         return_value=_available_network_egress()),
+        ):
             payload = await service.probe_profile()
 
         resource_limits = payload.raw_profile["resource_limits"]

@@ -774,6 +774,10 @@ class SandboxCapabilityProfileService(
         unavailable_capabilities: list[str] = []
         requires_confirmation: list[str] = []
         for capability in capabilities:
+            if capability.kind == SandboxCapabilityKind.PROXY:
+                continue
+            if capability.kind == SandboxCapabilityKind.NETWORK and capability.name != "network_egress":
+                continue
             if capability.status == SandboxCapabilityStatus.AVAILABLE:
                 if capability.kind in {
                     SandboxCapabilityKind.PYTHON,
@@ -813,8 +817,6 @@ class SandboxCapabilityProfileService(
             payload["max_command_seconds"] = resource_limits.max_command_seconds
         if resource_limits.max_file_read_bytes is not None:
             payload["max_file_read_bytes"] = resource_limits.max_file_read_bytes
-        if resource_limits.network_policy:
-            payload["network_policy"] = resource_limits.network_policy
         return payload
 
     @staticmethod
