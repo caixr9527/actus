@@ -23,6 +23,7 @@ from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.entry import EntryCompiler
 from app.domain.services.workspace_runtime.entry import reason_codes as entry_reason_codes
 from app.domain.services.workspace_runtime.policies.task_mode_policy import (
+    analyze_text_intent,
     classify_confirmed_user_task_mode,
     classify_step_task_mode,
 )
@@ -932,7 +933,7 @@ def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> No
     ) == "coding"
     assert classify_step_task_mode(
         Step(description="在 /tmp 下创建 hello.txt 并写入 HELLO")
-    ) == "coding"
+    ) == "file_processing"
     assert classify_step_task_mode(
         Step(description="读取 /tmp/backend.log 并整理错误摘要")
     ) == "file_processing"
@@ -1332,13 +1333,169 @@ def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_ste
     )
 
     assert state["plan"] is not None
-    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
     assert state["plan"].steps[0].artifact_policy == "allow_file_output"
     assert state["plan"].steps[0].output_mode == "file"
     # P3-一次性收口：编译后结构化字段必须保持 Enum 类型，禁止字符串回流持久化层。
     assert isinstance(state["plan"].steps[0].task_mode_hint, StepTaskModeHint)
     assert isinstance(state["plan"].steps[0].output_mode, StepOutputMode)
     assert isinstance(state["plan"].steps[0].artifact_policy, StepArtifactPolicy)
+
+
+def test_compile_step_contracts_should_keep_file_output_step_as_file_processing() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+                task_mode_hint="file_processing",
+                output_mode="file",
+                artifact_policy="require_file_output",
+                success_criteria=[
+                    "文件 /home/ubuntu/p1-3-reuse-test.md 创建成功",
+                    "文件内容为“P1-3 reuse test”",
+                ],
+            )
+        ],
+        user_message="请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.FILE
+    assert steps[0].artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_correct_general_file_write_to_file_processing() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="请创建文件 /home/ubuntu/p1-3-reuse-test.md",
+    )
+
+    assert issues == []
+    assert corrected_count == 3
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.FILE
+    assert steps[0].artifact_policy == StepArtifactPolicy.ALLOW_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_not_treat_success_criteria_as_write_intent() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="2",
+                description="读取 /home/ubuntu/p1-3-reuse-test.md，确认文件内容",
+                task_mode_hint="file_processing",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                success_criteria=[
+                    "读取内容与第一步写入内容一致",
+                    "文件 /home/ubuntu/p1-3-reuse-test.md 内容为 P1-3 reuse test",
+                ],
+            )
+        ],
+        user_message="请先创建一个 Markdown 文件，然后读取该文件确认内容。",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_keep_read_step_with_no_modify_as_read_only() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="3",
+                description="再次读取同一个文件 /home/ubuntu/p1-3-reuse-test.md，且不修改文件",
+                task_mode_hint="file_processing",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                success_criteria=[
+                    "成功再次读取文件",
+                    "内容未发生变化",
+                ],
+            )
+        ],
+        user_message=(
+            "请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md，"
+            "然后读取该文件，最后再次读取该文件且不修改文件。"
+        ),
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_analyze_text_intent_should_keep_file_target_when_reading_without_modifying() -> None:
+    signals = analyze_text_intent("再次读取同一个文件 /home/ubuntu/p1-3-reuse-test.md，且不修改文件")
+
+    assert signals["has_read_action_signal"] is True
+    assert signals["has_write_action_signal"] is False
+    assert signals["has_file_signal"] is True
+    assert signals["has_absolute_path"] is True
+
+
+def test_classify_step_task_mode_should_classify_file_write_as_file_processing_without_code_signal() -> None:
+    step = Step(
+        id="1",
+        description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+    )
+
+    assert classify_step_task_mode(step) == StepTaskModeHint.FILE_PROCESSING.value
+
+
+def test_classify_step_task_mode_should_keep_command_write_as_coding() -> None:
+    step = Step(
+        id="1",
+        description="执行命令 python -m pytest tests/test_example.py 并保存测试日志",
+    )
+
+    assert classify_step_task_mode(step) == StepTaskModeHint.CODING.value
+
+
+def test_classify_step_task_mode_should_keep_source_file_implementation_as_coding() -> None:
+    step = Step(
+        id="1",
+        description="修改 backend/app/services/foo.py 实现用户查询接口",
+    )
+
+    assert classify_step_task_mode(step) == StepTaskModeHint.CODING.value
+
+
+def test_compile_step_contracts_should_correct_source_file_implementation_to_coding() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="修改 backend/app/services/foo.py 实现用户查询接口",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="修改 backend/app/services/foo.py 实现用户查询接口",
+    )
+
+    assert issues == []
+    assert corrected_count == 3
+    assert steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert steps[0].output_mode == StepOutputMode.FILE
+    assert steps[0].artifact_policy == StepArtifactPolicy.ALLOW_FILE_OUTPUT
 
 
 def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -> None:
@@ -1470,7 +1627,9 @@ def test_create_or_reuse_plan_node_should_build_fallback_step_when_planned_task_
     assert state["plan"].status == ExecutionStatus.PENDING
     assert len(state["plan"].steps) == 1
     assert state["current_step_id"] == "fallback-execution-step"
-    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert state["plan"].steps[0].output_mode == StepOutputMode.FILE
+    assert state["plan"].steps[0].artifact_policy == StepArtifactPolicy.ALLOW_FILE_OUTPUT
     assert state["final_message"] == ""
 
 

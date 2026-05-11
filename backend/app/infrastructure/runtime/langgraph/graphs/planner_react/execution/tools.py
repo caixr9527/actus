@@ -12,6 +12,8 @@ from pydantic import BaseModel
 from app.domain.external import LLM
 from app.domain.models import (
     Step,
+    StepArtifactPolicy,
+    StepOutputMode,
     ToolEvent,
     ToolResult,
 )
@@ -29,6 +31,7 @@ from app.domain.services.runtime.normalizers import (
     normalize_url_value,
     normalize_file_path_list,
     normalize_execution_response,
+    normalize_controlled_value,
 )
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.policies import (
@@ -46,6 +49,7 @@ from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import (
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contracts import IterationConvergenceContext
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.engine import ConvergenceEngine
+from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import build_loop_break_result
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import ToolPolicyEngine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import build_interrupt_payload, \
     extract_interrupt_request
@@ -63,6 +67,8 @@ from .execution_state import ExecutionState
 from .iteration_context import build_iteration_context
 
 logger = logging.getLogger(__name__)
+
+FILE_WRITE_RESULT_FUNCTION_NAMES = {"write_file", "replace_in_file"}
 
 
 def has_available_file_context(
@@ -86,11 +92,9 @@ def _build_read_only_intent_text(
         attachment_paths: Optional[List[str]],
         artifact_paths: Optional[List[str]],
 ) -> str:
-    """只读治理只看业务语义输入，禁止把执行提示词正文混入判定。"""
+    """只读治理只看当前步骤语义和已知文件上下文，禁止多步骤用户原文污染当前 step。"""
     candidate_parts: List[str] = []
-    normalized_user_message = str(user_message or "").strip()
-    if normalized_user_message:
-        candidate_parts.append(normalized_user_message)
+    _ = user_message
     step_candidate_text = _build_step_candidate_text(step)
     if step_candidate_text:
         candidate_parts.append(step_candidate_text)
@@ -149,6 +153,41 @@ def _sandbox_profile_blocks_file_step(
         return False
     required_any = {"read_file", "write_file", "replace_in_file", "list_files", "shell_execute"}
     return len(required_any.intersection(set(available_function_names or set()))) == 0
+
+
+def _step_requires_file_write_result(step: Step) -> bool:
+    """结构化合同要求文件产物时，必须由真实写工具或后续 artifact index 证明。"""
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+    artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
+    return (
+        output_mode == StepOutputMode.FILE.value
+        or artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+    )
+
+
+def _collect_function_names_from_tool_schemas(tool_schemas: List[Dict[str, Any]]) -> set[str]:
+    function_names: set[str] = set()
+    for tool_schema in list(tool_schemas or []):
+        function_name = extract_function_name(tool_schema)
+        if function_name:
+            function_names.add(str(function_name or "").strip().lower())
+    return function_names
+
+
+def _build_file_write_tool_unavailable_payload(
+        *,
+        step: Step,
+        runtime_recent_action: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return _build_loop_break_payload(
+        step=step,
+        blocker="当前步骤要求产出文件，但执行轮次没有可用的 write_file 或 replace_in_file 工具，已拒绝模型自报文件成功。",
+        next_hint="请恢复文件写入工具能力，或重新规划为不要求文件产出的步骤。",
+        runtime_recent_action={
+            **dict(runtime_recent_action or {}),
+            "reason_code": "file_write_tool_unavailable",
+        },
+    )
 
 
 def _has_pending_research_candidate_urls(execution_state: ExecutionState) -> bool:
@@ -506,7 +545,13 @@ async def execute_step_with_prompt(
         step_id=str(step.id or ""),
         task_mode=task_mode,
         available_tool_count=len(available_tools),
+        available_function_names=sorted(available_function_names),
         blocked_tool_count=len(execution_context.blocked_function_names),
+        blocked_function_names=sorted(execution_context.blocked_function_names),
+        read_only_file_blocked_function_names=sorted(execution_context.read_only_file_blocked_function_names),
+        file_write_intent_blocked_function_names=sorted(execution_context.file_write_intent_blocked_function_names),
+        artifact_policy_blocked_function_names=sorted(execution_context.artifact_policy_blocked_function_names),
+        file_processing_shell_blocked_function_names=sorted(execution_context.file_processing_shell_blocked_function_names),
         requested_max_tool_iterations=execution_context.requested_max_tool_iterations,
         max_tool_iterations=execution_context.effective_max_tool_iterations,
     )
@@ -523,6 +568,37 @@ async def execute_step_with_prompt(
             blocker="当前等待步骤缺少可用的 message_ask_user 工具，无法向用户发起确认或选择。",
             next_hint="请先为当前运行时注入 message_ask_user 工具，再重新执行该等待步骤。",
         ), event_dispatcher.emitted_events
+
+    initial_execution_state = ExecutionState(runtime_recent_action=dict(initial_runtime_recent_action or {}))
+    _seed_execution_state_from_initial_recent_action(initial_execution_state)
+    initial_iteration_context = build_iteration_context(
+        task_mode=task_mode,
+        execution_context=execution_context,
+        execution_state=initial_execution_state,
+    )
+    initial_iteration_function_names = _collect_function_names_from_tool_schemas(
+        initial_iteration_context.iteration_tools,
+    )
+    if (
+            _step_requires_file_write_result(step)
+            and len(FILE_WRITE_RESULT_FUNCTION_NAMES.intersection(initial_iteration_function_names)) == 0
+    ):
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "文件产出步骤缺少可用写工具",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            reason_code="file_write_tool_unavailable",
+            available_function_names=sorted(available_function_names),
+            blocked_function_names=sorted(execution_context.blocked_function_names),
+            initial_iteration_function_names=sorted(initial_iteration_function_names),
+        )
+        return _build_file_write_tool_unavailable_payload(
+            step=step,
+            runtime_recent_action=initial_execution_state.runtime_recent_action,
+        ), event_dispatcher.emitted_events
+
     log_runtime(
         logger,
         logging.INFO,
@@ -532,6 +608,7 @@ async def execute_step_with_prompt(
         task_mode=task_mode,
         available_tool_count=len(available_tools),
         blocked_tool_count=len(execution_context.blocked_function_names),
+        initial_iteration_function_names=sorted(initial_iteration_function_names),
         requested_max_tool_iterations=execution_context.requested_max_tool_iterations,
         max_tool_iterations=execution_context.effective_max_tool_iterations,
     )
@@ -597,8 +674,7 @@ async def execute_step_with_prompt(
         {"role": "user", "content": execution_context.normalized_user_content}
     ]
 
-    execution_state = ExecutionState(runtime_recent_action=dict(initial_runtime_recent_action or {}))
-    _seed_execution_state_from_initial_recent_action(execution_state)
+    execution_state = initial_execution_state
 
     for index in range(execution_context.effective_max_tool_iterations):
         # P3 重构：单轮工具白名单/黑名单计算下沉，主循环只保留调度职责。
@@ -858,6 +934,14 @@ async def execute_step_with_prompt(
                     "reason_code": "page_evidence_pending_gate",
                 },
             }, event_dispatcher.emitted_events
+        loop_break_payload = build_loop_break_result(
+            loop_break_reason=loop_break_reason or "",
+            step=step,
+            tool_result=tool_result,
+            runtime_recent_action=execution_state.runtime_recent_action,
+        )
+        if loop_break_payload is not None:
+            return loop_break_payload, event_dispatcher.emitted_events
         messages.append(
             build_tool_feedback_message(
                 lifecycle=lifecycle,

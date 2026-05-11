@@ -21,6 +21,8 @@ from app.domain.models import (
     ExecutionStatus,
     Plan,
     Step,
+    StepArtifactPolicy,
+    StepOutputMode,
     StepEvent,
     StepOutcome,
     ToolEvent,
@@ -45,6 +47,7 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeTool
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_execution_response,
+    normalize_controlled_value,
     normalize_file_path_list,
     normalize_step_result_text,
     normalize_text_list,
@@ -710,11 +713,22 @@ async def build_execute_completed_transition(
         user_message=user_message,
         normalized_execution=normalized_execution,
     )
-    model_attachment_paths = normalize_attachments(normalized_execution.get("attachments"))
     tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
+    if _step_requires_file_write_result(step):
+        model_attachment_paths: List[str] = []
+    else:
+        model_attachment_paths = normalize_attachments(normalized_execution.get("attachments"))
     step_attachment_paths = normalize_file_path_list(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
     )
+    blockers = normalize_text_list(normalized_execution.get("blockers"))
+    if step_success and _step_requires_file_write_result(step) and len(tool_attachment_paths) == 0:
+        step_success = False
+        blockers = [
+            *blockers,
+            "当前步骤要求产出文件，但缺少成功 write_file 或 replace_in_file 工具事件，已拒绝按文件产出成功落账。",
+        ]
+        step_summary = f"步骤执行失败：{step_label}"
     open_questions = normalize_text_list(normalized_execution.get("open_questions"))
     evidence_backed_facts = _normalize_evidence_backed_facts(
         normalized_execution.get("evidence_backed_facts")
@@ -723,7 +737,7 @@ async def build_execute_completed_transition(
         done=step_success,
         summary=step_summary,
         produced_artifacts=step_attachment_paths,
-        blockers=normalize_text_list(normalized_execution.get("blockers")),
+        blockers=blockers,
         evidence_backed_facts=evidence_backed_facts,
         facts_learned=[item.text for item in evidence_backed_facts],
         open_questions=open_questions,
@@ -842,6 +856,15 @@ def _should_complete_web_reading_from_page_evidence(
     if str(task_mode or "").strip().lower() != "web_reading":
         return False
     return any(_is_valid_strong_page_evidence(record) for record in list(evidence_records or []))
+
+
+def _step_requires_file_write_result(step: Step) -> bool:
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+    artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
+    return (
+        output_mode == StepOutputMode.FILE.value
+        or artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+    )
 
 
 def _is_valid_strong_page_evidence(record: object) -> bool:

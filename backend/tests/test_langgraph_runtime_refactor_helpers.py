@@ -10,7 +10,18 @@ from io import StringIO
 from typing import Any, Dict, List
 from unittest.mock import patch
 
-from app.domain.models import Step, StepArtifactPolicy, StepOutputMode, ToolResult
+from app.domain.models import (
+    ExecutionStatus,
+    Plan,
+    Step,
+    StepArtifactPolicy,
+    StepEvent,
+    StepEventStatus,
+    StepOutputMode,
+    ToolEvent,
+    ToolEventStatus,
+    ToolResult,
+)
 from app.domain.models.search import FetchedPage
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
@@ -85,6 +96,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks impor
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.delivery_helpers import (
     _resolve_summary_attachment_refs,
+)
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import (
+    build_execute_completed_transition,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import (
     ToolPolicyEngine,
@@ -217,6 +231,77 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_evidence_backed_fac
     assert result.payload["success"] is True
 
 
+def test_finalize_no_tool_call_should_reject_file_output_without_write_tool_fact() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=step,
+        task_mode="file_processing",
+        llm_message={
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+                },
+                ensure_ascii=False,
+            )
+        },
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=0,
+        runtime_recent_action={},
+    )
+
+    assert result.action == "return"
+    assert result.payload is not None
+    assert result.payload["success"] is False
+    assert result.payload["attachments"] == []
+    assert any("没有成功的 write_file" in str(item) for item in result.payload["blockers"])
+
+
+def test_finalize_no_tool_call_should_not_treat_read_file_as_file_output_success() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=step,
+        task_mode="file_processing",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=0,
+        runtime_recent_action={
+            "last_successful_tool_call": {
+                "function_name": "read_file",
+                "data": {
+                    "filepath": "/home/ubuntu/p1-3-reuse-test.md",
+                    "content": "P1-3 reuse test",
+                },
+            }
+        },
+    )
+
+    assert result.action == "return"
+    assert result.payload is not None
+    assert result.payload["success"] is False
+    assert result.payload["attachments"] == []
+    assert any("没有成功的 write_file" in str(item) for item in result.payload["blockers"])
+
+
 def test_finalize_no_tool_call_should_preserve_text_outside_json_as_draft_fact() -> None:
     logger = logging.getLogger(__name__)
     markdown_text = "## 能力概述\n\nHuman-in-the-Loop 支持人工审核工具调用。"
@@ -268,6 +353,162 @@ def test_build_execution_context_should_not_block_file_generating_organization_s
 
     assert "search_web" not in execution_context.blocked_function_names
     assert "fetch_page" not in execution_context.blocked_function_names
+
+
+def test_build_execution_context_should_block_read_tools_for_current_file_creation_step_only() -> None:
+    step = Step(
+        id="step-create",
+        description="创建 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md 并写入内容“P1-3 reuse test”",
+        task_mode_hint="file_processing",
+        output_mode="file",
+        artifact_policy="require_file_output",
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="file_processing",
+        max_tool_iterations=6,
+        user_content=[
+            {
+                "type": "text",
+                "text": "用户完整请求：先创建文件，然后读取该文件，最后再次读取该文件。",
+            }
+        ],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+        },
+        user_message_text="请先创建一个 Markdown 文件，然后读取该文件。",
+    )
+
+    assert execution_context.file_write_intent_blocked_function_names == {
+        "read_file",
+        "list_files",
+        "find_files",
+        "search_in_file",
+    }
+    assert "write_file" not in execution_context.blocked_function_names
+
+
+def test_build_execution_context_should_not_block_write_tool_when_user_message_contains_later_read_step() -> None:
+    step = Step(
+        id="step-create",
+        description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+        task_mode_hint="file_processing",
+        output_mode="file",
+        artifact_policy="require_file_output",
+        success_criteria=[
+            "文件成功创建",
+            "文件内容为“P1-3 reuse test”",
+        ],
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="file_processing",
+        max_tool_iterations=6,
+        user_content=[
+            {
+                "type": "text",
+                "text": "请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md，然后读取该文件，再次读取该文件。",
+            }
+        ],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+            "replace_in_file",
+            "shell_execute",
+        },
+        user_message_text="请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md，然后读取该文件，再次读取该文件。",
+        read_only_intent_text=(
+            "创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test” "
+            "文件成功创建 文件内容为“P1-3 reuse test”"
+        ),
+    )
+
+    assert execution_context.read_only_file_blocked_function_names == set()
+    assert execution_context.file_write_intent_blocked_function_names == {
+        "read_file",
+        "list_files",
+        "find_files",
+        "search_in_file",
+    }
+    assert "write_file" not in execution_context.blocked_function_names
+    assert "replace_in_file" not in execution_context.blocked_function_names
+
+
+def test_build_execution_context_should_not_use_success_criteria_for_write_intent() -> None:
+    step = Step(
+        id="step-read",
+        description="读取 /home/ubuntu/p1-3-reuse-test.md 并确认内容",
+        task_mode_hint="file_processing",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+        success_criteria=["读取内容与第一步写入内容一致"],
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="file_processing",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": "读取文件并确认内容"}],
+        has_available_file_context=True,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+            "replace_in_file",
+        },
+        user_message_text="请读取该文件。",
+    )
+
+    assert execution_context.file_write_intent_blocked_function_names == set()
+    assert "read_file" not in execution_context.blocked_function_names
+    assert "write_file" in execution_context.artifact_policy_blocked_function_names
+    assert "replace_in_file" in execution_context.artifact_policy_blocked_function_names
+
+
+def test_build_execution_context_should_allow_source_reading_for_coding_file_write_step() -> None:
+    step = Step(
+        id="step-code",
+        description="修改 backend/app/services/foo.py 实现用户查询接口",
+        task_mode_hint="coding",
+        output_mode="file",
+        artifact_policy="allow_file_output",
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="coding",
+        max_tool_iterations=8,
+        user_content=[{"type": "text", "text": "修改源码前可以先读取相关文件。"}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+        },
+        user_message_text="修改 backend/app/services/foo.py 实现用户查询接口",
+    )
+
+    assert execution_context.file_write_intent_blocked_function_names == set()
+    assert "read_file" not in execution_context.blocked_function_names
 
 
 def test_build_tool_feedback_content_should_keep_full_fetch_page_content() -> None:
@@ -3382,8 +3623,10 @@ def test_normalize_tool_execution_args_should_keep_append_for_append_intent() ->
 class _FakeNoToolLLM:
     def __init__(self, message: Dict[str, Any]) -> None:
         self._message = message
+        self.calls = 0
 
     async def invoke(self, **kwargs: Any) -> Dict[str, Any]:
+        self.calls += 1
         return dict(self._message)
 
 
@@ -3626,6 +3869,66 @@ def test_execute_step_with_prompt_should_converge_success_when_file_output_writt
     assert payload["blockers"] == []
     assert payload["facts_learned"] == []
     assert any(getattr(event, "function_name", "") == "write_file" for event in events)
+
+
+def test_execute_step_with_prompt_should_fail_file_output_when_write_tools_filtered_out() -> None:
+    llm = _FakeNoToolLLM(
+        {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    runtime_tools = [
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "read file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "list files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+    ]
+
+    payload, events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="step-file",
+                description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容 P1-3 reuse test",
+                task_mode_hint="file_processing",
+                output_mode=StepOutputMode.FILE,
+                artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+            ),
+            runtime_tools=runtime_tools,  # type: ignore[list-item]
+            max_tool_iterations=3,
+            task_mode="file_processing",
+            user_message="请创建 /home/ubuntu/p1-3-reuse-test.md",
+        )
+    )
+
+    assert llm.calls == 0
+    assert payload["success"] is False
+    assert payload["attachments"] == []
+    assert any("没有可用的 write_file" in str(item) for item in payload["blockers"])
+    assert events == []
 
 
 def test_constraint_engine_should_resolve_rewritten_matched_tool_from_runtime_tools() -> None:
@@ -4147,6 +4450,141 @@ def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_emp
     blockers = [str(item) for item in list(payload.get("blockers") or [])]
     assert any("当前步骤无可用工具" in item for item in blockers)
     assert tool_events == []
+
+
+def test_execute_step_with_prompt_should_fail_file_output_when_no_tools_and_model_reports_attachment() -> None:
+    llm = _FakeNoToolLLM(
+        {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    payload, tool_events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="step-file",
+                description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+                output_mode=StepOutputMode.FILE,
+                artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+            ),
+            runtime_tools=[],
+            task_mode="file_processing",
+        )
+    )
+
+    assert llm.calls == 0
+    assert payload["success"] is False
+    assert payload["attachments"] == []
+    assert any("没有可用的 write_file" in str(item) for item in payload["blockers"])
+    assert tool_events == []
+
+
+def test_build_execute_completed_transition_should_fail_model_attachments_for_file_output_step() -> None:
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-1",
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={
+                "success": True,
+                "summary": "模型声称已创建文件",
+                "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+            },
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[],
+            user_message="请创建文件",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+        )
+    )
+
+    assert transition.step_success is False
+    assert transition.artifact_count == 0
+    assert step.outcome is not None
+    assert step.outcome.done is False
+    assert step.outcome.produced_artifacts == []
+    assert step.status == ExecutionStatus.FAILED
+    assert any("缺少成功 write_file" in str(item) for item in step.outcome.blockers)
+
+
+def test_build_execute_completed_transition_should_use_successful_write_tool_artifact_path() -> None:
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+    tool_event = ToolEvent(
+        id="tool-event-write",
+        step_id="step-file",
+        tool_call_id="call-write",
+        tool_name="file",
+        function_name="write_file",
+        function_args={"filepath": "/home/ubuntu/p1-3-reuse-test.md"},
+        function_result=ToolResult(success=True, data={"filepath": "/home/ubuntu/p1-3-reuse-test.md"}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-1",
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={
+                "success": True,
+                "summary": "已创建文件",
+                "attachments": ["/tmp/model-reported.md"],
+            },
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[tool_event],
+            user_message="请创建文件",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+        )
+    )
+
+    assert transition.artifact_count == 1
+    assert step.outcome is not None
+    assert step.outcome.produced_artifacts == ["/home/ubuntu/p1-3-reuse-test.md"]
 
 
 def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_explicit_url_present() -> None:

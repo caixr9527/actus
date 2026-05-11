@@ -3,7 +3,7 @@
 """P3 重构：执行循环上下文构建与步骤语义判断。"""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from app.domain.models import (
@@ -15,6 +15,7 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
     READ_ONLY_FILE_FUNCTION_NAMES,
+    SHELL_AUXILIARY_FUNCTION_NAMES,
     TASK_MODE_ALLOWED_PREFIXES,
     TASK_MODE_MAX_TOOL_ITERATIONS,
 )
@@ -51,6 +52,7 @@ class ExecutionContext:
     research_has_explicit_url: bool
     # 当前轮用户原始输入文本（不含系统拼接提示），供研究链路显式 URL 判定使用。
     current_user_message_text: str = ""
+    file_write_intent_blocked_function_names: Set[str] = field(default_factory=set)
 
 
 def step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
@@ -95,12 +97,21 @@ def build_execution_context(
     research_file_context_blocked_function_names: Set[str] = set()
     read_only_file_blocked_function_names: Set[str] = set()
     file_processing_shell_blocked_function_names: Set[str] = set()
+    file_write_intent_blocked_function_names: Set[str] = set()
     artifact_policy_blocked_function_names: Set[str] = set()
 
     # P3-1A 收敛修复：显式只读诉求下，禁止写文件/改文件/执行命令，避免“读请求写副作用”。
-    if _step_requests_read_only_file_access(
+    current_step_requests_write_only_file_output = (
+        task_mode == "file_processing"
+        and _step_requests_write_only_file_output(step=step)
+    )
+
+    if (
+            not current_step_requests_write_only_file_output
+            and _step_requests_read_only_file_access(
             step=step,
             read_only_intent_text=read_only_intent_text,
+            )
     ):
         read_only_file_blocked_function_names.update({"write_file", "replace_in_file", "shell_execute"})
         blocked_function_names.update(read_only_file_blocked_function_names)
@@ -114,9 +125,13 @@ def build_execution_context(
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
+    if current_step_requests_write_only_file_output:
+        file_write_intent_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
+        blocked_function_names.update(file_write_intent_blocked_function_names)
+
     if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
-        # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
-        file_processing_shell_blocked_function_names.add("shell_execute")
+        # 文件处理默认只走文件工具；shell 会话辅助工具没有活跃进程时只会制造失败噪音。
+        file_processing_shell_blocked_function_names.update({"shell_execute", *SHELL_AUXILIARY_FUNCTION_NAMES})
         blocked_function_names.update(file_processing_shell_blocked_function_names)
     if _step_forbids_file_output(step):
         artifact_policy_blocked_function_names.update({"write_file", "replace_in_file"})
@@ -143,6 +158,13 @@ def build_execution_context(
         {
             function_name
             for function_name in file_processing_shell_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in file_write_intent_blocked_function_names
             if function_name not in available_function_names
         }
     )
@@ -179,6 +201,7 @@ def build_execution_context(
         read_only_file_blocked_function_names=read_only_file_blocked_function_names,
         research_file_context_blocked_function_names=research_file_context_blocked_function_names,
         file_processing_shell_blocked_function_names=file_processing_shell_blocked_function_names,
+        file_write_intent_blocked_function_names=file_write_intent_blocked_function_names,
         artifact_policy_blocked_function_names=artifact_policy_blocked_function_names,
         requested_max_tool_iterations=requested_max_tool_iterations,
         effective_max_tool_iterations=effective_max_tool_iterations,
@@ -248,6 +271,29 @@ def _step_explicitly_requests_shell_execution(step: Step, user_content: Optional
         "terminal command",
     )
     return any(marker in normalized_text for marker in explicit_markers)
+
+
+def _step_requests_write_only_file_output(
+        *,
+        step: Step,
+) -> bool:
+    step_text = _build_step_action_text(step)
+    # 写文件意图只能由当前 step 契约决定，不能混入完整 execute prompt。
+    # execute prompt 可能包含用户原始多步骤请求里的“后续读取”，会污染当前创建文件步骤。
+    if not _step_explicitly_requests_file_output(step=step, file_output_intent_text=step_text):
+        return False
+    signals = _analyze_text_intent(step_text)
+    return not bool(signals.get("has_read_action_signal"))
+
+
+def _build_step_action_text(step: Step) -> str:
+    """只拼当前步骤动作文本，禁止 success_criteria 污染执行期工具治理。"""
+    parts: List[str] = []
+    for raw_item in (getattr(step, "title", ""), getattr(step, "description", "")):
+        item = str(raw_item or "").strip()
+        if item and item not in parts:
+            parts.append(item)
+    return "\n".join(parts)
 
 
 def _collect_shell_function_names(available_function_names: Set[str]) -> Set[str]:

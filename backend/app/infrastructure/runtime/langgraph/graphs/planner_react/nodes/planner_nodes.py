@@ -80,7 +80,7 @@ def _build_fallback_execution_step(user_message: str, entry_contract_payload: Di
         has_environment_write_intent(description)
         or EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN.search(description)
     )
-    task_mode = StepTaskModeHint.CODING if requires_file_output else StepTaskModeHint(task_mode_value)
+    task_mode = StepTaskModeHint(task_mode_value)
     output_mode = StepOutputMode.FILE if requires_file_output else StepOutputMode.NONE
     artifact_policy = (
         StepArtifactPolicy.ALLOW_FILE_OUTPUT

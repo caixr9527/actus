@@ -2699,6 +2699,147 @@ def test_execute_node_should_resolve_pending_result_before_virtual_success() -> 
     assert called_events[0].function_result.data["result_handle_id"] == handle.result_handle_id
 
 
+def test_file_processing_reuse_resolution_should_complete_step_payload() -> None:
+    runtime_context = _runtime_context()
+    handle = runtime_context.result_handles[0]
+    resolver = _Resolver(handle)
+    tool = _CountingRuntimeTool({"read_file"})
+
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_FakeToolCallLLM("read_file", {"filepath": "/workspace/a.txt"}),
+        step=Step(
+            id="step-3",
+            description="再次读取同一个文件 /workspace/a.txt，不做任何修改",
+            task_mode_hint="file_processing",
+            output_mode="none",
+            artifact_policy="forbid_file_output",
+        ),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="file_processing",
+        runtime_evidence_context=runtime_context,
+        has_previous_completed_steps=True,
+        evidence_result_handle_resolver=resolver,
+        evidence_resolution_state={
+            "user_id": "user-1",
+            "session_id": "session-1",
+            "workspace_id": "workspace-1",
+            "run_id": "run-1",
+            "current_step_id": "step-3",
+        },
+    ))
+
+    assert resolver.called is True
+    assert tool.invocations == []
+    assert payload["success"] is True
+    assert payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert payload["blockers"] == []
+    assert payload["data"]["result_handle_resolved"] is True
+    called_events = [
+        event for event in tool_events
+        if event.status == ToolEventStatus.CALLED and event.function_name == "read_file"
+    ]
+    assert len(called_events) == 1
+    assert called_events[0].function_result.success is True
+
+
+def test_file_write_intent_should_block_read_tools_before_executor() -> None:
+    tool = _FileRuntimeTool({"search_in_file", "write_file"})
+
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_TwoTurnLLM(
+            first_function_name="search_in_file",
+            first_function_args={"filepath": "/home/ubuntu/p1-3-reuse-test.md", "regex": ".*"},
+            second_content=json.dumps(
+                {
+                    "success": True,
+                    "summary": "已改用写文件工具",
+                },
+                ensure_ascii=False,
+            ),
+        ),
+        step=Step(
+            id="step-write",
+            description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容 P1-3 reuse test",
+            output_mode="file",
+            artifact_policy="require_file_output",
+        ),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="file_processing",
+    ))
+
+    assert payload["success"] is False
+    assert ("search_in_file", {"filepath": "/home/ubuntu/p1-3-reuse-test.md", "regex": ".*"}) not in tool.invocations
+    called_events = [event for event in tool_events if event.status == ToolEventStatus.CALLED]
+    assert called_events[0].function_name == "search_in_file"
+    assert called_events[0].function_result.success is False
+    assert called_events[0].function_result.data["reason_code"] == "file_write_intent_read_tool_blocked"
+
+
+def test_file_processing_should_block_shell_auxiliary_without_explicit_shell() -> None:
+    tool = _FileRuntimeTool({"shell_wait_process", "write_file"})
+
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_TwoTurnLLM(
+            first_function_name="shell_wait_process",
+            first_function_args={"seconds": 1},
+            second_content=json.dumps(
+                {
+                    "success": True,
+                    "summary": "已停止 shell 辅助工具",
+                },
+                ensure_ascii=False,
+            ),
+        ),
+        step=Step(
+            id="step-shell-aux",
+            description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容 P1-3 reuse test",
+            output_mode="file",
+            artifact_policy="require_file_output",
+        ),
+        runtime_tools=[tool],
+        max_tool_iterations=1,
+        task_mode="file_processing",
+    ))
+
+    assert payload["success"] is False
+    assert tool.invocations == []
+    called_events = [event for event in tool_events if event.status == ToolEventStatus.CALLED]
+    assert called_events[0].function_name == "shell_wait_process"
+    assert called_events[0].function_result.success is False
+    assert called_events[0].function_result.data["reason_code"] == "file_processing_shell_auxiliary_blocked"
+
+
+def test_successful_list_files_should_not_be_overwritten_by_plain_text_parse_failure() -> None:
+    tool = _FileRuntimeTool({"list_files"})
+
+    payload, tool_events = asyncio.run(execute_step_with_prompt(
+        llm=_TwoTurnLLM(
+            first_function_name="list_files",
+            first_function_args={"dir_path": "/home/ubuntu"},
+            second_content="/home/ubuntu 目录下目前只有一个文件：hello.md",
+        ),
+        step=Step(
+            id="atomic-action-step",
+            description="列出 /home/ubuntu 下的文件",
+            output_mode="none",
+            artifact_policy="forbid_file_output",
+        ),
+        runtime_tools=[tool],
+        max_tool_iterations=2,
+        task_mode="file_processing",
+    ))
+
+    assert payload["success"] is True
+    assert payload["result"] == "当前目录：/home/ubuntu\n文件列表：hello.md"
+    assert "hello.md" in payload["facts_learned"][1]
+    assert tool.invocations == [("list_files", {"dir_path": "/home/ubuntu"})]
+    called_events = [event for event in tool_events if event.status == ToolEventStatus.CALLED]
+    assert called_events[0].function_name == "list_files"
+    assert called_events[0].function_result.success is True
+
+
 def test_agent_task_runner_should_reconcile_evidence_before_completed_step_event_persisted() -> None:
     step = Step(id="step-1")
     event = StepEvent(step=step, status="completed")
@@ -3240,6 +3381,86 @@ class _CountingRuntimeTool(BaseTool):
     async def invoke(self, function_name: str, **kwargs):
         self.invocations.append((function_name, dict(kwargs)))
         return ToolResult(success=True, data={"invoked": function_name, **dict(kwargs)})
+
+
+class _FileRuntimeTool(BaseTool):
+    name = "file-runtime-tool"
+
+    def __init__(self, function_names: set[str]) -> None:
+        super().__init__()
+        self.function_names = set(function_names)
+        self.invocations = []
+
+    def get_tools(self):
+        properties_by_name = {
+            "list_files": {"dir_path": {"type": "string"}},
+            "read_file": {"filepath": {"type": "string"}},
+            "search_in_file": {"filepath": {"type": "string"}, "regex": {"type": "string"}},
+            "write_file": {"filepath": {"type": "string"}, "content": {"type": "string"}},
+            "shell_kill_process": {},
+            "shell_wait_process": {"seconds": {"type": "integer"}},
+            "shell_write_input": {"input_text": {"type": "string"}, "press_enter": {"type": "boolean"}},
+        }
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                    "description": function_name,
+                    "parameters": {
+                        "type": "object",
+                        "properties": dict(properties_by_name.get(function_name) or {}),
+                    },
+                },
+            }
+            for function_name in sorted(self.function_names)
+        ]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() in self.function_names
+
+    async def invoke(self, function_name: str, **kwargs):
+        normalized_name = str(function_name or "").strip().lower()
+        self.invocations.append((normalized_name, dict(kwargs)))
+        if normalized_name == "list_files":
+            return ToolResult(
+                success=True,
+                data={"dir_path": kwargs.get("dir_path"), "files": [{"name": "hello.md"}]},
+            )
+        if normalized_name == "write_file":
+            return ToolResult(
+                success=True,
+                data={
+                    "filepath": kwargs.get("filepath"),
+                    "content_length": len(str(kwargs.get("content") or "")),
+                },
+            )
+        return ToolResult(success=True, data={"invoked": normalized_name, **dict(kwargs)})
+
+
+class _TwoTurnLLM:
+    def __init__(self, *, first_function_name: str, first_function_args: dict, second_content: str) -> None:
+        self.first_function_name = first_function_name
+        self.first_function_args = dict(first_function_args)
+        self.second_content = second_content
+        self.calls = 0
+
+    async def invoke(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": self.first_function_name,
+                            "arguments": json.dumps(self.first_function_args, ensure_ascii=False),
+                        },
+                    }
+                ]
+            }
+        return {"content": self.second_content}
 
 
 class _SearchMainChainTool(BaseTool):

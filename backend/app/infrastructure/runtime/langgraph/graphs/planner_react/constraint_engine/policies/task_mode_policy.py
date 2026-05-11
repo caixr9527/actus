@@ -10,7 +10,10 @@ from __future__ import annotations
 from typing import Optional
 
 from app.domain.models import BrowserPageType
-from app.domain.services.runtime.contracts.langgraph_settings import READ_ONLY_FILE_FUNCTION_NAMES
+from app.domain.services.runtime.contracts.langgraph_settings import (
+    READ_ONLY_FILE_FUNCTION_NAMES,
+    SHELL_AUXILIARY_FUNCTION_NAMES,
+)
 from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_retry_block_message as _build_browser_high_level_retry_block_message,
     build_browser_route_block_message as _build_browser_route_block_message,
@@ -27,7 +30,9 @@ from ..reason_codes import (
     REASON_BROWSER_CLICK_TARGET_BLOCKED,
     REASON_BROWSER_HIGH_LEVEL_RETRY_BLOCKED,
     REASON_BROWSER_ROUTE_BLOCKED,
+    REASON_FILE_PROCESSING_SHELL_AUXILIARY_BLOCKED,
     REASON_FILE_PROCESSING_SHELL_EXPLICIT_REQUIRED,
+    REASON_FILE_WRITE_INTENT_READ_TOOL_BLOCKED,
     REASON_INVALID_TOOL,
     REASON_RESEARCH_FILE_CONTEXT_REQUIRED,
     REASON_TASK_MODE_TOOL_BLOCKED,
@@ -149,11 +154,18 @@ def evaluate_task_mode_policy(constraint_input: ConstraintInput) -> Optional[Con
         message = "当前步骤属于检索任务，只有在用户消息或附件中出现明确文件路径/文件名时，才能调用文件工具。"
         return _hard_block(REASON_RESEARCH_FILE_CONTEXT_REQUIRED, message)
 
+    if normalized_function_name in set(ctx.file_write_intent_blocked_function_names or set()):
+        message = "当前步骤是明确的文件创建/写入任务，请直接使用 write_file 或 replace_in_file，不要先调用只读文件工具。"
+        return _hard_block(REASON_FILE_WRITE_INTENT_READ_TOOL_BLOCKED, message)
+
     if task_mode == "web_reading" and normalized_function_name in READ_ONLY_FILE_FUNCTION_NAMES:
         message = "当前步骤属于网页读取任务，请优先使用 search_web、fetch_page 或浏览器高阶读取工具，不要回退到文件工具。"
         return _hard_block(REASON_WEB_READING_FILE_TOOL_BLOCKED, message)
 
     if normalized_function_name in set(ctx.file_processing_shell_blocked_function_names or set()):
+        if normalized_function_name in set(SHELL_AUXILIARY_FUNCTION_NAMES):
+            message = "当前步骤属于文件处理，且没有活跃 shell 命令会话，禁止调用 shell 会话辅助工具。"
+            return _hard_block(REASON_FILE_PROCESSING_SHELL_AUXILIARY_BLOCKED, message)
         message = "当前步骤属于文件处理，默认禁止调用 shell_execute。仅在用户明确要求执行命令时才允许。"
         return _hard_block(REASON_FILE_PROCESSING_SHELL_EXPLICIT_REQUIRED, message)
 
@@ -211,7 +223,11 @@ def _hard_block(reason_code: str, message: str) -> ConstraintDecision:
         reason_code=reason_code,
         block_mode="hard_block_break",
         loop_break_reason=reason_code,
-        tool_result_payload=ConstraintToolResultPayload(success=False, message=message),
+        tool_result_payload=ConstraintToolResultPayload(
+            success=False,
+            message=message,
+            data={"reason_code": reason_code},
+        ),
         message_for_model=message,
     )
 
