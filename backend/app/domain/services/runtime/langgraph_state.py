@@ -37,7 +37,6 @@ from app.domain.services.runtime.normalizers import (
     normalize_file_path_list,
     normalize_message_window_entry,
     normalize_plan_payload,
-    normalize_ref_list,
     normalize_step_payload,
     normalize_step_outcome_payload,
     normalize_text_list,
@@ -629,7 +628,7 @@ class GraphStateContractMapper:
         return cls._normalize_recent_run_briefs(raw)
 
     @staticmethod
-    def _truncate_brief_summary(raw: Any, *, max_chars: int = 200) -> str:
+    def _truncate_brief_summary(raw: Any, *, max_chars: int = 5000) -> str:
         normalized = str(raw or "").strip()
         if len(normalized) <= max_chars:
             return normalized
@@ -894,7 +893,8 @@ class GraphStateContractMapper:
             "task_mode": cls._normalize_task_mode(graph_state_from_metadata.get("task_mode")),
             "environment_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("environment_digest")),
             "observation_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("observation_digest")),
-            "recent_action_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("recent_action_digest")),
+            "recent_action_digest": cls._normalize_runtime_digest(
+                graph_state_from_metadata.get("recent_action_digest")),
             "retrieved_memories": cls._normalize_retrieved_memories(
                 graph_state_from_metadata.get("retrieved_memories")),
             "pending_memory_writes": cls._normalize_list_memory(graph_state_from_metadata.get("pending_memory_writes")),
@@ -994,14 +994,16 @@ class GraphStateContractMapper:
             if isinstance(event, PlanEvent):
                 plan = event.plan.model_copy(deep=True)
                 step_states = cls._build_step_states_from_plan(plan)
-                next_state["current_step_id"] = None if (waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
+                next_state["current_step_id"] = None if (
+                            waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
                     plan)
                 continue
 
             if isinstance(event, StepEvent):
                 step_states = cls._upsert_step_state(step_states=step_states, step=event.step)
                 plan = cls._upsert_step_into_plan(plan=plan, step=event.step, step_states=step_states)
-                next_state["current_step_id"] = None if (waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
+                next_state["current_step_id"] = None if (
+                            waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
                     plan)
                 continue
 

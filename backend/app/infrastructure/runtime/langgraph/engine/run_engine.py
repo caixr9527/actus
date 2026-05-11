@@ -14,6 +14,13 @@ from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 
 from langgraph.types import Command
 
+from app.application.service.document_input_service import (
+    DocumentAttachmentSource,
+    DocumentInputService,
+    FileStorageDocumentAttachmentReader,
+)
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.domain.external import LLM, FileStorage
 from app.domain.models import (
     BaseEvent,
@@ -35,6 +42,10 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     DataClassificationPolicy,
     DefaultDataClassificationPolicy,
 )
+from app.domain.services.runtime.contracts.evidence_runtime_ports import (
+    EvidenceResultHandleResolverPort,
+    EvidenceStepReconcilerPort,
+)
 from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
     build_trace_id,
@@ -44,6 +55,8 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     now_perf,
     reset_trace_id,
 )
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
 from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
     PlannerReActLangGraphState,
@@ -59,19 +72,7 @@ from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime import WorkspaceManager
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.application.service.document_input_service import (
-    DocumentAttachmentSource,
-    DocumentInputService,
-    FileStorageDocumentAttachmentReader,
-)
-from app.application.service.runtime_access_control_service import RuntimeAccessControlService
-from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
-from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
-from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
-from app.domain.services.runtime.contracts.evidence_runtime_ports import (
-    EvidenceResultHandleResolverPort,
-    EvidenceStepReconcilerPort,
-)
+from app.infrastructure.external.llm import OllamaLLMFactory
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
     bind_live_event_sinks,
@@ -79,7 +80,6 @@ from app.infrastructure.runtime.langgraph.graphs import (
     unbind_live_event_sinks,
 )
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
-from app.infrastructure.external.llm import OllamaLLMFactory
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -947,7 +947,7 @@ class LangGraphRunEngine(RunEngine):
     async def _run_graph(
             self,
             *,
-            graph_input: Any,
+            graph_input: PlannerReActLangGraphState,
             invoke_config: Dict[str, Dict[str, str]],
             run_id: Optional[str],
             fallback_state: Optional[PlannerReActLangGraphState],

@@ -16,17 +16,17 @@ from typing import Any, Protocol
 
 from app.application.service.evidence_ledger_inputs import EvidenceQueryInput
 from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
+from app.domain.models import Step
+from app.domain.models.event import EvidenceEvent, EvidenceEventRef
 from app.domain.models.evidence import (
     EvidenceBackedFactProjection,
     EvidenceKind,
     EvidenceQualityStatus,
     EvidenceRecord,
     EvidenceResultRef,
-    EvidenceReusePolicy,
     EvidenceScope,
     EvidenceSourceRef,
     EvidenceSourceType,
-    EvidenceStalenessPolicy,
     EvidenceSubjectRef,
     EvidenceSupportLevel,
     build_evidence_idempotency_key,
@@ -35,14 +35,11 @@ from app.domain.models.evidence import (
     classify_evidence_data,
     validate_evidence_payload,
 )
-from app.domain.models import Step
-from app.domain.models.event import EvidenceEvent, EvidenceEventRef
 from app.domain.models.sandbox_fact import SandboxFactRecord, SandboxFactScope
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepProjectionPort
 
 logger = logging.getLogger(__name__)
-
 
 MAX_EVIDENCE_TEXT_CHARS = 4000
 MAX_EVIDENCE_SUMMARY_CHARS = 500
@@ -116,6 +113,7 @@ class EvidenceLedgerService:
             scope=scope,
             evidence_input=evidence_input,
         )
+        # 数据脱敏及截断
         sanitized_payload = _sanitize_payload(evidence_input.payload)
         normalized_payload = validate_evidence_payload(
             evidence_kind=evidence_input.evidence_kind,
