@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
-import { RunTimelinePanel } from '@/components/run-timeline-panel'
 import { ChatMessage } from '@/components/chat-message'
 import { FilePreviewPanel } from '@/components/file-preview-panel'
 import { ToolPreviewPanel } from '@/components/tool-preview-panel'
@@ -18,6 +17,7 @@ import {
   eventsToTimeline,
   isEvidenceReuseVirtualToolEvent,
 } from '@/lib/session-events'
+import { timelineToConversationItems } from '@/lib/assistant-turns'
 import { buildStepViewState } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import {
@@ -88,6 +88,12 @@ function removeInitQueryParamFromUrl(): void {
 }
 
 const TIMELINE_WINDOW_SIZE = 120
+const PREVIEW_PANEL_ANIMATION_MS = 260
+
+type PreviewPanelState =
+  | { kind: 'none' }
+  | { kind: 'file'; file: AttachmentFile; closing: boolean }
+  | { kind: 'tool'; tool: ToolEvent; closing: boolean }
 
 export function SessionDetailView({ sessionId, initialMessage, initialAttachments, hasInitialMessage }: SessionDetailViewProps) {
   return (
@@ -156,8 +162,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     () => createSessionScopedDetailViewState<AttachmentFile, ToolEvent>(),
   )
   const [waitResumePending, setWaitResumePending] = useState(false)
+  const [previewPanel, setPreviewPanel] = useState<PreviewPanelState>({ kind: 'none' })
   const sessionRuntimeRef = useRef(createSessionScopedRuntimeState())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const previewCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { fileListOpen, previewFile, previewTool, timelineExpanded, vncOpen } = sessionUiState
 
   useEffect(() => {
@@ -182,6 +190,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
     return timeline.slice(-TIMELINE_WINDOW_SIZE)
   }, [showFullTimeline, timeline])
+  const conversationItems = useMemo(() => timelineToConversationItems(visibleTimeline), [visibleTimeline])
   const hiddenTimelineCount = timeline.length - visibleTimeline.length
   const collapseLeftSidebar = useCallback(() => {
     setOpen(false)
@@ -197,6 +206,9 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const resolvedPreviewTool = useMemo(() => {
     return resolvePreviewToolFromTimeline(previewTool, timeline)
   }, [previewTool, timeline])
+  const panelTool = previewPanel.kind === 'tool'
+    ? resolvePreviewToolFromTimeline(previewPanel.tool, timeline) ?? previewPanel.tool
+    : null
   const latestTool = useMemo(() => findLatestTool(timeline), [timeline])
   const toolCount = useMemo(() => {
     return timeline.reduce((count, item) => {
@@ -320,6 +332,40 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       previewFile: null,
       previewTool: null,
     }))
+  }, [])
+
+  useEffect(() => {
+    if (previewCloseTimerRef.current) {
+      clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = null
+    }
+
+    if (previewFile) {
+      setPreviewPanel({ kind: 'file', file: previewFile, closing: false })
+      return
+    }
+
+    if (resolvedPreviewTool) {
+      setPreviewPanel({ kind: 'tool', tool: resolvedPreviewTool, closing: false })
+      return
+    }
+
+    setPreviewPanel((current) => {
+      if (current.kind === 'none' || current.closing) return current
+      previewCloseTimerRef.current = setTimeout(() => {
+        setPreviewPanel({ kind: 'none' })
+        previewCloseTimerRef.current = null
+      }, PREVIEW_PANEL_ANIMATION_MS)
+      return { ...current, closing: true }
+    })
+  }, [previewFile, resolvedPreviewTool])
+
+  useEffect(() => {
+    return () => {
+      if (previewCloseTimerRef.current) {
+        clearTimeout(previewCloseTimerRef.current)
+      }
+    }
   }, [])
 
   const handleJumpToLatest = useCallback(() => {
@@ -556,7 +602,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
               </div>
             )}
 
-            <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
+            <div ref={scrollContainerRef} className="scrollbar-hide flex-1 overflow-y-auto">
               <div className="flex flex-col w-full gap-3 pt-3">
                 {hiddenTimelineCount > 0 && (
                   <div className="flex justify-center py-1">
@@ -589,7 +635,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                     {t('sessionDetail.emptyTimeline')}
                   </div>
                 )}
-                {visibleTimeline.map((item) => (
+                {conversationItems.map((item) => (
                   <ChatMessage
                     key={item.id}
                     item={item}
@@ -601,12 +647,6 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
                 {plannerTextStream && plannerTextStream.text.trim() && (
                   <div className="mt-3 flex flex-col gap-2 w-full">
-                    <div className="flex items-center justify-between h-7">
-                      <div className="flex items-center justify-center gap-1 text-gray-500">
-                        <Loader2 className="size-4 animate-spin" />
-                        <span className="text-xs">{t('sessionDetail.thinking')}</span>
-                      </div>
-                    </div>
                     <div className="max-w-none p-0 m-0 text-gray-500">
                       <MarkdownContent content={plannerTextStream.text} className="text-gray-500" />
                     </div>
@@ -615,19 +655,13 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
                 {finalTextStream && finalTextStream.text.trim() && (
                   <div className="mt-3 flex flex-col gap-2 w-full">
-                    <div className="flex items-center justify-between h-7">
-                      <div className="flex items-center justify-center gap-1 text-gray-500">
-                        <Loader2 className="size-4 animate-spin" />
-                        <span className="text-xs">{t('sessionDetail.thinking')}</span>
-                      </div>
-                    </div>
                     <div className="max-w-none p-0 m-0 text-gray-700">
                       <MarkdownContent content={finalTextStream.text} className="text-gray-700" />
                     </div>
                   </div>
                 )}
 
-                {shouldShowThinking && !hasVisibleTextStreamDraft && (
+                {(shouldShowThinking || hasVisibleTextStreamDraft) && (
                   <div className="flex items-center gap-2 text-sm text-gray-500 py-3">
                     <Loader2 className="size-4 animate-spin" />
                     <span>{t('sessionDetail.thinking')}</span>
@@ -639,10 +673,6 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
             </div>
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">
-              <RunTimelinePanel
-                className="mb-2"
-                stepView={stepView}
-              />
               {isWaitingForResume && waitContext && !shouldHideWaitResumeCard({
                 sessionStatus: runtimeStatus,
                 waitContextAvailable: Boolean(waitContext),
@@ -692,35 +722,40 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
           </div>
         </div>
 
-        {/* 文件预览面板 */}
-        {previewFile && (
+        {/* 文件/工具预览面板 */}
+        {previewPanel.kind === 'file' && (
           <div
             className={cn(
-              'animate-in slide-in-from-right duration-300',
+              previewPanel.closing
+                ? 'animate-out slide-out-to-right'
+                : 'animate-in slide-in-from-right',
+              'duration-300',
               isMobile
                 ? 'fixed inset-0 z-40 bg-white'
                 : 'flex-shrink-0 h-full w-[420px] lg:w-[520px] xl:w-[600px]'
             )}
           >
-            <FilePreviewPanel file={previewFile} onClose={handleClosePreview} />
+            <FilePreviewPanel file={previewPanel.file} onClose={handleClosePreview} />
           </div>
         )}
 
-        {/* 工具预览面板 */}
-        {resolvedPreviewTool && (
+        {previewPanel.kind === 'tool' && panelTool && (
           <div
             className={cn(
-              'animate-in slide-in-from-right duration-300',
+              previewPanel.closing
+                ? 'animate-out slide-out-to-right'
+                : 'animate-in slide-in-from-right',
+              'duration-300',
               isMobile
                 ? 'fixed inset-0 z-40 bg-white'
                 : 'flex-shrink-0 h-full w-[420px] lg:w-[520px] xl:w-[600px] py-2 pr-2'
             )}
           >
             <ToolPreviewPanel
-              tool={resolvedPreviewTool}
+              tool={panelTool}
               onClose={handleClosePreview}
               onJumpToLatest={handleJumpToLatest}
-              onOpenVNC={getToolKind(resolvedPreviewTool) === 'browser' ? handleOpenVNC : undefined}
+              onOpenVNC={getToolKind(panelTool) === 'browser' ? handleOpenVNC : undefined}
             />
           </div>
         )}

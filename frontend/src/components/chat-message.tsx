@@ -12,11 +12,17 @@ import type { AppLocale } from '@/lib/i18n'
 import type { StepEvent, ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
 import { resolveStepDetail } from '@/lib/run-timeline'
-import { resolveStepExpandedState, shouldAutoExpandStep } from '@/lib/session-detail-view-state'
+import {
+  getInitialAssistantTurnExpandedState,
+  resolveAssistantTurnExpandedState,
+  resolveStepExpandedState,
+  shouldAutoExpandStep,
+} from '@/lib/session-detail-view-state'
+import type { AssistantTurnItem, ConversationItem } from '@/lib/assistant-turns'
 
 export interface ChatMessageProps {
   className?: string
-  item: TimelineItem
+  item: ConversationItem
   onViewAllFiles?: () => void
   onFileClick?: (file: AttachmentFile) => void
   onToolClick?: (tool: ToolEvent) => void
@@ -81,7 +87,7 @@ export function ChatMessage({
         )}
       >
         <div className="flex max-w-[90%] relative flex-col gap-2 items-end">
-          <div className="text-gray-700 relative flex items-center rounded-lg overflow-hidden bg-white p-3 border">
+          <div className="text-gray-700 relative flex items-center rounded-lg overflow-hidden bg-white p-3 border whitespace-pre-wrap break-words text-sm leading-relaxed">
             {item.data.message ?? ''}
           </div>
         </div>
@@ -90,20 +96,19 @@ export function ChatMessage({
   }
 
   if (item.kind === 'assistant') {
+    return <AssistantMessageBlock item={item} className={className} />
+  }
+
+  if (item.kind === 'assistant_turn') {
     return (
-      <div
-        className={cn('flex flex-col gap-2 w-full group mt-3', className)}
-      >
-        <div className="flex items-center justify-between h-7 group">
-          <div className="flex items-center justify-center gap-1 text-gray-700">
-            <Languages size={18} />
-            <ManusIcon />
-          </div>
-        </div>
-        <div className="max-w-none p-0 m-0 text-gray-700">
-          <MarkdownContent content={item.data.message ?? ''} />
-        </div>
-      </div>
+      <AssistantTurnBlock
+        item={item}
+        className={className}
+        onViewAllFiles={onViewAllFiles}
+        onFileClick={onFileClick}
+        onToolClick={onToolClick}
+        locale={locale}
+      />
     )
   }
 
@@ -162,6 +167,283 @@ export function ChatMessage({
   }
 
   return null
+}
+
+function AssistantMessageBlock({
+  item,
+  className,
+}: {
+  item: Extract<TimelineItem, { kind: 'assistant' }>
+  className?: string
+}) {
+  return (
+    <div
+      className={cn('flex flex-col gap-2 w-full group mt-3', className)}
+    >
+      <div className="flex items-center justify-between h-7 group">
+        <div className="flex items-center justify-center gap-1 text-gray-700">
+          <Languages size={18} />
+          <ManusIcon />
+        </div>
+      </div>
+      <div className="max-w-none p-0 m-0 text-gray-700">
+        <MarkdownContent content={item.data.message ?? ''} />
+      </div>
+    </div>
+  )
+}
+
+function getProcessStatusIcon(status: StepEvent['status']) {
+  if (status === 'completed') return <CheckCircle2 className="size-4 text-stone-400" />
+  if (status === 'failed') return <XCircle className="size-4 text-red-500" />
+  if (status === 'cancelled') return <Ban className="size-4 text-stone-400" />
+  if (status === 'running') return <Loader2 className="size-4 animate-spin text-stone-400" />
+  return <Clock3 className="size-4 text-amber-500" />
+}
+
+function getAssistantTurnSummary(item: AssistantTurnItem, t: ReturnType<typeof useI18n>['t']): string {
+  if (item.stepCount === 0 && item.toolCount === 0) {
+    if (item.status === 'running') return t('sessionDetail.turnSummary.runningNoProcess')
+    if (item.status === 'failed') return t('sessionDetail.turnSummary.failedNoProcess')
+    return t('sessionDetail.turnSummary.completedNoProcess')
+  }
+
+  if (item.status === 'running') {
+    return item.stepCount > 0
+      ? t('sessionDetail.turnSummary.runningSteps', {
+        completed: item.completedStepCount,
+        total: item.stepCount,
+        tools: item.toolCount,
+      })
+      : t('sessionDetail.turnSummary.runningTools', { tools: item.toolCount })
+  }
+
+  if (item.status === 'waiting') {
+    return item.stepCount > 0
+      ? t('sessionDetail.turnSummary.waitingSteps', {
+        completed: item.completedStepCount,
+        total: item.stepCount,
+      })
+      : t('sessionDetail.turnSummary.waiting')
+  }
+
+  if (item.status === 'failed') {
+    return item.stepCount > 0
+      ? t('sessionDetail.turnSummary.failedSteps', {
+        completed: item.completedStepCount,
+        total: item.stepCount,
+      })
+      : t('sessionDetail.turnSummary.failedNoProcess')
+  }
+
+  if (item.status === 'cancelled') {
+    return item.stepCount > 0
+      ? t('sessionDetail.turnSummary.cancelledSteps', {
+        completed: item.completedStepCount,
+        total: item.stepCount,
+      })
+      : t('sessionDetail.turnSummary.cancelled')
+  }
+
+  return item.stepCount > 0
+    ? t('sessionDetail.turnSummary.completedSteps', {
+      total: item.stepCount,
+      tools: item.toolCount,
+    })
+    : t('sessionDetail.turnSummary.completedTools', { tools: item.toolCount })
+}
+
+function AssistantTurnBlock({
+  item,
+  className,
+  onViewAllFiles,
+  onFileClick,
+  onToolClick,
+  locale,
+}: {
+  item: AssistantTurnItem
+  className?: string
+  onViewAllFiles?: () => void
+  onFileClick?: (file: AttachmentFile) => void
+  onToolClick?: (tool: ToolEvent) => void
+  locale: AppLocale
+}) {
+  const { t } = useI18n()
+  const hasFinalMessage = Boolean(item.finalMessage)
+  const [expanded, setExpanded] = useState(() => getInitialAssistantTurnExpandedState({
+    hasFinalMessage,
+  }))
+  const previousStatusRef = useRef<AssistantTurnItem['status'] | null>(null)
+  const hasProcess = item.processItems.length > 0
+
+  useEffect(() => {
+    const previousStatus = previousStatusRef.current
+    previousStatusRef.current = item.status
+    setExpanded((current) => resolveAssistantTurnExpandedState({
+      currentExpanded: current,
+      previousStatus,
+      nextStatus: item.status,
+      hasFinalMessage,
+    }))
+  }, [item.status, hasFinalMessage])
+
+  return (
+    <div className={cn('flex flex-col w-full group mt-4', className)}>
+      {hasProcess && (
+        <div className="w-full">
+          <button
+            type="button"
+            className="flex w-full items-center gap-1 border-b border-stone-200/80 pb-3 text-left text-[17px] leading-6 text-stone-500 transition-colors hover:text-stone-700 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-stone-300"
+            onClick={() => setExpanded((prev) => !prev)}
+          >
+            <span className="min-w-0 truncate">
+              {getAssistantTurnSummary(item, t)}
+            </span>
+            <ChevronDown className={cn('size-5 shrink-0 text-stone-400 transition-transform duration-200', expanded ? 'rotate-180' : '-rotate-90')} />
+          </button>
+
+          {expanded && (
+            <div className="flex flex-col gap-4 py-4">
+              {item.processItems.map((processItem) => (
+                <ProcessItem
+                  key={processItem.id}
+                  item={processItem}
+                  onToolClick={onToolClick}
+                  locale={locale}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {item.finalMessage && (
+        <AssistantTurnFinalMessage item={item.finalMessage} className={hasProcess && !expanded ? 'pt-4' : undefined} />
+      )}
+
+      {item.attachments.map((attachment) => (
+        <AttachmentsMessage
+          key={attachment.id}
+          role={attachment.role}
+          files={attachment.files}
+          onViewAllFiles={attachment.role === 'assistant' ? onViewAllFiles : undefined}
+          onFileClick={onFileClick}
+        />
+      ))}
+    </div>
+  )
+}
+
+function AssistantTurnFinalMessage({
+  item,
+  className,
+}: {
+  item: Extract<TimelineItem, { kind: 'assistant' }>
+  className?: string
+}) {
+  return (
+    <div className={cn('max-w-none p-0 m-0 text-gray-700', className)}>
+      <MarkdownContent content={item.data.message ?? ''} />
+    </div>
+  )
+}
+
+function ProcessItem({
+  item,
+  onToolClick,
+  locale,
+}: {
+  item: AssistantTurnItem['processItems'][number]
+  onToolClick?: (tool: ToolEvent) => void
+  locale: AppLocale
+}) {
+  const { t } = useI18n()
+
+  if (item.kind === 'step') {
+    return (
+      <ProcessStepItem
+        stepItem={item}
+        onToolClick={onToolClick}
+        locale={locale}
+      />
+    )
+  }
+
+  if (item.kind === 'tool') {
+    return (
+      <ToolRow
+        className="mt-0 pl-1"
+        timeLabel={item.timeLabel}
+        fallbackTimeLabel={t('common.justNow')}
+      >
+        <ToolUse data={item.data} onClick={onToolClick ? () => onToolClick(item.data) : undefined} />
+      </ToolRow>
+    )
+  }
+
+  if (item.kind === 'assistant') {
+    return (
+      <div className="max-w-none text-gray-700">
+        <MarkdownContent content={item.data.message ?? ''} compact />
+      </div>
+    )
+  }
+
+  if (item.kind === 'error') {
+    return (
+      <div className="text-sm leading-relaxed text-red-600">
+        {item.error}
+      </div>
+    )
+  }
+
+  return null
+}
+
+function ProcessStepItem({
+  stepItem,
+  onToolClick,
+  locale,
+}: {
+  stepItem: Extract<TimelineItem, { kind: 'step' }>
+  onToolClick?: (tool: ToolEvent) => void
+  locale: AppLocale
+}) {
+  const { t } = useI18n()
+  const { data, tools } = stepItem
+  const detail = resolveStepDetail(data.outcome)
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex min-w-0 items-center gap-2 text-stone-400">
+        <span className="shrink-0">
+          {getProcessStatusIcon(data.status)}
+        </span>
+        <span className="min-w-0 truncate text-[15px] leading-6">
+          {data.description}
+        </span>
+      </div>
+      {detail && (
+        <div className="pl-6 text-sm leading-relaxed text-stone-500">
+          {detail}
+        </div>
+      )}
+      {tools.length > 0 && (
+        <div className="flex flex-col gap-2 pl-6">
+          {tools.map((tool, idx) => (
+            <ToolRow
+              key={`${data.id}-process-tool-${idx}`}
+              className="mt-0"
+              timeLabel={getToolTimeLabel(tool, locale)}
+              fallbackTimeLabel={t('common.justNow')}
+            >
+              <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
+            </ToolRow>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function StepBlock({

@@ -4,6 +4,8 @@ import test from 'node:test'
 import {
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
+  getInitialAssistantTurnExpandedState,
+  resolveAssistantTurnExpandedState,
   resolveSessionActionAvailability,
   resolveWaitResumeContext,
   resolveStepExpandedState,
@@ -98,6 +100,39 @@ test('resolveStepExpandedState should auto expand running step and collapse when
     currentExpanded: true,
     previousStatus: 'completed',
     nextStatus: 'completed',
+  }), true)
+})
+
+test('assistant turn work area should follow initial final-message and live status rules', () => {
+  assert.equal(getInitialAssistantTurnExpandedState({ hasFinalMessage: true }), false)
+  assert.equal(getInitialAssistantTurnExpandedState({ hasFinalMessage: false }), true)
+
+  assert.equal(resolveAssistantTurnExpandedState({
+    currentExpanded: false,
+    previousStatus: null,
+    nextStatus: 'running',
+    hasFinalMessage: false,
+  }), false)
+
+  assert.equal(resolveAssistantTurnExpandedState({
+    currentExpanded: false,
+    previousStatus: 'idle',
+    nextStatus: 'running',
+    hasFinalMessage: false,
+  }), true)
+
+  assert.equal(resolveAssistantTurnExpandedState({
+    currentExpanded: true,
+    previousStatus: 'running',
+    nextStatus: 'completed',
+    hasFinalMessage: true,
+  }), false)
+
+  assert.equal(resolveAssistantTurnExpandedState({
+    currentExpanded: true,
+    previousStatus: 'running',
+    nextStatus: 'completed',
+    hasFinalMessage: false,
   }), true)
 })
 

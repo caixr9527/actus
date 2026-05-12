@@ -70,6 +70,27 @@ export function resolveStepExpandedState(params: {
   return currentExpanded
 }
 
+export type AssistantTurnDisplayStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'idle'
+
+export function getInitialAssistantTurnExpandedState(params: {
+  hasFinalMessage: boolean
+}): boolean {
+  return !params.hasFinalMessage
+}
+
+export function resolveAssistantTurnExpandedState(params: {
+  currentExpanded: boolean
+  previousStatus: AssistantTurnDisplayStatus | null
+  nextStatus: AssistantTurnDisplayStatus
+  hasFinalMessage: boolean
+}): boolean {
+  const { currentExpanded, previousStatus, nextStatus, hasFinalMessage } = params
+  if (previousStatus === null) return currentExpanded
+  if (nextStatus === 'running' || nextStatus === 'waiting') return true
+  if (hasFinalMessage && nextStatus === 'completed') return false
+  return currentExpanded
+}
+
 export function shouldAutoCloseTaskPreview(
   previousStatus: SessionStatus | null | undefined,
   nextStatus: SessionStatus | null | undefined,
