@@ -4,15 +4,27 @@ import pytest
 
 from app.application.errors import ValidationError, error_keys
 from app.application.service.session_service import SessionService
-from app.domain.models import LLMModelConfig, Session
+from app.domain.models import LLMModelConfig, MessageEvent, Session, WorkflowRunEventRecord
 
 
 class _OwnedSessionRepo:
     def __init__(self) -> None:
         self.session = Session(id="session-a", user_id="user-a", title="测试会话")
         self.updated_current_model_id: str | None = None
+        self.get_by_id_calls = 0
+        self.get_by_id_without_events_calls = 0
 
     async def get_by_id(self, session_id: str, user_id: str | None = None):
+        self.get_by_id_calls += 1
+        self.session.events = [
+            MessageEvent(id="evt-hydrated", role="assistant", message="should not be used"),
+        ]
+        if session_id == self.session.id and user_id == self.session.user_id:
+            return self.session
+        return None
+
+    async def get_by_id_without_events(self, session_id: str, user_id: str | None = None):
+        self.get_by_id_without_events_calls += 1
         if session_id == self.session.id and user_id == self.session.user_id:
             return self.session
         return None
@@ -70,8 +82,31 @@ class _EmptyWorkspaceRepo:
 
 
 class _EmptyWorkflowRunRepo:
+    def __init__(self) -> None:
+        self.event_records = [
+            WorkflowRunEventRecord(
+                run_id="run-a",
+                session_id="session-a",
+                event_id="evt-1",
+                event_type="message",
+                event_payload=MessageEvent(
+                    id="evt-1",
+                    role="assistant",
+                    message="hello",
+                ),
+            ),
+        ]
+        self.list_event_records_by_session_calls = 0
+
     async def get_by_id(self, run_id: str):
         return None
+
+    async def list_event_records_by_session(self, session_id: str):
+        self.list_event_records_by_session_calls += 1
+        return [
+            record for record in self.event_records
+            if record.session_id == session_id
+        ]
 
 
 def test_session_service_set_current_model_should_accept_auto() -> None:
@@ -101,3 +136,22 @@ def test_session_service_set_current_model_should_reject_invalid_model() -> None
 
     assert exc.value.error_key == error_keys.SESSION_MODEL_ID_INVALID
     assert exc.value.error_params == {"model_id": "kimi"}
+
+
+def test_get_session_detail_should_not_hydrate_session_events_twice() -> None:
+    session_repo = _OwnedSessionRepo()
+    uow = _SessionUoW(session_repo)
+    service = SessionService(
+        uow_factory=lambda: uow,
+        sandbox_cls=_DummySandbox,
+        model_config_service=_FakeModelConfigService(enabled_model_ids=set()),
+    )
+
+    session, records = asyncio.run(service.get_session_detail("user-a", "session-a"))
+
+    assert session is session_repo.session
+    assert session.events == []
+    assert [record.event_id for record in records] == ["evt-1"]
+    assert session_repo.get_by_id_without_events_calls == 1
+    assert session_repo.get_by_id_calls == 0
+    assert uow.workflow_run.list_event_records_by_session_calls == 1

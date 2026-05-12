@@ -27,6 +27,14 @@ class SessionRepository(Protocol):
         """根据传递的会话id查询会话"""
         ...
 
+    async def get_by_id_without_events(
+            self,
+            session_id: str,
+            user_id: Optional[str] = None,
+    ) -> Optional[Session]:
+        """按会话ID读取会话元信息，不加载历史事件。"""
+        ...
+
     async def get_by_id_for_update(self, session_id: str) -> Optional[Session]:
         """按会话id加锁查询会话，用于Runtime状态事务收敛"""
         ...

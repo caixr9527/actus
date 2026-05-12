@@ -430,3 +430,29 @@ def test_list_event_records_by_session_should_return_full_event_records() -> Non
         ("run-1", "evt-1"),
         ("run-2", "evt-2"),
     ]
+
+
+def test_get_latest_event_record_by_session_should_return_single_record() -> None:
+    latest_event = MessageEvent(id="evt-latest", role="assistant", message="latest")
+    execute_result = SimpleNamespace(
+        scalar_one_or_none=lambda: SimpleNamespace(
+            to_domain=lambda: WorkflowRunEventRecord(
+                id="record-latest",
+                run_id="run-2",
+                session_id="session-1",
+                event_id="evt-latest",
+                event_type="message",
+                event_payload=latest_event,
+            )
+        )
+    )
+    repo = _build_repo(execute_result)
+
+    record = asyncio.run(repo.get_latest_event_record_by_session(
+        session_id="session-1",
+        event_type="message",
+        run_id="run-2",
+    ))
+
+    assert record is not None
+    assert record.event_id == "evt-latest"

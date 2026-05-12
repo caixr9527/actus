@@ -139,6 +139,19 @@ class DBSessionRepository(SessionRepository):
         session = record.to_domain()
         return await self._hydrate_session_events(session)
 
+    async def get_by_id_without_events(
+            self,
+            session_id: str,
+            user_id: Optional[str] = None,
+    ) -> Optional[Session]:
+        """根据id查询会话元信息，不加载事件历史。"""
+        stmt = select(SessionModel).where(SessionModel.id == session_id)
+        if user_id is not None:
+            stmt = stmt.where(SessionModel.user_id == user_id)
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
     async def get_by_id_for_update(self, session_id: str) -> Optional[Session]:
         """按会话ID加锁查询，不加载历史事件。"""
         record = await self._get_session_record_with_lock(session_id=session_id)

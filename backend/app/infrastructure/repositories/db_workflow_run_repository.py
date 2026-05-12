@@ -36,6 +36,13 @@ from app.domain.services.runtime.normalizers import normalize_step_outcome_paylo
 from app.infrastructure.models import WorkflowRunModel, WorkflowRunEventModel, WorkflowRunStepModel
 
 
+_LIVE_ONLY_EVENT_TYPES = {
+    "text_stream_start",
+    "text_stream_delta",
+    "text_stream_end",
+}
+
+
 class DBWorkflowRunRepository(WorkflowRunRepository):
     """WorkflowRun 仓库 DB 实现"""
 
@@ -375,6 +382,30 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         result = await self.db_session.execute(stmt)
         records = result.scalars().all()
         return [record.to_domain() for record in records]
+
+    async def get_latest_event_record_by_session(
+            self,
+            session_id: str,
+            *,
+            event_type: Optional[str] = None,
+            run_id: Optional[str] = None,
+    ) -> Optional[WorkflowRunEventRecord]:
+        stmt = select(WorkflowRunEventModel).where(
+            WorkflowRunEventModel.session_id == session_id,
+        )
+        if event_type is not None:
+            stmt = stmt.where(WorkflowRunEventModel.event_type == event_type)
+        else:
+            stmt = stmt.where(WorkflowRunEventModel.event_type.notin_(_LIVE_ONLY_EVENT_TYPES))
+        if run_id is not None:
+            stmt = stmt.where(WorkflowRunEventModel.run_id == run_id)
+        stmt = stmt.order_by(
+            WorkflowRunEventModel.created_at.desc(),
+            WorkflowRunEventModel.id.desc(),
+        ).limit(1)
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
 
     async def list_events_by_session(self, session_id: str) -> List[Event]:
         records = await self.list_event_records_by_session(session_id=session_id)

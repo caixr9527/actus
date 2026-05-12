@@ -750,22 +750,31 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
                 checkpoint_id=run.checkpoint_id,
             )
 
+        snapshot_run_status = run.status if run else None
+        snapshot_session_status = session.status
+        has_continuable_cancelled_plan = False
+        if (
+                snapshot_run_status == WorkflowRunStatus.CANCELLED
+                or (snapshot_run_status is None and snapshot_session_status == SessionStatus.CANCELLED)
+        ):
+            has_continuable_cancelled_plan = await self._has_continuable_cancelled_plan(
+                uow=uow,
+                session_id=session_id,
+            )
+
         return RuntimeStateSnapshot(
             session_id=session.id,
             workspace_id=workspace.id if workspace else session.workspace_id,
             run_id=run.id if run else run_id,
-            session_status=session.status,
-            run_status=run.status if run else None,
+            session_status=snapshot_session_status,
+            run_status=snapshot_run_status,
             workspace_run_id=workspace.current_run_id if workspace else None,
             session_run_id=session.current_run_id,
             checkpoint_ref=checkpoint_ref,
             has_checkpoint=bool(checkpoint_ref and checkpoint_ref.checkpoint_id),
             current_step_id=run.current_step_id if run else None,
             last_event_at=run.last_event_at if run else None,
-            has_continuable_cancelled_plan=await self._has_continuable_cancelled_plan(
-                uow=uow,
-                session_id=session_id,
-            ),
+            has_continuable_cancelled_plan=has_continuable_cancelled_plan,
             source=source,
         )
 
@@ -775,6 +784,22 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
             uow: IUnitOfWork,
             session_id: str,
     ) -> bool:
+        get_latest_record = getattr(
+            uow.workflow_run,
+            "get_latest_event_record_by_session",
+            None,
+        )
+        if callable(get_latest_record):
+            record = await get_latest_record(session_id, event_type="plan")
+            if record is None:
+                return False
+            event = record.event_payload
+            if not isinstance(event, PlanEvent):
+                return False
+            if event.plan.status != ExecutionStatus.CANCELLED:
+                return False
+            return any(step.status == ExecutionStatus.CANCELLED for step in event.plan.steps)
+
         records = await uow.workflow_run.list_event_records_by_session(session_id)
         for record in reversed(records):
             event = record.event_payload

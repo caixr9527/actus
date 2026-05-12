@@ -113,7 +113,11 @@ class SessionService:
             session_id: str,
     ) -> tuple[Session | None, list[WorkflowRunEventRecord]]:
         async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+            get_session = getattr(uow.session, "get_by_id_without_events", None)
+            if callable(get_session):
+                session = await get_session(session_id=session_id, user_id=user_id)
+            else:
+                session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
             if session is None:
                 return None, []
 

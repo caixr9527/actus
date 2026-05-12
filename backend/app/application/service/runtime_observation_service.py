@@ -488,17 +488,38 @@ class RuntimeObservationService:
             run_id: str | None,
     ) -> tuple[str | None, WaitEvent | None]:
         async with self._uow_factory() as uow:
-            records = await uow.workflow_run.list_event_records_by_session(session_id)
-
-        persistent_records = self._persistent_records(records)
-        latest_event_id = self._latest_record_event_id(persistent_records)
-        latest_wait_event = None
-        for record in reversed(persistent_records):
-            if run_id is not None and record.run_id != run_id:
-                continue
-            if isinstance(record.event_payload, WaitEvent):
-                latest_wait_event = record.event_payload
-                break
+            get_latest_record = getattr(
+                uow.workflow_run,
+                "get_latest_event_record_by_session",
+                None,
+            )
+            if callable(get_latest_record):
+                latest_record = await get_latest_record(session_id)
+                latest_wait_record = await get_latest_record(
+                    session_id,
+                    event_type="wait",
+                    run_id=run_id,
+                )
+            else:
+                records = await uow.workflow_run.list_event_records_by_session(session_id)
+                persistent_records = self._persistent_records(records)
+                latest_record = persistent_records[-1] if persistent_records else None
+                latest_wait_record = None
+                for record in reversed(persistent_records):
+                    if run_id is not None and record.run_id != run_id:
+                        continue
+                    if isinstance(record.event_payload, WaitEvent):
+                        latest_wait_record = record
+                        break
+        latest_event_id = latest_record.event_id if latest_record is not None else None
+        latest_wait_event = (
+            latest_wait_record.event_payload
+            if (
+                latest_wait_record is not None
+                and isinstance(latest_wait_record.event_payload, WaitEvent)
+            )
+            else None
+        )
         return latest_event_id, latest_wait_event
 
     @staticmethod

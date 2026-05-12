@@ -130,6 +130,16 @@ class WorkflowRunRepository(Protocol):
         """按 session_id 读取同会话下全部运行事件记录。"""
         ...
 
+    async def get_latest_event_record_by_session(
+            self,
+            session_id: str,
+            *,
+            event_type: Optional[str] = None,
+            run_id: Optional[str] = None,
+    ) -> Optional[WorkflowRunEventRecord]:
+        """按 session/run/event_type 读取最新一条运行事件记录。"""
+        ...
+
     async def get_event_record_by_event_id(
             self,
             *,

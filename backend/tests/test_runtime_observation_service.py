@@ -9,6 +9,7 @@ from app.application.service.runtime_observation_service import (
     RuntimeObservationResult,
     RuntimeObservationService,
 )
+from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.models import (
     DoneEvent,
     ErrorEvent,
@@ -68,6 +69,8 @@ class _SessionRepo:
 class _WorkflowRunRepo:
     run: WorkflowRun | None
     records: list[WorkflowRunEventRecord] = field(default_factory=list)
+    list_event_records_calls: int = 0
+    latest_event_record_calls: list[dict] = field(default_factory=list)
 
     async def get_by_id(self, run_id: str):
         return self.run if self.run and self.run.id == run_id else None
@@ -79,7 +82,29 @@ class _WorkflowRunRepo:
         return self.run if self.run and self.run.id == run_id else None
 
     async def list_event_records_by_session(self, session_id: str):
+        self.list_event_records_calls += 1
         return [record for record in self.records if record.session_id == session_id]
+
+    async def get_latest_event_record_by_session(
+            self,
+            session_id: str,
+            *,
+            event_type: str | None = None,
+            run_id: str | None = None,
+    ):
+        self.latest_event_record_calls.append({
+            "session_id": session_id,
+            "event_type": event_type,
+            "run_id": run_id,
+        })
+        records = [record for record in self.records if record.session_id == session_id]
+        if event_type is not None:
+            records = [record for record in records if record.event_type == event_type]
+        else:
+            records = [record for record in records if should_persist_event(record.event_payload)]
+        if run_id is not None:
+            records = [record for record in records if record.run_id == run_id]
+        return records[-1] if records else None
 
     async def update_status(
             self,
@@ -209,6 +234,11 @@ def test_session_observation_should_return_wait_interaction_and_capabilities() -
     assert result.interaction.interrupt_id == "interrupt-1"
     assert result.capabilities.can_resume is True
     assert result.capabilities.can_cancel is True
+    assert uow.workflow_run.list_event_records_calls == 0
+    assert uow.workflow_run.latest_event_record_calls == [
+        {"session_id": "session-1", "event_type": None, "run_id": None},
+        {"session_id": "session-1", "event_type": "wait", "run_id": "run-1"},
+    ]
 
 
 def test_session_observation_should_expose_continue_cancelled_capability() -> None:
@@ -245,6 +275,12 @@ def test_session_observation_should_expose_continue_cancelled_capability() -> No
     assert result.status == SessionStatus.CANCELLED
     assert result.capabilities.can_send_message is True
     assert result.capabilities.can_continue_cancelled is True
+    assert uow.workflow_run.list_event_records_calls == 0
+    assert uow.workflow_run.latest_event_record_calls[0] == {
+        "session_id": "session-1",
+        "event_type": "plan",
+        "run_id": None,
+    }
 
 
 def test_session_observation_cursor_should_ignore_trailing_live_only_event() -> None:
