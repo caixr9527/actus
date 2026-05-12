@@ -170,6 +170,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const followScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const initialScrollToLatestDoneRef = useRef(false)
   const { fileListOpen, previewFile, previewTool, timelineExpanded, vncOpen } = sessionUiState
 
   const scrollToLatest = useCallback((behavior: ScrollBehavior = 'smooth') => {
@@ -502,6 +503,24 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     scrollToLatest,
     shouldShowThinking,
     streaming,
+    timeline.length,
+  ])
+
+  useEffect(() => {
+    if (initialScrollToLatestDoneRef.current || !session || loading) {
+      return
+    }
+    if (timeline.length === 0 && !hasVisibleTextStreamDraft && !shouldShowThinking) {
+      return
+    }
+    initialScrollToLatestDoneRef.current = true
+    scrollToLatest('auto')
+  }, [
+    hasVisibleTextStreamDraft,
+    loading,
+    scrollToLatest,
+    session,
+    shouldShowThinking,
     timeline.length,
   ])
 
