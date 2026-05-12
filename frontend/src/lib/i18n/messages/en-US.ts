@@ -196,6 +196,7 @@ export const enUSMessages: MessageDictionary = {
   "sessionDetail.stepStatus.failed": "Failed",
   "sessionDetail.turnSummary.working": "Working",
   "sessionDetail.turnSummary.done": "Work complete",
+  "sessionDetail.jumpToLatest": "Jump to latest",
   "sessionDetail.turnSummary.runningNoProcess": "Working",
   "sessionDetail.turnSummary.runningSteps": "Working · {completed}/{total} steps · {tools} tool use(s)",
   "sessionDetail.turnSummary.runningTools": "Working · {tools} tool use(s)",

@@ -14,7 +14,7 @@ export type SessionScopedDetailViewState<TFile = unknown, TTool = unknown> = {
 export type SessionScopedRuntimeState = {
   initialMessageSent: boolean
   previousToolCount: number
-  hasAutoScrolled: boolean
+  autoFollowLatest: boolean
   previousSessionStatus: SessionStatus | null
 }
 
@@ -39,7 +39,7 @@ export function createSessionScopedRuntimeState(): SessionScopedRuntimeState {
   return {
     initialMessageSent: false,
     previousToolCount: 0,
-    hasAutoScrolled: false,
+    autoFollowLatest: true,
     previousSessionStatus: null,
   }
 }
@@ -127,14 +127,51 @@ export function shouldShowSessionThinking(params: {
   )
 }
 
+export function isNearScrollBottom(params: {
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  thresholdPx?: number
+}): boolean {
+  const thresholdPx = params.thresholdPx ?? 96
+  return params.scrollHeight - params.scrollTop - params.clientHeight <= thresholdPx
+}
+
 export function shouldAutoScrollToLatest(params: {
-  hasAutoScrolled: boolean
+  autoFollowLatest: boolean
+  sessionStatus: SessionStatus | null | undefined
+  streaming: boolean
   timelineLength: number
   shouldShowThinking: boolean
+  hasVisibleTextStreamDraft: boolean
 }): boolean {
-  const { hasAutoScrolled, timelineLength, shouldShowThinking } = params
-  if (hasAutoScrolled) return false
-  return timelineLength > 0 || shouldShowThinking
+  const {
+    autoFollowLatest,
+    sessionStatus,
+    streaming,
+    timelineLength,
+    shouldShowThinking,
+    hasVisibleTextStreamDraft,
+  } = params
+  if (!autoFollowLatest) return false
+  if (!(sessionStatus === 'running' || sessionStatus === 'waiting' || streaming)) return false
+  return timelineLength > 0 || shouldShowThinking || hasVisibleTextStreamDraft
+}
+
+export function shouldShowJumpToLatestButton(params: {
+  autoFollowLatest: boolean
+  timelineLength: number
+  shouldShowThinking: boolean
+  hasVisibleTextStreamDraft: boolean
+}): boolean {
+  const {
+    autoFollowLatest,
+    timelineLength,
+    shouldShowThinking,
+    hasVisibleTextStreamDraft,
+  } = params
+  if (autoFollowLatest) return false
+  return timelineLength > 0 || shouldShowThinking || hasVisibleTextStreamDraft
 }
 
 export function shouldHideWaitResumeCard(params: {

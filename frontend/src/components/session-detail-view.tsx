@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { SessionHeader } from '@/components/session-header'
 import { ChatInput } from '@/components/chat-input'
@@ -23,6 +23,7 @@ import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
 import {
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
+  isNearScrollBottom,
   resolveSessionActionAvailability,
   resolveWaitResumeContext,
   shouldAutoCloseTaskPreview,
@@ -30,6 +31,7 @@ import {
   shouldHideWaitResumeCard,
   shouldResetWaitResumePending,
   shouldShowSessionThinking,
+  shouldShowJumpToLatestButton,
   type SessionScopedDetailViewState,
 } from '@/lib/session-detail-view-state'
 import { cn } from '@/lib/utils'
@@ -40,7 +42,7 @@ import type { ToolEvent, FileInfo } from '@/lib/api/types'
 import type { AttachmentFile, TimelineItem } from '@/lib/session-events'
 import { sessionApi } from '@/lib/api/session'
 import { toast } from 'sonner'
-import { Loader2 } from 'lucide-react'
+import { ArrowDown, Loader2 } from 'lucide-react'
 import { useI18n } from '@/lib/i18n'
 import { MarkdownContent } from '@/components/markdown-content'
 
@@ -164,9 +166,38 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const [waitResumePending, setWaitResumePending] = useState(false)
   const [previewPanel, setPreviewPanel] = useState<PreviewPanelState>({ kind: 'none' })
   const sessionRuntimeRef = useRef(createSessionScopedRuntimeState())
+  const [autoFollowLatest, setAutoFollowLatest] = useState(true)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const followScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const previewCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { fileListOpen, previewFile, previewTool, timelineExpanded, vncOpen } = sessionUiState
+
+  const scrollToLatest = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    sessionRuntimeRef.current.autoFollowLatest = true
+    setAutoFollowLatest(true)
+    requestAnimationFrame(() => {
+      container.scrollTo({ top: container.scrollHeight, behavior })
+    })
+  }, [])
+
+  const handleTimelineScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const container = event.currentTarget
+    if (followScrollTimerRef.current) {
+      clearTimeout(followScrollTimerRef.current)
+    }
+    followScrollTimerRef.current = setTimeout(() => {
+      const nextAutoFollowLatest = isNearScrollBottom({
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        clientHeight: container.clientHeight,
+      })
+      sessionRuntimeRef.current.autoFollowLatest = nextAutoFollowLatest
+      setAutoFollowLatest(nextAutoFollowLatest)
+      followScrollTimerRef.current = null
+    }, 80)
+  }, [])
 
   useEffect(() => {
     if (!isHydrated || isLoggedIn) {
@@ -230,10 +261,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
         previewCloseTimerRef.current = null
       }
       setPreviewPanel({ kind: 'tool', tool: latestTool, closing: false })
-      scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
+      scrollToLatest('smooth')
     }
     sessionRuntimeRef.current.previousToolCount = toolCount
-  }, [latestTool, runtimeStatus, toolCount, vncOpen])
+  }, [latestTool, runtimeStatus, scrollToLatest, toolCount, vncOpen])
 
   useEffect(() => {
     if (!initialMessage || sessionRuntimeRef.current.initialMessageSent || !session || loading || streaming) {
@@ -356,6 +387,9 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
   useEffect(() => {
     return () => {
+      if (followScrollTimerRef.current) {
+        clearTimeout(followScrollTimerRef.current)
+      }
       if (previewCloseTimerRef.current) {
         clearTimeout(previewCloseTimerRef.current)
       }
@@ -375,8 +409,8 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       }))
       setPreviewPanel({ kind: 'tool', tool: latestTool, closing: false })
     }
-    scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
-  }, [latestTool])
+    scrollToLatest('smooth')
+  }, [latestTool, scrollToLatest])
 
   const handleOpenVNC = useCallback(() => {
     setSessionUiState((prev) => ({ ...prev, vncOpen: true }))
@@ -398,10 +432,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       }))
       setPreviewPanel({ kind: 'tool', tool: latestTool, closing: false })
       setTimeout(() => {
-        scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
+        scrollToLatest('smooth')
       }, 100)
     }
-  }, [latestTool, runtimeStatus])
+  }, [latestTool, runtimeStatus, scrollToLatest])
 
   const handleStop = useCallback(async () => {
     if (!session) return
@@ -438,23 +472,38 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const hasVisibleTextStreamDraft = Boolean(
     plannerTextStream?.text.trim() || finalTextStream?.text.trim()
   )
+  const shouldShowJumpToLatest = shouldShowJumpToLatestButton({
+    autoFollowLatest,
+    timelineLength: timeline.length,
+    shouldShowThinking,
+    hasVisibleTextStreamDraft,
+  })
 
   useEffect(() => {
     if (!shouldAutoScrollToLatest({
-      hasAutoScrolled: sessionRuntimeRef.current.hasAutoScrolled,
+      autoFollowLatest,
+      sessionStatus: runtimeStatus,
+      streaming,
       timelineLength: timeline.length,
       shouldShowThinking,
+      hasVisibleTextStreamDraft,
     })) {
       return
     }
 
-    const container = scrollContainerRef.current
-    if (!container) return
-    sessionRuntimeRef.current.hasAutoScrolled = true
-    requestAnimationFrame(() => {
-      container.scrollTo({ top: container.scrollHeight, behavior: 'auto' })
-    })
-  }, [timeline.length, shouldShowThinking])
+    scrollToLatest('smooth')
+  }, [
+    conversationItems,
+    finalTextStream?.text,
+    hasVisibleTextStreamDraft,
+    plannerTextStream?.text,
+    autoFollowLatest,
+    runtimeStatus,
+    scrollToLatest,
+    shouldShowThinking,
+    streaming,
+    timeline.length,
+  ])
 
   useEffect(() => {
     const previousStatus = sessionRuntimeRef.current.previousSessionStatus
@@ -602,8 +651,13 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
               </div>
             )}
 
-            <div ref={scrollContainerRef} className="scrollbar-hide flex-1 overflow-y-auto">
-              <div className="flex flex-col w-full gap-3 pt-3">
+            <div className="relative flex-1 min-h-0">
+              <div
+                ref={scrollContainerRef}
+                className="scrollbar-hide h-full overflow-y-auto"
+                onScroll={handleTimelineScroll}
+              >
+                <div className="flex flex-col w-full gap-3 pt-3">
                 {hiddenTimelineCount > 0 && (
                   <div className="flex justify-center py-1">
                     <button
@@ -669,7 +723,22 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                 )}
 
                 <div className="h-[140px]" />
+                </div>
               </div>
+              {shouldShowJumpToLatest && (
+                <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center">
+                  <button
+                    type="button"
+                    className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full border border-stone-200 bg-white/95 text-stone-700 shadow-[0_8px_24px_rgba(0,0,0,0.12)]"
+                    onClick={() => {
+                      scrollToLatest('smooth')
+                    }}
+                    aria-label={t('sessionDetail.jumpToLatest')}
+                  >
+                    <ArrowDown className="size-4" />
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex-shrink-0 bg-[#f8f8f7] py-4">

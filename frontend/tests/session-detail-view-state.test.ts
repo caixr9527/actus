@@ -5,6 +5,7 @@ import {
   createSessionScopedDetailViewState,
   createSessionScopedRuntimeState,
   getInitialAssistantTurnExpandedState,
+  isNearScrollBottom,
   resolveAssistantTurnExpandedState,
   resolveSessionActionAvailability,
   resolveWaitResumeContext,
@@ -15,6 +16,7 @@ import {
   shouldHideWaitResumeCard,
   shouldResetWaitResumePending,
   shouldShowSessionThinking,
+  shouldShowJumpToLatestButton,
 } from '../src/lib/session-detail-view-state'
 import type { RuntimeCapabilities, RuntimeEventMeta, RuntimeInteraction, SSEEventData } from '../src/lib/api/types'
 
@@ -145,29 +147,71 @@ test('shouldAutoCloseTaskPreview should only close preview when running task com
   assert.equal(shouldAutoCloseTaskPreview(null, 'completed'), false)
 })
 
-test('shouldAutoScrollToLatest should auto scroll once per session when content exists', () => {
+test('shouldAutoScrollToLatest should follow latest while run is active', () => {
   assert.equal(shouldAutoScrollToLatest({
-    hasAutoScrolled: false,
+    autoFollowLatest: true,
+    sessionStatus: 'running',
+    streaming: false,
     timelineLength: 3,
     shouldShowThinking: false,
+    hasVisibleTextStreamDraft: false,
   }), true)
 
   assert.equal(shouldAutoScrollToLatest({
-    hasAutoScrolled: true,
+    autoFollowLatest: true,
+    sessionStatus: 'completed',
+    streaming: false,
     timelineLength: 3,
     shouldShowThinking: true,
+    hasVisibleTextStreamDraft: true,
   }), false)
 
   assert.equal(shouldAutoScrollToLatest({
-    hasAutoScrolled: false,
+    autoFollowLatest: false,
+    sessionStatus: 'running',
+    streaming: true,
     timelineLength: 0,
     shouldShowThinking: true,
-  }), true)
+    hasVisibleTextStreamDraft: true,
+  }), false)
 
   assert.equal(shouldAutoScrollToLatest({
-    hasAutoScrolled: false,
+    autoFollowLatest: true,
+    sessionStatus: 'waiting',
+    streaming: false,
     timelineLength: 0,
+    shouldShowThinking: true,
+    hasVisibleTextStreamDraft: false,
+  }), true)
+})
+
+test('isNearScrollBottom should tolerate small distance from bottom', () => {
+  assert.equal(isNearScrollBottom({
+    scrollTop: 880,
+    scrollHeight: 1000,
+    clientHeight: 100,
+  }), true)
+
+  assert.equal(isNearScrollBottom({
+    scrollTop: 700,
+    scrollHeight: 1000,
+    clientHeight: 100,
+  }), false)
+})
+
+test('jump to latest button should be driven by paused auto follow state', () => {
+  assert.equal(shouldShowJumpToLatestButton({
+    autoFollowLatest: false,
+    timelineLength: 5,
     shouldShowThinking: false,
+    hasVisibleTextStreamDraft: false,
+  }), true)
+
+  assert.equal(shouldShowJumpToLatestButton({
+    autoFollowLatest: true,
+    timelineLength: 5,
+    shouldShowThinking: false,
+    hasVisibleTextStreamDraft: false,
   }), false)
 })
 
@@ -183,7 +227,7 @@ test('session scoped detail state factories should reset view state and runtime 
   assert.deepEqual(createSessionScopedRuntimeState(), {
     initialMessageSent: false,
     previousToolCount: 0,
-    hasAutoScrolled: false,
+    autoFollowLatest: true,
     previousSessionStatus: null,
   })
 })
