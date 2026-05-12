@@ -25,6 +25,7 @@
     "src/lib/session-realtime-events.ts",
     "src/lib/session-text-stream-state.ts",
     "src/lib/session-text-stream-playback.ts",
+    "src/lib/step-process-display.ts",
     "src/lib/markdown-content-utils.ts",
     "src/lib/user-message-text.ts",
     "src/lib/file-preview.ts",

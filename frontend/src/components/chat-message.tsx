@@ -13,6 +13,7 @@ import type { AppLocale } from '@/lib/i18n'
 import type { StepEvent, ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
 import { resolveStepDetail } from '@/lib/run-timeline'
+import { resolveStepProcessSectionOrder } from '@/lib/step-process-display'
 import {
   getInitialAssistantTurnExpandedState,
   resolveAssistantTurnExpandedState,
@@ -423,7 +424,11 @@ function ProcessStepItem({
 }) {
   const { t } = useI18n()
   const { data, tools } = stepItem
-  const detail = resolveStepDetail(data.outcome)
+  const detail = resolveStepDetail(data.outcome, data.status)
+  const sectionOrder = resolveStepProcessSectionOrder({
+    hasTools: tools.length > 0,
+    hasSummary: Boolean(detail),
+  })
 
   return (
     <div className="flex flex-col gap-2">
@@ -435,25 +440,31 @@ function ProcessStepItem({
           {data.description}
         </span>
       </div>
-      {detail && (
-        <div className="pl-6 text-sm leading-relaxed text-stone-500">
-          {detail}
-        </div>
-      )}
-      {tools.length > 0 && (
-        <div className="flex flex-col gap-2 pl-6">
-          {tools.map((tool, idx) => (
-            <ToolRow
-              key={`${data.id}-process-tool-${idx}`}
-              className="mt-0"
-              timeLabel={getToolTimeLabel(tool, locale)}
-              fallbackTimeLabel={t('common.justNow')}
-            >
-              <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
-            </ToolRow>
-          ))}
-        </div>
-      )}
+      {sectionOrder.map((section) => {
+        if (section === 'tools') {
+          return (
+            <div key="tools" className="flex flex-col gap-2 pl-6">
+              {tools.map((tool, idx) => (
+                <ToolRow
+                  key={`${data.id}-process-tool-${idx}`}
+                  className="mt-0"
+                  timeLabel={getToolTimeLabel(tool, locale)}
+                  fallbackTimeLabel={t('common.justNow')}
+                >
+                  <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
+                </ToolRow>
+              ))}
+            </div>
+          )
+        }
+
+        if (!detail) return null
+        return (
+          <div key="summary" className="pl-6 text-sm leading-relaxed text-stone-500">
+            {detail}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -472,8 +483,12 @@ function StepBlock({
   const [expanded, setExpanded] = useState(() => shouldAutoExpandStep(stepItem.data.status))
   const { t } = useI18n()
   const { data, tools } = stepItem
-  const detail = resolveStepDetail(data.outcome)
+  const detail = resolveStepDetail(data.outcome, data.status)
   const shouldShowBody = Boolean(detail) || tools.length > 0
+  const sectionOrder = resolveStepProcessSectionOrder({
+    hasTools: tools.length > 0,
+    hasSummary: Boolean(detail),
+  })
   const previousStatusRef = useRef<StepEvent['status'] | null>(null)
 
   useEffect(() => {
@@ -524,20 +539,26 @@ function StepBlock({
             <div className="absolute left-[7px] top-2 bottom-0 w-[1px] border-l border-dashed border-gray-300" />
           </div>
           <div className="flex flex-col gap-3 flex-1 min-w-0 overflow-hidden pt-2 transition-[max-height,opacity] duration-150 ease-in-out">
-            {detail && (
-              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                {detail}
-              </div>
-            )}
-            {tools.map((tool, idx) => (
-              <ToolRow
-                key={`${data.id}-tool-${idx}`}
-                timeLabel={getToolTimeLabel(tool, locale)}
-                fallbackTimeLabel={t('common.justNow')}
-              >
-                <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
-              </ToolRow>
-            ))}
+            {sectionOrder.map((section) => {
+              if (section === 'tools') {
+                return tools.map((tool, idx) => (
+                  <ToolRow
+                    key={`${data.id}-tool-${idx}`}
+                    timeLabel={getToolTimeLabel(tool, locale)}
+                    fallbackTimeLabel={t('common.justNow')}
+                  >
+                    <ToolUse data={tool} onClick={onToolClick ? () => onToolClick(tool) : undefined} />
+                  </ToolRow>
+                ))
+              }
+
+              if (!detail) return null
+              return (
+                <div key="summary" className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                  {detail}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

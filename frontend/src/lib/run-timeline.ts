@@ -94,22 +94,28 @@ function planSummary(data: PlanEvent, locale: AppLocale): string {
 }
 
 function stepSummary(data: StepEvent, locale: AppLocale): string {
-  const detail = resolveStepDetail(data.outcome)
+  const detail = resolveStepDetail(data.outcome, data.status)
   if (detail) return truncate(detail, 80)
   const description = typeof data.description === 'string' ? data.description.trim() : ''
   if (description) return truncate(description, 80)
   return locale === 'en-US' ? `Step ${data.id}` : `步骤 ${data.id}`
 }
 
-export function resolveStepDetail(outcome: StepOutcome | null | undefined): string | null {
+export function resolveStepDetail(
+  outcome: StepOutcome | null | undefined,
+  status?: StepEvent['status'] | StepViewStatus,
+): string | null {
   if (!outcome) return null
+  const nextHint = toNonEmptyText(outcome.next_hint)
+  const blocker = Array.isArray(outcome.blockers)
+    ? outcome.blockers.find((item) => typeof item === 'string' && item.trim().length > 0)?.trim() ?? null
+    : null
+  if (status === 'failed' || status === 'cancelled') {
+    return nextHint ?? blocker
+  }
   const summary = toNonEmptyText(outcome.summary)
   if (summary) return summary
-  if (Array.isArray(outcome.blockers)) {
-    const blocker = outcome.blockers.find((item) => typeof item === 'string' && item.trim().length > 0)
-    if (blocker) return blocker.trim()
-  }
-  return toNonEmptyText(outcome.next_hint)
+  return blocker ?? nextHint
 }
 
 function waitSummary(data: WaitEventData, locale: AppLocale): string {
@@ -231,7 +237,7 @@ export function buildStepViewState(events: SSEEventData[]): StepViewState {
             description: step.description ?? step.id,
             status: normalizeStepStatus(step.status),
             stepIndex: i,
-            detail: resolveStepDetail(step.outcome),
+            detail: resolveStepDetail(step.outcome, normalizeStepStatus(step.status)),
           })
           orderedStepIds.push(step.id)
         }
@@ -241,20 +247,22 @@ export function buildStepViewState(events: SSEEventData[]): StepViewState {
         if (!step.id) return
         const existing = stepMap.get(step.id)
         if (existing) {
+          const nextStatus = normalizeStepStatus(step.status)
           stepMap.set(step.id, {
             ...existing,
             description: step.description || existing.description,
-            status: normalizeStepStatus(step.status),
-            detail: resolveStepDetail(step.outcome) ?? existing.detail,
+            status: nextStatus,
+            detail: resolveStepDetail(step.outcome, nextStatus) ?? existing.detail,
           })
           return
         }
+        const nextStatus = normalizeStepStatus(step.status)
         stepMap.set(step.id, {
           id: step.id,
           description: step.description || step.id,
-          status: normalizeStepStatus(step.status),
+          status: nextStatus,
           stepIndex: orderedStepIds.length,
-          detail: resolveStepDetail(step.outcome),
+          detail: resolveStepDetail(step.outcome, nextStatus),
         })
         orderedStepIds.push(step.id)
       },
