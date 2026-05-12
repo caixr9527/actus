@@ -91,6 +91,14 @@ EN_FILE_OUTPUT_ACTION_PATTERN = re.compile(
     r"\b(generate|write|save|export|create|produce)\b.{0,24}\b(markdown|md|file|document|report)\b",
     re.IGNORECASE,
 )
+SOURCE_RECORD_PATTERN = re.compile(
+    r"(记录|标注|保留|附上).{0,12}(来源|出处|链接|url|引用|source)",
+    re.IGNORECASE,
+)
+EN_SOURCE_RECORD_PATTERN = re.compile(
+    r"\b(record|cite|include|keep|attach)\b.{0,18}\b(source|sources|url|urls|link|links|citation|citations)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -195,6 +203,11 @@ def _compile_single_step_contract(
             corrected_count += 1
         return compiled_step, issues, corrected_count
 
+    if _should_compile_step_to_research(action_text=action_text, signals=signals, task_mode=task_mode):
+        compiled_step.task_mode_hint = StepTaskModeHint.RESEARCH
+        corrected_count += 1
+        task_mode = StepTaskModeHint.RESEARCH.value
+
     # P3-一次性收口：如果步骤明确写副作用，但策略禁止文件产出，按可执行语义纠偏。
     if artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value and step_requests_environment_write_action:
         if task_mode in {
@@ -231,6 +244,31 @@ def _compile_single_step_contract(
         corrected_count += 1
 
     return compiled_step, issues, corrected_count
+
+
+def _should_compile_step_to_research(
+        *,
+        action_text: str,
+        signals: dict,
+        task_mode: str,
+) -> bool:
+    if task_mode not in {"", StepTaskModeHint.GENERAL.value}:
+        return False
+    candidate_text = str(action_text or "").strip()
+    if not candidate_text:
+        return False
+    if _is_summary_only_text(candidate_text):
+        return False
+    if bool(signals.get("has_search_signal")):
+        return True
+    return bool(SOURCE_RECORD_PATTERN.search(candidate_text) or EN_SOURCE_RECORD_PATTERN.search(candidate_text))
+
+
+def _is_summary_only_text(candidate_text: str) -> bool:
+    return bool(
+        SUMMARY_ONLY_STEP_PATTERN.search(candidate_text)
+        or EN_SUMMARY_ONLY_STEP_PATTERN.search(candidate_text)
+    )
 
 
 def _is_final_delivery_step(*, step: Step, user_requests_file_output: bool) -> bool:

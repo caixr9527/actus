@@ -1605,6 +1605,119 @@ def test_finalize_max_iterations_should_not_converge_research_when_only_snippets
     assert "仍未形成可交付结果" in payload["blockers"][0]
 
 
+def test_research_convergence_should_break_after_search_and_fetch_tool_facts_ready() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "query_count": 7,
+                "candidate_url_count": 8,
+                "fetched_url_count": 1,
+                "fetch_success_count": 1,
+                "coverage_score": 0.625,
+                "search_evidence_summaries": [
+                    {
+                        "title": "漳州长泰周末游",
+                        "url": "https://example.com/search",
+                        "snippet": "长泰适合周末自驾和自然放松。",
+                    }
+                ],
+                "web_reading_evidence_summaries": [
+                    {
+                        "url": "https://example.com/page",
+                        "summary": "页面包含景点、民宿和餐饮信息。",
+                    }
+                ],
+            },
+        }
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息"),
+        task_mode="research",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "research_tool_fact_ready"
+    assert result.payload is not None
+    assert result.payload["success"] is True
+    assert result.payload["runtime_recent_action"]["research_convergence"]["source"] == "tool_fact_progress"
+
+
+def test_finalize_max_iterations_should_converge_research_when_search_and_fetch_tool_facts_ready() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息")
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=8,
+        iteration_count=8,
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "query_count": 7,
+                "candidate_url_count": 8,
+                "fetched_url_count": 1,
+                "fetch_success_count": 1,
+                "coverage_score": 0.625,
+                "web_reading_evidence_summaries": [
+                    {
+                        "url": "https://example.com/page",
+                        "summary": "页面包含景点、民宿和餐饮信息。",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert payload["success"] is True
+    assert payload["runtime_recent_action"]["research_convergence"]["reason_code"] == (
+        "research_max_iteration_tool_fact_ready"
+    )
+    assert payload["blockers"] == []
+
+
+def test_research_convergence_should_accept_top_level_web_reading_tool_facts() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "query_count": 7,
+                "candidate_url_count": 8,
+                "fetched_url_count": 1,
+                "fetch_success_count": 1,
+                "coverage_score": 0.625,
+            },
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://example.com/page",
+                    "summary": "页面包含景点、民宿和餐饮信息。",
+                }
+            ],
+        }
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息"),
+        task_mode="research",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "research_tool_fact_ready"
+    assert result.payload is not None
+    assert "页面包含景点、民宿和餐饮信息" in result.payload["facts_learned"][-1]
+
+
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="检索网页并读取正文")
@@ -2943,7 +3056,7 @@ def test_build_execution_context_should_keep_file_tools_for_general_file_observa
     assert "find_files" not in context.blocked_function_names
 
 
-def test_build_execution_context_should_block_research_tools_for_general_summary_only_step() -> None:
+def test_build_execution_context_should_not_mark_source_request_as_summary_only_without_existing_context() -> None:
     step = Step(
         description="整理 LangGraph human-in-the-loop 的常见实现模式，归纳为 5 条要点，并标注对应来源链接",
         task_mode_hint="general",
@@ -2958,12 +3071,18 @@ def test_build_execution_context_should_block_research_tools_for_general_summary
         user_content=[{"type": "text", "text": step.description}],
         has_available_file_context=False,
         available_tools=[],
-        available_function_names={"search_web", "fetch_page", "read_file"},
+        available_function_names={
+            "search_web",
+            "fetch_page",
+            "read_file",
+            "list_files",
+            "search_in_file",
+            "shell_execute",
+        },
         user_message_text="调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
     )
 
-    assert "search_web" in context.blocked_function_names
-    assert "fetch_page" in context.blocked_function_names
+    assert context.general_summary_only is False
 
 
 def test_build_execution_context_should_block_research_tools_for_general_summary_from_existing_evidence_step() -> None:
@@ -2985,12 +3104,115 @@ def test_build_execution_context_should_block_research_tools_for_general_summary
         user_content=[{"type": "text", "text": step.description}],
         has_available_file_context=False,
         available_tools=[],
-        available_function_names={"search_web", "fetch_page", "read_file", "write_file"},
+        available_function_names={"search_web", "fetch_page", "read_file", "write_file", "shell_execute"},
         user_message_text="根据已有搜索摘要整理重庆五一 4 天 3 夜行程草案，不要继续联网搜索",
     )
 
+    assert context.general_summary_only is True
     assert "search_web" in context.blocked_function_names
     assert "fetch_page" in context.blocked_function_names
+    assert "read_file" in context.blocked_function_names
+    assert "write_file" in context.blocked_function_names
+    assert "shell_execute" in context.blocked_function_names
+
+
+def test_build_execution_context_should_block_all_tools_for_collected_info_travel_note_step() -> None:
+    step = Step(
+        description="将收集到的所有信息（景点、天气、活动、住宿、交通）整理为结构化的旅行笔记，便于后续生成行程",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+        success_criteria=["输出包含各模块关键信息的结构化文本"],
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "search_web",
+            "fetch_page",
+            "list_files",
+            "read_file",
+            "search_in_file",
+            "shell_execute",
+            "shell_wait_process",
+        },
+        user_message_text="给我设计一份漳州周末情侣自驾游计划",
+    )
+
+    assert context.general_summary_only is True
+    assert {
+        "search_web",
+        "fetch_page",
+        "list_files",
+        "read_file",
+        "search_in_file",
+        "shell_execute",
+        "shell_wait_process",
+    }.issubset(context.blocked_function_names)
+
+
+def test_build_execution_context_should_block_browser_tools_for_summary_only_general_step() -> None:
+    step = Step(
+        description="基于已收集的网页信息，整理为结构化摘要",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "browser_view",
+            "browser_navigate",
+            "browser_extract_main_content",
+            "search_web",
+            "fetch_page",
+        },
+        user_message_text="整理前面网页信息",
+    )
+
+    assert context.general_summary_only is True
+    assert {
+        "browser_view",
+        "browser_navigate",
+        "browser_extract_main_content",
+        "search_web",
+        "fetch_page",
+    }.issubset(context.blocked_function_names)
+
+
+def test_build_execution_context_should_not_use_user_message_to_mark_step_summary_only() -> None:
+    step = Step(
+        description="检查当前目录是否存在 travel_notes.md",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="default",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={"list_files", "find_files", "search_web", "fetch_page"},
+        user_message_text="请基于已收集的信息整理旅行笔记",
+    )
+
+    assert context.general_summary_only is False
+    assert "list_files" not in context.blocked_function_names
+    assert "find_files" not in context.blocked_function_names
 
 
 def test_general_convergence_should_not_break_non_synthesis_general_without_file_observation() -> None:
@@ -3491,7 +3713,7 @@ def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_
 
 def test_build_execution_context_should_not_block_shell_for_general_step() -> None:
     step = Step(
-        description="整理所有信息并输出最终结论",
+        description="执行命令检查当前目录磁盘占用并输出结论",
         task_mode_hint="general",
         output_mode="none",
         artifact_policy="default",
@@ -3501,13 +3723,14 @@ def test_build_execution_context_should_not_block_shell_for_general_step() -> No
         step=step,
         task_mode="general",
         max_tool_iterations=4,
-        user_content=[{"type": "text", "text": "整理所有信息并输出最终结论"}],
+        user_content=[{"type": "text", "text": "执行命令检查当前目录磁盘占用并输出结论"}],
         has_available_file_context=False,
         available_tools=[],
         available_function_names={"shell_wait_process", "shell_execute", "search_web"},
-        user_message_text="整理所有信息并输出最终结论",
+        user_message_text="执行命令检查当前目录磁盘占用并输出结论",
     )
 
+    assert context.general_summary_only is False
     assert "shell_wait_process" not in context.blocked_function_names
 
 
@@ -3928,6 +4151,85 @@ def test_execute_step_with_prompt_should_fail_file_output_when_write_tools_filte
     assert payload["success"] is False
     assert payload["attachments"] == []
     assert any("没有可用的 write_file" in str(item) for item in payload["blockers"])
+    assert events == []
+
+
+def test_execute_step_with_prompt_should_use_no_tool_mode_for_summary_only_general_step() -> None:
+    llm = _FakeNoToolLLM(
+        {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已整理为结构化旅行笔记。",
+                    "facts_learned": ["景点、天气、活动、住宿、交通已归纳为五个模块。"],
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    runtime_tools = [
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "list files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "read file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "shell_execute",
+                    "description": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+    ]
+
+    payload, events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="7",
+                description="将收集到的所有信息（景点、天气、活动、住宿、交通）整理为结构化的旅行笔记，便于后续生成行程",
+                task_mode_hint="general",
+                output_mode=StepOutputMode.NONE,
+                artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
+            ),
+            runtime_tools=runtime_tools,  # type: ignore[list-item]
+            max_tool_iterations=6,
+            task_mode="general",
+            user_message="给我设计一份漳州周末情侣自驾游计划",
+        )
+    )
+
+    assert llm.calls == 1
+    assert payload["success"] is True
+    assert payload["summary"] == "已整理为结构化旅行笔记。"
     assert events == []
 
 

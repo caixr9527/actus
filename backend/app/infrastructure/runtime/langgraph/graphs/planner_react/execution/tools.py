@@ -614,7 +614,18 @@ async def execute_step_with_prompt(
         max_tool_iterations=execution_context.effective_max_tool_iterations,
     )
 
-    if len(available_tools) == 0:
+    if execution_context.general_summary_only:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "general_summary_only_step_enter_no_tool_mode",
+            step_id=str(step.id or ""),
+            task_mode=task_mode,
+            blocked_function_names=sorted(execution_context.blocked_function_names),
+            initial_iteration_function_names=sorted(initial_iteration_function_names),
+        )
+
+    if len(available_tools) == 0 or execution_context.general_summary_only:
         log_runtime(
             logger,
             logging.INFO,

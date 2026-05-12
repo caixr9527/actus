@@ -385,18 +385,6 @@ def finalize_max_iterations(
             runtime_recent_action=runtime_recent_action,
         )
 
-    log_runtime(
-        logger,
-        logging.INFO,
-        "达到最大工具轮次，步骤判定未完成",
-        step_id=str(step.id or ""),
-        requested_max_tool_iterations=requested_max_tool_iterations,
-        iteration_count=iteration_count,
-        task_mode=task_mode,
-        loop_break_reason="max_tool_iterations",
-        attachment_count=len(normalize_attachments(parsed.get("attachments"))),
-        elapsed_ms=elapsed_ms(started_at),
-    )
     convergence_decision = ConvergenceEngine(logger=logger).evaluate_max_iteration(
         context=MaxIterationConvergenceContext(
             step=step,
@@ -410,6 +398,19 @@ def finalize_max_iterations(
     )
     if convergence_decision.should_break and convergence_decision.payload is not None:
         return convergence_decision.payload
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "达到最大工具轮次，步骤判定未完成",
+        step_id=str(step.id or ""),
+        requested_max_tool_iterations=requested_max_tool_iterations,
+        iteration_count=iteration_count,
+        task_mode=task_mode,
+        loop_break_reason="max_tool_iterations",
+        attachment_count=len(normalize_attachments(parsed.get("attachments"))),
+        elapsed_ms=elapsed_ms(started_at),
+    )
     # P3-1A 收敛修复：max_tool_iterations 到达后一律按未完成收敛，不再返回 success=true。
     return _build_loop_break_payload(
         step=step,

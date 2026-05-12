@@ -330,6 +330,24 @@ class _SearchThenFinishLLM:
         }
 
 
+class _NoToolThenFinishLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已完成当前步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
 class _ShellThenFinishLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -1519,6 +1537,48 @@ def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -
     assert steps[0].output_mode == StepOutputMode.NONE
 
 
+def test_compile_step_contracts_should_correct_general_search_step_to_research() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息，并记录来源",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="给我设计一份周末出行计划",
+    )
+
+    assert issues == []
+    assert corrected_count == 1
+    assert steps[0].task_mode_hint == StepTaskModeHint.RESEARCH
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_keep_summary_only_general_step() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="2",
+                description="基于已收集的漳州相关信息，整理出具体的行程清单",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="给我设计一份周末出行计划",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.GENERAL
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
 def test_filter_final_delivery_steps_should_drop_summary_like_general_step() -> None:
     steps, issues, corrected_count = compile_step_contracts(
         steps=[
@@ -2296,7 +2356,7 @@ def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_wit
 
 
 def test_execute_step_with_prompt_should_block_search_in_general_task_mode() -> None:
-    llm = _SearchThenFinishLLM()
+    llm = _NoToolThenFinishLLM()
     search_tool = _SearchFetchTool()
 
     async def _run():
@@ -2317,11 +2377,7 @@ def test_execute_step_with_prompt_should_block_search_in_general_task_mode() -> 
     assert payload["summary"] == "已完成当前步骤"
     assert search_tool.invocations == []
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
-    assert len(called_events) == 1
-    assert called_events[0].function_name == "search_web"
-    assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "任务模式 general 不允许调用工具" in str(called_events[0].function_result.message or "")
+    assert called_events == []
 
 
 def test_execute_step_with_prompt_should_fail_web_reading_when_search_evidence_is_insufficient() -> None:
@@ -2354,8 +2410,8 @@ def test_execute_step_with_prompt_should_fail_web_reading_when_search_evidence_i
     assert called_events[0].function_result.success is True
 
 
-def test_execute_step_with_prompt_should_not_block_shell_without_legacy_delivery_semantics() -> None:
-    llm = _ShellThenFinishLLM()
+def test_execute_step_with_prompt_should_block_shell_for_summary_only_general_step() -> None:
+    llm = _NoToolThenFinishLLM()
     shell_tool = _ShellTool()
 
     async def _run():
@@ -2374,12 +2430,9 @@ def test_execute_step_with_prompt_should_not_block_shell_without_legacy_delivery
     payload, events = asyncio.run(_run())
 
     assert payload["summary"] == "已完成当前步骤"
-    assert shell_tool.invoked == 1
+    assert shell_tool.invoked == 0
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
-    assert len(called_events) == 1
-    assert called_events[0].function_name == "shell_execute"
-    assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is True
+    assert called_events == []
 
 
 def test_execute_step_with_prompt_should_block_shell_for_file_processing_without_explicit_command() -> None:

@@ -12,9 +12,12 @@ from app.domain.models import (
     StepTaskModeHint,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import (
+    BROWSER_ATOMIC_FUNCTION_NAMES,
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
+    FILE_FUNCTION_NAMES,
     READ_ONLY_FILE_FUNCTION_NAMES,
+    SEARCH_FUNCTION_NAMES,
     SHELL_AUXILIARY_FUNCTION_NAMES,
     TASK_MODE_ALLOWED_PREFIXES,
     TASK_MODE_MAX_TOOL_ITERATIONS,
@@ -29,9 +32,25 @@ from app.domain.services.workspace_runtime.policies import (
 )
 
 _GENERAL_SUMMARY_ONLY_PATTERN = re.compile(
-    r"(整理|归纳|提炼|梳理|总结|汇总|输出.{0,8}(要点|草案|方案|总结)|生成.{0,8}(草案|方案|要点|总结)|基于已有|已有搜索摘要|已有摘要|不依赖新的网络请求|仅基于已有)",
+    r"(整理|归纳|提炼|梳理|总结|汇总|撰写|形成|组织|结构化|收集到的|已收集|已获取|前面搜索|前面收集|"
+    r"输出.{0,8}(要点|草案|方案|总结|文本|笔记)|生成.{0,8}(草案|方案|要点|总结|笔记)|"
+    r"基于已有|已有搜索摘要|已有摘要|已有信息|已有证据|不依赖新的网络请求|仅基于已有)",
     re.IGNORECASE,
 )
+_GENERAL_SUMMARY_EXISTING_CONTEXT_PATTERN = re.compile(
+    r"(基于|根据|使用|利用)?(.{0,8})?"
+    r"(已有|已收集|收集到的|已获取|已完成|现有|前面搜索|前面收集|前序|前述|搜索摘要|检索结果|已有信息|已有证据|"
+    r"collected|gathered|existing|previous|prior|search results|research findings)",
+    re.IGNORECASE,
+)
+GENERAL_SUMMARY_ONLY_BLOCKED_FUNCTION_NAMES = {
+    *SEARCH_FUNCTION_NAMES,
+    *FILE_FUNCTION_NAMES,
+    "shell_execute",
+    *SHELL_AUXILIARY_FUNCTION_NAMES,
+    *BROWSER_ATOMIC_FUNCTION_NAMES,
+    *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
+}
 
 
 @dataclass(slots=True)
@@ -50,6 +69,7 @@ class ExecutionContext:
     allow_ask_user: bool
     research_route_enabled: bool
     research_has_explicit_url: bool
+    general_summary_only: bool = False
     # 当前轮用户原始输入文本（不含系统拼接提示），供研究链路显式 URL 判定使用。
     current_user_message_text: str = ""
     file_write_intent_blocked_function_names: Set[str] = field(default_factory=set)
@@ -116,11 +136,12 @@ def build_execution_context(
         read_only_file_blocked_function_names.update({"write_file", "replace_in_file", "shell_execute"})
         blocked_function_names.update(read_only_file_blocked_function_names)
 
-    if task_mode == "general" and _step_is_general_summary_only(
+    general_summary_only = task_mode == "general" and not has_available_file_context and _step_is_general_summary_only(
             step=step,
             user_message_text=user_message_text,
-    ):
-        blocked_function_names.update({"search_web", "fetch_page"})
+    )
+    if general_summary_only:
+        blocked_function_names.update(GENERAL_SUMMARY_ONLY_BLOCKED_FUNCTION_NAMES.intersection(available_function_names))
 
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
@@ -208,6 +229,7 @@ def build_execution_context(
         allow_ask_user=allow_ask_user,
         research_route_enabled=research_route_enabled,
         research_has_explicit_url=research_has_explicit_url,
+        general_summary_only=general_summary_only,
         current_user_message_text=str(user_message_text or "").strip(),
     )
 
@@ -347,12 +369,8 @@ def _step_is_general_summary_only(
     这类步骤的正确动作是消费已有 research / web_reading 证据直接成稿，
     不应继续调用 search_web / fetch_page 把步骤漂回搜索链路。
     """
-    candidate_text = "\n".join(
-        [
-            _build_step_candidate_text(step),
-            str(user_message_text or "").strip(),
-        ]
-    ).strip()
+    _ = user_message_text
+    candidate_text = _build_step_action_text(step).strip()
     if not candidate_text:
         return False
     signals = _analyze_text_intent(candidate_text)
@@ -360,8 +378,12 @@ def _step_is_general_summary_only(
         return False
     if not bool(_GENERAL_SUMMARY_ONLY_PATTERN.search(candidate_text)):
         return False
-    if bool(signals.get("has_url")):
+    if not bool(_GENERAL_SUMMARY_EXISTING_CONTEXT_PATTERN.search(candidate_text)):
         return False
-    if bool(signals.get("has_web_reading_signal")) and not bool(signals.get("has_search_signal")):
+    if _step_explicitly_requests_file_output(step=step, file_output_intent_text=_build_step_action_text(step)):
+        return False
+    if _step_explicitly_requests_shell_execution(step, [{"type": "text", "text": _build_step_action_text(step)}]):
+        return False
+    if bool(signals.get("has_url")):
         return False
     return True
