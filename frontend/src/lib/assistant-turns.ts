@@ -1,5 +1,5 @@
 import type { ChatMessage, ExecutionStatus } from './api/types'
-import type { AttachmentFile, TimelineItem } from './session-events'
+import type { TimelineItem } from './session-events'
 
 export type AssistantTurnStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'idle'
 

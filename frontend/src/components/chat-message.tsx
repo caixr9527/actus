@@ -8,6 +8,7 @@ import { ToolUse } from '@/components/tool-use'
 import { AttachmentsMessage } from '@/components/attachments-message'
 import { MarkdownContent } from '@/components/markdown-content'
 import { useI18n } from '@/lib/i18n'
+import { getUserMessageTextClassName, normalizeUserMessageText } from '@/lib/user-message-text'
 import type { AppLocale } from '@/lib/i18n'
 import type { StepEvent, ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
@@ -87,9 +88,7 @@ export function ChatMessage({
         )}
       >
         <div className="flex max-w-[90%] relative flex-col gap-2 items-end">
-          <div className="text-gray-700 relative flex items-center rounded-lg overflow-hidden bg-white p-3 border whitespace-pre-wrap break-words text-sm leading-relaxed">
-            {item.data.message ?? ''}
-          </div>
+          <UserMessageText message={item.data.message} />
         </div>
       </div>
     )
@@ -167,6 +166,19 @@ export function ChatMessage({
   }
 
   return null
+}
+
+function UserMessageText({ message }: { message?: string | null }) {
+  return (
+    <div
+      className={cn(
+        'text-gray-700 relative rounded-lg overflow-hidden bg-white p-3 border',
+        getUserMessageTextClassName(),
+      )}
+    >
+      {normalizeUserMessageText(message)}
+    </div>
+  )
 }
 
 function AssistantMessageBlock({

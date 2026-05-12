@@ -197,15 +197,6 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     setOpenMobile(false)
   }, [setOpen, setOpenMobile])
 
-  /**
-   * 将 previewTool 解析为 timeline 中最新版本的工具对象。
-   * 自动跟踪设置 previewTool 时工具事件可能尚无 content（如截图），
-   * 后续 SSE 更新后 timeline 中对象已刷新但 state 仍为旧引用。
-   * 通过 tool_call_id 匹配获取最新版本。
-   */
-  const resolvedPreviewTool = useMemo(() => {
-    return resolvePreviewToolFromTimeline(previewTool, timeline)
-  }, [previewTool, timeline])
   const panelTool = previewPanel.kind === 'tool'
     ? resolvePreviewToolFromTimeline(previewPanel.tool, timeline) ?? previewPanel.tool
     : null
@@ -234,6 +225,11 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
         previewTool: latestTool,
         previewFile: null,
       }))
+      if (previewCloseTimerRef.current) {
+        clearTimeout(previewCloseTimerRef.current)
+        previewCloseTimerRef.current = null
+      }
+      setPreviewPanel({ kind: 'tool', tool: latestTool, closing: false })
       scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
     }
     sessionRuntimeRef.current.previousToolCount = toolCount
@@ -309,21 +305,31 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   }, [refreshFiles])
 
   const handleFileClick = useCallback((file: AttachmentFile) => {
+    if (previewCloseTimerRef.current) {
+      clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = null
+    }
     setSessionUiState((prev) => ({
       ...prev,
       previewFile: file,
       previewTool: null,
     }))
+    setPreviewPanel({ kind: 'file', file, closing: false })
   }, [])
 
   const handleToolClick = useCallback((tool: ToolEvent) => {
     const kind = getToolKind(tool)
     if (kind === 'message' || isEvidenceReuseVirtualToolEvent(tool)) return
+    if (previewCloseTimerRef.current) {
+      clearTimeout(previewCloseTimerRef.current)
+      previewCloseTimerRef.current = null
+    }
     setSessionUiState((prev) => ({
       ...prev,
       previewTool: tool,
       previewFile: null,
     }))
+    setPreviewPanel({ kind: 'tool', tool, closing: false })
   }, [])
 
   const handleClosePreview = useCallback(() => {
@@ -332,24 +338,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       previewFile: null,
       previewTool: null,
     }))
-  }, [])
-
-  useEffect(() => {
     if (previewCloseTimerRef.current) {
       clearTimeout(previewCloseTimerRef.current)
       previewCloseTimerRef.current = null
     }
-
-    if (previewFile) {
-      setPreviewPanel({ kind: 'file', file: previewFile, closing: false })
-      return
-    }
-
-    if (resolvedPreviewTool) {
-      setPreviewPanel({ kind: 'tool', tool: resolvedPreviewTool, closing: false })
-      return
-    }
-
     setPreviewPanel((current) => {
       if (current.kind === 'none' || current.closing) return current
       previewCloseTimerRef.current = setTimeout(() => {
@@ -358,7 +350,9 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       }, PREVIEW_PANEL_ANIMATION_MS)
       return { ...current, closing: true }
     })
-  }, [previewFile, resolvedPreviewTool])
+  }, [])
+
+  const closePreviewPanel = handleClosePreview
 
   useEffect(() => {
     return () => {
@@ -370,11 +364,16 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
   const handleJumpToLatest = useCallback(() => {
     if (latestTool) {
+      if (previewCloseTimerRef.current) {
+        clearTimeout(previewCloseTimerRef.current)
+        previewCloseTimerRef.current = null
+      }
       setSessionUiState((prev) => ({
         ...prev,
         previewTool: latestTool,
         previewFile: null,
       }))
+      setPreviewPanel({ kind: 'tool', tool: latestTool, closing: false })
     }
     scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
   }, [latestTool])
@@ -387,12 +386,17 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     setSessionUiState((prev) => ({ ...prev, vncOpen: false }))
     // 关闭 VNC 后跳转到最新工具
     if (latestTool && runtimeStatus === 'running') {
+      if (previewCloseTimerRef.current) {
+        clearTimeout(previewCloseTimerRef.current)
+        previewCloseTimerRef.current = null
+      }
       setSessionUiState((prev) => ({
         ...prev,
         previewTool: latestTool,
         previewFile: null,
         vncOpen: false,
       }))
+      setPreviewPanel({ kind: 'tool', tool: latestTool, closing: false })
       setTimeout(() => {
         scrollContainerRef.current?.scrollTo({ top: scrollContainerRef.current.scrollHeight, behavior: 'smooth' })
       }, 100)
@@ -456,16 +460,12 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     const previousStatus = sessionRuntimeRef.current.previousSessionStatus
     const nextStatus = runtimeStatus ?? null
     if (shouldAutoCloseTaskPreview(previousStatus, nextStatus)) {
-      // 任务从 running 收敛到 completed/cancelled 时，预览面板必须立即清空，避免显示过期执行态内容。
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSessionUiState((prev) => ({
-        ...prev,
-        previewFile: null,
-        previewTool: null,
-      }))
+      setTimeout(() => {
+        closePreviewPanel()
+      }, 0)
     }
     sessionRuntimeRef.current.previousSessionStatus = nextStatus
-  }, [runtimeStatus])
+  }, [closePreviewPanel, runtimeStatus])
 
   if (!isHydrated) {
     return (
