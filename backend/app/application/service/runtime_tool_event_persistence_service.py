@@ -15,6 +15,7 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactEventProjectorPort,
     SandboxFactProjectionContextBuilderPort,
     SandboxFactRecorderPort,
+    ToolEventDisplayProjectorPort,
     ToolEventFactProjectionResult,
 )
 
@@ -34,6 +35,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             sandbox_fact_recorder: SandboxFactRecorderPort,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
+            tool_event_display_projector: ToolEventDisplayProjectorPort | None = None,
     ) -> None:
         self._session_id = str(session_id or "").strip()
         self._task = task
@@ -42,6 +44,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         self._sandbox_fact_recorder = sandbox_fact_recorder
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
+        self._tool_event_display_projector = tool_event_display_projector
 
     async def persist_tool_event_and_record_facts(
             self,
@@ -65,6 +68,8 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             raise ValueError("ToolEvent session_id 与运行实例不一致")
         if not str(current_step_id or "").strip():
             raise ValueError("ToolEvent fact 投影需要 current_step_id")
+
+        await self._project_tool_event_display_content(event)
 
         stream_event_id = await self._task.output_stream.put(
             TaskStreamEventRecord(event=event).model_dump_json()
@@ -142,6 +147,15 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             sandbox_fact_event_persisted=sandbox_fact_event_persisted,
             event_inserted=bool(getattr(persist_result, "event_inserted", False)),
         )
+
+    async def _project_tool_event_display_content(self, event: ToolEvent) -> None:
+        if event.status != ToolEventStatus.CALLED:
+            return
+        if event.tool_content is not None:
+            return
+        if self._tool_event_display_projector is None:
+            return
+        await self._tool_event_display_projector.project(event)
 
     async def _project_sandbox_fact_event(
             self,

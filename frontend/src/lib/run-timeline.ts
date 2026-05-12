@@ -2,6 +2,7 @@ import type { SSEEventData, PlanEvent, StepEvent, StepOutcome, ToolEvent, WaitEv
 import type { AppLocale } from './i18n'
 import { getFriendlyToolLabel } from '../components/tool-use/utils'
 import { visitSessionEvent } from './session-event-adapter'
+import { isEvidenceReuseVirtualToolEvent } from './session-events'
 import { parseWaitEventContext, type WaitEventContext } from './wait-event'
 
 export type RunTimelineKind = 'message' | 'plan' | 'step' | 'tool' | 'wait' | 'error' | 'done'
@@ -165,6 +166,7 @@ export function buildRunTimeline(events: SSEEventData[], locale: AppLocale = 'zh
         })
       },
       tool: (toolEvent) => {
+        if (isEvidenceReuseVirtualToolEvent(toolEvent.data as ToolEvent)) return
         items.push({
           ...base,
           kind: 'tool',

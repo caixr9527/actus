@@ -63,7 +63,7 @@ from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.domain.services.workspace_runtime.projectors import SandboxFactToolEventProjector
+from app.domain.services.workspace_runtime.projectors import SandboxFactToolEventProjector, ToolEventProjector
 from app.infrastructure.runtime.langgraph import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,17 @@ class AgentService:
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
+            tool_event_display_projector=ToolEventProjector(
+                adapter=self._tool_runtime_adapter,
+                browser=browser,
+                file_storage=self._file_storage,
+                workspace_runtime_service=WorkspaceRuntimeService(
+                    session_id=session.id,
+                    user_id=session.user_id,
+                    uow_factory=self._uow_factory,
+                ),
+                user_id=session.user_id,
+            ),
         )
         return await AgentTaskRunner.create(
             llm=llm,

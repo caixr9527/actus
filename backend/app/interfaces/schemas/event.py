@@ -239,6 +239,8 @@ class ToolEventData(BaseEventData):
     function: str  # 工具名字
     args: Dict[str, Any]  # 工具参数
     content: Optional[Any] = None  # 工具调用结果
+    is_virtual: bool = False  # 是否为后端复用/投影产生的虚拟工具事件
+    virtual_kind: Optional[str] = None  # 虚拟工具事件类型
 
 
 class ToolSSEEvent(BaseSSEEvent):
@@ -248,6 +250,7 @@ class ToolSSEEvent(BaseSSEEvent):
 
     @classmethod
     def from_event(cls, event: ToolEvent, runtime: RuntimeEventMeta) -> Self:
+        is_virtual = _is_evidence_reuse_virtual_tool_event(event)
         return cls(
             data=ToolEventData(
                 **BaseEventData.base_event_data(event, runtime),
@@ -257,8 +260,26 @@ class ToolSSEEvent(BaseSSEEvent):
                 function=event.function_name,
                 args=event.function_args,
                 content=event.tool_content,
+                is_virtual=is_virtual,
+                virtual_kind="evidence_reuse" if is_virtual else None,
             )
         )
+
+
+def _is_evidence_reuse_virtual_tool_event(event: ToolEvent) -> bool:
+    if event.status != ToolEventStatus.CALLED:
+        return False
+    result = event.function_result
+    if result is None:
+        return False
+    data = result.data
+    if not isinstance(data, dict):
+        return False
+    return (
+        data.get("result_handle_resolved") is True
+        or data.get("duplicate_decision") == "reuse_existing_evidence"
+        or data.get("loop_break_reason") == "evidence_reuse_allowed"
+    )
 
 
 class SandboxFactEventRefData(BaseModel):

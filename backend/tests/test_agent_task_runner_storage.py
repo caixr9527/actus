@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 from typing import Optional
 
 import pytest
@@ -18,6 +19,8 @@ from app.domain.models import (
     PlanEvent,
     RuntimeInput,
     SandboxFactEvent,
+    SearchResultItem,
+    SearchResults,
     Session,
     SessionStatus,
     Step,
@@ -761,12 +764,14 @@ class _NoopOutputStream:
     def __init__(self) -> None:
         self.sequence = 0
         self.records: list[str] = []
+        self.messages: list[str] = []
         self.deleted: list[str] = []
 
-    async def put(self, _message: str) -> str:
+    async def put(self, message: str) -> str:
         self.sequence += 1
         event_id = f"evt-{self.sequence}"
         self.records.append(event_id)
+        self.messages.append(message)
         return event_id
 
     async def delete_message(self, message_id: str) -> bool:
@@ -1664,6 +1669,50 @@ def test_runtime_tool_event_persistence_should_mark_calling_event_as_graph_proje
     assert "runtime_fact_projection" not in event.model_dump(mode="json")
 
 
+def test_runtime_tool_event_persistence_should_project_tool_content_before_persist() -> None:
+    task = _SerialInvokeTask([])
+    coordinator = _CapturingCoordinator()
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=coordinator,
+        sandbox_fact_recorder=_EmptyFactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+        tool_event_display_projector=_SearchDisplayProjector(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(
+            success=True,
+            data=SearchResults(
+                query="q",
+                results=[SearchResultItem(title="Example", url="https://example.com", snippet="ok")],
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(service.persist_tool_event_and_record_facts(
+        event=event,
+        run_id="run-1",
+        session_id="session-1",
+        current_step_id="step-1",
+    ))
+
+    stream_payload = json.loads(task.output_stream.messages[0])
+    persisted_event = coordinator.persisted_events[0]
+    assert stream_payload["event"]["tool_content"]["results"][0]["url"] == "https://example.com"
+    assert persisted_event.tool_content is not None
+    assert persisted_event.tool_content.results[0].title == "Example"
+    assert event.tool_content is not None
+
+
 def test_runtime_tool_event_persistence_should_keep_stream_when_fact_projection_fails_after_db_persist() -> None:
     task = _SerialInvokeTask([])
     coordinator = _PersistingCoordinator()
@@ -1742,6 +1791,15 @@ class _PersistingCoordinator:
         return type("PersistResult", (), {"event_inserted": True})()
 
 
+class _CapturingCoordinator:
+    def __init__(self) -> None:
+        self.persisted_events: list[ToolEvent] = []
+
+    async def persist_runtime_event(self, *, session_id, event, projection=None, allow_status_transition=True):
+        self.persisted_events.append(event)
+        return type("PersistResult", (), {"event_inserted": True})()
+
+
 class _FailingCoordinator:
     async def persist_runtime_event(self, **_kwargs):
         raise RuntimeError("db failed")
@@ -1812,9 +1870,26 @@ class _FactRecorder:
         ]
 
 
+class _EmptyFactRecorder:
+    async def record_from_tool_event(self, *, context, event):
+        return []
+
+
 class _FailingFactRecorder:
     async def record_from_tool_event(self, **_kwargs):
         raise RuntimeError("fact failed")
+
+
+class _SearchDisplayProjector:
+    async def project(self, event: ToolEvent) -> None:
+        projector = ToolEventProjector(
+            adapter=ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1()),
+            browser=_BrowserScreenshot(),
+            file_storage=_ScreenshotFileStorage(),
+            workspace_runtime_service=_ShellObservationWorkspaceRuntimeService(),
+            user_id="user-1",
+        )
+        await projector.project(event)
 
 
 def test_atomic_action_evidence_reconcile_should_preserve_current_step_id() -> None:

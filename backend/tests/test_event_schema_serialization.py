@@ -18,6 +18,9 @@ from app.domain.models import (
     TextStreamDeltaEvent,
     TextStreamEndEvent,
     TextStreamStartEvent,
+    ToolEvent,
+    ToolEventStatus,
+    ToolResult,
     WaitEvent,
 )
 from app.application.service.runtime_observation_service import (
@@ -221,6 +224,57 @@ def test_event_mapper_should_serialize_sandbox_fact_event_without_raw_payload() 
     assert payload["data"]["step_id"] == "step-1"
     assert "payload" not in payload["data"]
     assert payload["data"]["runtime"]["status_after_event"] is None
+
+
+def test_tool_sse_event_should_mark_evidence_reuse_virtual_success() -> None:
+    event = ToolEvent(
+        id="evt-tool-virtual",
+        created_at=datetime(2026, 3, 11, 12, 0, 6),
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/a"},
+        function_result=ToolResult(
+            success=True,
+            message="已复用前序证据结果",
+            data={
+                "loop_break_reason": "evidence_reuse_allowed",
+                "duplicate_decision": "reuse_existing_evidence",
+                "result_handle_resolved": True,
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    payload = _map_event(event).model_dump(mode="json")
+
+    assert payload["event"] == "tool"
+    assert payload["data"]["is_virtual"] is True
+    assert payload["data"]["virtual_kind"] == "evidence_reuse"
+
+
+def test_tool_sse_event_should_not_mark_real_tool_call_virtual() -> None:
+    event = ToolEvent(
+        id="evt-tool-real",
+        created_at=datetime(2026, 3, 11, 12, 0, 7),
+        step_id="step-1",
+        tool_call_id="call-2",
+        tool_name="search",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/a"},
+        function_result=ToolResult(
+            success=True,
+            data={"url": "https://example.com/a", "title": "Example"},
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    payload = _map_event(event).model_dump(mode="json")
+
+    assert payload["event"] == "tool"
+    assert payload["data"]["is_virtual"] is False
+    assert payload["data"]["virtual_kind"] is None
 
 
 def test_sandbox_fact_event_should_be_persistent() -> None:

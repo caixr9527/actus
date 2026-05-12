@@ -16,6 +16,7 @@ import { useSessionDetail } from '@/hooks/use-session-detail'
 import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
+  isEvidenceReuseVirtualToolEvent,
 } from '@/lib/session-events'
 import { buildStepViewState } from '@/lib/run-timeline'
 import { resolvePreviewToolFromTimeline } from '@/lib/session-preview-tool'
@@ -56,12 +57,19 @@ export interface SessionDetailViewProps {
 function findLatestTool(timeline: TimelineItem[]): ToolEvent | null {
   for (let i = timeline.length - 1; i >= 0; i--) {
     const item = timeline[i]
-    if (item.kind === 'tool' && getToolKind(item.data) !== 'message') {
+    if (
+      item.kind === 'tool' &&
+      getToolKind(item.data) !== 'message' &&
+      !isEvidenceReuseVirtualToolEvent(item.data)
+    ) {
       return item.data
     }
     if (item.kind === 'step' && item.tools.length > 0) {
       for (let j = item.tools.length - 1; j >= 0; j--) {
-        if (getToolKind(item.tools[j]) !== 'message') {
+        if (
+          getToolKind(item.tools[j]) !== 'message' &&
+          !isEvidenceReuseVirtualToolEvent(item.tools[j])
+        ) {
           return item.tools[j]
         }
       }
@@ -192,8 +200,12 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
   const latestTool = useMemo(() => findLatestTool(timeline), [timeline])
   const toolCount = useMemo(() => {
     return timeline.reduce((count, item) => {
-      if (item.kind === 'tool') return count + 1
-      if (item.kind === 'step') return count + item.tools.length
+      if (item.kind === 'tool') {
+        return isEvidenceReuseVirtualToolEvent(item.data) ? count : count + 1
+      }
+      if (item.kind === 'step') {
+        return count + item.tools.filter((tool) => !isEvidenceReuseVirtualToolEvent(tool)).length
+      }
       return count
     }, 0)
   }, [timeline])
@@ -294,7 +306,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
 
   const handleToolClick = useCallback((tool: ToolEvent) => {
     const kind = getToolKind(tool)
-    if (kind === 'message') return
+    if (kind === 'message' || isEvidenceReuseVirtualToolEvent(tool)) return
     setSessionUiState((prev) => ({
       ...prev,
       previewTool: tool,

@@ -69,6 +69,12 @@ class SandboxFactEventProjectorPort(Protocol):
         ...
 
 
+class ToolEventDisplayProjectorPort(Protocol):
+    async def project(self, event: ToolEvent) -> None:
+        """在 ToolEvent 持久化前补齐前端展示所需的 tool_content。"""
+        ...
+
+
 class ToolEventFactProjectionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -216,6 +216,154 @@ test('sandbox fact event should stay out of user-facing timeline', () => {
   }
 })
 
+test('evidence reuse virtual tool event should remove pending calling tool from step timeline', () => {
+  const events: SSEEventData[] = [
+    eventOf('step', { id: 's-1', status: 'running', description: 'reuse step' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-reuse',
+      name: 'search',
+      function: 'fetch_page',
+      args: { url: 'https://example.com/a' },
+      status: 'calling',
+    }, { current_step_id: 's-1' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-reuse',
+      name: 'search',
+      function: 'fetch_page',
+      args: { url: 'https://example.com/a' },
+      status: 'called',
+      is_virtual: true,
+      virtual_kind: 'evidence_reuse',
+      content: {
+        message: '已复用前序证据结果',
+        reason_code: 'evidence_reuse_allowed',
+        diagnostic_type: 'tool_result_fallback',
+        details: {
+          duplicate_decision: 'reuse_existing_evidence',
+          result_handle_resolved: true,
+          result_handle_id: 'handle-1',
+        },
+      },
+    }, { current_step_id: 's-1' }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+  const standaloneTools = timeline.filter((item) => item.kind === 'tool')
+
+  assert.equal(stepItems.length, 1)
+  assert.equal(standaloneTools.length, 0)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.tools.length, 0)
+  }
+})
+
+test('evidence reuse virtual standalone tool event should remove pending calling tool', () => {
+  const events: SSEEventData[] = [
+    eventOf('tool', {
+      tool_call_id: 'tool-reuse-standalone',
+      name: 'search',
+      function: 'search_web',
+      args: { query: 'hello' },
+      status: 'calling',
+    }),
+    eventOf('tool', {
+      tool_call_id: 'tool-reuse-standalone',
+      name: 'search',
+      function: 'search_web',
+      args: { query: 'hello' },
+      status: 'called',
+      is_virtual: true,
+      virtual_kind: 'evidence_reuse',
+      content: {
+        reason_code: 'evidence_reuse_allowed',
+        details: {
+          result_handle_resolved: true,
+        },
+      },
+    }),
+    eventOf('step', { id: 's-after', status: 'running', description: 'after reuse' }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const standaloneTools = timeline.filter((item) => item.kind === 'tool')
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+
+  assert.equal(standaloneTools.length, 0)
+  assert.equal(stepItems.length, 1)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.data.id, 's-after')
+  }
+})
+
+test('real repeated tool calls should remain visible when tool_call_id is different', () => {
+  const events: SSEEventData[] = [
+    eventOf('step', { id: 's-1', status: 'running', description: 'real repeated search' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-real-1',
+      name: 'search',
+      function: 'search_web',
+      args: { query: 'hello' },
+      status: 'called',
+      content: { results: [{ url: 'https://a.example', title: 'A', snippet: 'first' }] },
+    }, { current_step_id: 's-1' }),
+    eventOf('tool', {
+      tool_call_id: 'tool-real-2',
+      name: 'search',
+      function: 'search_web',
+      args: { query: 'hello' },
+      status: 'called',
+      content: { results: [{ url: 'https://b.example', title: 'B', snippet: 'second' }] },
+    }, { current_step_id: 's-1' }),
+  ]
+
+  const timeline = eventsToTimeline(events)
+  const stepItems = timeline.filter((item) => item.kind === 'step')
+
+  assert.equal(stepItems.length, 1)
+  const stepItem = stepItems[0]
+  assert.equal(stepItem?.kind, 'step')
+  if (stepItem?.kind === 'step') {
+    assert.equal(stepItem.tools.length, 2)
+    assert.equal((stepItem.tools[0] as { tool_call_id?: string }).tool_call_id, 'tool-real-1')
+    assert.equal((stepItem.tools[1] as { tool_call_id?: string }).tool_call_id, 'tool-real-2')
+  }
+})
+
+test('evidence reuse virtual tool event should stay out of run timeline projection', async () => {
+  const { buildRunTimeline } = await import('../src/lib/run-timeline')
+  const events: SSEEventData[] = [
+    eventOf('tool', {
+      tool_call_id: 'tool-reuse-run-timeline',
+      name: 'search',
+      function: 'fetch_page',
+      args: { url: 'https://example.com/a' },
+      status: 'called',
+      is_virtual: true,
+      virtual_kind: 'evidence_reuse',
+      content: { message: '已复用前序证据结果' },
+    }),
+    eventOf('tool', {
+      tool_call_id: 'tool-real-run-timeline',
+      name: 'search',
+      function: 'search_web',
+      args: { query: 'hello' },
+      status: 'called',
+      content: { results: [{ url: 'https://example.com', title: 'Example', snippet: 'ok' }] },
+    }),
+  ]
+
+  const runTimeline = buildRunTimeline(events)
+
+  assert.equal(runTimeline.length, 1)
+  assert.equal(runTimeline[0]?.kind, 'tool')
+  assert.equal(runTimeline[0]?.summary, '正在搜索 hello')
+})
+
 test('plan event should reconcile existing running step card to cancelled', () => {
   const events: SSEEventData[] = [
     eventOf('message', { role: 'user', message: 'q1' }),

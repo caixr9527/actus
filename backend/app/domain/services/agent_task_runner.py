@@ -725,7 +725,8 @@ class AgentTaskRunner(TaskRunner):
         async for event in self._require_run_engine().invoke(message):
             # 处理工具事件，根据工具类型进行相应的内容填充
             if isinstance(event, ToolEvent):
-                await self._tool_event_projector.project(event)
+                if event.tool_content is None:
+                    await self._tool_event_projector.project(event)
             # 处理消息事件，同步附件到存储
             elif isinstance(event, MessageEvent):
                 await self._message_attachment_projector.project(event)
@@ -747,7 +748,8 @@ class AgentTaskRunner(TaskRunner):
     async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
         async for event in self._require_run_engine().resume(value):
             if isinstance(event, ToolEvent):
-                await self._tool_event_projector.project(event)
+                if event.tool_content is None:
+                    await self._tool_event_projector.project(event)
             elif isinstance(event, MessageEvent):
                 await self._message_attachment_projector.project(event)
             yield event
