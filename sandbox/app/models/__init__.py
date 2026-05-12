@@ -36,6 +36,11 @@ from .searxng import (
     SearXNGSearchResult,
     SearXNGStatusResult,
 )
+from .capabilities import (
+    SandboxCapabilityItem,
+    SandboxCapabilityProbePayload,
+    SandboxResourceLimits,
+)
 
 _all_ = [
     "ShellExecResult",
@@ -60,4 +65,7 @@ _all_ = [
     "SearXNGSearchItem",
     "SearXNGSearchResult",
     "SearXNGStatusResult",
+    "SandboxCapabilityItem",
+    "SandboxCapabilityProbePayload",
+    "SandboxResourceLimits",
 ]

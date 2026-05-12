@@ -22,11 +22,29 @@ from app.domain.models import (
 )
 from app.domain.services.runtime.contracts.langgraph_settings import EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN
 from app.domain.services.runtime.normalizers import normalize_controlled_value
-from .task_mode_policy import analyze_text_intent, build_step_candidate_text, has_environment_write_intent
+from .task_mode_policy import (
+    analyze_text_intent,
+    build_step_candidate_text,
+    has_engineering_execution_intent,
+    has_environment_write_intent,
+)
 
 
 FINAL_USER_DELIVERY_STEP_PATTERN = re.compile(
     r"(直接向用户输出|输出给用户|向用户(展示|呈现|交付)|展示给用户|等待用户最终确认|最终(回答|答案|说明|报告|正文|交付|确认)|完整(回答|攻略|方案|报告)|面向用户)",
+    re.IGNORECASE,
+)
+EN_FINAL_USER_DELIVERY_STEP_PATTERN = re.compile(
+    r"\b("
+    r"deliver|present|show|send|respond|reply"
+    r")\b.{0,24}\b("
+    r"to the user|final answer|final response|final summary|final report|final delivery"
+    r")\b"
+    r"|\b("
+    r"final answer|final response|final summary|final report|final delivery"
+    r")\b.{0,24}\b("
+    r"to the user|for the user"
+    r")\b",
     re.IGNORECASE,
 )
 SUMMARY_ONLY_STEP_PATTERN = re.compile(
@@ -34,8 +52,51 @@ SUMMARY_ONLY_STEP_PATTERN = re.compile(
     r"|((整理|归纳|汇总|总结).{0,30}(为|成|出).{0,8}(\d+|[一二三四五六七八九十]+)\s*(条|个).{0,12}(要点|模式|方案|结论|建议))",
     re.IGNORECASE,
 )
+EN_SUMMARY_ONLY_STEP_PATTERN = re.compile(
+    r"\b("
+    r"summarize|organize|compile|synthesize|write|draft|compose"
+    r")\b.{0,36}\b("
+    r"collected|gathered|existing|search results|research findings|all findings"
+    r")\b.{0,36}\b("
+    r"answer|response|summary|report|recommendations|conclusion"
+    r")\b"
+    r"|\b("
+    r"based on|using"
+    r")\b.{0,36}\b("
+    r"collected|gathered|existing|search results|research findings|all findings"
+    r")\b.{0,36}\b("
+    r"summarize|organize|compile|synthesize|write|draft|compose"
+    r")\b",
+    re.IGNORECASE,
+)
 SUMMARY_FILE_OUTPUT_STEP_PATTERN = re.compile(
     r"((整理|归纳|汇总|总结).{0,30}(导出|保存|写入|生成).{0,12}(markdown|md|文件|文档|报告))",
+    re.IGNORECASE,
+)
+EN_SUMMARY_FILE_OUTPUT_STEP_PATTERN = re.compile(
+    r"\b("
+    r"summarize|organize|compile|synthesize"
+    r")\b.{0,36}\b("
+    r"export|save|write|generate"
+    r")\b.{0,20}\b("
+    r"markdown|md|file|document|report"
+    r")\b",
+    re.IGNORECASE,
+)
+FILE_OUTPUT_ACTION_PATTERN = re.compile(
+    r"(生成|写入|保存|导出|创建|产出).{0,24}(markdown|md|文件|文档|报告|report)",
+    re.IGNORECASE,
+)
+EN_FILE_OUTPUT_ACTION_PATTERN = re.compile(
+    r"\b(generate|write|save|export|create|produce)\b.{0,24}\b(markdown|md|file|document|report)\b",
+    re.IGNORECASE,
+)
+SOURCE_RECORD_PATTERN = re.compile(
+    r"(记录|标注|保留|附上).{0,12}(来源|出处|链接|url|引用|source)",
+    re.IGNORECASE,
+)
+EN_SOURCE_RECORD_PATTERN = re.compile(
+    r"\b(record|cite|include|keep|attach)\b.{0,18}\b(source|sources|url|urls|link|links|citation|citations)\b",
     re.IGNORECASE,
 )
 
@@ -123,8 +184,8 @@ def _compile_single_step_contract(
     issues: List[StepContractCompilationIssue] = []
     corrected_count = 0
 
-    candidate_text = build_step_candidate_text(compiled_step)
-    signals = analyze_text_intent(candidate_text)
+    action_text = _build_step_contract_action_text(compiled_step)
+    signals = analyze_text_intent(action_text)
     step_requests_environment_write_action = has_environment_write_intent(signals)
     _ = user_message  # P3-一次性收口：保留函数签名，当前编译策略仅依赖步骤语义。
 
@@ -142,6 +203,11 @@ def _compile_single_step_contract(
             corrected_count += 1
         return compiled_step, issues, corrected_count
 
+    if _should_compile_step_to_research(action_text=action_text, signals=signals, task_mode=task_mode):
+        compiled_step.task_mode_hint = StepTaskModeHint.RESEARCH
+        corrected_count += 1
+        task_mode = StepTaskModeHint.RESEARCH.value
+
     # P3-一次性收口：如果步骤明确写副作用，但策略禁止文件产出，按可执行语义纠偏。
     if artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT.value and step_requests_environment_write_action:
         if task_mode in {
@@ -155,15 +221,20 @@ def _compile_single_step_contract(
                 compiled_step.output_mode = StepOutputMode.FILE
                 corrected_count += 1
 
-    # P3-一次性收口：只要步骤语义明确包含创建/写入/修改等写副作用，
-    # 就不能继续保留 file_processing/general 的只读执行假设，必须纠偏到 coding。
+    # 文件创建/写入属于文件处理边界；只有命令、代码、测试等工程执行语义才纠偏到 coding。
+    has_engineering_execution_signal = has_engineering_execution_intent(signals)
     if step_requests_environment_write_action and task_mode in {
         StepTaskModeHint.FILE_PROCESSING.value,
         StepTaskModeHint.GENERAL.value,
         "",
     }:
-        compiled_step.task_mode_hint = StepTaskModeHint.CODING
-        corrected_count += 1
+        if has_engineering_execution_signal:
+            compiled_step.task_mode_hint = StepTaskModeHint.CODING
+            corrected_count += 1
+        else:
+            if task_mode != StepTaskModeHint.FILE_PROCESSING.value:
+                compiled_step.task_mode_hint = StepTaskModeHint.FILE_PROCESSING
+                corrected_count += 1
 
     # P3-一次性收口：output_mode=file 与 forbid_file_output 互斥时统一纠偏到 allow。
     output_mode = normalize_controlled_value(getattr(compiled_step, "output_mode", None), StepOutputMode) or ""
@@ -175,19 +246,68 @@ def _compile_single_step_contract(
     return compiled_step, issues, corrected_count
 
 
+def _should_compile_step_to_research(
+        *,
+        action_text: str,
+        signals: dict,
+        task_mode: str,
+) -> bool:
+    if task_mode not in {"", StepTaskModeHint.GENERAL.value}:
+        return False
+    candidate_text = str(action_text or "").strip()
+    if not candidate_text:
+        return False
+    if _is_summary_only_text(candidate_text):
+        return False
+    if bool(signals.get("has_search_signal")):
+        return True
+    return bool(SOURCE_RECORD_PATTERN.search(candidate_text) or EN_SOURCE_RECORD_PATTERN.search(candidate_text))
+
+
+def _is_summary_only_text(candidate_text: str) -> bool:
+    return bool(
+        SUMMARY_ONLY_STEP_PATTERN.search(candidate_text)
+        or EN_SUMMARY_ONLY_STEP_PATTERN.search(candidate_text)
+    )
+
+
 def _is_final_delivery_step(*, step: Step, user_requests_file_output: bool) -> bool:
     candidate_text = build_step_candidate_text(step)
     if not candidate_text:
         return False
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) or ""
+    artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy) or ""
+    if (
+        user_requests_file_output
+        and output_mode == StepOutputMode.FILE.value
+        and artifact_policy in {
+            StepArtifactPolicy.ALLOW_FILE_OUTPUT.value,
+            StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value,
+        }
+        and (
+            FILE_OUTPUT_ACTION_PATTERN.search(candidate_text)
+            or EN_FILE_OUTPUT_ACTION_PATTERN.search(candidate_text)
+        )
+    ):
+        return False
     if FINAL_USER_DELIVERY_STEP_PATTERN.search(candidate_text):
+        return True
+    if EN_FINAL_USER_DELIVERY_STEP_PATTERN.search(candidate_text):
         return True
     if SUMMARY_ONLY_STEP_PATTERN.search(candidate_text):
         return True
-    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode) or ""
+    if EN_SUMMARY_ONLY_STEP_PATTERN.search(candidate_text):
+        return True
     if (
         not user_requests_file_output
         and output_mode == StepOutputMode.FILE.value
         and SUMMARY_FILE_OUTPUT_STEP_PATTERN.search(candidate_text)
+    ):
+        return True
+    if (
+        not user_requests_file_output
+        and output_mode == StepOutputMode.FILE.value
+        and EN_SUMMARY_FILE_OUTPUT_STEP_PATTERN.search(candidate_text)
     ):
         return True
     return False
@@ -203,3 +323,13 @@ def _normalize_step_contract_enum_fields(step: Step) -> Step:
     normalized_step.output_mode = StepOutputMode(raw_output_mode) if raw_output_mode else None
     normalized_step.artifact_policy = StepArtifactPolicy(raw_artifact_policy) if raw_artifact_policy else None
     return normalized_step
+
+
+def _build_step_contract_action_text(step: Step) -> str:
+    """只拼当前步骤动作文本，禁止 success_criteria 污染写副作用判定。"""
+    parts: List[str] = []
+    for raw_item in (getattr(step, "title", ""), getattr(step, "description", "")):
+        item = str(raw_item or "").strip()
+        if item and item not in parts:
+            parts.append(item)
+    return "\n".join(parts)

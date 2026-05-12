@@ -8,9 +8,11 @@
 from abc import ABC, abstractmethod
 from typing import TypeVar
 
+from .evidence_repository import EvidenceRepository
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .long_term_memory_repository import LongTermMemoryRepository
+from .sandbox_fact_repository import SandboxFactRepository
 from .session_repository import SessionRepository
 from .session_context_snapshot_repository import SessionContextSnapshotRepository
 from .user_repository import UserRepository
@@ -24,11 +26,13 @@ T = TypeVar("T", bound="IUnitOfWork")
 
 class IUnitOfWork(ABC):
     """Uow模式协议接口"""
+    evidence: EvidenceRepository
     file: FileRepository
     session: SessionRepository
     user: UserRepository
     llm_model_config: LLMModelConfigRepository
     long_term_memory: LongTermMemoryRepository
+    sandbox_fact: SandboxFactRepository
     workflow_run: WorkflowRunRepository
     workflow_run_summary: WorkflowRunSummaryRepository
     session_context_snapshot: SessionContextSnapshotRepository

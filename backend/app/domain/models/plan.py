@@ -10,7 +10,9 @@ import hashlib
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.domain.services.runtime.contracts.evidence_ledger_contract import EvidenceBackedFactProjection
 
 
 def build_step_objective_source(title: str, description: str) -> str:
@@ -95,6 +97,7 @@ class StepOutcome(BaseModel):
     summary: str = ""
     produced_artifacts: List[str] = Field(default_factory=list)
     blockers: List[str] = Field(default_factory=list)
+    evidence_backed_facts: List[EvidenceBackedFactProjection] = Field(default_factory=list)
     facts_learned: List[str] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
     # 结构化附件交付偏好：False 表示本步骤明确禁止最终附件交付；None 表示未显式声明。
@@ -102,6 +105,12 @@ class StepOutcome(BaseModel):
     next_hint: Optional[str] = None
     reused_from_run_id: Optional[str] = None
     reused_from_step_id: Optional[str] = None
+    evidence_reconcile_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("facts_learned")
+    @classmethod
+    def _facts_learned_from_projection_text(cls, value: List[str]) -> List[str]:
+        return [str(item or "").strip() for item in list(value or []) if str(item or "").strip()]
 
 
 class Step(BaseModel):
@@ -140,6 +149,7 @@ class Step(BaseModel):
     objective_key: str = ""
     # 步骤成功判据（当前主要用于语义判定与去重签名；未来可扩展为执行收敛判定输入）。
     success_criteria: List[str] = Field(default_factory=list)
+    evidence_intent: Dict[str, Any] = Field(default_factory=dict)
     status: ExecutionStatus = ExecutionStatus.PENDING
     outcome: Optional[StepOutcome] = None
     error: Optional[str] = None

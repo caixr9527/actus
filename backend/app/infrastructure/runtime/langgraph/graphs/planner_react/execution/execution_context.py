@@ -3,7 +3,7 @@
 """P3 重构：执行循环上下文构建与步骤语义判断。"""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from app.domain.models import (
@@ -12,9 +12,13 @@ from app.domain.models import (
     StepTaskModeHint,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import (
+    BROWSER_ATOMIC_FUNCTION_NAMES,
     BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
     EXPLICIT_FILE_OUTPUT_REQUEST_PATTERN,
+    FILE_FUNCTION_NAMES,
     READ_ONLY_FILE_FUNCTION_NAMES,
+    SEARCH_FUNCTION_NAMES,
+    SHELL_AUXILIARY_FUNCTION_NAMES,
     TASK_MODE_ALLOWED_PREFIXES,
     TASK_MODE_MAX_TOOL_ITERATIONS,
 )
@@ -28,9 +32,25 @@ from app.domain.services.workspace_runtime.policies import (
 )
 
 _GENERAL_SUMMARY_ONLY_PATTERN = re.compile(
-    r"(整理|归纳|提炼|梳理|总结|汇总|输出.{0,8}(要点|草案|方案|总结)|生成.{0,8}(草案|方案|要点|总结)|基于已有|已有搜索摘要|已有摘要|不依赖新的网络请求|仅基于已有)",
+    r"(整理|归纳|提炼|梳理|总结|汇总|撰写|形成|组织|结构化|收集到的|已收集|已获取|前面搜索|前面收集|"
+    r"输出.{0,8}(要点|草案|方案|总结|文本|笔记)|生成.{0,8}(草案|方案|要点|总结|笔记)|"
+    r"基于已有|已有搜索摘要|已有摘要|已有信息|已有证据|不依赖新的网络请求|仅基于已有)",
     re.IGNORECASE,
 )
+_GENERAL_SUMMARY_EXISTING_CONTEXT_PATTERN = re.compile(
+    r"(基于|根据|使用|利用)?(.{0,8})?"
+    r"(已有|已收集|收集到的|已获取|已完成|现有|前面搜索|前面收集|前序|前述|搜索摘要|检索结果|已有信息|已有证据|"
+    r"collected|gathered|existing|previous|prior|search results|research findings)",
+    re.IGNORECASE,
+)
+GENERAL_SUMMARY_ONLY_BLOCKED_FUNCTION_NAMES = {
+    *SEARCH_FUNCTION_NAMES,
+    *FILE_FUNCTION_NAMES,
+    "shell_execute",
+    *SHELL_AUXILIARY_FUNCTION_NAMES,
+    *BROWSER_ATOMIC_FUNCTION_NAMES,
+    *BROWSER_HIGH_LEVEL_FUNCTION_NAMES,
+}
 
 
 @dataclass(slots=True)
@@ -49,8 +69,10 @@ class ExecutionContext:
     allow_ask_user: bool
     research_route_enabled: bool
     research_has_explicit_url: bool
+    general_summary_only: bool = False
     # 当前轮用户原始输入文本（不含系统拼接提示），供研究链路显式 URL 判定使用。
     current_user_message_text: str = ""
+    file_write_intent_blocked_function_names: Set[str] = field(default_factory=set)
 
 
 def step_allows_user_wait(step: Step, function_args: Dict[str, Any]) -> bool:
@@ -95,28 +117,42 @@ def build_execution_context(
     research_file_context_blocked_function_names: Set[str] = set()
     read_only_file_blocked_function_names: Set[str] = set()
     file_processing_shell_blocked_function_names: Set[str] = set()
+    file_write_intent_blocked_function_names: Set[str] = set()
     artifact_policy_blocked_function_names: Set[str] = set()
 
     # P3-1A 收敛修复：显式只读诉求下，禁止写文件/改文件/执行命令，避免“读请求写副作用”。
-    if _step_requests_read_only_file_access(
+    current_step_requests_write_only_file_output = (
+        task_mode == "file_processing"
+        and _step_requests_write_only_file_output(step=step)
+    )
+
+    if (
+            not current_step_requests_write_only_file_output
+            and _step_requests_read_only_file_access(
             step=step,
             read_only_intent_text=read_only_intent_text,
+            )
     ):
         read_only_file_blocked_function_names.update({"write_file", "replace_in_file", "shell_execute"})
         blocked_function_names.update(read_only_file_blocked_function_names)
 
-    if task_mode == "general" and _step_is_general_summary_only(
+    general_summary_only = task_mode == "general" and not has_available_file_context and _step_is_general_summary_only(
             step=step,
             user_message_text=user_message_text,
-    ):
-        blocked_function_names.update({"search_web", "fetch_page"})
+    )
+    if general_summary_only:
+        blocked_function_names.update(GENERAL_SUMMARY_ONLY_BLOCKED_FUNCTION_NAMES.intersection(available_function_names))
 
     if task_mode == "research" and not has_available_file_context:
         research_file_context_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
         blocked_function_names.update(research_file_context_blocked_function_names)
+    if current_step_requests_write_only_file_output:
+        file_write_intent_blocked_function_names.update(READ_ONLY_FILE_FUNCTION_NAMES)
+        blocked_function_names.update(file_write_intent_blocked_function_names)
+
     if task_mode == "file_processing" and not _step_explicitly_requests_shell_execution(step, normalized_user_content):
-        # P3-CASE3 修复：文件处理默认只走文件工具，显式命令意图才允许 shell_execute。
-        file_processing_shell_blocked_function_names.add("shell_execute")
+        # 文件处理默认只走文件工具；shell 会话辅助工具没有活跃进程时只会制造失败噪音。
+        file_processing_shell_blocked_function_names.update({"shell_execute", *SHELL_AUXILIARY_FUNCTION_NAMES})
         blocked_function_names.update(file_processing_shell_blocked_function_names)
     if _step_forbids_file_output(step):
         artifact_policy_blocked_function_names.update({"write_file", "replace_in_file"})
@@ -143,6 +179,13 @@ def build_execution_context(
         {
             function_name
             for function_name in file_processing_shell_blocked_function_names
+            if function_name not in available_function_names
+        }
+    )
+    blocked_function_names.difference_update(
+        {
+            function_name
+            for function_name in file_write_intent_blocked_function_names
             if function_name not in available_function_names
         }
     )
@@ -179,12 +222,14 @@ def build_execution_context(
         read_only_file_blocked_function_names=read_only_file_blocked_function_names,
         research_file_context_blocked_function_names=research_file_context_blocked_function_names,
         file_processing_shell_blocked_function_names=file_processing_shell_blocked_function_names,
+        file_write_intent_blocked_function_names=file_write_intent_blocked_function_names,
         artifact_policy_blocked_function_names=artifact_policy_blocked_function_names,
         requested_max_tool_iterations=requested_max_tool_iterations,
         effective_max_tool_iterations=effective_max_tool_iterations,
         allow_ask_user=allow_ask_user,
         research_route_enabled=research_route_enabled,
         research_has_explicit_url=research_has_explicit_url,
+        general_summary_only=general_summary_only,
         current_user_message_text=str(user_message_text or "").strip(),
     )
 
@@ -250,6 +295,29 @@ def _step_explicitly_requests_shell_execution(step: Step, user_content: Optional
     return any(marker in normalized_text for marker in explicit_markers)
 
 
+def _step_requests_write_only_file_output(
+        *,
+        step: Step,
+) -> bool:
+    step_text = _build_step_action_text(step)
+    # 写文件意图只能由当前 step 契约决定，不能混入完整 execute prompt。
+    # execute prompt 可能包含用户原始多步骤请求里的“后续读取”，会污染当前创建文件步骤。
+    if not _step_explicitly_requests_file_output(step=step, file_output_intent_text=step_text):
+        return False
+    signals = _analyze_text_intent(step_text)
+    return not bool(signals.get("has_read_action_signal"))
+
+
+def _build_step_action_text(step: Step) -> str:
+    """只拼当前步骤动作文本，禁止 success_criteria 污染执行期工具治理。"""
+    parts: List[str] = []
+    for raw_item in (getattr(step, "title", ""), getattr(step, "description", "")):
+        item = str(raw_item or "").strip()
+        if item and item not in parts:
+            parts.append(item)
+    return "\n".join(parts)
+
+
 def _collect_shell_function_names(available_function_names: Set[str]) -> Set[str]:
     shell_prefixes = tuple(TASK_MODE_ALLOWED_PREFIXES.get("general") or ())
     matched_names: Set[str] = set()
@@ -301,12 +369,8 @@ def _step_is_general_summary_only(
     这类步骤的正确动作是消费已有 research / web_reading 证据直接成稿，
     不应继续调用 search_web / fetch_page 把步骤漂回搜索链路。
     """
-    candidate_text = "\n".join(
-        [
-            _build_step_candidate_text(step),
-            str(user_message_text or "").strip(),
-        ]
-    ).strip()
+    _ = user_message_text
+    candidate_text = _build_step_action_text(step).strip()
     if not candidate_text:
         return False
     signals = _analyze_text_intent(candidate_text)
@@ -314,8 +378,12 @@ def _step_is_general_summary_only(
         return False
     if not bool(_GENERAL_SUMMARY_ONLY_PATTERN.search(candidate_text)):
         return False
-    if bool(signals.get("has_url")):
+    if not bool(_GENERAL_SUMMARY_EXISTING_CONTEXT_PATTERN.search(candidate_text)):
         return False
-    if bool(signals.get("has_web_reading_signal")) and not bool(signals.get("has_search_signal")):
+    if _step_explicitly_requests_file_output(step=step, file_output_intent_text=_build_step_action_text(step)):
+        return False
+    if _step_explicitly_requests_shell_execution(step, [{"type": "text", "text": _build_step_action_text(step)}]):
+        return False
+    if bool(signals.get("has_url")):
         return False
     return True

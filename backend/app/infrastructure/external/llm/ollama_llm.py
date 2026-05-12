@@ -116,19 +116,15 @@ class OllamaLLM(LLM):
 
     @property
     def supported(self) -> list[str]:
-        return ["text"]
+        return []
 
     async def format_multiplexed_message(self, input_parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Ollama 当前作为文本 LLM 使用，非文本输入直接拒绝。"""
-        formatted_parts: List[Dict[str, Any]] = []
+        """Ollama 当前不提供 Runtime 原生附件输入能力。"""
         for input_part in list(input_parts or []):
-            input_type = str(input_part.get("type") or "").strip()
-            if input_type == "text":
-                formatted_parts.append({"type": "text", "text": str(input_part.get("text") or "")})
-                continue
-            if input_type:
-                raise ServerError(f"OllamaLLM 当前不支持 {input_type} 输入")
-        return formatted_parts
+            input_type = str(input_part.get("type") or "").strip().lower()
+            if input_type in {"image", "audio", "video", "file", "file_ref"}:
+                raise ServerError(f"OllamaLLM 当前不支持 {input_type} 原生输入")
+        return []
 
     async def invoke(
             self,

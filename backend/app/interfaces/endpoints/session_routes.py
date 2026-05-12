@@ -17,7 +17,8 @@ from websockets import ConnectionClosed
 
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
-from app.application.service import SessionService, AgentService
+from app.application.service import SessionService, RuntimeObservationService
+from app.application.service.agent_service import AgentService
 from app.domain.models import User
 from app.interfaces.facades import SessionStreamFacade
 from app.interfaces.schemas import (
@@ -27,6 +28,7 @@ from app.interfaces.schemas import (
     ChatRequest,
     EventMapper,
     GetSessionResponse,
+    RuntimeObservationResponse,
     UpdateSessionModelRequest,
     UpdateSessionModelResponse,
     GetSessionFilesResponse,
@@ -37,7 +39,12 @@ from app.interfaces.schemas import (
 )
 from app.interfaces.schemas import Response
 from app.interfaces.dependencies.auth import get_current_user
-from app.interfaces.dependencies.services import get_session_service, get_agent_service, get_session_stream_facade
+from app.interfaces.dependencies.services import (
+    get_session_service,
+    get_agent_service,
+    get_session_stream_facade,
+    get_runtime_observation_service,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/sessions", tags=["会话模块"])
@@ -153,6 +160,7 @@ async def chat(
         session_service: SessionService = Depends(get_session_service),
         agent_service: AgentService = Depends(get_agent_service),
         session_stream_facade: SessionStreamFacade = Depends(get_session_stream_facade),
+        runtime_observation_service: RuntimeObservationService = Depends(get_runtime_observation_service),
 ) -> EventSourceResponse:
     """根据传递的会话id+chat请求数据向指定会话发起聊天请求"""
     chat_event_generator = await session_stream_facade.stream_chat(
@@ -161,6 +169,7 @@ async def chat(
         request=request,
         session_service=session_service,
         agent_service=agent_service,
+        runtime_observation_service=runtime_observation_service,
     )
     return EventSourceResponse(
         chat_event_generator
@@ -177,6 +186,9 @@ async def get_session(
         session_id: str,
         current_user: User = Depends(get_current_user),
         session_service: SessionService = Depends(get_session_service),
+        runtime_observation_service: RuntimeObservationService = Depends(
+            get_runtime_observation_service,
+        ),
 ) -> Response[GetSessionResponse]:
     """传递指定会话id获取该会话的对话详情"""
     session, event_records = await session_service.get_session_detail(
@@ -189,17 +201,36 @@ async def get_session(
             error_key=error_keys.SESSION_NOT_FOUND,
             error_params={"session_id": session_id},
         )
+    runtime = await runtime_observation_service.build_session_observation(
+        user_id=current_user.id,
+        session_id=session_id,
+    )
+    observation_context = runtime_observation_service.context_from_observation(runtime)
+    events = []
+    for event_record in runtime_observation_service.filter_persistent_records(event_records):
+        envelope = await runtime_observation_service.build_observable_event(
+            session_id=session.id,
+            event=event_record.event_payload,
+            run_id=event_record.run_id,
+            source_event_id=event_record.event_id,
+            cursor_event_id=event_record.event_id,
+            source="snapshot",
+            context=observation_context,
+        )
+        events.append(EventMapper.observable_event_to_sse_event(envelope))
+        observation_context = runtime_observation_service.advance_event_context(
+            observation_context,
+            event_record.event_payload,
+        )
     return Response.success(
         msg="获取会话详情成功",
         data=GetSessionResponse(
             session_id=session.id,
             title=session.title,
-            status=session.status,
+            status=runtime.status,
             current_model_id=session.current_model_id,
-            events=[
-                EventMapper.event_to_sse_event(event_record.event_payload)
-                for event_record in event_records
-            ],
+            runtime=RuntimeObservationResponse.from_result(runtime),
+            events=events,
         )
     )
 
@@ -346,13 +377,12 @@ async def vnc_websocket(
     elif "base64" in protocols:
         selected_protocol = "base64"
 
-    # 记录日志并接受WebSocket连接
-    logger.info(f"为会话[{session_id}]开启WebSocket连接")
-    await websocket.accept(subprotocol=selected_protocol)
-
     try:
         # 获取沙箱环境的VNC URL并建立连接
         sandbox_vnc_url = await session_service.get_vnc_url(user_id=current_user.id, session_id=session_id)
+        # 鉴权与 VNC URL 解析必须在 accept 前完成，避免失败请求建立 WebSocket。
+        logger.info(f"为会话[{session_id}]开启WebSocket连接")
+        await websocket.accept(subprotocol=selected_protocol)
         logger.info(f"连接WebSocket VNC： {sandbox_vnc_url}")
 
         # 建立到沙箱VNC服务器的WebSocket连接
@@ -405,6 +435,9 @@ async def vnc_websocket(
         # 处理连接沙箱环境失败的情况
         logger.error(f"连接沙箱环境失败: {str(connection_e)}")
         await websocket.close(code=1011, reason=f"连接沙箱环境失败: {str(connection_e)}")
+    except NotFoundError as e:
+        logger.info("VNC WebSocket 鉴权失败: session_id=%s error_key=%s", session_id, e.error_key)
+        await websocket.close(code=1008, reason=e.msg or "无权访问会话 VNC")
     except Exception as e:
         # 处理其他WebSocket异常
         logger.error(f"WebSocket异常: {str(e)}")

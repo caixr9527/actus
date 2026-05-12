@@ -23,6 +23,7 @@ from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.entry import EntryCompiler
 from app.domain.services.workspace_runtime.entry import reason_codes as entry_reason_codes
 from app.domain.services.workspace_runtime.policies.task_mode_policy import (
+    analyze_text_intent,
     classify_confirmed_user_task_mode,
     classify_step_task_mode,
 )
@@ -317,6 +318,24 @@ class _SearchThenFinishLLM:
                     }
                 ],
             }
+        return {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已完成当前步骤",
+                    "attachments": [],
+                },
+                ensure_ascii=False,
+            )
+        }
+
+
+class _NoToolThenFinishLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def invoke(self, messages, tools=None, response_format=None, tool_choice=None):
+        self.calls += 1
         return {
             "content": json.dumps(
                 {
@@ -932,7 +951,7 @@ def test_classify_step_task_mode_should_use_artifact_and_command_signals() -> No
     ) == "coding"
     assert classify_step_task_mode(
         Step(description="在 /tmp 下创建 hello.txt 并写入 HELLO")
-    ) == "coding"
+    ) == "file_processing"
     assert classify_step_task_mode(
         Step(description="读取 /tmp/backend.log 并整理错误摘要")
     ) == "file_processing"
@@ -1332,13 +1351,169 @@ def test_create_or_reuse_plan_node_should_fix_file_processing_write_conflict_ste
     )
 
     assert state["plan"] is not None
-    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
     assert state["plan"].steps[0].artifact_policy == "allow_file_output"
     assert state["plan"].steps[0].output_mode == "file"
     # P3-一次性收口：编译后结构化字段必须保持 Enum 类型，禁止字符串回流持久化层。
     assert isinstance(state["plan"].steps[0].task_mode_hint, StepTaskModeHint)
     assert isinstance(state["plan"].steps[0].output_mode, StepOutputMode)
     assert isinstance(state["plan"].steps[0].artifact_policy, StepArtifactPolicy)
+
+
+def test_compile_step_contracts_should_keep_file_output_step_as_file_processing() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+                task_mode_hint="file_processing",
+                output_mode="file",
+                artifact_policy="require_file_output",
+                success_criteria=[
+                    "文件 /home/ubuntu/p1-3-reuse-test.md 创建成功",
+                    "文件内容为“P1-3 reuse test”",
+                ],
+            )
+        ],
+        user_message="请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.FILE
+    assert steps[0].artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_correct_general_file_write_to_file_processing() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="请创建文件 /home/ubuntu/p1-3-reuse-test.md",
+    )
+
+    assert issues == []
+    assert corrected_count == 3
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.FILE
+    assert steps[0].artifact_policy == StepArtifactPolicy.ALLOW_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_not_treat_success_criteria_as_write_intent() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="2",
+                description="读取 /home/ubuntu/p1-3-reuse-test.md，确认文件内容",
+                task_mode_hint="file_processing",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                success_criteria=[
+                    "读取内容与第一步写入内容一致",
+                    "文件 /home/ubuntu/p1-3-reuse-test.md 内容为 P1-3 reuse test",
+                ],
+            )
+        ],
+        user_message="请先创建一个 Markdown 文件，然后读取该文件确认内容。",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_keep_read_step_with_no_modify_as_read_only() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="3",
+                description="再次读取同一个文件 /home/ubuntu/p1-3-reuse-test.md，且不修改文件",
+                task_mode_hint="file_processing",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+                success_criteria=[
+                    "成功再次读取文件",
+                    "内容未发生变化",
+                ],
+            )
+        ],
+        user_message=(
+            "请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md，"
+            "然后读取该文件，最后再次读取该文件且不修改文件。"
+        ),
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_analyze_text_intent_should_keep_file_target_when_reading_without_modifying() -> None:
+    signals = analyze_text_intent("再次读取同一个文件 /home/ubuntu/p1-3-reuse-test.md，且不修改文件")
+
+    assert signals["has_read_action_signal"] is True
+    assert signals["has_write_action_signal"] is False
+    assert signals["has_file_signal"] is True
+    assert signals["has_absolute_path"] is True
+
+
+def test_classify_step_task_mode_should_classify_file_write_as_file_processing_without_code_signal() -> None:
+    step = Step(
+        id="1",
+        description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+    )
+
+    assert classify_step_task_mode(step) == StepTaskModeHint.FILE_PROCESSING.value
+
+
+def test_classify_step_task_mode_should_keep_command_write_as_coding() -> None:
+    step = Step(
+        id="1",
+        description="执行命令 python -m pytest tests/test_example.py 并保存测试日志",
+    )
+
+    assert classify_step_task_mode(step) == StepTaskModeHint.CODING.value
+
+
+def test_classify_step_task_mode_should_keep_source_file_implementation_as_coding() -> None:
+    step = Step(
+        id="1",
+        description="修改 backend/app/services/foo.py 实现用户查询接口",
+    )
+
+    assert classify_step_task_mode(step) == StepTaskModeHint.CODING.value
+
+
+def test_compile_step_contracts_should_correct_source_file_implementation_to_coding() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="修改 backend/app/services/foo.py 实现用户查询接口",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="修改 backend/app/services/foo.py 实现用户查询接口",
+    )
+
+    assert issues == []
+    assert corrected_count == 3
+    assert steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert steps[0].output_mode == StepOutputMode.FILE
+    assert steps[0].artifact_policy == StepArtifactPolicy.ALLOW_FILE_OUTPUT
 
 
 def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -> None:
@@ -1360,6 +1535,48 @@ def test_compile_step_contracts_should_not_promote_plain_text_edit_to_coding() -
     assert steps[0].task_mode_hint == StepTaskModeHint.GENERAL
     assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
     assert steps[0].output_mode == StepOutputMode.NONE
+
+
+def test_compile_step_contracts_should_correct_general_search_step_to_research() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="1",
+                description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息，并记录来源",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="给我设计一份周末出行计划",
+    )
+
+    assert issues == []
+    assert corrected_count == 1
+    assert steps[0].task_mode_hint == StepTaskModeHint.RESEARCH
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
+
+
+def test_compile_step_contracts_should_keep_summary_only_general_step() -> None:
+    steps, issues, corrected_count = compile_step_contracts(
+        steps=[
+            Step(
+                id="2",
+                description="基于已收集的漳州相关信息，整理出具体的行程清单",
+                task_mode_hint="general",
+                output_mode="none",
+                artifact_policy="forbid_file_output",
+            )
+        ],
+        user_message="给我设计一份周末出行计划",
+    )
+
+    assert issues == []
+    assert corrected_count == 0
+    assert steps[0].task_mode_hint == StepTaskModeHint.GENERAL
+    assert steps[0].output_mode == StepOutputMode.NONE
+    assert steps[0].artifact_policy == StepArtifactPolicy.FORBID_FILE_OUTPUT
 
 
 def test_filter_final_delivery_steps_should_drop_summary_like_general_step() -> None:
@@ -1470,7 +1687,9 @@ def test_create_or_reuse_plan_node_should_build_fallback_step_when_planned_task_
     assert state["plan"].status == ExecutionStatus.PENDING
     assert len(state["plan"].steps) == 1
     assert state["current_step_id"] == "fallback-execution-step"
-    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.CODING
+    assert state["plan"].steps[0].task_mode_hint == StepTaskModeHint.FILE_PROCESSING
+    assert state["plan"].steps[0].output_mode == StepOutputMode.FILE
+    assert state["plan"].steps[0].artifact_policy == StepArtifactPolicy.ALLOW_FILE_OUTPUT
     assert state["final_message"] == ""
 
 
@@ -1758,9 +1977,11 @@ def test_create_or_reuse_plan_node_should_emit_planner_message_stream_before_pla
     assert isinstance(captured_events[0], TextStreamStartEvent)
     assert isinstance(captured_events[1], TextStreamDeltaEvent)
     assert isinstance(captured_events[2], TextStreamEndEvent)
-    assert captured_events[0].stream_id == "run-1:planner_message"
+    assert captured_events[0].stream_id == "run-1:final_message"
+    assert captured_events[0].stage == "final"
     assert isinstance(captured_events[-2], PlanEvent)
     assert isinstance(captured_events[-1], MessageEvent)
+    assert captured_events[-1].stage == "final"
     assert [event.type for event in state["emitted_events"]] == ["title", "plan", "message"]
 
 
@@ -2135,7 +2356,7 @@ def test_execute_step_with_prompt_should_allow_file_tools_for_inline_general_wit
 
 
 def test_execute_step_with_prompt_should_block_search_in_general_task_mode() -> None:
-    llm = _SearchThenFinishLLM()
+    llm = _NoToolThenFinishLLM()
     search_tool = _SearchFetchTool()
 
     async def _run():
@@ -2156,11 +2377,7 @@ def test_execute_step_with_prompt_should_block_search_in_general_task_mode() -> 
     assert payload["summary"] == "已完成当前步骤"
     assert search_tool.invocations == []
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
-    assert len(called_events) == 1
-    assert called_events[0].function_name == "search_web"
-    assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is False
-    assert "任务模式 general 不允许调用工具" in str(called_events[0].function_result.message or "")
+    assert called_events == []
 
 
 def test_execute_step_with_prompt_should_fail_web_reading_when_search_evidence_is_insufficient() -> None:
@@ -2193,8 +2410,8 @@ def test_execute_step_with_prompt_should_fail_web_reading_when_search_evidence_i
     assert called_events[0].function_result.success is True
 
 
-def test_execute_step_with_prompt_should_not_block_shell_without_legacy_delivery_semantics() -> None:
-    llm = _ShellThenFinishLLM()
+def test_execute_step_with_prompt_should_block_shell_for_summary_only_general_step() -> None:
+    llm = _NoToolThenFinishLLM()
     shell_tool = _ShellTool()
 
     async def _run():
@@ -2213,12 +2430,9 @@ def test_execute_step_with_prompt_should_not_block_shell_without_legacy_delivery
     payload, events = asyncio.run(_run())
 
     assert payload["summary"] == "已完成当前步骤"
-    assert shell_tool.invoked == 1
+    assert shell_tool.invoked == 0
     called_events = [event for event in events if event.status == ToolEventStatus.CALLED]
-    assert len(called_events) == 1
-    assert called_events[0].function_name == "shell_execute"
-    assert called_events[0].function_result is not None
-    assert called_events[0].function_result.success is True
+    assert called_events == []
 
 
 def test_execute_step_with_prompt_should_block_shell_for_file_processing_without_explicit_command() -> None:
@@ -2304,12 +2518,12 @@ def test_direct_wait_execute_step_should_allow_search_without_legacy_delivery_co
 
     next_state = asyncio.run(execute_step_node(state, llm, runtime_tools=[search_tool]))
 
-    assert search_tool.invoked == 1
-    assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
+    assert search_tool.invoked == 0
+    assert next_state["last_executed_step"].status == ExecutionStatus.FAILED
     assert "direct_wait_original_task_executed" not in next_state["graph_metadata"]["control"]
     assert next_state["final_message"] == ""
     assert next_state["last_executed_step"].outcome is not None
-    assert next_state["last_executed_step"].outcome.summary == "已完成当前步骤"
+    assert "evidence reuse snapshot" in next_state["last_executed_step"].outcome.summary
 
 
 def test_execute_step_node_should_treat_selected_artifacts_as_available_file_context() -> None:
@@ -2451,7 +2665,8 @@ def test_execute_step_node_should_not_emit_intermediate_message_for_inline_candi
     intermediate_events = [event for event in emitted_events if isinstance(event, MessageEvent)]
     assert len(intermediate_events) == 0
     assert next_state["plan"].steps[0].outcome is not None
-    assert next_state["plan"].steps[0].outcome.facts_learned == ["候选课程 A", "候选课程 B", "候选课程 C"]
+    assert next_state["plan"].steps[0].outcome.facts_learned == []
+    assert next_state["plan"].steps[0].outcome.evidence_backed_facts == []
     assert next_state["final_message"] == ""
 
 

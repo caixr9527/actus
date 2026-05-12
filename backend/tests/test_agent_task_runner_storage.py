@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 from typing import Optional
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from app.domain.models import (
     ContinueCancelledTaskInput,
     DoneEvent,
+    EvidenceEvent,
     ErrorEvent,
     ExecutionStatus,
     File,
@@ -16,18 +18,34 @@ from app.domain.models import (
     Plan,
     PlanEvent,
     RuntimeInput,
+    SandboxFactEvent,
+    SearchResultItem,
+    SearchResults,
     Session,
     SessionStatus,
     Step,
     StepEvent,
+    StepEventStatus,
     TextStreamChannel,
     TextStreamDeltaEvent,
     ToolEvent,
     ToolEventStatus,
     WaitEvent,
     Workspace,
+    WorkspaceArtifact,
     WorkflowRun,
     WorkflowRunStatus,
+)
+from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
+from app.domain.models.sandbox_fact import (
+    SandboxFactKind,
+    SandboxFactRecord,
+    SandboxFactScope,
+    SandboxFactSourceRef,
+    SandboxFactSourceType,
+    SandboxFactSubjectRef,
+    build_sandbox_fact_idempotency_key,
+    build_sandbox_fact_payload_hash,
 )
 from app.domain.models.tool_result import ToolResult
 from app.domain.services.agent_task_runner import AgentTaskRunner
@@ -73,6 +91,44 @@ class _DummySessionRepo:
 class _DummyUoW:
     def __init__(self) -> None:
         self.session = _DummySessionRepo()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _EvidenceScopeSessionRepo:
+    async def get_by_id(self, *, session_id, user_id=None):
+        return Session(id=session_id, user_id=user_id, workspace_id="workspace-1", current_run_id="run-1")
+
+
+class _EvidenceScopeWorkspaceRepo:
+    async def get_by_id_for_user(self, *, workspace_id, user_id):
+        return Workspace(id=workspace_id, user_id=user_id, session_id="session-1", current_run_id="run-1")
+
+    async def get_by_session_id_for_user(self, *, session_id, user_id):
+        return Workspace(id="workspace-1", user_id=user_id, session_id=session_id, current_run_id="run-1")
+
+
+class _EvidenceScopeWorkflowRunRepo:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def get_by_id_for_user(self, *, run_id, user_id):
+        return WorkflowRun(id=run_id, user_id=user_id, session_id="session-1", current_step_id=None)
+
+    async def add_event_record_if_absent(self, *, session_id, run_id, event):
+        self.events.append(event)
+        return True
+
+
+class _EvidenceScopeUoW:
+    def __init__(self, workflow_run_repo: _EvidenceScopeWorkflowRunRepo) -> None:
+        self.session = _EvidenceScopeSessionRepo()
+        self.workspace = _EvidenceScopeWorkspaceRepo()
+        self.workflow_run = workflow_run_repo
 
     async def __aenter__(self):
         return self
@@ -208,12 +264,14 @@ def _build_tool_event_projector(
 def _build_user_input_attachment_projector(
         *,
         session_id: str = "session-1",
+        user_id: str = "user-1",
         sandbox=None,
         file_storage=None,
         uow_factory=None,
 ) -> UserInputAttachmentProjector:
     return UserInputAttachmentProjector(
         session_id=session_id,
+        user_id=user_id,
         sandbox=sandbox or _SandboxUploadFail(),
         file_storage=file_storage or _SandboxSyncFileStorage(),
         uow_factory=uow_factory or (lambda: _SandboxSyncUoW()),
@@ -241,7 +299,11 @@ class _SandboxUploadSuccess:
 
 
 class _SandboxSyncFileStorage:
-    async def download_file(self, file_id: str):
+    def __init__(self) -> None:
+        self.download_calls: list[tuple[str, str | None]] = []
+
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
         return io.BytesIO(b"hello"), File(id=file_id, filename="a.txt")
 
 
@@ -291,10 +353,12 @@ def test_user_input_attachment_projector_should_re_raise_when_upload_unsuccessfu
 
 def test_user_input_attachment_projector_should_sync_attachments_to_sandbox_and_session() -> None:
     sandbox = _SandboxUploadSuccess()
+    file_storage = _SandboxSyncFileStorage()
     file_repo = _SandboxSyncFileRepo()
     session_repo = _SandboxSyncSessionRepo()
     projector = _build_user_input_attachment_projector(
         sandbox=sandbox,
+        file_storage=file_storage,
         uow_factory=lambda: _SandboxSyncUoW(file_repo=file_repo, session_repo=session_repo),
     )
     event = MessageEvent(
@@ -317,6 +381,22 @@ def test_user_input_attachment_projector_should_sync_attachments_to_sandbox_and_
         ("session-1", "/home/ubuntu/upload/file-1/a.txt")
     ]
     assert [attachment.filepath for attachment in event.attachments] == ["/home/ubuntu/upload/file-1/a.txt"]
+    assert file_storage.download_calls == [("file-1", "user-1")]
+
+
+def test_user_input_attachment_projector_should_require_user_id() -> None:
+    with pytest.raises(ValueError, match="必须提供 user_id"):
+        _build_user_input_attachment_projector(user_id="")
+
+
+def test_user_input_attachment_projector_should_not_download_without_user_id_for_foreign_file() -> None:
+    file_storage = _ForeignFileStorage()
+    projector = _build_user_input_attachment_projector(file_storage=file_storage)
+
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(projector.sync_file_to_sandbox(file_id="file-foreign"))
+
+    assert file_storage.download_calls == [("file-foreign", "user-1")]
 
 
 class _SameNameFileStorage:
@@ -325,19 +405,33 @@ class _SameNameFileStorage:
             "file-1": File(id="file-1", filename="same.txt"),
             "file-2": File(id="file-2", filename="same.txt"),
         }
+        self.download_calls: list[tuple[str, str | None]] = []
 
-    async def download_file(self, file_id: str):
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
         file = self._files[file_id].model_copy(deep=True)
         return io.BytesIO(file_id.encode("utf-8")), file
 
 
+class _ForeignFileStorage:
+    def __init__(self) -> None:
+        self.download_calls: list[tuple[str, str | None]] = []
+
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
+        if user_id != "user-1":
+            raise AssertionError("UserInputAttachmentProjector 不应无 user_id 下载文件")
+        raise FileNotFoundError(file_id)
+
+
 def test_user_input_attachment_projector_should_not_override_same_name_attachments() -> None:
     sandbox = _SandboxUploadSuccess()
+    file_storage = _SameNameFileStorage()
     file_repo = _SandboxSyncFileRepo()
     session_repo = _SandboxSyncSessionRepo()
     projector = _build_user_input_attachment_projector(
         sandbox=sandbox,
-        file_storage=_SameNameFileStorage(),
+        file_storage=file_storage,
         uow_factory=lambda: _SandboxSyncUoW(file_repo=file_repo, session_repo=session_repo),
     )
     event = MessageEvent(
@@ -371,6 +465,7 @@ def test_user_input_attachment_projector_should_not_override_same_name_attachmen
         "/home/ubuntu/upload/file-1/same.txt",
         "/home/ubuntu/upload/file-2/same.txt",
     ]
+    assert file_storage.download_calls == [("file-1", "user-1"), ("file-2", "user-1")]
 
 
 def test_sync_file_to_storage_should_skip_when_file_not_exists() -> None:
@@ -443,7 +538,16 @@ class _CaptureWorkspaceRuntimeService:
 
     async def upsert_artifact(self, **kwargs):
         self.artifact_calls.append(dict(kwargs))
-        return kwargs
+        return WorkspaceArtifact(
+            id="artifact-screenshot",
+            workspace_id="workspace-1",
+            user_id="user-1",
+            session_id="session-1",
+            path=kwargs["path"],
+            artifact_type=kwargs["artifact_type"],
+            summary=kwargs.get("summary") or "",
+            metadata=kwargs.get("metadata") or {},
+        )
 
     async def get_latest_shell_tool_result(self):
         return ToolResult(success=False, data={"console_records": []})
@@ -659,10 +763,20 @@ class _SerialInvokeTask:
 class _NoopOutputStream:
     def __init__(self) -> None:
         self.sequence = 0
+        self.records: list[str] = []
+        self.messages: list[str] = []
+        self.deleted: list[str] = []
 
-    async def put(self, _message: str) -> str:
+    async def put(self, message: str) -> str:
         self.sequence += 1
-        return f"evt-{self.sequence}"
+        event_id = f"evt-{self.sequence}"
+        self.records.append(event_id)
+        self.messages.append(message)
+        return event_id
+
+    async def delete_message(self, message_id: str) -> bool:
+        self.deleted.append(message_id)
+        return True
 
 
 def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
@@ -684,7 +798,7 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
     runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
-    emitted_pairs: list[tuple[str, Optional[SessionStatus]]] = []
+    emitted_events: list[tuple[str, bool]] = []
     processed_messages: list[str] = []
 
     async def _pop_event(_task):
@@ -705,8 +819,17 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
         )
         yield DoneEvent()
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        emitted_pairs.append((type(event).__name__, status))
+    async def _put_and_add_event(
+            *,
+            task,
+            event,
+            title=None,
+            latest_message=None,
+            latest_message_at=None,
+            increment_unread=False,
+            allow_status_transition=True,
+    ):
+        emitted_events.append((type(event).__name__, allow_status_transition))
 
     runner._pop_event = _pop_event
     runner._run_flow = _run_flow
@@ -715,11 +838,11 @@ def test_invoke_should_finish_current_run_before_consuming_next_input() -> None:
     asyncio.run(runner.invoke(task))
 
     assert processed_messages == ["first", "second"]
-    assert emitted_pairs == [
-        ("ToolEvent", None),
-        ("DoneEvent", None),
-        ("ToolEvent", None),
-        ("DoneEvent", SessionStatus.COMPLETED),
+    assert emitted_events == [
+        ("ToolEvent", True),
+        ("DoneEvent", False),
+        ("ToolEvent", True),
+        ("DoneEvent", True),
     ]
     assert session_repo.updated_status == SessionStatus.COMPLETED
     assert session_repo.updated_statuses == [SessionStatus.COMPLETED]
@@ -739,7 +862,7 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
     runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
-    emitted_pairs: list[tuple[str, Optional[SessionStatus], Optional[str]]] = []
+    emitted_pairs: list[tuple[str, Optional[str]]] = []
 
     async def _pop_event(_task):
         message_event = await _task.input_stream.pop_next()
@@ -751,11 +874,10 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
     async def _run_flow(_message):
         yield ErrorEvent(error="boom")
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        emitted_pairs.append((type(event).__name__, status, latest_message))
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False):
+        emitted_pairs.append((type(event).__name__, latest_message))
+        session_repo.updated_status = SessionStatus.FAILED
+        session_repo.updated_statuses.append(SessionStatus.FAILED)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -775,7 +897,7 @@ def test_invoke_should_keep_failed_status_after_error_event() -> None:
 
     asyncio.run(runner.invoke(task))
 
-    assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "boom")]
+    assert emitted_pairs == [("ErrorEvent", "boom")]
     assert session_repo.updated_status == SessionStatus.FAILED
     assert session_repo.updated_statuses == [SessionStatus.FAILED]
 
@@ -807,10 +929,19 @@ def test_invoke_should_continue_consuming_stream_after_done_event() -> None:
         yield DoneEvent()
         continuation_markers.append("done-stream-drained")
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(
+            *,
+            task,
+            event,
+            title=None,
+            latest_message=None,
+            latest_message_at=None,
+            increment_unread=False,
+            allow_status_transition=True,
+    ):
+        if isinstance(event, DoneEvent):
+            session_repo.updated_status = SessionStatus.COMPLETED
+            session_repo.updated_statuses.append(SessionStatus.COMPLETED)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -857,10 +988,10 @@ def test_invoke_should_continue_consuming_stream_after_wait_event() -> None:
         yield WaitEvent()
         continuation_markers.append("wait-stream-drained")
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False):
+        if isinstance(event, WaitEvent):
+            session_repo.updated_status = SessionStatus.WAITING
+            session_repo.updated_statuses.append(SessionStatus.WAITING)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -899,7 +1030,7 @@ def test_invoke_should_project_latest_message_when_exception_falls_back_to_error
     runner._user_id = "user-1"
     runner._uow_factory = lambda: _InvokeUoW(session_repo)
 
-    emitted_pairs: list[tuple[str, Optional[SessionStatus], Optional[str]]] = []
+    emitted_pairs: list[tuple[str, Optional[str]]] = []
 
     async def _pop_event(_task):
         message_event = await _task.input_stream.pop_next()
@@ -912,11 +1043,10 @@ def test_invoke_should_project_latest_message_when_exception_falls_back_to_error
         raise RuntimeError("fatal boom")
         yield  # pragma: no cover
 
-    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False, status=None):
-        emitted_pairs.append((type(event).__name__, status, latest_message))
-        if status is not None:
-            session_repo.updated_status = status
-            session_repo.updated_statuses.append(status)
+    async def _put_and_add_event(*, task, event, title=None, latest_message=None, latest_message_at=None, increment_unread=False):
+        emitted_pairs.append((type(event).__name__, latest_message))
+        session_repo.updated_status = SessionStatus.FAILED
+        session_repo.updated_statuses.append(SessionStatus.FAILED)
 
     async def _emit_request_started(*, task, request_id):
         return None
@@ -936,7 +1066,7 @@ def test_invoke_should_project_latest_message_when_exception_falls_back_to_error
 
     asyncio.run(runner.invoke(task))
 
-    assert emitted_pairs == [("ErrorEvent", SessionStatus.FAILED, "fatal boom")]
+    assert emitted_pairs == [("ErrorEvent", "fatal boom")]
     assert session_repo.updated_status == SessionStatus.FAILED
     assert session_repo.updated_statuses == [SessionStatus.FAILED]
 
@@ -970,9 +1100,11 @@ def test_browser_screenshot_artifact_service_should_upload_and_index_workspace_a
         user_id="user-1",
     )
 
-    screenshot_url = asyncio.run(service.capture(source_capability="browser_view"))
+    screenshot_ref = asyncio.run(service.capture(source_capability="browser_view"))
 
-    assert screenshot_url == "https://cdn.example.com/2026/03/19/s.png"
+    assert screenshot_ref.url == "https://cdn.example.com/2026/03/19/s.png"
+    assert screenshot_ref.artifact_id == "artifact-screenshot"
+    assert screenshot_ref.artifact_path == "/.workspace/browser-screenshots/2026/03/19/s.png"
     assert file_storage.upload_user_ids == ["user-1"]
     payload = file_storage.upload_payloads[0]
     assert getattr(payload, "filename").endswith(".png")
@@ -1047,7 +1179,14 @@ class _CancellationSessionRepo:
     async def get_by_id(self, session_id: str, user_id: str | None = None):
         return self._session if session_id == self._session.id else None
 
+    async def get_by_id_for_update(self, session_id: str):
+        return self._session if session_id == self._session.id else None
+
     async def update_status(self, session_id: str, status: SessionStatus) -> None:
+        self.updated_status = status
+        self._session.status = status
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, **_kwargs) -> None:
         self.updated_status = status
         self._session.status = status
 
@@ -1060,14 +1199,40 @@ class _CancellationWorkflowRunRepo:
         self._run = run
         self._events = list(events)
         self.cancelled_run_ids: list[str] = []
+        self.replaced_plan_count = 0
+        self.upserted_step_count = 0
+        self.unfinished_steps_cancelled_count = 0
 
     async def get_by_id(self, run_id: str):
         return self._run if run_id == self._run.id else None
+
+    async def get_by_id_for_update(self, run_id: str):
+        return await self.get_by_id(run_id)
+
+    async def update_status(self, run_id: str, *, status: WorkflowRunStatus, current_step_id=None, **_kwargs) -> None:
+        self._run.status = status
+        self._run.current_step_id = current_step_id
+
+    async def add_event_record_if_absent(self, session_id: str, run_id: str, event) -> bool:
+        self._events.append(event)
+        return True
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
     async def list_events(self, run_id: str | None):
         if run_id != self._run.id:
             return []
         return list(self._events)
+
+    async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
+        self.replaced_plan_count += 1
+
+    async def upsert_step_from_event(self, run_id: str, event) -> None:
+        self.upserted_step_count += 1
+
+    async def mark_unfinished_steps_cancelled(self, run_id: str) -> None:
+        self.unfinished_steps_cancelled_count += 1
 
     async def cancel_run(self, run_id: str) -> None:
         self.cancelled_run_ids.append(run_id)
@@ -1153,15 +1318,19 @@ def test_persist_cancellation_state_should_build_cancelled_events_from_run_histo
     asyncio.run(runner._persist_cancellation_state())
 
     assert session_repo.updated_status == SessionStatus.CANCELLED
-    assert workflow_run_repo.cancelled_run_ids == ["run-1"]
-    assert len(session_repo.added_events) == 2
+    assert run.status == WorkflowRunStatus.CANCELLED
+    assert workflow_run_repo.cancelled_run_ids == []
+    assert workflow_run_repo.upserted_step_count == 1
+    assert workflow_run_repo.replaced_plan_count == 1
+    assert workflow_run_repo.unfinished_steps_cancelled_count == 1
+    assert len(workflow_run_repo._events) == 5
 
-    cancelled_step_event = session_repo.added_events[0]
+    cancelled_step_event = workflow_run_repo._events[-2]
     assert isinstance(cancelled_step_event, StepEvent)
     assert cancelled_step_event.step.id == "step-2"
     assert cancelled_step_event.step.status == ExecutionStatus.CANCELLED
 
-    cancelled_plan_event = session_repo.added_events[1]
+    cancelled_plan_event = workflow_run_repo._events[-1]
     assert isinstance(cancelled_plan_event, PlanEvent)
     assert [step.status for step in cancelled_plan_event.plan.steps] == [
         ExecutionStatus.COMPLETED,
@@ -1284,3 +1453,563 @@ def test_put_and_add_event_should_stream_live_only_event_without_persisting_hist
 
     assert len(task.output_stream.records) == 1
     assert session_repo.persist_calls == 0
+
+
+def test_record_sandbox_facts_for_tool_event_should_use_persisted_source_event_id() -> None:
+    runner = _new_runner()
+
+    class _ContextBuilder:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+            self.calls.append({"source_event_id": source_event_id, "current_step_id": current_step_id})
+            return {"source_event_id": source_event_id, "current_step_id": current_step_id}
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list[tuple[dict, ToolEvent]] = []
+
+        async def record_from_tool_event(self, *, context, event: ToolEvent):
+            self.calls.append((context, event))
+            return ["fact-1"]
+
+    class _EventProjector:
+        def __init__(self) -> None:
+            self.calls: list[tuple[dict, list[str]]] = []
+
+        async def project_tool_event_facts(self, *, context, facts):
+            self.calls.append((context, facts))
+            return None
+
+    context_builder = _ContextBuilder()
+    recorder = _Recorder()
+    event_projector = _EventProjector()
+    runner._sandbox_fact_context_builder = context_builder
+    runner._sandbox_fact_recorder = recorder
+    runner._sandbox_fact_event_projector = event_projector
+    event = ToolEvent(
+        id="tool-event-1",
+        tool_call_id="call-1",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+        step_id="atomic-action-step",
+    )
+
+    asyncio.run(
+        runner._record_sandbox_facts_for_tool_event(
+            event=event,
+            source_event_id="stream-record-1",
+        )
+    )
+
+    assert context_builder.calls == [
+        {"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}
+    ]
+    assert recorder.calls == [({"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}, event)]
+    assert event_projector.calls == [({"source_event_id": "stream-record-1", "current_step_id": "atomic-action-step"}, ["fact-1"])]
+
+
+def test_invoke_should_not_repersist_graph_projected_tool_event() -> None:
+    runner = _new_runner()
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    persisted_events = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(request_id="req-1", payload=message_event)
+
+    async def _run_flow(_message):
+        yield ToolEvent(
+            id="stream-tool-1",
+            tool_call_id="call-1",
+            tool_name="search",
+            function_name="search_web",
+            function_args={"query": "q"},
+            function_result=ToolResult(success=True, data={}),
+            status=ToolEventStatus.CALLED,
+            runtime_fact_projection={
+                "graph_main_chain": True,
+                "source_event_id": "stream-tool-1",
+            },
+        )
+        yield DoneEvent()
+
+    async def _put_and_add_event(**kwargs):
+        persisted_events.append(kwargs["event"])
+        return "new-stream-id"
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._sandbox_fact_recorder = object()
+    runner._sandbox_fact_context_builder = object()
+    runner._sandbox_fact_event_projector = None
+
+    asyncio.run(runner.invoke(task))
+
+    assert [type(event).__name__ for event in persisted_events] == ["DoneEvent"]
+
+
+def test_invoke_should_not_repersist_graph_projected_calling_tool_event() -> None:
+    runner = _new_runner()
+    session_repo = _InvokeSessionRepo()
+    task = _SerialInvokeTask([MessageEvent(role="user", message="first")])
+    runner._session_id = "session-1"
+    runner._sandbox = _NoopSandbox()
+    runner._mcp_tool = _NoopTool()
+    runner._a2a_tool = _NoopA2ATool()
+    runner._mcp_config = None
+    runner._a2a_config = None
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _InvokeUoW(session_repo)
+
+    persisted_events = []
+
+    async def _pop_event(_task):
+        message_event = await _task.input_stream.pop_next()
+        return RuntimeInput(request_id="req-1", payload=message_event)
+
+    async def _run_flow(_message):
+        yield ToolEvent(
+            id="stream-tool-calling-1",
+            tool_call_id="call-1",
+            tool_name="search",
+            function_name="search_web",
+            function_args={"query": "q"},
+            status=ToolEventStatus.CALLING,
+            runtime_fact_projection={
+                "graph_main_chain": True,
+                "source_event_id": "stream-tool-calling-1",
+                "fact_count": 0,
+            },
+        )
+        yield DoneEvent()
+
+    async def _put_and_add_event(**kwargs):
+        persisted_events.append(kwargs["event"])
+        return "new-stream-id"
+
+    runner._pop_event = _pop_event
+    runner._run_flow = _run_flow
+    runner._put_and_add_event = _put_and_add_event
+    runner._sandbox_fact_recorder = object()
+    runner._sandbox_fact_context_builder = object()
+    runner._sandbox_fact_event_projector = None
+
+    asyncio.run(runner.invoke(task))
+
+    assert [type(event).__name__ for event in persisted_events] == ["DoneEvent"]
+
+
+def test_tool_event_runtime_fact_projection_should_not_serialize() -> None:
+    event = ToolEvent(
+        id="tool-event-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+        runtime_fact_projection={
+            "graph_main_chain": True,
+            "source_event_id": "stream-tool-1",
+        },
+    )
+
+    assert AgentTaskRunner._graph_tool_event_fact_projected(event) is True
+    assert "runtime_fact_projection" not in event.model_dump(mode="json")
+
+
+def test_runtime_tool_event_persistence_should_mark_calling_event_as_graph_projected() -> None:
+    task = _SerialInvokeTask([])
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=_PersistingCoordinator(),
+        sandbox_fact_recorder=_FactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        status=ToolEventStatus.CALLING,
+    )
+
+    result = asyncio.run(service.persist_tool_event_and_record_facts(
+        event=event,
+        run_id="run-1",
+        session_id="session-1",
+        current_step_id="step-1",
+    ))
+
+    assert result.source_event_id == "evt-1"
+    assert result.fact_count == 0
+    assert event.runtime_fact_projection["graph_main_chain"] is True
+    assert event.runtime_fact_projection["source_event_id"] == "evt-1"
+    assert event.runtime_fact_projection["fact_count"] == 0
+    assert "runtime_fact_projection" not in event.model_dump(mode="json")
+
+
+def test_runtime_tool_event_persistence_should_project_tool_content_before_persist() -> None:
+    task = _SerialInvokeTask([])
+    coordinator = _CapturingCoordinator()
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=coordinator,
+        sandbox_fact_recorder=_EmptyFactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+        tool_event_display_projector=_SearchDisplayProjector(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(
+            success=True,
+            data=SearchResults(
+                query="q",
+                results=[SearchResultItem(title="Example", url="https://example.com", snippet="ok")],
+            ),
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(service.persist_tool_event_and_record_facts(
+        event=event,
+        run_id="run-1",
+        session_id="session-1",
+        current_step_id="step-1",
+    ))
+
+    stream_payload = json.loads(task.output_stream.messages[0])
+    persisted_event = coordinator.persisted_events[0]
+    assert stream_payload["event"]["tool_content"]["results"][0]["url"] == "https://example.com"
+    assert persisted_event.tool_content is not None
+    assert persisted_event.tool_content.results[0].title == "Example"
+    assert event.tool_content is not None
+
+
+def test_runtime_tool_event_persistence_should_keep_stream_when_fact_projection_fails_after_db_persist() -> None:
+    task = _SerialInvokeTask([])
+    coordinator = _PersistingCoordinator()
+    recorder = _FailingFactRecorder()
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=coordinator,
+        sandbox_fact_recorder=recorder,
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    with pytest.raises(RuntimeError, match="fact failed"):
+        asyncio.run(service.persist_tool_event_and_record_facts(
+            event=event,
+            run_id="run-1",
+            session_id="session-1",
+            current_step_id="step-1",
+        ))
+
+    assert task.output_stream.records == ["evt-1"]
+    assert task.output_stream.deleted == []
+    assert coordinator.persisted_event_ids == ["evt-1"]
+
+
+def test_runtime_tool_event_persistence_should_delete_stream_when_db_persist_fails() -> None:
+    task = _SerialInvokeTask([])
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=_FailingCoordinator(),
+        sandbox_fact_recorder=_FactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    with pytest.raises(RuntimeError, match="db failed"):
+        asyncio.run(service.persist_tool_event_and_record_facts(
+            event=event,
+            run_id="run-1",
+            session_id="session-1",
+            current_step_id="step-1",
+        ))
+
+    assert task.output_stream.records == ["evt-1"]
+    assert task.output_stream.deleted == ["evt-1"]
+
+
+class _PersistingCoordinator:
+    def __init__(self) -> None:
+        self.persisted_event_ids: list[str] = []
+
+    async def persist_runtime_event(self, *, session_id, event, projection=None, allow_status_transition=True):
+        self.persisted_event_ids.append(event.id)
+        return type("PersistResult", (), {"event_inserted": True})()
+
+
+class _CapturingCoordinator:
+    def __init__(self) -> None:
+        self.persisted_events: list[ToolEvent] = []
+
+    async def persist_runtime_event(self, *, session_id, event, projection=None, allow_status_transition=True):
+        self.persisted_events.append(event)
+        return type("PersistResult", (), {"event_inserted": True})()
+
+
+class _FailingCoordinator:
+    async def persist_runtime_event(self, **_kwargs):
+        raise RuntimeError("db failed")
+
+
+class _StaticFactContextBuilder:
+    async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+        from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+        from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext
+
+        return SandboxFactProjectionContext(
+            scope=AccessScopeResult(
+                tenant_id="user-1",
+                user_id="user-1",
+                session_id="session-1",
+                workspace_id="workspace-1",
+                run_id="run-1",
+                current_step_id=current_step_id,
+            ),
+            profile_ref={},
+            source_event_id=source_event_id,
+            current_step_id=current_step_id,
+        )
+
+
+class _FactRecorder:
+    async def record_from_tool_event(self, *, context, event):
+        payload = {"query": "q", "result_count": 0, "top_results": []}
+        payload_hash = build_sandbox_fact_payload_hash(payload)
+        source_ref = SandboxFactSourceRef(
+            source_type=SandboxFactSourceType.SANDBOX_API,
+            source_event_id=context.source_event_id,
+            source_event_status="available",
+            tool_event_id=event.id,
+            tool_call_id=event.tool_call_id,
+            function_name=event.function_name,
+        )
+        subject_ref = SandboxFactSubjectRef(subject_type="search", subject_key="search:q")
+        return [
+            SandboxFactRecord(
+                id="fact-1",
+                user_id="user-1",
+                session_id="session-1",
+                workspace_id="workspace-1",
+                fact_scope=SandboxFactScope.STEP,
+                run_id="run-1",
+                step_id="step-1",
+                fact_kind=SandboxFactKind.SEARCH_RESULT,
+                source_ref=source_ref,
+                subject_ref=subject_ref,
+                summary="search fact",
+                payload=payload,
+                payload_hash=payload_hash,
+                idempotency_key=build_sandbox_fact_idempotency_key(
+                    user_id="user-1",
+                    session_id="session-1",
+                    workspace_id="workspace-1",
+                    fact_scope=SandboxFactScope.STEP,
+                    run_id="run-1",
+                    step_id="step-1",
+                    fact_kind=SandboxFactKind.SEARCH_RESULT,
+                    source_event_id=context.source_event_id,
+                    tool_call_id=event.tool_call_id,
+                    subject_key=subject_ref.subject_key,
+                    payload_hash=payload_hash,
+                ),
+            )
+        ]
+
+
+class _EmptyFactRecorder:
+    async def record_from_tool_event(self, *, context, event):
+        return []
+
+
+class _FailingFactRecorder:
+    async def record_from_tool_event(self, **_kwargs):
+        raise RuntimeError("fact failed")
+
+
+class _SearchDisplayProjector:
+    async def project(self, event: ToolEvent) -> None:
+        projector = ToolEventProjector(
+            adapter=ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1()),
+            browser=_BrowserScreenshot(),
+            file_storage=_ScreenshotFileStorage(),
+            workspace_runtime_service=_ShellObservationWorkspaceRuntimeService(),
+            user_id="user-1",
+        )
+        await projector.project(event)
+
+
+def test_atomic_action_evidence_reconcile_should_preserve_current_step_id() -> None:
+    runner = _new_runner()
+    workflow_run_repo = _EvidenceScopeWorkflowRunRepo()
+    runner._session_id = "session-1"
+    runner._user_id = "user-1"
+    runner._uow_factory = lambda: _EvidenceScopeUoW(workflow_run_repo)
+
+    class _Reconciler:
+        def __init__(self) -> None:
+            self.reconcile_scope_step_id = ""
+            self.event_scope_step_id = ""
+
+        async def reconcile_step_evidence(self, *, scope, step):
+            self.reconcile_scope_step_id = str(scope.current_step_id or "")
+            assert scope.current_step_id == "atomic-action-step"
+            assert step.id == "atomic-action-step"
+            return [object()]
+
+        async def build_step_evidence_event(self, *, scope, step, records):
+            self.event_scope_step_id = str(scope.current_step_id or "")
+            assert scope.current_step_id == "atomic-action-step"
+            assert step.id == "atomic-action-step"
+            return EvidenceEvent(
+                step_id="atomic-action-step",
+                quality_status_counts={"valid": 1},
+                support_level_counts={"strong": 1},
+                summary="atomic evidence event",
+            )
+
+        async def build_step_evidence_backed_facts(self, *, scope, step):
+            assert scope.current_step_id == "atomic-action-step"
+            return []
+
+    reconciler = _Reconciler()
+    runner._evidence_step_reconciler = reconciler
+    event = StepEvent(
+        step=Step(id="atomic-action-step", status=ExecutionStatus.COMPLETED),
+        status=StepEventStatus.COMPLETED,
+    )
+
+    asyncio.run(runner._reconcile_evidence_before_step_completed(event))
+
+    assert reconciler.reconcile_scope_step_id == "atomic-action-step"
+    assert reconciler.event_scope_step_id == "atomic-action-step"
+    assert len(workflow_run_repo.events) == 1
+
+
+def test_record_sandbox_facts_for_tool_event_should_emit_fact_event_without_rollback_on_failure() -> None:
+    runner = _new_runner()
+    fact_event = SandboxFactEvent(id="fact-event-1", summary="记录了 1 条事实")
+    put_calls: list[None] = []
+
+    class _ContextBuilder:
+        async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+            return {"source_event_id": source_event_id}
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.facts = ["fact-1"]
+
+        async def record_from_tool_event(self, *, context, event: ToolEvent):
+            return self.facts
+
+    class _EventProjector:
+        async def project_tool_event_facts(self, *, context, facts):
+            return fact_event
+
+    async def _put_and_add_event(**kwargs):
+        put_calls.append(None)
+        raise RuntimeError("event write failed")
+
+    runner._sandbox_fact_context_builder = _ContextBuilder()
+    runner._sandbox_fact_recorder = _Recorder()
+    runner._sandbox_fact_event_projector = _EventProjector()
+    runner._put_and_add_event = _put_and_add_event
+    event = ToolEvent(
+        id="tool-event-3",
+        tool_call_id="call-3",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(
+        runner._record_sandbox_facts_for_tool_event(
+            task=object(),
+            event=event,
+            source_event_id="stream-record-3",
+        )
+    )
+
+    assert put_calls == [None]
+
+
+def test_record_sandbox_facts_for_tool_event_should_skip_without_source_event_id() -> None:
+    runner = _new_runner()
+
+    class _ContextBuilder:
+        async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+            raise AssertionError("source_event_id 缺失时不应构造 context")
+
+    class _Recorder:
+        async def record_from_tool_event(self, *, context, event: ToolEvent):
+            raise AssertionError("source_event_id 缺失时不应写 fact")
+
+    runner._sandbox_fact_context_builder = _ContextBuilder()
+    runner._sandbox_fact_recorder = _Recorder()
+    runner._sandbox_fact_event_projector = None
+    event = ToolEvent(
+        id="tool-event-2",
+        tool_call_id="call-2",
+        tool_name="shell",
+        function_name="exec_command",
+        function_args={"command": "pytest -q"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(runner._record_sandbox_facts_for_tool_event(event=event, source_event_id=None))

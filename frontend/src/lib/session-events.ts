@@ -69,7 +69,6 @@ function stableId(prefix: string, index: number, suffix: string): string {
 
 export type TimelineBuildContext = {
   list: TimelineItem[];
-  lastStepId: string | null;
   messageIndex: number;
   toolIndex: number;
   stepIndex: number;
@@ -82,7 +81,6 @@ export type TimelineBuildContext = {
 export function createTimelineBuildContext(): TimelineBuildContext {
   return {
     list: [],
-    lastStepId: null,
     messageIndex: 0,
     toolIndex: 0,
     stepIndex: 0,
@@ -94,7 +92,6 @@ export function createTimelineBuildContext(): TimelineBuildContext {
 }
 
 function resetStepTurnContext(context: TimelineBuildContext): void {
-  context.lastStepId = null;
   context.stepIndexById.clear();
   context.stepToolIndexByStepId.clear();
 }
@@ -104,6 +101,102 @@ function buildToolTimelineKey(tool: ToolEvent): string | null {
   if (!toolCallId) return null
   // 会话对话区按“一次调用一条记录”展示，calling/called 通过状态就地更新，避免重复步骤噪音。
   return String(toolCallId)
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function startsWithEvidenceReuse(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith("reuse_existing_evidence")
+}
+
+export function isEvidenceReuseVirtualToolEvent(tool: ToolEvent): boolean {
+  if ((tool as { is_virtual?: boolean }).is_virtual === true) {
+    return (tool as { virtual_kind?: string | null }).virtual_kind === "evidence_reuse"
+  }
+
+  const content = asRecord(tool.content)
+  const directData = asRecord((tool as { data?: unknown }).data)
+  if (!content && !directData) return false
+
+  const details = asRecord(content?.details) ?? {}
+  return (
+    details.result_handle_resolved === true ||
+    startsWithEvidenceReuse(details.duplicate_decision) ||
+    content?.reason_code === "evidence_reuse_allowed" ||
+    directData?.result_handle_resolved === true ||
+    directData?.loop_break_reason === "evidence_reuse_allowed" ||
+    startsWithEvidenceReuse(directData?.duplicate_decision)
+  )
+}
+
+function rebuildStepToolIndex(context: TimelineBuildContext, stepId: string, tools: ToolEvent[]): void {
+  const nextIndex = new Map<string, number>()
+  tools.forEach((item, index) => {
+    const key = buildToolTimelineKey(item)
+    if (key != null) nextIndex.set(key, index)
+  })
+  context.stepToolIndexByStepId.set(stepId, nextIndex)
+}
+
+function shiftTimelineIndexesAfterRemoval(context: TimelineBuildContext, removedIdx: number): void {
+  for (const [stepId, index] of Array.from(context.stepIndexById.entries())) {
+    if (index === removedIdx) {
+      context.stepIndexById.delete(stepId)
+    } else if (index > removedIdx) {
+      context.stepIndexById.set(stepId, index - 1)
+    }
+  }
+
+  for (const [toolCallId, index] of Array.from(context.standaloneToolIndexByCallId.entries())) {
+    if (index === removedIdx) {
+      context.standaloneToolIndexByCallId.delete(toolCallId)
+    } else if (index > removedIdx) {
+      context.standaloneToolIndexByCallId.set(toolCallId, index - 1)
+    }
+  }
+}
+
+function removeExistingToolEvent(
+  context: TimelineBuildContext,
+  tool: ToolEvent,
+  toolTimelineKey: string | null,
+): boolean {
+  if (toolTimelineKey == null) return false
+
+  const activeStepId = tool.runtime.current_step_id
+  if (activeStepId !== null) {
+    const stepIdx = context.stepIndexById.get(activeStepId)
+    const stepItem = stepIdx !== undefined ? context.list[stepIdx] : null
+    if (stepIdx !== undefined && stepItem?.kind === "step") {
+      const stepToolIndexes = context.stepToolIndexByStepId.get(activeStepId)
+      const existingToolIdx = stepToolIndexes?.get(toolTimelineKey)
+      if (
+        existingToolIdx !== undefined &&
+        existingToolIdx >= 0 &&
+        existingToolIdx < stepItem.tools.length
+      ) {
+        const newTools = stepItem.tools.filter((_, index) => index !== existingToolIdx)
+        context.list[stepIdx] = { ...stepItem, tools: newTools }
+        rebuildStepToolIndex(context, activeStepId, newTools)
+        return true
+      }
+    }
+  }
+
+  const existingStandaloneIdx = context.standaloneToolIndexByCallId.get(toolTimelineKey)
+  if (existingStandaloneIdx !== undefined) {
+    const existingItem = context.list[existingStandaloneIdx]
+    if (existingItem?.kind === "tool") {
+      context.list.splice(existingStandaloneIdx, 1)
+      shiftTimelineIndexesAfterRemoval(context, existingStandaloneIdx)
+      return true
+    }
+  }
+
+  return false
 }
 
 /** 将时间戳格式化为相对时间，如 2天前、刚刚 */
@@ -230,13 +323,6 @@ function appendStepEvent(context: TimelineBuildContext, step: StepEvent): void {
     // 相同 step.id 在新轮次中可能复用，需要清理旧索引
     context.stepToolIndexByStepId.set(step.id, new Map<string, number>());
   }
-
-  // completed/failed/cancelled 都表示当前步骤已收敛，后续工具事件不应再挂到它身上。
-  if (step.status === "completed" || step.status === "failed" || step.status === "cancelled") {
-    context.lastStepId = null;
-  } else {
-    context.lastStepId = step.id;
-  }
 }
 
 function reconcileStepsFromPlan(context: TimelineBuildContext, plan: PlanEvent): void {
@@ -259,12 +345,6 @@ function reconcileStepsFromPlan(context: TimelineBuildContext, plan: PlanEvent):
         outcome: step.outcome ?? existing.data.outcome,
       },
     }
-
-    if (step.status === 'completed' || step.status === 'failed' || step.status === 'cancelled') {
-      if (context.lastStepId === step.id) {
-        context.lastStepId = null
-      }
-    }
   }
 }
 
@@ -274,7 +354,12 @@ function appendToolEvent(
   locale: AppLocale,
 ): void {
   const toolTimelineKey = buildToolTimelineKey(tool);
-  const activeStepId = context.lastStepId;
+  if (isEvidenceReuseVirtualToolEvent(tool)) {
+    removeExistingToolEvent(context, tool, toolTimelineKey)
+    return
+  }
+
+  const activeStepId = tool.runtime.current_step_id;
 
   if (activeStepId !== null) {
     const stepIdx = context.stepIndexById.get(activeStepId);
@@ -372,6 +457,9 @@ export function appendTimelineEvent(
     plan: (event) => reconcileStepsFromPlan(context, event.data as PlanEvent),
     step: (event) => appendStepEvent(context, event.data as StepEvent),
     tool: (event) => appendToolEvent(context, event.data as ToolEvent, locale),
+    sandbox_fact: () => {
+      // 事实事件用于审计和后续 Evidence，不进入普通用户对话 timeline。
+    },
     error: (event) => appendErrorEvent(context, event.data, locale),
   });
 }
@@ -379,7 +467,6 @@ export function appendTimelineEvent(
 function cloneTimelineBuildContext(source: TimelineBuildContext): TimelineBuildContext {
   return {
     list: [...source.list],
-    lastStepId: source.lastStepId,
     messageIndex: source.messageIndex,
     toolIndex: source.toolIndex,
     stepIndex: source.stepIndex,

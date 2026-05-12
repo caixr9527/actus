@@ -15,6 +15,7 @@ from app.domain.services.tools import BaseTool
 
 @dataclass(slots=True)
 class ToolCallLifecycle:
+    step_id: str
     tool_call_id: str
     tool_call_ref: str
     function_name: str
@@ -27,6 +28,7 @@ def build_tool_call_lifecycle(
         *,
         selected_tool_call: Dict[str, Any],
         parse_tool_call_args: Callable[[Any], Dict[str, Any]],
+        step_id: str = "",
 ) -> Optional[ToolCallLifecycle]:
     function = selected_tool_call.get("function")
     if not isinstance(function, dict):
@@ -38,6 +40,7 @@ def build_tool_call_lifecycle(
     tool_call_ref = str(selected_tool_call.get("call_id") or tool_call_id)
     function_args = parse_tool_call_args(function.get("arguments"))
     return ToolCallLifecycle(
+        step_id=str(step_id or "").strip(),
         tool_call_id=tool_call_id,
         tool_call_ref=tool_call_ref,
         function_name=function_name,
@@ -52,6 +55,7 @@ def bind_tool_name(lifecycle: ToolCallLifecycle, matched_tool: Optional[BaseTool
 
 def build_calling_event(lifecycle: ToolCallLifecycle) -> ToolEvent:
     return ToolEvent(
+        step_id=lifecycle.step_id or None,
         tool_call_id=lifecycle.tool_call_id,
         tool_name=lifecycle.tool_name,
         function_name=lifecycle.function_name,
@@ -62,6 +66,7 @@ def build_calling_event(lifecycle: ToolCallLifecycle) -> ToolEvent:
 
 def build_called_event(lifecycle: ToolCallLifecycle, tool_result: ToolResult) -> ToolEvent:
     return ToolEvent(
+        step_id=lifecycle.step_id or None,
         tool_call_id=lifecycle.tool_call_id,
         tool_name=lifecycle.tool_name,
         function_name=lifecycle.function_name,

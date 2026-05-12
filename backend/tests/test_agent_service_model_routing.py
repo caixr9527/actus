@@ -1,7 +1,7 @@
 import asyncio
 
 from app.application.service.agent_service import AgentService
-from app.domain.models import AgentConfig, MCPConfig, A2AConfig, Session, Workspace
+from app.domain.models import AgentConfig, MCPConfig, A2AConfig, Session, SessionStatus, WorkflowRun, Workspace
 
 
 class _DummyBrowser:
@@ -30,41 +30,88 @@ class _DummySandboxCls:
 
 
 class _Task:
-    def __init__(self, task_runner) -> None:
+    def __init__(self, task_id: str = "task-1", task_runner=None) -> None:
         self.id = "task-1"
+        self.id = task_id
         self.task_runner = task_runner
 
     async def cancel(self):
         return None
+
+    @property
+    def is_bound(self) -> bool:
+        return self.task_runner is not None
+
+    def bind_runner(self, task_runner) -> None:
+        if self.task_runner is not None:
+            raise RuntimeError("任务 runner 已绑定，禁止重复绑定")
+        self.task_runner = task_runner
 
 
 class _TaskFactory:
     created_tasks: list[_Task] = []
 
     @classmethod
-    def create(cls, task_runner):
-        task = _Task(task_runner=task_runner)
+    def allocate(cls, task_id: str | None = None):
+        task = _Task(task_id=task_id or "task-1")
         cls.created_tasks.append(task)
+        return task
+
+    @classmethod
+    def create(cls, task_runner):
+        task = cls.allocate()
+        task.bind_runner(task_runner)
         return task
 
 
 class _SessionRepo:
     def __init__(self) -> None:
         self.saved_sessions: list[Session] = []
+        self.sessions_by_id: dict[str, Session] = {}
 
     async def save(self, session: Session) -> None:
-        self.saved_sessions.append(session)
+        cloned = session.model_copy(deep=True)
+        self.saved_sessions.append(cloned)
+        self.sessions_by_id[cloned.id] = cloned
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self.sessions_by_id.get(session_id)
+
+    async def get_by_id(self, *, session_id: str, user_id: str):
+        session = self.sessions_by_id.get(session_id)
+        if session is None or session.user_id != user_id:
+            return None
+        return session
+
+    async def update_runtime_state(self, session_id: str, *, status: SessionStatus, current_run_id=None, **_kwargs):
+        session = self.sessions_by_id[session_id]
+        session.status = status
+        if current_run_id is not None:
+            session.current_run_id = current_run_id
 
 
 class _WorkflowRunRepo:
     def __init__(self) -> None:
         self.created_for_session_ids: list[str] = []
+        self.runs_by_id: dict[str, WorkflowRun] = {}
 
     async def create_for_session(self, session: Session, *, status, thread_id=None):
         self.created_for_session_ids.append(session.id)
-        from app.domain.models import WorkflowRun
+        run = WorkflowRun(id="run-1", session_id=session.id, user_id=session.user_id, status=status, thread_id=thread_id)
+        self.runs_by_id[run.id] = run
+        return run
 
-        return WorkflowRun(id="run-1", session_id=session.id, user_id=session.user_id, status=status, thread_id=thread_id)
+    async def get_by_id_for_update(self, run_id: str):
+        return self.runs_by_id.get(run_id)
+
+    async def get_by_id_for_user(self, *, run_id: str, user_id: str):
+        run = self.runs_by_id.get(run_id)
+        if run is None or run.user_id != user_id:
+            return None
+        return run
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
 
 class _WorkspaceRepo:
@@ -83,8 +130,24 @@ class _WorkspaceRepo:
                 return workspace
         return None
 
+    async def get_by_id_for_user(self, *, workspace_id: str, user_id: str):
+        workspace = await self.get_by_id(workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
+    async def list_by_session_id(self, *, session_id: str):
+        workspace = self.workspace_by_session_id.get(session_id)
+        return [workspace] if workspace is not None else []
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace_by_session_id.get(session_id)
+
+    async def get_by_session_id_for_user(self, *, session_id: str, user_id: str):
+        workspace = self.workspace_by_session_id.get(session_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
 
 
 class _UoW:
@@ -149,7 +212,7 @@ class _DummyRunEngine:
             yield message
 
 
-def _dummy_run_engine_factory(**kwargs):
+async def _dummy_run_engine_factory(**kwargs):
     return _DummyRunEngine()
 
 
@@ -176,6 +239,7 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
         run_engine_factory=_dummy_run_engine_factory,
     )
     session = Session(id="session-a", user_id="user-a", current_model_id="deepseek")
+    asyncio.run(session_repo.save(session))
 
     task = asyncio.run(service._create_task(session))
 
@@ -183,6 +247,6 @@ def test_agent_service_create_task_should_build_llm_from_session_model() -> None
     assert resolver.calls == ["deepseek"]
     assert llm_factory.configs[0].model_name == "gpt-5.4"
     assert llm_factory.configs[0].temperature == 0.3
-    assert session_repo.saved_sessions[0].workspace_id is not None
-    assert session_repo.saved_sessions[0].current_run_id == "run-1"
-    assert workspace_repo.saved_workspaces[0].task_id == "task-1"
+    assert session_repo.sessions_by_id["session-a"].workspace_id is not None
+    assert session_repo.sessions_by_id["session-a"].current_run_id == "run-1"
+    assert workspace_repo.workspace_by_session_id["session-a"].task_id == "task-1"

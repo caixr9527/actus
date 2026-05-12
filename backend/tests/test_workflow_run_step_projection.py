@@ -17,9 +17,20 @@ from app.domain.models import (
     StepOutputMode,
     StepTaskModeHint,
     WorkflowRunEventRecord,
+    WorkflowRunStatus,
 )
 from app.infrastructure.models.workflow_run_step import WorkflowRunStepModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
+
+
+class _ExecuteQueue:
+    def __init__(self, *results) -> None:
+        self._results = list(results)
+
+    async def __call__(self, statement):
+        if not self._results:
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+        return self._results.pop(0)
 
 
 def _build_repo(execute_result) -> DBWorkflowRunRepository:
@@ -30,9 +41,25 @@ def _build_repo(execute_result) -> DBWorkflowRunRepository:
     return DBWorkflowRunRepository(db_session=db_session)
 
 
+def _build_event_insert_repo() -> DBWorkflowRunRepository:
+    run_record = SimpleNamespace(
+        id="run-1",
+        user_id="user-1",
+        session_id="session-1",
+        current_step_id=None,
+    )
+    db_session = SimpleNamespace(
+        execute=_ExecuteQueue(
+            SimpleNamespace(scalar_one_or_none=lambda: None),
+            SimpleNamespace(scalar_one_or_none=lambda: run_record),
+        ),
+        add=MagicMock(),
+    )
+    return DBWorkflowRunRepository(db_session=db_session)
+
+
 def test_add_event_if_absent_should_sync_step_projection_for_step_event() -> None:
-    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
-    repo = _build_repo(execute_result)
+    repo = _build_event_insert_repo()
     repo._refresh_run_status_by_event = AsyncMock()
     repo.upsert_step_from_event = AsyncMock()
     repo.replace_steps_from_plan = AsyncMock()
@@ -58,13 +85,15 @@ def test_add_event_if_absent_should_sync_step_projection_for_step_event() -> Non
     )
 
     assert inserted is True
+    event_record = repo.db_session.add.call_args.args[0]
+    assert event_record.user_id == "user-1"
+    repo._refresh_run_status_by_event.assert_not_awaited()
     repo.upsert_step_from_event.assert_awaited_once()
     repo.replace_steps_from_plan.assert_not_awaited()
 
 
 def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> None:
-    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
-    repo = _build_repo(execute_result)
+    repo = _build_event_insert_repo()
     repo._refresh_run_status_by_event = AsyncMock()
     repo.upsert_step_from_event = AsyncMock()
     repo.replace_steps_from_plan = AsyncMock()
@@ -98,6 +127,9 @@ def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> Non
     )
 
     assert inserted is True
+    event_record = repo.db_session.add.call_args.args[0]
+    assert event_record.user_id == "user-1"
+    repo._refresh_run_status_by_event.assert_not_awaited()
     repo.replace_steps_from_plan.assert_awaited_once()
     repo.upsert_step_from_event.assert_not_awaited()
 
@@ -201,6 +233,7 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         "summary": "完成",
         "produced_artifacts": ["/tmp/file-1.md"],
         "blockers": [],
+        "evidence_backed_facts": [],
         "facts_learned": [],
         "open_questions": [],
         "deliver_result_as_attachment": None,
@@ -208,6 +241,32 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         "reused_from_run_id": None,
         "reused_from_step_id": None,
     }
+
+
+def test_mark_unfinished_steps_cancelled_should_only_cancel_non_terminal_steps() -> None:
+    repo = _build_repo(SimpleNamespace())
+    step_records = [
+        SimpleNamespace(status=ExecutionStatus.PENDING.value),
+        SimpleNamespace(status=ExecutionStatus.RUNNING.value),
+        SimpleNamespace(status=ExecutionStatus.COMPLETED.value),
+        SimpleNamespace(status=ExecutionStatus.FAILED.value),
+        SimpleNamespace(status=ExecutionStatus.CANCELLED.value),
+    ]
+    repo.db_session.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: step_records),
+        )
+    )
+
+    asyncio.run(repo.mark_unfinished_steps_cancelled(run_id="run-1"))
+
+    assert [record.status for record in step_records] == [
+        ExecutionStatus.CANCELLED.value,
+        ExecutionStatus.CANCELLED.value,
+        ExecutionStatus.COMPLETED.value,
+        ExecutionStatus.FAILED.value,
+        ExecutionStatus.CANCELLED.value,
+    ]
 
 
 def test_workflow_run_step_model_to_domain_should_filter_non_file_artifacts_from_outcome() -> None:
@@ -256,6 +315,51 @@ def test_list_events_should_return_empty_when_run_id_missing() -> None:
 
     assert events == []
     repo._list_events_by_run_id.assert_not_awaited()
+
+
+def test_update_status_should_not_clear_current_step_when_current_step_is_unset() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+    run_record = SimpleNamespace(
+        status=WorkflowRunStatus.RUNNING.value,
+        finished_at=None,
+        last_event_at=None,
+        current_step_id="step-1",
+    )
+    repo._get_record_with_lock = AsyncMock(return_value=run_record)
+
+    asyncio.run(
+        repo.update_status(
+            "run-1",
+            status=WorkflowRunStatus.WAITING,
+        )
+    )
+
+    assert run_record.status == WorkflowRunStatus.WAITING.value
+    assert run_record.current_step_id == "step-1"
+
+
+def test_update_status_should_clear_current_step_when_current_step_is_explicit_none() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+    run_record = SimpleNamespace(
+        status=WorkflowRunStatus.RUNNING.value,
+        finished_at=None,
+        last_event_at=None,
+        current_step_id="step-1",
+    )
+    repo._get_record_with_lock = AsyncMock(return_value=run_record)
+
+    asyncio.run(
+        repo.update_status(
+            "run-1",
+            status=WorkflowRunStatus.COMPLETED,
+            current_step_id=None,
+        )
+    )
+
+    assert run_record.status == WorkflowRunStatus.COMPLETED.value
+    assert run_record.current_step_id is None
 
 
 def test_list_events_should_return_workflow_run_events() -> None:

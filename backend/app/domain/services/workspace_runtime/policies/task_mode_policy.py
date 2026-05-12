@@ -78,6 +78,36 @@ def has_environment_write_intent(value_or_signals: str | Dict[str, Any]) -> bool
     return bool(signals.get("has_write_action_signal")) and has_environment_write_target_signal(signals)
 
 
+_ENGINEERING_SOURCE_FILE_PATTERN = re.compile(
+    r"(\.(py|ts|tsx|js|jsx|java|go|rs|rb|php|cs|cpp|c|h|hpp|kt|swift|scala|sql)\b)"
+    r"|((^|/)(backend|frontend|src|app|tests?|api|packages?)/)",
+    re.IGNORECASE,
+)
+_ENGINEERING_IMPLEMENTATION_PATTERN = re.compile(
+    r"(实现|开发|修复|重构|改造|补齐|补充|新增|接入|迁移|调整).{0,24}(接口|功能|逻辑|模块|服务|测试|代码|函数|类|api|bug)"
+    r"|((接口|功能|逻辑|模块|服务|测试|代码|函数|类|api|bug).{0,24}(实现|开发|修复|重构|改造|补齐|补充|新增|接入|迁移|调整))"
+    r"|(\b(implement|fix|refactor|add|update|migrate|wire|test)\b.{0,32}\b(api|feature|logic|module|service|test|code|function|class|bug)\b)",
+    re.IGNORECASE,
+)
+
+
+def has_engineering_execution_intent(value_or_signals: str | Dict[str, Any]) -> bool:
+    """判断是否属于 coding 任务，而不是普通文件创建/写入。"""
+    signals = (
+        value_or_signals
+        if isinstance(value_or_signals, dict)
+        else analyze_text_intent(str(value_or_signals or ""))
+    )
+    if bool(signals.get("has_shell_command")) or bool(signals.get("has_code_block")) or bool(
+            signals.get("has_coding_signal")
+    ):
+        return True
+    text = str(signals.get("text") or "")
+    if not bool(signals.get("has_write_action_signal")):
+        return False
+    return bool(_ENGINEERING_SOURCE_FILE_PATTERN.search(text) and _ENGINEERING_IMPLEMENTATION_PATTERN.search(text))
+
+
 def has_explicit_wait_semantics(value: str) -> bool:
     normalized_text = normalize_intent_text(value)
     if not normalized_text:
@@ -131,8 +161,8 @@ def analyze_text_intent(value: str) -> Dict[str, Any]:
         and not WRITE_ACTION_DENY_PATTERN.search(normalized_text)
     )
     has_file_signal = bool(FILE_PATTERN.search(normalized_text))
-    if WRITE_ACTION_DENY_PATTERN.search(normalized_text):
-        # 用户明确否定写文件/改文件时，“文件”只是在描述禁止事项，不代表需要文件工具。
+    if WRITE_ACTION_DENY_PATTERN.search(normalized_text) and not bool(READ_ACTION_PATTERN.search(normalized_text)):
+        # 纯否定写文件/改文件时，“文件”只是在描述禁止事项；同时存在读取语义时仍保留文件目标。
         has_file_signal = False
 
     return {
@@ -220,11 +250,7 @@ def classify_task_mode_from_signals(signals: Dict[str, Any]) -> str:
     if signals["has_url"]:
         scores["web_reading"] += 2
         scores["research"] += 2
-    if signals["has_shell_command"] or signals["has_code_block"] or signals["has_coding_signal"]:
-        scores["coding"] += 3
-    if has_environment_write_intent(signals):
-        # P3-一次性收口：创建/写入/修改/执行类任务属于可变更环境操作，
-        # 不能继续按只读 file_processing 处理，否则执行约束层会误伤 shell/write 能力。
+    if has_engineering_execution_intent(signals):
         scores["coding"] += 3
     if signals["has_absolute_path"] or signals["has_file_signal"]:
         scores["file_processing"] += 3

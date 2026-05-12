@@ -33,9 +33,28 @@ def test_add_file_should_only_persist_session_files() -> None:
             "extension": "",
             "mime_type": "",
             "size": 0,
+            "user_id": None,
         }
     ]
     repository._workflow_run_repository.append_file_snapshot.assert_not_awaited()
+
+    asyncio.run(
+        repository.add_file(
+            session_id="session-1",
+            file=File(id="file-2", user_id="user-1", filename="b.txt", filepath="/tmp/b.txt"),
+        )
+    )
+
+    assert record.files[-1] == {
+        "id": "file-2",
+        "filename": "b.txt",
+        "filepath": "/tmp/b.txt",
+        "key": "",
+        "extension": "",
+        "mime_type": "",
+        "size": 0,
+        "user_id": "user-1",
+    }
 
 
 def test_add_file_should_replace_existing_session_file_with_same_filepath() -> None:

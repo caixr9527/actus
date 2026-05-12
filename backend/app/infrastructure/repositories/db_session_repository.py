@@ -139,6 +139,11 @@ class DBSessionRepository(SessionRepository):
         session = record.to_domain()
         return await self._hydrate_session_events(session)
 
+    async def get_by_id_for_update(self, session_id: str) -> Optional[Session]:
+        """按会话ID加锁查询，不加载历史事件。"""
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        return record.to_domain()
+
     async def delete_by_id(self, session_id: str) -> None:
         """根据传递的id删除会话"""
         # 构建删除语句，根据session_id删除对应的会话记录
@@ -386,6 +391,33 @@ class DBSessionRepository(SessionRepository):
         # 检查是否有行被更新，如果没有则抛出异常
         if result.rowcount == 0:
             raise ValueError(f"会话[{session_id}]不存在，请核实后重试")
+        self._register_session_list_changed(session_id)
+
+    async def update_runtime_state(
+            self,
+            session_id: str,
+            *,
+            status: SessionStatus,
+            current_run_id: Optional[str] = None,
+            title: Optional[str] = None,
+            latest_message: Optional[str] = None,
+            latest_message_at: Optional[datetime] = None,
+            increment_unread: bool = False,
+    ) -> None:
+        """原子更新Runtime状态与会话展示投影，不做状态合法性判断。"""
+        record = await self._get_session_record_with_lock(session_id=session_id)
+        record.status = status.value
+        if current_run_id is not None:
+            record.current_run_id = current_run_id
+        if title is not None:
+            record.title = title
+        if latest_message is not None:
+            record.latest_message = latest_message
+        if latest_message_at is not None:
+            record.latest_message_at = latest_message_at
+        if increment_unread:
+            record.unread_message_count = int(record.unread_message_count or 0) + 1
+
         self._register_session_list_changed(session_id)
 
     async def update_unread_message_count(self, session_id: str, count: int) -> None:

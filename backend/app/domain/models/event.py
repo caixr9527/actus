@@ -23,6 +23,7 @@ from .plan import Plan, Step
 from .search import FetchedPage, SearchResultItem
 from .tool_result import ToolResult
 from .wait import normalize_wait_payload
+from .sandbox_fact import SandboxFactKind
 
 
 class PlanEventStatus(str, Enum):
@@ -181,6 +182,7 @@ ToolContent = Union[
 class ToolEvent(BaseEvent):
     """工具事件模型"""
     type: Literal["tool"] = "tool"
+    step_id: Optional[str] = None
     tool_call_id: str = ""  # 工具调用ID
     tool_name: str = ""  # 工具名称
     tool_content: Optional[ToolContent] = None  # 工具扩展内容
@@ -188,6 +190,49 @@ class ToolEvent(BaseEvent):
     function_args: Dict[str, Any]  # 工具调用的函数参数
     function_result: Optional[ToolResult] = None  # 工具调用结果
     status: ToolEventStatus = ToolEventStatus.CALLING  # 工具事件状态
+    runtime_fact_projection: Dict[str, Any] = Field(default_factory=dict, exclude=True)
+
+
+class SandboxFactEventRef(BaseModel):
+    """Runtime timeline 中的 fact 轻量引用，不包含 raw payload。"""
+
+    fact_id: str
+    fact_kind: SandboxFactKind
+    summary: str = ""
+
+
+class SandboxFactEvent(BaseEvent):
+    """Sandbox Fact timeline 投影事件。"""
+
+    type: Literal["sandbox_fact"] = "sandbox_fact"
+    fact_refs: List[SandboxFactEventRef] = Field(default_factory=list)
+    summary: str = ""
+    source_event_id: Optional[str] = None
+    step_id: Optional[str] = None
+
+
+class EvidenceEventRef(BaseModel):
+    """Evidence runtime event 中的轻量引用，不包含 raw payload。"""
+
+    evidence_id: str
+    evidence_kind: str
+    quality_status: str
+    support_level: str
+    summary: str = ""
+
+
+class EvidenceEvent(BaseEvent):
+    """Evidence Ledger 的 step 级聚合 runtime event。"""
+
+    type: Literal["evidence"] = "evidence"
+    step_id: str
+    evidence_refs: List[EvidenceEventRef] = Field(default_factory=list)
+    source_event_ids: List[str] = Field(default_factory=list)
+    quality_status_counts: Dict[str, int] = Field(default_factory=dict)
+    support_level_counts: Dict[str, int] = Field(default_factory=dict)
+    gap_count: int = 0
+    summary: str = ""
+    runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WaitEvent(BaseEvent):
@@ -261,6 +306,8 @@ Event = Annotated[
         StepEvent,
         MessageEvent,
         ToolEvent,
+        SandboxFactEvent,
+        EvidenceEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,

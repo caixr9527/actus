@@ -191,3 +191,40 @@ def test_filter_replan_drift_steps_should_allow_meta_when_user_explicitly_reques
     assert dropped_count == 0
     assert len(filtered_steps) == 1
     assert filtered_steps[0].id == "meta-1"
+
+
+def test_filter_structured_evidence_duplicate_steps_should_only_use_explicit_intent() -> None:
+    engine = _build_engine()
+    steps = [
+        Step(
+            id="duplicate-1",
+            title="再次读取文件",
+            description="读取相同文件",
+            evidence_intent={
+                "action_key": "file_read:/workspace/a.txt",
+                "subject_key": "file:/workspace/a.txt",
+            },
+            status=ExecutionStatus.PENDING,
+        ),
+        Step(
+            id="natural-language-only",
+            title="看看 a.txt",
+            description="这一步自然语言上可能相似，但没有结构化 intent",
+            status=ExecutionStatus.PENDING,
+        ),
+    ]
+
+    filtered_steps, dropped_count = engine.filter_structured_evidence_duplicate_steps(
+        steps,
+        evidence_context={
+            "completed_actions": [
+                {
+                    "action_key": "file_read:/workspace/a.txt",
+                    "subject_key": "file:/workspace/a.txt",
+                }
+            ],
+        },
+    )
+
+    assert dropped_count == 1
+    assert [step.id for step in filtered_steps] == ["natural-language-only"]

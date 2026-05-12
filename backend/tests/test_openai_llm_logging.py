@@ -122,6 +122,33 @@ def test_openai_llm_invoke_should_log_summary_without_reasoning_content_for_chat
     assert "这是内部思考，不应该出现在日志中" not in log_text
 
 
+def test_openai_llm_format_multiplexed_message_should_block_legacy_native_parts(caplog) -> None:
+    llm = _build_llm(api_style="chat_completions")
+
+    with caplog.at_level(logging.WARNING, logger="app.infrastructure.external.llm.openai_llm"):
+        parts = asyncio.run(
+            llm.format_multiplexed_message(
+                [
+                    {
+                        "type": "image",
+                        "file_url": "https://example.com/a.png",
+                        "mime_type": "image/png",
+                    },
+                    {
+                        "type": "file_ref",
+                        "filepath": "/workspace/notes.md",
+                    },
+                ]
+            )
+        )
+
+    assert parts == []
+    log_text = _collect_log_text(caplog)
+    assert "document_input_legacy_path_blocked" in log_text
+    assert "legacy_native_image_blocked" in log_text
+    assert "legacy_native_file_ref_blocked" in log_text
+
+
 def test_openai_llm_invoke_should_log_summary_without_tools_for_chat_transport(caplog) -> None:
     message_payload = {
         "role": "assistant",

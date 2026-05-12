@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, AsyncGenerator, Callable, Optional, Any, Literal
+from typing import Awaitable, List, AsyncGenerator, Callable, Optional, Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -34,6 +34,8 @@ from app.domain.models import (
     Message,
     MessageCommand,
     BaseEvent,
+    StepEvent,
+    StepEventStatus,
     ToolEvent,
     DoneEvent,
     TitleEvent,
@@ -41,7 +43,6 @@ from app.domain.models import (
     ContinueCancelledTaskInput,
     ResumeInput,
     RuntimeInput,
-    WorkflowRunStatus,
     TaskStreamEventRecord,
     TaskRequestStartedRecord,
     TaskRequestFinishedRecord,
@@ -50,9 +51,16 @@ from app.domain.models import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
-from app.domain.services.runtime.cancellation import (
-    build_cancelled_runtime_events,
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
+from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import (
+    RuntimeToolEventPersistencePort,
+    SandboxFactEventProjectorPort,
+    SandboxFactProjectionContextBuilderPort,
+    SandboxFactRecorderPort,
 )
+from app.domain.models import RuntimeEventProjection
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.projectors import (
     MessageAttachmentProjector,
@@ -71,37 +79,51 @@ class AgentTaskRunner(TaskRunner):
 
     def __init__(
             self,
-            llm: LLM,
-            agent_config: AgentConfig,
             mcp_config: MCPConfig,
             a2a_config: A2AConfig,
             session_id: str,
             user_id: Optional[str],
             file_storage: FileStorage,
             uow_factory: Callable[[], IUnitOfWork],
-            json_parser: JSONParser,
             browser: Browser,
-            search_engine: SearchEngine,
             sandbox: Sandbox,
-            run_engine_factory: Optional[Callable[..., RunEngine]] = None,
+            run_engine: RunEngine,
             tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
+            runtime_state_coordinator: Any = None,
+            mcp_tool: MCPTool | None = None,
+            a2a_tool: A2ATool | None = None,
+            workspace_runtime_service: WorkspaceRuntimeService | None = None,
+            sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
+        if run_engine is None:
+            raise RuntimeError("AgentTaskRunner 必须在构造时提供已初始化 run engine")
         self._session_id = session_id
         self._user_id = user_id
         self._sandbox = sandbox
         self._mcp_config = mcp_config
-        self._mcp_tool = MCPTool()
+        self._mcp_tool = mcp_tool or MCPTool()
         self._a2a_config = a2a_config
-        self._a2a_tool = A2ATool()
+        self._a2a_tool = a2a_tool or A2ATool()
         self._file_storage = file_storage
         self._uow_factory = uow_factory
-        self._workspace_runtime_service = WorkspaceRuntimeService(
+        self._workspace_runtime_service = workspace_runtime_service or WorkspaceRuntimeService(
             session_id=session_id,
+            user_id=user_id,
             uow_factory=uow_factory,
         )
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
+        self._runtime_state_coordinator = runtime_state_coordinator
+        self._sandbox_fact_recorder = sandbox_fact_recorder
+        self._sandbox_fact_context_builder = sandbox_fact_context_builder
+        self._sandbox_fact_event_projector = sandbox_fact_event_projector
+        self._evidence_step_reconciler = evidence_step_reconciler
+        self._runtime_tool_event_persistence = runtime_tool_event_persistence
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -120,56 +142,148 @@ class AgentTaskRunner(TaskRunner):
         )
         self._user_input_attachment_projector = UserInputAttachmentProjector(
             session_id=session_id,
+            user_id=user_id,
             sandbox=sandbox,
             file_storage=file_storage,
             uow_factory=uow_factory,
         )
-        self._run_engine = self._build_run_engine(
+        self._run_engine: RunEngine | None = run_engine
+
+    @classmethod
+    async def create(
+            cls,
+            *,
+            llm: LLM,
+            agent_config: AgentConfig,
+            mcp_config: MCPConfig,
+            a2a_config: A2AConfig,
+            session_id: str,
+            user_id: Optional[str],
+            file_storage: FileStorage,
+            uow_factory: Callable[[], IUnitOfWork],
+            json_parser: JSONParser,
+            browser: Browser,
+            search_engine: SearchEngine,
+            sandbox: Sandbox,
+            run_engine_factory: Optional[Callable[..., Awaitable[RunEngine]]] = None,
+            tool_runtime_adapter: Optional[ToolRuntimeAdapter] = None,
+            runtime_state_coordinator: Any = None,
+            runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort | None = None,
+            sandbox_fact_recorder: SandboxFactRecorderPort | None = None,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+    ) -> "AgentTaskRunner":
+        if run_engine_factory is None:
+            raise RuntimeError(
+                "未配置 run_engine_factory，当前仅支持 LangGraph 运行时，禁止回退 legacy planner-react"
+            )
+        if runtime_tool_snapshot_recorder is None:
+            raise RuntimeError("未配置 RuntimeToolSnapshotRecorderPort，禁止构建未记录 snapshot 的运行引擎")
+        if tool_runtime_adapter is None:
+            raise ValueError("tool_runtime_adapter 不能为空")
+
+        mcp_tool = MCPTool()
+        a2a_tool = A2ATool()
+        workspace_runtime_service = WorkspaceRuntimeService(
+            session_id=session_id,
+            user_id=user_id,
+            uow_factory=uow_factory,
+        )
+        run_engine = await cls._build_run_engine(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
+            user_id=user_id,
+            file_storage=file_storage,
             uow_factory=uow_factory,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
             search_engine=search_engine,
+            mcp_config=mcp_config,
+            mcp_tool=mcp_tool,
+            a2a_tool=a2a_tool,
+            workspace_runtime_service=workspace_runtime_service,
+            tool_runtime_adapter=tool_runtime_adapter,
             run_engine_factory=run_engine_factory,
+            runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            evidence_step_reconciler=evidence_step_reconciler,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
+        )
+        return cls(
+            mcp_config=mcp_config,
+            a2a_config=a2a_config,
+            session_id=session_id,
+            user_id=user_id,
+            file_storage=file_storage,
+            uow_factory=uow_factory,
+            browser=browser,
+            sandbox=sandbox,
+            run_engine=run_engine,
+            tool_runtime_adapter=tool_runtime_adapter,
+            runtime_state_coordinator=runtime_state_coordinator,
+            mcp_tool=mcp_tool,
+            a2a_tool=a2a_tool,
+            workspace_runtime_service=workspace_runtime_service,
+            sandbox_fact_recorder=sandbox_fact_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            sandbox_fact_event_projector=sandbox_fact_event_projector,
+            evidence_step_reconciler=evidence_step_reconciler,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
         )
 
-    def _build_run_engine(
-            self,
+    @staticmethod
+    async def _build_run_engine(
             llm: LLM,
             agent_config: AgentConfig,
             session_id: str,
+            user_id: Optional[str],
+            file_storage: FileStorage,
             uow_factory: Callable[[], IUnitOfWork],
             json_parser: JSONParser,
             browser: Browser,
             sandbox: Sandbox,
             search_engine: SearchEngine,
-            run_engine_factory: Optional[Callable[..., RunEngine]],
+            mcp_config: MCPConfig,
+            mcp_tool: MCPTool,
+            a2a_tool: A2ATool,
+            workspace_runtime_service: WorkspaceRuntimeService,
+            tool_runtime_adapter: ToolRuntimeAdapter,
+            run_engine_factory: Callable[..., Awaitable[RunEngine]],
+            runtime_tool_snapshot_recorder: RuntimeToolSnapshotRecorderPort,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> RunEngine:
-        if run_engine_factory is None:
-            raise RuntimeError(
-                "未配置 run_engine_factory，当前仅支持 LangGraph 运行时，禁止回退 legacy planner-react"
-            )
-
-        return run_engine_factory(
+        return await run_engine_factory(
             llm=llm,
             agent_config=agent_config,
             session_id=session_id,
-            file_storage=self._file_storage,
+            file_storage=file_storage,
             uow_factory=uow_factory,
             json_parser=json_parser,
             browser=browser,
             sandbox=sandbox,
             search_engine=search_engine,
-            mcp_tool=self._mcp_tool,
-            a2a_tool=self._a2a_tool,
-            workspace_runtime_service=self._workspace_runtime_service,
-            mcp_config=self._mcp_config,
-            user_id=self._user_id,
-            tool_runtime_adapter=self._tool_runtime_adapter,
+            mcp_tool=mcp_tool,
+            a2a_tool=a2a_tool,
+            workspace_runtime_service=workspace_runtime_service,
+            mcp_config=mcp_config,
+            user_id=user_id,
+            tool_runtime_adapter=tool_runtime_adapter,
+            runtime_tool_snapshot_recorder=runtime_tool_snapshot_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            evidence_step_reconciler=evidence_step_reconciler,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
         )
+
+    def _require_run_engine(self) -> RunEngine:
+        if self._run_engine is None:
+            raise RuntimeError("AgentTaskRunner 未完成 run engine 初始化")
+        return self._run_engine
 
     def _get_workspace_manager(self) -> WorkspaceManager:
         manager = getattr(self, "_workspace_manager", None)
@@ -177,6 +291,17 @@ class AgentTaskRunner(TaskRunner):
             manager = WorkspaceManager(uow_factory=self._uow_factory)
             self._workspace_manager = manager
         return manager
+
+    def _get_runtime_state_coordinator(self):
+        coordinator = getattr(self, "_runtime_state_coordinator", None)
+        if coordinator is not None:
+            return coordinator
+        # 测试可通过 object.__new__ 构造 runner；此处延迟导入避免领域层顶层依赖应用层。
+        from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+
+        coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
+        self._runtime_state_coordinator = coordinator
+        return coordinator
 
     async def _put_stream_record(
             self,
@@ -197,8 +322,8 @@ class AgentTaskRunner(TaskRunner):
             latest_message: Optional[str] = None,
             latest_message_at: Optional[datetime] = None,
             increment_unread: bool = False,
-            status: Optional[SessionStatus] = None,
-    ) -> None:
+            allow_status_transition: bool = True,
+    ) -> str | None:
         event_id = None
         try:
             # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
@@ -207,25 +332,26 @@ class AgentTaskRunner(TaskRunner):
                 record=TaskStreamEventRecord(event=event),
             )
             if not should_persist_event(event):
-                return
+                return event_id
             # 注意：不要原地修改传入 event.id。
             # LangGraphRunEngine 会对同一事件对象做 live + final replay 去重，
             # 若这里直接改写 id，可能导致 replay 阶段去重失效并重复落库。
             persisted_event = event.model_copy(deep=True)
             persisted_event.id = event_id
 
-            # 再把同一事件和会话投影在单事务内落库。
-            # 这样可以保证“事件历史”与“会话列表投影(latest/status/title/unread)”一致提交。
-            async with self._uow_factory() as uow:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=self._session_id,
-                    event=persisted_event,
-                    title=title,
-                    latest_message=latest_message,
-                    latest_message_at=latest_message_at,
-                    increment_unread=increment_unread,
-                    status=status,
-                )
+            projection = RuntimeEventProjection(
+                title=title,
+                latest_message=latest_message,
+                latest_message_at=latest_message_at,
+                increment_unread=increment_unread,
+            )
+            await self._get_runtime_state_coordinator().persist_runtime_event(
+                session_id=self._session_id,
+                event=persisted_event,
+                projection=projection,
+                allow_status_transition=allow_status_transition,
+            )
+            return event_id
         except Exception as e:
             # 落库失败时补偿删除输出流，尽量降低Redis/DB分叉概率。
             logger.error(f"写入输出流后保存事件历史失败: {e}")
@@ -235,6 +361,275 @@ class AgentTaskRunner(TaskRunner):
                 except Exception as rollback_err:
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
+
+    async def _record_sandbox_facts_for_tool_event(
+            self,
+            *,
+            task: Task | None = None,
+            event: ToolEvent,
+            source_event_id: str | None,
+    ) -> None:
+        recorder = getattr(self, "_sandbox_fact_recorder", None)
+        context_builder = getattr(self, "_sandbox_fact_context_builder", None)
+        event_projector = getattr(self, "_sandbox_fact_event_projector", None)
+        if recorder is None or context_builder is None:
+            return
+        if self._graph_tool_event_fact_projected(event):
+            return
+        if not source_event_id:
+            logger.warning(
+                "sandbox_fact_record_skipped",
+                extra={
+                    "reason_code": "source_event_id_missing",
+                    "tool_event_id": event.id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                },
+            )
+            return
+        try:
+            context = await context_builder.build_for_tool_event(
+                source_event_id=source_event_id,
+                current_step_id=str(getattr(event, "step_id", "") or "").strip() or None,
+            )
+            facts = await recorder.record_from_tool_event(context=context, event=event)
+            if event_projector is not None:
+                fact_event = await event_projector.project_tool_event_facts(context=context, facts=facts)
+                if fact_event is not None and task is not None:
+                    try:
+                        await self._put_and_add_event(
+                            task=task,
+                            event=fact_event,
+                            allow_status_transition=False,
+                        )
+                    except Exception as exc:
+                        logger.exception(
+                            "sandbox_fact_event_projection_failed",
+                            extra={
+                                "user_id": getattr(context.scope, "user_id", None),
+                                "session_id": getattr(context.scope, "session_id", None),
+                                "run_id": getattr(context.scope, "run_id", None),
+                                "step_id": getattr(context, "current_step_id", None)
+                                or getattr(context.scope, "current_step_id", None),
+                                "source_event_id": source_event_id,
+                                "fact_ids": [getattr(fact, "id", None) for fact in facts],
+                                "error_type": exc.__class__.__name__,
+                                "reason_code": "event_stream_persist_failed",
+                            },
+                        )
+        except Exception as exc:
+            logger.exception(
+                "sandbox_fact_record_failed",
+                extra={
+                    "tool_event_id": event.id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                    "source_event_id": source_event_id,
+                    "error_type": exc.__class__.__name__,
+                },
+            )
+
+    @staticmethod
+    def _graph_tool_event_fact_projected(event: ToolEvent) -> bool:
+        projection = getattr(event, "runtime_fact_projection", None)
+        if not isinstance(projection, dict):
+            projection = (getattr(event, "__pydantic_extra__", None) or {}).get("runtime_fact_projection")
+        return isinstance(projection, dict) and projection.get("graph_main_chain") is True
+
+    async def _reconcile_evidence_before_step_completed(self, event: StepEvent) -> None:
+        reconciler = getattr(self, "_evidence_step_reconciler", None)
+        if reconciler is None or event.status != StepEventStatus.COMPLETED:
+            return
+        if self._graph_evidence_already_reconciled(event.step):
+            logger.info(
+                "evidence_reconcile_skipped_graph_already_reconciled",
+                extra={
+                    "user_id": getattr(self, "_user_id", None),
+                    "session_id": getattr(self, "_session_id", None),
+                    "step_id": str(getattr(event.step, "id", "") or ""),
+                    "reason_code": "graph_evidence_already_reconciled",
+                },
+            )
+            return
+        scope: AccessScopeResult | None = None
+        try:
+            scope = await self._build_evidence_reconcile_scope(current_step_id=event.step.id)
+        except Exception as exc:
+            logger.exception(
+                "evidence_reconcile_scope_missing",
+                extra={
+                    "user_id": getattr(self, "_user_id", None),
+                    "session_id": getattr(self, "_session_id", None),
+                    "step_id": str(getattr(event.step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_reconcile_scope_missing",
+                },
+            )
+            return
+        try:
+            saved = await reconciler.reconcile_step_evidence(scope=scope, step=event.step)
+            if saved is None:
+                logger.error(
+                    "evidence_reconcile_contract_violation",
+                    extra={
+                        "user_id": scope.user_id,
+                        "session_id": str(scope.session_id),
+                        "run_id": scope.run_id,
+                        "step_id": str(getattr(event.step, "id", "") or ""),
+                        "reason_code": "evidence_reconcile_return_missing",
+                    },
+                )
+            await self._persist_evidence_event_before_step_completed(
+                reconciler=reconciler,
+                scope=scope,
+                step=event.step,
+                records=list(saved or []),
+            )
+            await self._overwrite_step_outcome_with_evidence_projection(
+                reconciler=reconciler,
+                scope=scope,
+                step=event.step,
+            )
+        except Exception as exc:
+            logger.exception(
+                "evidence_reconcile_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": str(getattr(event.step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_reconcile_failed",
+                },
+            )
+            await self._try_record_evidence_reconcile_failed_gap(
+                reconciler=reconciler,
+                scope=scope,
+                step=event.step,
+            )
+
+    async def _persist_evidence_event_before_step_completed(
+            self,
+            *,
+            reconciler: EvidenceStepReconcilerPort,
+            scope: AccessScopeResult,
+            step,
+            records: list[object],
+    ) -> None:
+        build_event = getattr(reconciler, "build_step_evidence_event", None)
+        if not callable(build_event):
+            return
+        try:
+            evidence_event = await build_event(scope=scope, step=step, records=records)
+            if evidence_event is None:
+                return
+            async with self._uow_factory() as uow:
+                await uow.workflow_run.add_event_record_if_absent(
+                    session_id=str(scope.session_id),
+                    run_id=str(scope.run_id or ""),
+                    event=evidence_event,
+                )
+        except Exception as exc:
+            logger.exception(
+                "evidence_event_projection_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": str(getattr(step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_event_projection_failed",
+                },
+            )
+
+    @staticmethod
+    async def _overwrite_step_outcome_with_evidence_projection(
+            *,
+            reconciler: EvidenceStepReconcilerPort,
+            scope: AccessScopeResult,
+            step,
+    ) -> None:
+        build_projection = getattr(reconciler, "build_step_evidence_backed_facts", None)
+        if not callable(build_projection):
+            return
+        projections = await build_projection(scope=scope, step=step)
+        if getattr(step, "outcome", None) is None:
+            return
+        step.outcome.evidence_backed_facts = list(projections or [])
+        step.outcome.facts_learned = [
+            str(item.text or "").strip()
+            for item in list(projections or [])
+            if str(item.text or "").strip()
+        ]
+
+    @staticmethod
+    async def _try_record_evidence_reconcile_failed_gap(
+            *,
+            reconciler: EvidenceStepReconcilerPort,
+            scope: AccessScopeResult,
+            step,
+    ) -> None:
+        record_gap = getattr(reconciler, "record_reconcile_failed_gap", None)
+        if not callable(record_gap):
+            return
+        try:
+            await record_gap(scope=scope, step=step)
+        except Exception as exc:
+            logger.exception(
+                "evidence_reconcile_gap_write_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": str(getattr(step, "id", "") or ""),
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "evidence_reconcile_gap_write_failed",
+                },
+            )
+
+    async def _build_evidence_reconcile_scope(self, *, current_step_id: str) -> AccessScopeResult:
+        if not self._user_id:
+            raise RuntimeError("evidence reconcile 需要 user_id")
+        async with self._uow_factory() as uow:
+            session = await uow.session.get_by_id(session_id=self._session_id, user_id=self._user_id)
+            if session is None:
+                raise RuntimeError("evidence reconcile 无法解析 session scope")
+            workspace_id = str(getattr(session, "workspace_id", None) or "").strip()
+            workspace = None
+            if workspace_id:
+                workspace = await uow.workspace.get_by_id_for_user(
+                    workspace_id=workspace_id,
+                    user_id=self._user_id,
+                )
+            if workspace is None:
+                workspace = await uow.workspace.get_by_session_id_for_user(
+                    session_id=self._session_id,
+                    user_id=self._user_id,
+                )
+            if workspace is None:
+                raise RuntimeError("evidence reconcile 无法解析 workspace scope")
+            run_id = str(getattr(workspace, "current_run_id", None) or session.current_run_id or "").strip()
+            if not run_id:
+                raise RuntimeError("evidence reconcile 无法解析 run scope")
+            run = await uow.workflow_run.get_by_id_for_user(run_id=run_id, user_id=self._user_id)
+            if run is None or run.session_id != self._session_id:
+                raise RuntimeError("evidence reconcile run scope 不属于当前 session")
+        return AccessScopeResult(
+            tenant_id=self._user_id,
+            user_id=self._user_id,
+            session_id=self._session_id,
+            workspace_id=workspace.id,
+            run_id=run_id,
+            current_step_id=str(current_step_id or "").strip() or None,
+        )
+
+    @staticmethod
+    def _graph_evidence_already_reconciled(step) -> bool:
+        outcome = getattr(step, "outcome", None)
+        if outcome is None:
+            return False
+        marker = getattr(outcome, "evidence_reconcile_metadata", None)
+        return isinstance(marker, dict) and marker.get("graph_completion_gate") is True
 
     async def _emit_request_started(self, task: Task, request_id: str) -> None:
         await self._put_stream_record(
@@ -327,10 +722,11 @@ class AgentTaskRunner(TaskRunner):
             return
 
         # 遍历流程执行过程中产生的事件
-        async for event in self._run_engine.invoke(message):
+        async for event in self._require_run_engine().invoke(message):
             # 处理工具事件，根据工具类型进行相应的内容填充
             if isinstance(event, ToolEvent):
-                await self._tool_event_projector.project(event)
+                if event.tool_content is None:
+                    await self._tool_event_projector.project(event)
             # 处理消息事件，同步附件到存储
             elif isinstance(event, MessageEvent):
                 await self._message_attachment_projector.project(event)
@@ -350,9 +746,10 @@ class AgentTaskRunner(TaskRunner):
             yield event
 
     async def _resume_flow(self, value: Any) -> AsyncGenerator[BaseEvent, None]:
-        async for event in self._run_engine.resume(value):
+        async for event in self._require_run_engine().resume(value):
             if isinstance(event, ToolEvent):
-                await self._tool_event_projector.project(event)
+                if event.tool_content is None:
+                    await self._tool_event_projector.project(event)
             elif isinstance(event, MessageEvent):
                 await self._message_attachment_projector.project(event)
             yield event
@@ -406,53 +803,11 @@ class AgentTaskRunner(TaskRunner):
             logger.error(f"会话[{self._session_id}]在{scene}取消兜底失败: {fallback_err}")
 
     async def _persist_cancellation_state(self) -> None:
-        """将当前运行和未完成步骤统一收敛为 cancelled。"""
-        async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=self._session_id)
-            if session is None:
-                return
-
-            await uow.session.update_status(
-                session_id=self._session_id,
-                status=SessionStatus.CANCELLED,
-            )
-
-            run_id = await self._get_workspace_manager().resolve_current_run_id(
-                session=session,
-                uow=uow,
-            )
-            if not run_id:
-                return
-
-            run = await uow.workflow_run.get_by_id(run_id)
-            if run is None:
-                return
-
-            if run.status == WorkflowRunStatus.CANCELLED:
-                return
-
-            run_events = await uow.workflow_run.list_events(run_id)
-            await uow.workflow_run.cancel_run(run_id)
-
-            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
-            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
-                runtime_metadata,
-                run_events=run_events,
-                current_step_id=run.current_step_id,
-            )
-
-            if cancelled_step_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=self._session_id,
-                    event=cancelled_step_event,
-                )
-
-            if cancelled_plan_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=self._session_id,
-                    event=cancelled_plan_event,
-                    status=SessionStatus.CANCELLED,
-                )
+        """将取消状态收敛委托给 RuntimeStateCoordinator。"""
+        await self._get_runtime_state_coordinator().cancel_current_run(
+            session_id=self._session_id,
+            reason="task_cancelled",
+        )
 
     async def invoke(self, task: Task) -> None:
         active_request_id: Optional[str] = None
@@ -500,6 +855,7 @@ class AgentTaskRunner(TaskRunner):
                     message_obj = Message(
                         message=message,
                         attachments=[attachment.filepath for attachment in event.attachments],
+                        source_event_id=event.id,
                     )
                     event_stream = self._run_flow(message_obj)
                 elif isinstance(event, ResumeInput):
@@ -537,7 +893,6 @@ class AgentTaskRunner(TaskRunner):
                         await self._put_and_add_event(
                             task=task,
                             event=event,
-                            status=SessionStatus.WAITING,
                         )
                         terminal_session_status = SessionStatus.WAITING
                         if active_request_id is not None:
@@ -558,13 +913,12 @@ class AgentTaskRunner(TaskRunner):
                         # Done 事件先完成本轮终态投影，但不能立即 break；
                         # run_engine 还需要继续完成 finally 中的状态合同与上下文投影收尾。
                         has_more_input = not await task.input_stream.is_empty()
-                        done_status = None if has_more_input else SessionStatus.COMPLETED
                         await self._put_and_add_event(
                             task=task,
                             event=event,
-                            status=done_status,
+                            allow_status_transition=not has_more_input,
                         )
-                        terminal_session_status = done_status
+                        terminal_session_status = None if has_more_input else SessionStatus.COMPLETED
                         if active_request_id is not None:
                             await self._emit_request_finished(
                                 task=task,
@@ -580,7 +934,6 @@ class AgentTaskRunner(TaskRunner):
                             event=event,
                             latest_message=event.error,
                             latest_message_at=event.created_at,
-                            status=SessionStatus.FAILED,
                         )
                         terminal_session_status = SessionStatus.FAILED
                         if active_request_id is not None:
@@ -598,7 +951,17 @@ class AgentTaskRunner(TaskRunner):
                             pending_requests_rejected = True
                     else:
                         # 其他事件：仅记录事件历史。
-                        await self._put_and_add_event(task=task, event=event)
+                        if isinstance(event, StepEvent):
+                            await self._reconcile_evidence_before_step_completed(event)
+                        if isinstance(event, ToolEvent) and self._graph_tool_event_fact_projected(event):
+                            continue
+                        source_event_id = await self._put_and_add_event(task=task, event=event)
+                        if isinstance(event, ToolEvent):
+                            await self._record_sandbox_facts_for_tool_event(
+                                task=task,
+                                event=event,
+                                source_event_id=source_event_id,
+                            )
 
             # 所有事件处理完成后，执行一次状态兜底：
             # 这里只兜底正常完成路径，不能覆盖 wait/failed 等已真实收敛的终态。
@@ -629,7 +992,6 @@ class AgentTaskRunner(TaskRunner):
                     event=error_event,
                     latest_message=error_event.error,
                     latest_message_at=error_event.created_at,
-                    status=SessionStatus.FAILED,
                 )
                 if active_request_id is not None:
                     await self._emit_request_finished(

@@ -41,6 +41,7 @@ class MemoryConsolidationStats(BaseModel):
     input_candidate_count: int = 0
     kept_candidate_count: int = 0
     dropped_invalid_count: int = 0
+    dropped_sensitive_count: int = 0
     dropped_low_confidence_count: int = 0
     deduped_count: int = 0
     merged_profile_count: int = 0

@@ -10,9 +10,19 @@ from io import StringIO
 from typing import Any, Dict, List
 from unittest.mock import patch
 
-from app.domain.models import Step, ToolResult
+from app.domain.models import (
+    ExecutionStatus,
+    Plan,
+    Step,
+    StepArtifactPolicy,
+    StepEvent,
+    StepEventStatus,
+    StepOutputMode,
+    ToolEvent,
+    ToolEventStatus,
+    ToolResult,
+)
 from app.domain.models.search import FetchedPage
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_failure_key,
@@ -87,6 +97,9 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks impor
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.delivery_helpers import (
     _resolve_summary_attachment_refs,
 )
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import (
+    build_execute_completed_transition,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import (
     ToolPolicyEngine,
 )
@@ -101,11 +114,14 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool
     normalize_tool_execution_args,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import (
+    _build_search_evidence_summaries,
     apply_tool_preinvoke_effects,
     apply_rewrite_effects,
     apply_tool_result_effects,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
+    build_called_event,
+    build_calling_event,
     build_tool_call_lifecycle,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_handlers import (
@@ -145,6 +161,25 @@ def test_finalize_no_tool_call_should_retry_empty_payload_and_block_human_wait()
     assert isinstance(wait_result.payload.get("blockers"), list)
 
 
+def test_tool_call_lifecycle_should_project_step_id_to_tool_events() -> None:
+    lifecycle = build_tool_call_lifecycle(
+        selected_tool_call={
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "/workspace/a.txt"}'},
+        },
+        parse_tool_call_args=json.loads,
+        step_id="atomic-action-step",
+    )
+
+    assert lifecycle is not None
+    calling_event = build_calling_event(lifecycle)
+    called_event = build_called_event(lifecycle, ToolResult(success=True, data={"path": "/workspace/a.txt"}))
+
+    assert calling_event.step_id == "atomic-action-step"
+    assert called_event.step_id == "atomic-action-step"
+
+
 def test_finalize_no_tool_call_should_retry_web_reading_without_contract_evidence() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="读取页面正文并概括重点")
@@ -169,7 +204,7 @@ def test_finalize_no_tool_call_should_retry_web_reading_without_contract_evidenc
     assert result.action == "retry"
 
 
-def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -> None:
+def test_finalize_no_tool_call_should_allow_web_reading_with_evidence_backed_fact() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="读取页面正文并概括重点")
 
@@ -182,11 +217,10 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -
         started_at=time.perf_counter(),
         iteration=0,
         runtime_recent_action={
-            "web_reading_evidence_summaries": [
+            "evidence_backed_facts": [
                 {
-                    "url": "https://example.com",
-                    "summary": "页面正文包含核心要点",
-                    "quality": "strong",
+                    "text": "页面正文包含核心要点",
+                    "source_event_ids": ["evt-page-1"],
                 }
             ]
         },
@@ -195,6 +229,77 @@ def test_finalize_no_tool_call_should_allow_web_reading_with_strong_evidence() -
     assert result.action == "return"
     assert result.payload is not None
     assert result.payload["success"] is True
+
+
+def test_finalize_no_tool_call_should_reject_file_output_without_write_tool_fact() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=step,
+        task_mode="file_processing",
+        llm_message={
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+                },
+                ensure_ascii=False,
+            )
+        },
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=0,
+        runtime_recent_action={},
+    )
+
+    assert result.action == "return"
+    assert result.payload is not None
+    assert result.payload["success"] is False
+    assert result.payload["attachments"] == []
+    assert any("没有成功的 write_file" in str(item) for item in result.payload["blockers"])
+
+
+def test_finalize_no_tool_call_should_not_treat_read_file_as_file_output_success() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+
+    result = finalize_no_tool_call(
+        logger=logger,
+        step=step,
+        task_mode="file_processing",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        llm_cost_ms=1,
+        started_at=time.perf_counter(),
+        iteration=0,
+        runtime_recent_action={
+            "last_successful_tool_call": {
+                "function_name": "read_file",
+                "data": {
+                    "filepath": "/home/ubuntu/p1-3-reuse-test.md",
+                    "content": "P1-3 reuse test",
+                },
+            }
+        },
+    )
+
+    assert result.action == "return"
+    assert result.payload is not None
+    assert result.payload["success"] is False
+    assert result.payload["attachments"] == []
+    assert any("没有成功的 write_file" in str(item) for item in result.payload["blockers"])
 
 
 def test_finalize_no_tool_call_should_preserve_text_outside_json_as_draft_fact() -> None:
@@ -224,7 +329,7 @@ def test_finalize_no_tool_call_should_preserve_text_outside_json_as_draft_fact()
     assert result.payload is not None
     facts = [str(item) for item in list(result.payload.get("facts_learned") or [])]
     assert "支持人工审核" in facts
-    assert any(item == f"{STEP_DRAFT_FACT_PREFIX}{markdown_text}" for item in facts)
+    assert markdown_text not in facts
 
 
 def test_build_execution_context_should_not_block_file_generating_organization_step() -> None:
@@ -248,6 +353,162 @@ def test_build_execution_context_should_not_block_file_generating_organization_s
 
     assert "search_web" not in execution_context.blocked_function_names
     assert "fetch_page" not in execution_context.blocked_function_names
+
+
+def test_build_execution_context_should_block_read_tools_for_current_file_creation_step_only() -> None:
+    step = Step(
+        id="step-create",
+        description="创建 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md 并写入内容“P1-3 reuse test”",
+        task_mode_hint="file_processing",
+        output_mode="file",
+        artifact_policy="require_file_output",
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="file_processing",
+        max_tool_iterations=6,
+        user_content=[
+            {
+                "type": "text",
+                "text": "用户完整请求：先创建文件，然后读取该文件，最后再次读取该文件。",
+            }
+        ],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+        },
+        user_message_text="请先创建一个 Markdown 文件，然后读取该文件。",
+    )
+
+    assert execution_context.file_write_intent_blocked_function_names == {
+        "read_file",
+        "list_files",
+        "find_files",
+        "search_in_file",
+    }
+    assert "write_file" not in execution_context.blocked_function_names
+
+
+def test_build_execution_context_should_not_block_write_tool_when_user_message_contains_later_read_step() -> None:
+    step = Step(
+        id="step-create",
+        description="创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test”",
+        task_mode_hint="file_processing",
+        output_mode="file",
+        artifact_policy="require_file_output",
+        success_criteria=[
+            "文件成功创建",
+            "文件内容为“P1-3 reuse test”",
+        ],
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="file_processing",
+        max_tool_iterations=6,
+        user_content=[
+            {
+                "type": "text",
+                "text": "请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md，然后读取该文件，再次读取该文件。",
+            }
+        ],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+            "replace_in_file",
+            "shell_execute",
+        },
+        user_message_text="请先创建一个 Markdown 文件 /home/ubuntu/p1-3-reuse-test.md，然后读取该文件，再次读取该文件。",
+        read_only_intent_text=(
+            "创建文件 /home/ubuntu/p1-3-reuse-test.md，写入内容“P1-3 reuse test” "
+            "文件成功创建 文件内容为“P1-3 reuse test”"
+        ),
+    )
+
+    assert execution_context.read_only_file_blocked_function_names == set()
+    assert execution_context.file_write_intent_blocked_function_names == {
+        "read_file",
+        "list_files",
+        "find_files",
+        "search_in_file",
+    }
+    assert "write_file" not in execution_context.blocked_function_names
+    assert "replace_in_file" not in execution_context.blocked_function_names
+
+
+def test_build_execution_context_should_not_use_success_criteria_for_write_intent() -> None:
+    step = Step(
+        id="step-read",
+        description="读取 /home/ubuntu/p1-3-reuse-test.md 并确认内容",
+        task_mode_hint="file_processing",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+        success_criteria=["读取内容与第一步写入内容一致"],
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="file_processing",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": "读取文件并确认内容"}],
+        has_available_file_context=True,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+            "replace_in_file",
+        },
+        user_message_text="请读取该文件。",
+    )
+
+    assert execution_context.file_write_intent_blocked_function_names == set()
+    assert "read_file" not in execution_context.blocked_function_names
+    assert "write_file" in execution_context.artifact_policy_blocked_function_names
+    assert "replace_in_file" in execution_context.artifact_policy_blocked_function_names
+
+
+def test_build_execution_context_should_allow_source_reading_for_coding_file_write_step() -> None:
+    step = Step(
+        id="step-code",
+        description="修改 backend/app/services/foo.py 实现用户查询接口",
+        task_mode_hint="coding",
+        output_mode="file",
+        artifact_policy="allow_file_output",
+    )
+
+    execution_context = build_execution_context(
+        step=step,
+        task_mode="coding",
+        max_tool_iterations=8,
+        user_content=[{"type": "text", "text": "修改源码前可以先读取相关文件。"}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "read_file",
+            "list_files",
+            "find_files",
+            "search_in_file",
+            "write_file",
+        },
+        user_message_text="修改 backend/app/services/foo.py 实现用户查询接口",
+    )
+
+    assert execution_context.file_write_intent_blocked_function_names == set()
+    assert "read_file" not in execution_context.blocked_function_names
 
 
 def test_build_tool_feedback_content_should_keep_full_fetch_page_content() -> None:
@@ -1206,6 +1467,62 @@ def test_finalize_max_iterations_should_converge_success_when_file_facts_ready()
     assert "收敛成功" in str(payload["summary"])
 
 
+def test_finalize_max_iterations_should_converge_success_when_file_output_written() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        description="生成周末出行方案文件",
+        task_mode_hint="general",
+        output_mode="file",
+        artifact_policy="allow_file_output",
+    )
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="general",
+        llm_message={"content": ""},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=3,
+        iteration_count=3,
+        runtime_recent_action={},
+        step_file_context={
+            "called_functions": {"write_file", "read_file"},
+            "written_files": ["/home/ubuntu/漳州周末自驾游计划.md"],
+            "last_read_file": "/home/ubuntu/漳州周末自驾游计划.md",
+        },
+    )
+
+    assert payload["success"] is True
+    assert payload["attachments"] == ["/home/ubuntu/漳州周末自驾游计划.md"]
+    assert payload["blockers"] == []
+    assert payload["facts_learned"] == []
+
+
+def test_finalize_max_iterations_should_fail_when_required_file_output_missing() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(
+        description="生成周末出行方案文件",
+        task_mode_hint="general",
+        output_mode="file",
+        artifact_policy="require_file_output",
+    )
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="general",
+        llm_message={"content": ""},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=3,
+        iteration_count=3,
+        runtime_recent_action={},
+        step_file_context={"called_functions": {"read_file"}},
+    )
+
+    assert payload["success"] is False
+    assert payload["blockers"] == ["达到最大工具调用轮次，当前步骤仍未形成可交付结果。"]
+
+
 def test_finalize_max_iterations_should_include_research_gap_hint() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="调研并给出结论")
@@ -1257,7 +1574,7 @@ def test_finalize_max_iterations_should_include_query_rewrite_hint_for_low_recal
     assert "单主题自然语言短句" in str(payload.get("next_hint") or "")
 
 
-def test_finalize_max_iterations_should_converge_research_when_snippets_available() -> None:
+def test_finalize_max_iterations_should_not_converge_research_when_only_snippets_available() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="调研 LangGraph human-in-the-loop 常见实现模式")
 
@@ -1283,10 +1600,122 @@ def test_finalize_max_iterations_should_converge_research_when_snippets_availabl
         },
     )
 
+    assert payload["success"] is False
+    assert "当前步骤暂时未能完成" in payload["summary"]
+    assert "仍未形成可交付结果" in payload["blockers"][0]
+
+
+def test_research_convergence_should_break_after_search_and_fetch_tool_facts_ready() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "query_count": 7,
+                "candidate_url_count": 8,
+                "fetched_url_count": 1,
+                "fetch_success_count": 1,
+                "coverage_score": 0.625,
+                "search_evidence_summaries": [
+                    {
+                        "title": "漳州长泰周末游",
+                        "url": "https://example.com/search",
+                        "snippet": "长泰适合周末自驾和自然放松。",
+                    }
+                ],
+                "web_reading_evidence_summaries": [
+                    {
+                        "url": "https://example.com/page",
+                        "summary": "页面包含景点、民宿和餐饮信息。",
+                    }
+                ],
+            },
+        }
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息"),
+        task_mode="research",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "research_tool_fact_ready"
+    assert result.payload is not None
+    assert result.payload["success"] is True
+    assert result.payload["runtime_recent_action"]["research_convergence"]["source"] == "tool_fact_progress"
+
+
+def test_finalize_max_iterations_should_converge_research_when_search_and_fetch_tool_facts_ready() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息")
+
+    payload = finalize_max_iterations(
+        logger=logger,
+        step=step,
+        task_mode="research",
+        llm_message={"content": '{"success": false, "summary": ""}'},
+        started_at=time.perf_counter(),
+        requested_max_tool_iterations=8,
+        iteration_count=8,
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "query_count": 7,
+                "candidate_url_count": 8,
+                "fetched_url_count": 1,
+                "fetch_success_count": 1,
+                "coverage_score": 0.625,
+                "web_reading_evidence_summaries": [
+                    {
+                        "url": "https://example.com/page",
+                        "summary": "页面包含景点、民宿和餐饮信息。",
+                    }
+                ],
+            },
+        },
+    )
+
     assert payload["success"] is True
-    assert any("LangGraph 支持通过 interrupt" in str(item) for item in list(payload["facts_learned"]))
-    assert any("来源链接：https://docs.langchain.com/langgraph-platform/human-in-the-loop" == str(item) for item in
-               list(payload["facts_learned"]))
+    assert payload["runtime_recent_action"]["research_convergence"]["reason_code"] == (
+        "research_max_iteration_tool_fact_ready"
+    )
+    assert payload["blockers"] == []
+
+
+def test_research_convergence_should_accept_top_level_web_reading_tool_facts() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "research_progress": {
+                "query_count": 7,
+                "candidate_url_count": 8,
+                "fetched_url_count": 1,
+                "fetch_success_count": 1,
+                "coverage_score": 0.625,
+            },
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://example.com/page",
+                    "summary": "页面包含景点、民宿和餐饮信息。",
+                }
+            ],
+        }
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="搜索漳州适合情侣躺平放松的自然山水景点、住宿和餐饮信息"),
+        task_mode="research",
+        recent_function_name="fetch_page",
+        execution_state=state,
+    )
+
+    assert result.should_break is True
+    assert result.reason_code == "research_tool_fact_ready"
+    assert result.payload is not None
+    assert "页面包含景点、民宿和餐饮信息" in result.payload["facts_learned"][-1]
 
 
 def test_apply_tool_result_effects_should_update_research_search_state() -> None:
@@ -1344,7 +1773,7 @@ def test_apply_tool_result_effects_should_update_research_search_state() -> None
     assert execution_state.last_search_evidence_quality["reason_code"] == "snippet_insufficient"
 
 
-def test_apply_tool_result_effects_should_capture_search_snippet_evidence() -> None:
+def test_apply_tool_result_effects_should_capture_search_snippet_candidates() -> None:
     logger = logging.getLogger(__name__)
     step = Step(description="调研 OpenAI 文档并提炼要点")
     execution_context = ExecutionContext(
@@ -1537,6 +1966,53 @@ def test_apply_tool_result_effects_should_persist_cross_domain_repeat_blocks() -
         tool_executed=False,
     )
     assert execution_state.research_cross_domain_repeat_blocks == 1
+
+
+def test_apply_tool_result_effects_should_not_count_pending_evidence_reuse_as_failure() -> None:
+    logger = logging.getLogger(__name__)
+    step = Step(description="复用前序页面")
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "再次读取同一页面"}],
+        available_tools=[],
+        available_function_names={"fetch_page", "search_web"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=True,
+        research_has_explicit_url=True,
+    )
+    execution_state = ExecutionState()
+
+    result = apply_tool_result_effects(
+        logger=logger,
+        step=step,
+        function_name="fetch_page",
+        normalized_function_name="fetch_page",
+        function_args={"url": "https://example.com/page"},
+        tool_result=ToolResult(
+            success=False,
+            message="reuse pending",
+            data={"duplicate_decision": "reuse_existing_evidence_pending_resolution"},
+        ),
+        loop_break_reason="virtual_success_pending_resolution",
+        guard_reason_code="evidence_reuse_pending_resolution",
+        browser_route_state_key="",
+        execution_context=execution_context,
+        execution_state=execution_state,
+        tool_executed=False,
+    )
+
+    assert result.loop_break_reason == "virtual_success_pending_resolution"
+    assert execution_state.consecutive_failure_count == 0
+    assert execution_state.consecutive_fetch_failure_count == 0
+    assert "last_failed_action" not in execution_state.runtime_recent_action
+    assert "research_progress" not in execution_state.runtime_recent_action
 
 
 def test_apply_tool_result_effects_should_not_mark_browser_high_level_failed_on_soft_block_retry_reason() -> None:
@@ -2250,7 +2726,7 @@ def test_convergence_engine_should_reuse_rules_for_max_iteration() -> None:
     assert any("hello.txt" in str(item) for item in list(decision.payload["facts_learned"]))
 
 
-def test_research_convergence_should_break_when_snippet_sufficient() -> None:
+def test_research_convergence_should_not_break_when_only_snippet_sufficient() -> None:
     judge = ResearchConvergenceJudge()
     state = ExecutionState(
         research_snippet_sufficient=True,
@@ -2271,12 +2747,99 @@ def test_research_convergence_should_break_when_snippet_sufficient() -> None:
         execution_state=state,
     )
 
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_research_convergence_should_break_when_evidence_backed_fact_exists() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "LangGraph HITL",
+                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                "snippet": "LangGraph 支持通过 interrupt 和 resume 将人工输入接入执行流。",
+            }
+        ],
+        runtime_recent_action={
+            "research_diagnosis": {"code": "search_snippet_sufficient"},
+            "evidence_backed_facts": [
+                {
+                    "text": "已形成 SEARCH_EVIDENCE：LangGraph 支持通过 interrupt 和 resume 接入人工输入。",
+                    "source_event_ids": ["evt-1"],
+                }
+            ],
+        },
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="收集 LangGraph human-in-the-loop 候选资料"),
+        task_mode="research",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
     assert result.should_break is True
     assert result.payload is not None
     assert result.payload["success"] is True
-    assert result.reason_code == "research_snippet_evidence_ready"
-    assert any("来源链接" in str(item) for item in list(result.payload["facts_learned"]))
+    assert result.reason_code == "research_evidence_ready"
+    assert any("SEARCH_EVIDENCE" in str(item) for item in list(result.payload["facts_learned"]))
     assert len(result.payload["facts_learned"]) >= 1
+
+
+def test_research_convergence_should_not_break_for_file_save_step_with_snippet_only() -> None:
+    judge = ResearchConvergenceJudge()
+    state = ExecutionState(
+        research_snippet_sufficient=True,
+        research_search_evidence_items=[
+            {
+                "title": "资料来源",
+                "url": "https://example.com/source",
+                "snippet": "搜索摘要只能作为候选来源，不能代表文件已经保存。",
+            }
+        ],
+        runtime_recent_action={"research_diagnosis": {"code": "search_snippet_sufficient"}},
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(
+            description="搜索资料并保存到文件",
+            output_mode=StepOutputMode.NONE,
+            artifact_policy=StepArtifactPolicy.DEFAULT,
+        ),
+        task_mode="research",
+        recent_function_name="search_web",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
+
+
+def test_build_search_candidate_summaries_should_not_truncate_fields() -> None:
+    long_title = "标题" * 80
+    long_url = "https://example.com/" + ("very-long-path/" * 30)
+    long_snippet = "摘要内容" * 120
+    state = ExecutionState(
+        research_search_evidence_items=[
+            {
+                "title": long_title,
+                "url": long_url,
+                "snippet": long_snippet,
+            }
+        ]
+    )
+
+    summaries = _build_search_evidence_summaries(state)
+
+    assert summaries == [
+        {
+            "title": long_title,
+            "url": long_url,
+            "snippet": long_snippet,
+        }
+    ]
 
 
 def test_research_convergence_should_not_break_for_broad_scope_research_on_first_snippet_only() -> None:
@@ -2493,7 +3056,7 @@ def test_build_execution_context_should_keep_file_tools_for_general_file_observa
     assert "find_files" not in context.blocked_function_names
 
 
-def test_build_execution_context_should_block_research_tools_for_general_summary_only_step() -> None:
+def test_build_execution_context_should_not_mark_source_request_as_summary_only_without_existing_context() -> None:
     step = Step(
         description="整理 LangGraph human-in-the-loop 的常见实现模式，归纳为 5 条要点，并标注对应来源链接",
         task_mode_hint="general",
@@ -2508,12 +3071,18 @@ def test_build_execution_context_should_block_research_tools_for_general_summary
         user_content=[{"type": "text", "text": step.description}],
         has_available_file_context=False,
         available_tools=[],
-        available_function_names={"search_web", "fetch_page", "read_file"},
+        available_function_names={
+            "search_web",
+            "fetch_page",
+            "read_file",
+            "list_files",
+            "search_in_file",
+            "shell_execute",
+        },
         user_message_text="调研 LangGraph human-in-the-loop 常见实现模式，给我 5 条要点和来源链接",
     )
 
-    assert "search_web" in context.blocked_function_names
-    assert "fetch_page" in context.blocked_function_names
+    assert context.general_summary_only is False
 
 
 def test_build_execution_context_should_block_research_tools_for_general_summary_from_existing_evidence_step() -> None:
@@ -2535,12 +3104,115 @@ def test_build_execution_context_should_block_research_tools_for_general_summary
         user_content=[{"type": "text", "text": step.description}],
         has_available_file_context=False,
         available_tools=[],
-        available_function_names={"search_web", "fetch_page", "read_file", "write_file"},
+        available_function_names={"search_web", "fetch_page", "read_file", "write_file", "shell_execute"},
         user_message_text="根据已有搜索摘要整理重庆五一 4 天 3 夜行程草案，不要继续联网搜索",
     )
 
+    assert context.general_summary_only is True
     assert "search_web" in context.blocked_function_names
     assert "fetch_page" in context.blocked_function_names
+    assert "read_file" in context.blocked_function_names
+    assert "write_file" in context.blocked_function_names
+    assert "shell_execute" in context.blocked_function_names
+
+
+def test_build_execution_context_should_block_all_tools_for_collected_info_travel_note_step() -> None:
+    step = Step(
+        description="将收集到的所有信息（景点、天气、活动、住宿、交通）整理为结构化的旅行笔记，便于后续生成行程",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+        success_criteria=["输出包含各模块关键信息的结构化文本"],
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "search_web",
+            "fetch_page",
+            "list_files",
+            "read_file",
+            "search_in_file",
+            "shell_execute",
+            "shell_wait_process",
+        },
+        user_message_text="给我设计一份漳州周末情侣自驾游计划",
+    )
+
+    assert context.general_summary_only is True
+    assert {
+        "search_web",
+        "fetch_page",
+        "list_files",
+        "read_file",
+        "search_in_file",
+        "shell_execute",
+        "shell_wait_process",
+    }.issubset(context.blocked_function_names)
+
+
+def test_build_execution_context_should_block_browser_tools_for_summary_only_general_step() -> None:
+    step = Step(
+        description="基于已收集的网页信息，整理为结构化摘要",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="forbid_file_output",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={
+            "browser_view",
+            "browser_navigate",
+            "browser_extract_main_content",
+            "search_web",
+            "fetch_page",
+        },
+        user_message_text="整理前面网页信息",
+    )
+
+    assert context.general_summary_only is True
+    assert {
+        "browser_view",
+        "browser_navigate",
+        "browser_extract_main_content",
+        "search_web",
+        "fetch_page",
+    }.issubset(context.blocked_function_names)
+
+
+def test_build_execution_context_should_not_use_user_message_to_mark_step_summary_only() -> None:
+    step = Step(
+        description="检查当前目录是否存在 travel_notes.md",
+        task_mode_hint="general",
+        output_mode="none",
+        artifact_policy="default",
+    )
+
+    context = build_execution_context(
+        step=step,
+        task_mode="general",
+        max_tool_iterations=6,
+        user_content=[{"type": "text", "text": step.description}],
+        has_available_file_context=False,
+        available_tools=[],
+        available_function_names={"list_files", "find_files", "search_web", "fetch_page"},
+        user_message_text="请基于已收集的信息整理旅行笔记",
+    )
+
+    assert context.general_summary_only is False
+    assert "list_files" not in context.blocked_function_names
+    assert "find_files" not in context.blocked_function_names
 
 
 def test_general_convergence_should_not_break_non_synthesis_general_without_file_observation() -> None:
@@ -2571,17 +3243,18 @@ def test_general_convergence_should_not_break_non_synthesis_general_without_file
 def test_web_reading_convergence_should_break_when_browser_evidence_ready() -> None:
     judge = WebReadingConvergenceJudge()
     state = ExecutionState(
-        web_reading_evidence_items=[
-            {
-                "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
-                "title": "LangGraph HITL",
-                "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
-                "content_length": 48,
-                "link_count": 3,
-                "quality": "strong",
-            }
-        ],
-        runtime_recent_action={},
+        runtime_recent_action={
+            "evidence_backed_facts": [
+                {
+                    "text": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "source_event_ids": ["evt-page-1"],
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "content_length": 180,
+                    "link_count": 3,
+                }
+            ]
+        },
     )
 
     result = judge.evaluate_after_iteration(
@@ -2595,6 +3268,34 @@ def test_web_reading_convergence_should_break_when_browser_evidence_ready() -> N
     assert result.payload is not None
     assert result.reason_code == "web_reading_page_evidence_ready"
     assert any("页面证据" in str(item) or "来源链接" in str(item) for item in list(result.payload["facts_learned"]))
+
+
+def test_web_reading_convergence_should_not_break_when_only_summary_marked_strong() -> None:
+    judge = WebReadingConvergenceJudge()
+    state = ExecutionState(
+        runtime_recent_action={
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "content_length": 180,
+                    "link_count": 3,
+                    "quality": "strong",
+                }
+            ]
+        },
+    )
+
+    result = judge.evaluate_after_iteration(
+        step=Step(description="读取显式 URL 页面并概括要点"),
+        task_mode="web_reading",
+        recent_function_name="browser_extract_main_content",
+        execution_state=state,
+    )
+
+    assert result.should_break is False
+    assert result.payload is None
 
 
 def test_web_reading_convergence_should_not_break_when_only_weak_browser_evidence_exists() -> None:
@@ -2680,6 +3381,64 @@ def test_web_reading_convergence_should_not_break_on_insufficient_non_explicit_u
 
 def test_web_reading_completion_progress_should_record_remaining_page_count() -> None:
     state = ExecutionState(
+        runtime_recent_action={
+            "evidence_backed_facts": [
+                {
+                    "text": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "source_event_ids": ["evt-page-1"],
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "content_length": 180,
+                    "link_count": 3,
+                }
+            ]
+        },
+    )
+
+    progress_state = WebReadingConvergenceJudge.get_completion_progress(
+        step=Step(description="至少读取 3 个页面，并附上来源链接"),
+        runtime_recent_action=state.runtime_recent_action,
+        execution_state=state,
+    )
+
+    progress = dict(progress_state["progress"])
+    assert progress["current_page_count"] == 1
+    assert progress["required_page_count"] == 3
+    assert progress["remaining_page_count"] == 2
+    assert progress["contract_satisfied"] is False
+
+
+def test_web_reading_completion_progress_should_ignore_summary_only_items() -> None:
+    state = ExecutionState(
+        runtime_recent_action={
+            "web_reading_evidence_summaries": [
+                {
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "summary": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                    "content_length": 180,
+                    "link_count": 3,
+                    "quality": "strong",
+                }
+            ]
+        },
+    )
+
+    progress_state = WebReadingConvergenceJudge.get_completion_progress(
+        step=Step(description="读取 1 个页面，并附上来源链接"),
+        runtime_recent_action=state.runtime_recent_action,
+        execution_state=state,
+    )
+
+    progress = dict(progress_state["progress"])
+    assert progress["current_page_count"] == 0
+    assert progress["required_page_count"] == 1
+    assert progress["remaining_page_count"] == 1
+    assert progress["contract_satisfied"] is False
+
+
+def test_web_reading_completion_progress_should_not_use_runtime_summary_as_evidence() -> None:
+    state = ExecutionState(
         web_reading_evidence_items=[
             {
                 "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
@@ -2700,9 +3459,9 @@ def test_web_reading_completion_progress_should_record_remaining_page_count() ->
     )
 
     progress = dict(progress_state["progress"])
-    assert progress["current_page_count"] == 1
+    assert progress["current_page_count"] == 0
     assert progress["required_page_count"] == 3
-    assert progress["remaining_page_count"] == 2
+    assert progress["remaining_page_count"] == 3
     assert progress["contract_satisfied"] is False
 
 
@@ -2747,6 +3506,8 @@ def test_runtime_context_service_should_project_research_evidence_into_web_readi
     assert packet["recent_action_digest"]["search_evidence_summaries"][0]["url"] == (
         "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"
     )
+    assert "search_evidence_summaries" not in packet["recent_action_digest"]["research_progress"]
+    assert "web_reading_evidence_summaries" not in packet["recent_action_digest"]["research_progress"]
 
 
 def test_execute_step_with_prompt_should_seed_initial_recent_action_into_execution_state() -> None:
@@ -2813,7 +3574,7 @@ def test_web_reading_convergence_should_break_when_explicit_url_degraded() -> No
     assert any("浏览器已打开页面" in item for item in degraded_facts)
 
 
-def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_evidence_exists() -> None:
+def test_evaluate_task_mode_policy_should_not_block_web_reading_fetch_for_summary_only() -> None:
     step = Step(description="读取页面正文并概括要点", task_mode_hint="web_reading")
     decision = evaluate_task_mode_policy(
         ConstraintInput(
@@ -2854,9 +3615,53 @@ def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_strong_ev
         )
     )
 
+    assert decision is None
+
+
+def test_evaluate_task_mode_policy_should_block_web_reading_fetch_when_evidence_backed_fact_exists() -> None:
+    step = Step(description="读取页面正文并概括要点", task_mode_hint="web_reading")
+    decision = evaluate_task_mode_policy(
+        ConstraintInput(
+            step=step,
+            task_mode="web_reading",
+            function_name="fetch_page",
+            normalized_function_name="fetch_page",
+            function_args={"url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop"},
+            matched_tool=object(),
+            iteration_blocked_function_names=set(),
+            execution_context=ExecutionContext(
+                normalized_user_content=[],
+                available_tools=[],
+                available_function_names={"fetch_page"},
+                browser_route_enabled=False,
+                blocked_function_names=set(),
+                read_only_file_blocked_function_names=set(),
+                research_file_context_blocked_function_names=set(),
+                file_processing_shell_blocked_function_names=set(),
+                artifact_policy_blocked_function_names=set(),
+                requested_max_tool_iterations=4,
+                effective_max_tool_iterations=4,
+                allow_ask_user=False,
+                research_route_enabled=True,
+                research_has_explicit_url=True,
+            ),
+            execution_state=ExecutionState(
+                runtime_recent_action={
+                    "evidence_backed_facts": [
+                        {
+                            "text": "页面正文已经包含 interrupt、resume 与审批流程说明。",
+                            "source_event_ids": ["evt-page-1"],
+                            "url": "https://docs.langchain.com/oss/python/langchain/human-in-the-loop",
+                        }
+                    ]
+                }
+            ),
+        )
+    )
+
     assert decision is not None
     assert decision.reason_code == "task_mode_tool_blocked"
-    assert "强页面证据" in str(decision.message_for_model or "")
+    assert "结构化 strong 页面证据" in str(decision.message_for_model or "")
 
 
 def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_not_met() -> None:
@@ -2908,7 +3713,7 @@ def test_evaluate_task_mode_policy_should_allow_web_reading_fetch_when_contract_
 
 def test_build_execution_context_should_not_block_shell_for_general_step() -> None:
     step = Step(
-        description="整理所有信息并输出最终结论",
+        description="执行命令检查当前目录磁盘占用并输出结论",
         task_mode_hint="general",
         output_mode="none",
         artifact_policy="default",
@@ -2918,13 +3723,14 @@ def test_build_execution_context_should_not_block_shell_for_general_step() -> No
         step=step,
         task_mode="general",
         max_tool_iterations=4,
-        user_content=[{"type": "text", "text": "整理所有信息并输出最终结论"}],
+        user_content=[{"type": "text", "text": "执行命令检查当前目录磁盘占用并输出结论"}],
         has_available_file_context=False,
         available_tools=[],
         available_function_names={"shell_wait_process", "shell_execute", "search_web"},
-        user_message_text="整理所有信息并输出最终结论",
+        user_message_text="执行命令检查当前目录磁盘占用并输出结论",
     )
 
+    assert context.general_summary_only is False
     assert "shell_wait_process" not in context.blocked_function_names
 
 
@@ -3040,8 +3846,10 @@ def test_normalize_tool_execution_args_should_keep_append_for_append_intent() ->
 class _FakeNoToolLLM:
     def __init__(self, message: Dict[str, Any]) -> None:
         self._message = message
+        self.calls = 0
 
     async def invoke(self, **kwargs: Any) -> Dict[str, Any]:
+        self.calls += 1
         return dict(self._message)
 
 
@@ -3144,6 +3952,59 @@ class _FetchOnlyTool:
         return str(function_name or "").strip().lower() == "fetch_page"
 
 
+class _CountingTool:
+    name = "counting-tool"
+
+    def __init__(self) -> None:
+        self.invocation_count = 0
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == "read_file"
+
+    async def invoke(self, function_name: str, **kwargs: Any) -> ToolResult:
+        self.invocation_count += 1
+        return ToolResult(success=True, data={"path": kwargs.get("path")})
+
+
+class _FileMutationTool:
+    name = "file-mutation-tool"
+
+    def __init__(self) -> None:
+        self.invocations: List[tuple[str, Dict[str, Any]]] = []
+
+    def get_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "description": "write file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+
+    def has_tool(self, function_name: str) -> bool:
+        return str(function_name or "").strip().lower() == "write_file"
+
+    async def invoke(self, function_name: str, **kwargs: Any) -> ToolResult:
+        self.invocations.append((str(function_name or "").strip(), dict(kwargs)))
+        path = str(kwargs.get("path") or kwargs.get("filepath") or "").strip()
+        return ToolResult(
+            success=True,
+            data={
+                "filepath": path,
+                "bytes_written": len(str(kwargs.get("content") or "")),
+            },
+        )
+
+
 def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missing_ask_user() -> None:
     llm = _FakeNoToolLLM({"content": '{"success": true, "summary": "ok"}'})
     step = Step(description="等待用户确认后继续")
@@ -3173,6 +4034,203 @@ def test_execute_step_with_prompt_should_return_loop_break_when_human_wait_missi
     blockers = [str(item) for item in list(payload.get("blockers") or [])]
     assert any("缺少可用的 message_ask_user 工具" in item for item in blockers)
     assert tool_events == []
+
+
+def test_execute_step_with_prompt_should_converge_success_when_file_output_written_at_max_iteration() -> None:
+    llm = _FakeSequentialToolCallLLM(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "id": "call-write",
+                        "type": "function",
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps(
+                                {
+                                    "path": "/home/ubuntu/漳州周末自驾游计划.md",
+                                    "content": "周末自驾游计划",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    tool = _FileMutationTool()
+
+    payload, events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="step-file",
+                description="生成周末出行方案文件",
+                task_mode_hint="general",
+                output_mode="file",
+                artifact_policy="allow_file_output",
+            ),
+            runtime_tools=[tool],  # type: ignore[list-item]
+            max_tool_iterations=1,
+            task_mode="general",
+            user_message="生成周末出行方案文件",
+        )
+    )
+
+    assert tool.invocations == [
+        (
+            "write_file",
+            {
+                "path": "/home/ubuntu/漳州周末自驾游计划.md",
+                "content": "周末自驾游计划",
+            },
+        )
+    ]
+    assert payload["success"] is True
+    assert payload["attachments"] == ["/home/ubuntu/漳州周末自驾游计划.md"]
+    assert payload["blockers"] == []
+    assert payload["facts_learned"] == []
+    assert any(getattr(event, "function_name", "") == "write_file" for event in events)
+
+
+def test_execute_step_with_prompt_should_fail_file_output_when_write_tools_filtered_out() -> None:
+    llm = _FakeNoToolLLM(
+        {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    runtime_tools = [
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "read file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "list files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+    ]
+
+    payload, events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="step-file",
+                description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容 P1-3 reuse test",
+                task_mode_hint="file_processing",
+                output_mode=StepOutputMode.FILE,
+                artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+            ),
+            runtime_tools=runtime_tools,  # type: ignore[list-item]
+            max_tool_iterations=3,
+            task_mode="file_processing",
+            user_message="请创建 /home/ubuntu/p1-3-reuse-test.md",
+        )
+    )
+
+    assert llm.calls == 0
+    assert payload["success"] is False
+    assert payload["attachments"] == []
+    assert any("没有可用的 write_file" in str(item) for item in payload["blockers"])
+    assert events == []
+
+
+def test_execute_step_with_prompt_should_use_no_tool_mode_for_summary_only_general_step() -> None:
+    llm = _FakeNoToolLLM(
+        {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已整理为结构化旅行笔记。",
+                    "facts_learned": ["景点、天气、活动、住宿、交通已归纳为五个模块。"],
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+    runtime_tools = [
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_files",
+                    "description": "list files",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "read file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_web",
+                    "description": "search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+        _FakeToolOnly(
+            {
+                "type": "function",
+                "function": {
+                    "name": "shell_execute",
+                    "description": "shell",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ),
+    ]
+
+    payload, events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="7",
+                description="将收集到的所有信息（景点、天气、活动、住宿、交通）整理为结构化的旅行笔记，便于后续生成行程",
+                task_mode_hint="general",
+                output_mode=StepOutputMode.NONE,
+                artifact_policy=StepArtifactPolicy.FORBID_FILE_OUTPUT,
+            ),
+            runtime_tools=runtime_tools,  # type: ignore[list-item]
+            max_tool_iterations=6,
+            task_mode="general",
+            user_message="给我设计一份漳州周末情侣自驾游计划",
+        )
+    )
+
+    assert llm.calls == 1
+    assert payload["success"] is True
+    assert payload["summary"] == "已整理为结构化旅行笔记。"
+    assert events == []
 
 
 def test_constraint_engine_should_resolve_rewritten_matched_tool_from_runtime_tools() -> None:
@@ -3264,8 +4322,8 @@ def test_constraint_engine_should_block_when_rewrite_target_tool_is_missing() ->
     assert result.final_function_name == "fetch_page"
 
 
-def test_constraint_engine_should_prefer_task_mode_policy_by_fixed_order() -> None:
-    logger = logging.getLogger("runtime-fixed-policy-order")
+def test_constraint_engine_should_still_block_invalid_tool_after_evidence_policy_allows() -> None:
+    logger = logging.getLogger("runtime-invalid-tool-order")
     engine = ConstraintEngine(logger=logger)
     step = Step(description="普通步骤")
     execution_context = ExecutionContext(
@@ -3312,6 +4370,8 @@ def test_constraint_engine_should_prefer_task_mode_policy_by_fixed_order() -> No
     assert result.constraint_decision.action == "block"
     assert result.constraint_decision.reason_code == "task_mode_tool_blocked"
     assert result.winning_policy == "task_mode_policy"
+    assert result.policy_trace[0].policy_name == "evidence_reuse_policy"
+    assert result.policy_trace[0].reason_code == REASON_ALLOW
 
 
 def test_build_loop_break_result_should_append_research_progress_hint() -> None:
@@ -3458,6 +4518,56 @@ def test_policy_engine_should_not_count_blocked_search_call_as_real_invocation()
     assert execution_state.search_invocation_count == 0
     assert execution_state.search_repeat_counter == {}
     assert execution_state.same_tool_repeat_count == 0
+
+
+def test_policy_engine_should_fail_closed_for_invalid_evidence_snapshot_without_invoking_tool() -> None:
+    logger = logging.getLogger(__name__)
+    engine = ToolPolicyEngine(logger=logger)
+    execution_state = ExecutionState()
+    execution_context = ExecutionContext(
+        normalized_user_content=[{"type": "text", "text": "读取文件"}],
+        available_tools=[],
+        available_function_names={"read_file"},
+        browser_route_enabled=False,
+        blocked_function_names=set(),
+        read_only_file_blocked_function_names=set(),
+        research_file_context_blocked_function_names=set(),
+        file_processing_shell_blocked_function_names=set(),
+        artifact_policy_blocked_function_names=set(),
+        requested_max_tool_iterations=5,
+        effective_max_tool_iterations=5,
+        allow_ask_user=False,
+        research_route_enabled=False,
+        research_has_explicit_url=False,
+    )
+    tool = _CountingTool()
+
+    result = asyncio.run(
+        engine.evaluate_tool_call(
+            step=Step(description="读取 /workspace/a.txt"),
+            task_mode="general",
+            function_name="read_file",
+            normalized_function_name="read_file",
+            function_args={"path": "/workspace/a.txt"},
+            matched_tool=tool,  # type: ignore[arg-type]
+            runtime_tools=[tool],  # type: ignore[list-item]
+            browser_route_state_key="",
+            iteration_blocked_function_names=set(),
+            execution_context=execution_context,
+            execution_state=execution_state,
+            started_at=time.perf_counter(),
+            evidence_reuse_snapshot={"run_id": "run-1"},  # type: ignore[arg-type]
+            has_previous_completed_steps=True,
+        )
+    )
+
+    assert result.tool_result.success is False
+    assert result.loop_break_reason == REASON_CONSTRAINT_ENGINE_ERROR
+    assert result.tool_cost_ms == 0
+    assert result.final_normalized_function_name == "read_file"
+    assert tool.invocation_count == 0
+    assert execution_state.same_tool_repeat_count == 0
+    assert execution_state.runtime_recent_action["last_failed_action"]["function_name"] == "read_file"
 
 
 def test_apply_tool_preinvoke_effects_should_track_repeat_counters() -> None:
@@ -3642,6 +4752,141 @@ def test_execute_step_with_prompt_should_return_loop_break_when_no_tools_and_emp
     blockers = [str(item) for item in list(payload.get("blockers") or [])]
     assert any("当前步骤无可用工具" in item for item in blockers)
     assert tool_events == []
+
+
+def test_execute_step_with_prompt_should_fail_file_output_when_no_tools_and_model_reports_attachment() -> None:
+    llm = _FakeNoToolLLM(
+        {
+            "content": json.dumps(
+                {
+                    "success": True,
+                    "summary": "已创建文件",
+                    "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+                },
+                ensure_ascii=False,
+            )
+        }
+    )
+
+    payload, tool_events = asyncio.run(
+        execute_step_with_prompt(
+            llm=llm,
+            step=Step(
+                id="step-file",
+                description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+                output_mode=StepOutputMode.FILE,
+                artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+            ),
+            runtime_tools=[],
+            task_mode="file_processing",
+        )
+    )
+
+    assert llm.calls == 0
+    assert payload["success"] is False
+    assert payload["attachments"] == []
+    assert any("没有可用的 write_file" in str(item) for item in payload["blockers"])
+    assert tool_events == []
+
+
+def test_build_execute_completed_transition_should_fail_model_attachments_for_file_output_step() -> None:
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-1",
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={
+                "success": True,
+                "summary": "模型声称已创建文件",
+                "attachments": ["/home/ubuntu/p1-3-reuse-test.md"],
+            },
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[],
+            user_message="请创建文件",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+        )
+    )
+
+    assert transition.step_success is False
+    assert transition.artifact_count == 0
+    assert step.outcome is not None
+    assert step.outcome.done is False
+    assert step.outcome.produced_artifacts == []
+    assert step.status == ExecutionStatus.FAILED
+    assert any("缺少成功 write_file" in str(item) for item in step.outcome.blockers)
+
+
+def test_build_execute_completed_transition_should_use_successful_write_tool_artifact_path() -> None:
+    step = Step(
+        id="step-file",
+        description="创建 /home/ubuntu/p1-3-reuse-test.md 并写入内容",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+    tool_event = ToolEvent(
+        id="tool-event-write",
+        step_id="step-file",
+        tool_call_id="call-write",
+        tool_name="file",
+        function_name="write_file",
+        function_args={"filepath": "/home/ubuntu/p1-3-reuse-test.md"},
+        function_result=ToolResult(success=True, data={"filepath": "/home/ubuntu/p1-3-reuse-test.md"}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-1",
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={
+                "success": True,
+                "summary": "已创建文件",
+                "attachments": ["/tmp/model-reported.md"],
+            },
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[tool_event],
+            user_message="请创建文件",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+        )
+    )
+
+    assert transition.artifact_count == 1
+    assert step.outcome is not None
+    assert step.outcome.produced_artifacts == ["/home/ubuntu/p1-3-reuse-test.md"]
 
 
 def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_explicit_url_present() -> None:

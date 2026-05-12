@@ -190,6 +190,9 @@ export type CreateSessionParams = {
  * 聊天消息
  */
 export type ChatMessage = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
   role: "user" | "assistant" | "system";
   message: string;
   stage?: "intermediate" | "final";
@@ -203,6 +206,66 @@ export type ChatMessage = {
 
 export type ChatCommand = {
   type: "continue_cancelled_task";
+};
+
+export type RuntimeAction = "send_message" | "resume" | "cancel" | "continue_cancelled";
+
+export type RuntimeEventMeta = {
+  session_id: string;
+  run_id: string | null;
+  status_after_event: SessionStatus | null;
+  current_step_id: string | null;
+  source_event_id: string | null;
+  cursor_event_id: string | null;
+  durability: "persistent" | "live_only";
+  visibility: "timeline" | "draft" | "control" | "hidden";
+};
+
+export type LiveOnlyRuntimeEventMeta = RuntimeEventMeta & {
+  durability: "live_only";
+  visibility: "draft";
+  source_event_id: null;
+  cursor_event_id: null;
+};
+
+export type RuntimeCursor = {
+  latest_event_id: string | null;
+  has_more: boolean;
+};
+
+export type RuntimeCapabilities = {
+  can_send_message: boolean;
+  can_resume: boolean;
+  can_cancel: boolean;
+  can_continue_cancelled: boolean;
+  disabled_reasons: Partial<Record<RuntimeAction, string>>;
+};
+
+export type RuntimeInteraction = {
+  kind: "none" | "wait";
+  interrupt_id: string | null;
+  payload: Record<string, unknown>;
+};
+
+export type SandboxProfileProjection = {
+  schema_version: "sandbox_capability_profile.v1";
+  health_status: string;
+  generated_at: string;
+  expires_at: string | null;
+  stale: boolean;
+  unavailable_capabilities: string[];
+  requires_confirmation: string[];
+};
+
+export type RuntimeObservation = {
+  session_id: string;
+  run_id: string | null;
+  status: SessionStatus;
+  current_step_id: string | null;
+  cursor: RuntimeCursor;
+  capabilities: RuntimeCapabilities;
+  interaction: RuntimeInteraction;
+  sandbox_profile: SandboxProfileProjection | null;
 };
 
 /**
@@ -224,7 +287,8 @@ export type ChatParams = {
  * 会话详情（含事件列表，与 chat 流式响应格式一致）
  */
 export type SessionDetail = Session & {
-  events?: SSEEventData[];
+  runtime: RuntimeObservation;
+  events: SSEEventData[];
 };
 
 export type UpdateSessionModelParams = {
@@ -251,6 +315,9 @@ export type PlanStep = {
  * 计划事件
  */
 export type PlanEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
   steps: PlanStep[];
   [key: string]: unknown;
 };
@@ -272,6 +339,9 @@ export type StepOutcome = {
  * 步骤事件
  */
 export type StepEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
   id: string;
   status: ExecutionStatus;
   description: string;
@@ -283,11 +353,31 @@ export type StepEvent = {
  * 工具调用事件
  */
 export type ToolEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
   name: string;
   function: string;
   args: Record<string, unknown>;
   content?: unknown;
   status?: ToolEventStatus;
+  [key: string]: unknown;
+};
+
+export type SandboxFactEventRef = {
+  fact_id: string;
+  fact_kind: string;
+  summary: string;
+};
+
+export type SandboxFactEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
+  fact_refs: SandboxFactEventRef[];
+  summary: string;
+  source_event_id?: string | null;
+  step_id?: string | null;
   [key: string]: unknown;
 };
 
@@ -387,6 +477,9 @@ export type WaitPayload =
  * 等待事件数据
  */
 export type WaitEventData = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
   interrupt_id?: string | null;
   payload?: WaitPayload;
   [key: string]: unknown;
@@ -397,6 +490,7 @@ export type TextStreamChannel = "planner_message" | "final_message";
 export type TextStreamStartEventData = {
   event_id?: string | null;
   created_at?: number;
+  runtime: LiveOnlyRuntimeEventMeta;
   stream_id: string;
   channel: TextStreamChannel;
   run_id?: string | null;
@@ -409,6 +503,7 @@ export type TextStreamStartEventData = {
 export type TextStreamDeltaEventData = {
   event_id?: string | null;
   created_at?: number;
+  runtime: LiveOnlyRuntimeEventMeta;
   stream_id: string;
   channel: TextStreamChannel;
   text: string;
@@ -419,6 +514,7 @@ export type TextStreamDeltaEventData = {
 export type TextStreamEndEventData = {
   event_id?: string | null;
   created_at?: number;
+  runtime: LiveOnlyRuntimeEventMeta;
   stream_id: string;
   channel: TextStreamChannel;
   full_text_length: number;
@@ -435,6 +531,7 @@ export type SSEEventType =
   | "plan"
   | "step"
   | "tool"
+  | "sandbox_fact"
   | "wait"
   | "done"
   | "error"
@@ -447,18 +544,38 @@ export type SSEEventType =
  */
 export type SSEEventData =
   | { type: "message"; data: ChatMessage }
-  | { type: "title"; data: { title: string } }
+  | {
+      type: "title";
+      data: {
+        event_id?: string | null;
+        created_at?: number;
+        runtime: RuntimeEventMeta;
+        title: string;
+      };
+    }
   | { type: "plan"; data: PlanEvent }
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
+  | { type: "sandbox_fact"; data: SandboxFactEvent }
   | { type: "wait"; data: WaitEventData }
-  | { type: "done"; data: Record<string, unknown> }
+  | {
+      type: "done";
+      data: {
+        event_id?: string | null;
+        created_at?: number;
+        runtime: RuntimeEventMeta;
+        [key: string]: unknown;
+      };
+    }
   | { type: "text_stream_start"; data: TextStreamStartEventData }
   | { type: "text_stream_delta"; data: TextStreamDeltaEventData }
   | { type: "text_stream_end"; data: TextStreamEndEventData }
   | {
       type: "error";
       data: {
+        event_id?: string | null;
+        created_at?: number;
+        runtime: RuntimeEventMeta;
         error: string;
         error_key?: string | null;
         error_params?: Record<string, unknown> | null;

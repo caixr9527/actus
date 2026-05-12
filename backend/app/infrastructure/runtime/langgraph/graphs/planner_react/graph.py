@@ -11,6 +11,15 @@ from app.domain.external import LLM
 from app.domain.repositories import LongTermMemoryRepository
 from app.domain.services.memory_consolidation import MemoryConsolidationService
 from app.domain.services.runtime import SkillGraphRuntime
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataClassificationPolicy,
+    DefaultDataClassificationPolicy,
+)
+from app.domain.services.runtime.contracts.evidence_runtime_ports import (
+    EvidenceResultHandleResolverPort,
+    EvidenceStepReconcilerPort,
+)
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
@@ -51,12 +60,17 @@ def build_planner_react_langgraph_graph(
         checkpointer: Optional[Any] = None,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
         memory_consolidation_service: Optional[MemoryConsolidationService] = None,
+        data_retention_policy_service: Optional[DataClassificationPolicy] = None,
+        evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
+        evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+        runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
         *,
         runtime_context_service: RuntimeContextService,
 ) -> Any:
     """构建 LangGraph Planner-ReAct V1 图。"""
     if runtime_context_service is None:
         raise ValueError("runtime_context_service 不能为空")
+    effective_data_retention_policy_service = data_retention_policy_service or DefaultDataClassificationPolicy()
     stage_llm_map = ensure_required_stage_llms(stage_llms)
 
     skill_runtime: Optional[SkillGraphRuntime] = None
@@ -102,13 +116,22 @@ def build_planner_react_langgraph_graph(
         )
 
     async def _execute_step_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
+        execute_kwargs = {
+            "skill_runtime": skill_runtime,
+            "runtime_tools": runtime_tools,
+            "runtime_context_service": runtime_context_service,
+            "max_tool_iterations": max_tool_iterations,
+        }
+        if evidence_result_handle_resolver is not None:
+            execute_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver
+        if evidence_step_reconciler is not None:
+            execute_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
+        if runtime_tool_event_persistence is not None:
+            execute_kwargs["runtime_tool_event_persistence"] = runtime_tool_event_persistence
         return await execute_step_node(
             state,
             stage_llm_map["executor"],
-            skill_runtime=skill_runtime,
-            runtime_tools=runtime_tools,
-            runtime_context_service=runtime_context_service,
-            max_tool_iterations=max_tool_iterations,
+            **execute_kwargs,
         )
 
     async def _replan_with_llm(state: PlannerReActLangGraphState) -> PlannerReActLangGraphState:
@@ -130,6 +153,7 @@ def build_planner_react_langgraph_graph(
             state,
             long_term_memory_repository=long_term_memory_repository,
             memory_consolidation_service=memory_consolidation_service,
+            data_retention_policy_service=effective_data_retention_policy_service,
         )
 
     graph = StateGraph(PlannerReActLangGraphState)

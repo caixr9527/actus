@@ -56,7 +56,7 @@ class _FakeBrowser:
 
 
 class _FakeSandbox:
-    async def search_searxng(self, **kwargs):
+    async def search(self, **kwargs):
         return ToolResult(
             success=True,
             data={

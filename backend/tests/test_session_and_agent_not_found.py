@@ -23,6 +23,8 @@ class _MissingSessionRepo:
 class _MissingSessionUoW:
     def __init__(self) -> None:
         self.session = _MissingSessionRepo()
+        self.workspace = _MissingWorkspaceRepo()
+        self.workflow_run = _MissingWorkflowRunRepo()
 
     async def __aenter__(self):
         return self
@@ -33,6 +35,22 @@ class _MissingSessionUoW:
 
 def _missing_session_uow_factory() -> _MissingSessionUoW:
     return _MissingSessionUoW()
+
+
+class _MissingWorkspaceRepo:
+    async def get_by_id(self, workspace_id: str):
+        return None
+
+    async def get_by_session_id(self, session_id: str):
+        return None
+
+    async def list_by_session_id(self, session_id: str):
+        return []
+
+
+class _MissingWorkflowRunRepo:
+    async def get_by_id(self, run_id: str):
+        return None
 
 
 class _DummySandbox:
@@ -61,7 +79,7 @@ def test_session_service_get_session_files_missing_session_raises_not_found() ->
 
     with pytest.raises(NotFoundError) as exc:
         asyncio.run(service.get_session_files("user-1", "session-1"))
-    assert "任务会话不存在" in exc.value.msg
+    assert exc.value.msg == "该会话不存在，请核实后重试"
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
 
@@ -70,7 +88,7 @@ def test_session_service_read_file_missing_session_raises_not_found() -> None:
 
     with pytest.raises(NotFoundError) as exc:
         asyncio.run(service.read_file("user-1", "session-1", "/tmp/a.txt"))
-    assert "任务会话不存在" in exc.value.msg
+    assert exc.value.msg == "该会话不存在，请核实后重试"
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
 
@@ -79,7 +97,7 @@ def test_session_service_read_shell_output_missing_session_raises_not_found() ->
 
     with pytest.raises(NotFoundError) as exc:
         asyncio.run(service.read_shell_output("user-1", "session-1"))
-    assert "任务会话不存在" in exc.value.msg
+    assert exc.value.msg == "该会话不存在，请核实后重试"
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
 
@@ -88,7 +106,7 @@ def test_session_service_get_vnc_url_missing_session_raises_not_found() -> None:
 
     with pytest.raises(NotFoundError) as exc:
         asyncio.run(service.get_vnc_url("user-1", "session-1"))
-    assert "任务会话不存在" in exc.value.msg
+    assert exc.value.msg == "该会话不存在，请核实后重试"
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
 
@@ -98,7 +116,7 @@ def test_agent_service_stop_session_missing_session_raises_not_found() -> None:
 
     with pytest.raises(NotFoundError) as exc:
         asyncio.run(service.stop_session("session-1", "user-1"))
-    assert exc.value.msg == "会话session-1不存在"
+    assert exc.value.msg == "该会话不存在，请核实后重试"
     assert exc.value.error_key == error_keys.SESSION_NOT_FOUND
 
 

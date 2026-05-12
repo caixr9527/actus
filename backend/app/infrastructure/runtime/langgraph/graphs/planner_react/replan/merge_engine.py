@@ -57,6 +57,31 @@ class ReplanMergeEngine:
         merged_steps.extend(self._dedupe_replanned_steps(preserved_steps, new_steps))
         return merged_steps, "replace_remaining_pending_steps"
 
+    def filter_structured_evidence_duplicate_steps(
+            self,
+            new_steps: List[Step],
+            *,
+            evidence_context: dict,
+    ) -> Tuple[List[Step], int]:
+        """只按显式结构化 evidence intent 过滤重复规划，不做自然语言相似判断。"""
+        known_action_subjects, known_artifact_ids, known_claim_keys = self._extract_known_evidence_keys(
+            evidence_context=evidence_context,
+        )
+        filtered: List[Step] = []
+        dropped_count = 0
+        for step in new_steps:
+            intent = dict(getattr(step, "evidence_intent", None) or {})
+            if self._matches_known_evidence(
+                    intent=intent,
+                    known_action_subjects=known_action_subjects,
+                    known_artifact_ids=known_artifact_ids,
+                    known_claim_keys=known_claim_keys,
+            ):
+                dropped_count += 1
+                continue
+            filtered.append(step)
+        return filtered, dropped_count
+
     def _dedupe_replanned_steps(self, existing_steps: List[Step], new_steps: List[Step]) -> List[Step]:
         seen_step_ids = {
             str(step.id).strip()
@@ -84,6 +109,54 @@ class ReplanMergeEngine:
             seen_step_ids.add(step_id)
             deduped_steps.append(normalized_step)
         return deduped_steps
+
+    @staticmethod
+    def _extract_known_evidence_keys(
+            *,
+            evidence_context: dict,
+    ) -> tuple[set[tuple[str, str]], set[str], set[str]]:
+        known_action_subjects: set[tuple[str, str]] = set()
+        known_artifact_ids: set[str] = set()
+        known_claim_keys: set[str] = set()
+        for item in list(evidence_context.get("completed_actions") or []):
+            if not isinstance(item, dict):
+                continue
+            action_key = str(item.get("action_key") or "").strip()
+            subject_key = str(item.get("subject_key") or "").strip()
+            if action_key and subject_key:
+                known_action_subjects.add((action_key, subject_key))
+        for item in list(evidence_context.get("do_not_repeat") or []):
+            if not isinstance(item, dict):
+                continue
+            action_key = str(item.get("action_key") or "").strip()
+            subject_key = str(item.get("subject_key") or "").strip()
+            if action_key and subject_key:
+                known_action_subjects.add((action_key, subject_key))
+        for item in list(evidence_context.get("available_artifacts") or []):
+            if isinstance(item, dict) and str(item.get("artifact_id") or "").strip():
+                known_artifact_ids.add(str(item.get("artifact_id") or "").strip())
+        for item in list(evidence_context.get("verified_claims") or []):
+            if isinstance(item, dict) and str(item.get("claim_key") or "").strip():
+                known_claim_keys.add(str(item.get("claim_key") or "").strip())
+        return known_action_subjects, known_artifact_ids, known_claim_keys
+
+    @staticmethod
+    def _matches_known_evidence(
+            *,
+            intent: dict,
+            known_action_subjects: set[tuple[str, str]],
+            known_artifact_ids: set[str],
+            known_claim_keys: set[str],
+    ) -> bool:
+        action_key = str(intent.get("action_key") or "").strip()
+        subject_key = str(intent.get("subject_key") or "").strip()
+        if action_key and subject_key and (action_key, subject_key) in known_action_subjects:
+            return True
+        artifact_id = str(intent.get("artifact_id") or "").strip()
+        if artifact_id and artifact_id in known_artifact_ids:
+            return True
+        claim_key = str(intent.get("claim_key") or "").strip()
+        return bool(claim_key and claim_key in known_claim_keys)
 
     @staticmethod
     def _build_step_semantic_signature(step: Step) -> str:

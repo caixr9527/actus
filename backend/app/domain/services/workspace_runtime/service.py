@@ -4,14 +4,31 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from pydantic import ValidationError
+
 from app.domain.models import Workspace, WorkspaceArtifact
 from app.domain.models.tool_result import ToolResult
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataOrigin,
+    DataTrustLevel,
+    PrivacyLevel,
+    RetentionPolicyKind,
+)
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+    SandboxCapabilityProfile,
+    validate_sandbox_capability_profile_payload,
+)
 from app.domain.services.workspace_runtime.manager import WorkspaceManager
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -32,8 +49,12 @@ class WorkspaceRuntimeService:
             *,
             session_id: str,
             uow_factory: Callable[[], IUnitOfWork],
+            user_id: str,
     ) -> None:
         self._session_id = session_id
+        self._user_id = str(user_id or "").strip()
+        if not self._user_id:
+            raise ValueError("WorkspaceRuntimeService 必须提供 user_id")
         self._uow_factory = uow_factory
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
 
@@ -43,7 +64,10 @@ class WorkspaceRuntimeService:
 
     async def get_workspace(self) -> Optional[Workspace]:
         async with self._uow_factory() as uow:
-            return await uow.workspace.get_by_session_id(session_id=self._session_id)
+            return await uow.workspace.get_by_session_id_for_user(
+                session_id=self._session_id,
+                user_id=self._user_id,
+            )
 
     async def get_workspace_or_raise(self) -> Workspace:
         workspace = await self.get_workspace()
@@ -56,14 +80,20 @@ class WorkspaceRuntimeService:
         if workspace is None:
             return []
         async with self._uow_factory() as uow:
-            return await uow.workspace_artifact.list_by_workspace_id(workspace_id=workspace.id)
+            return await uow.workspace_artifact.list_by_user_workspace_id(
+                user_id=self._user_id,
+                workspace_id=workspace.id,
+            )
 
     async def build_environment_snapshot(self) -> Optional[WorkspaceEnvironmentSnapshot]:
         workspace = await self.get_workspace()
         if workspace is None:
             return None
         async with self._uow_factory() as uow:
-            artifacts = await uow.workspace_artifact.list_by_workspace_id(workspace_id=workspace.id)
+            artifacts = await uow.workspace_artifact.list_by_user_workspace_id(
+                user_id=self._user_id,
+                workspace_id=workspace.id,
+            )
         return WorkspaceEnvironmentSnapshot(workspace=workspace, artifacts=artifacts)
 
     async def ensure_shell_session_id(self) -> str:
@@ -138,6 +168,55 @@ class WorkspaceRuntimeService:
         workspace.updated_at = datetime.now()
         await self._save_workspace(workspace)
         return workspace
+
+    async def record_sandbox_capability_profile(self, *, profile: SandboxCapabilityProfile) -> Workspace:
+        workspace = await self.get_workspace_or_raise()
+        if (
+                profile.user_id != self._user_id
+                or profile.session_id != self._session_id
+                or profile.workspace_id != workspace.id
+        ):
+            raise ValueError("sandbox capability profile scope 与当前 workspace 不一致")
+        next_environment_summary = dict(workspace.environment_summary or {})
+        next_environment_summary[SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY] = profile.model_dump(mode="json")
+        workspace.environment_summary = next_environment_summary
+        workspace.last_active_at = datetime.now()
+        workspace.updated_at = datetime.now()
+        await self._save_workspace(workspace)
+        return workspace
+
+    async def get_sandbox_capability_profile(self) -> SandboxCapabilityProfile | None:
+        workspace = await self.get_workspace()
+        if workspace is None:
+            return None
+        raw_profile = dict(workspace.environment_summary or {}).get(SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY)
+        if raw_profile is None:
+            return None
+        if not isinstance(raw_profile, dict):
+            logger.warning(
+                "sandbox_profile_invalid_payload",
+                extra={
+                    "user_id": self._user_id,
+                    "session_id": self._session_id,
+                    "workspace_id": workspace.id,
+                    "reason_code": "sandbox_profile_payload_not_mapping",
+                },
+            )
+            return None
+        try:
+            return validate_sandbox_capability_profile_payload(raw_profile)
+        except ValidationError as exc:
+            logger.warning(
+                "sandbox_profile_invalid_payload",
+                extra={
+                    "user_id": self._user_id,
+                    "session_id": self._session_id,
+                    "workspace_id": workspace.id,
+                    "reason_code": "sandbox_profile_payload_invalid",
+                    "error_count": exc.error_count(),
+                },
+            )
+            return None
 
     async def record_browser_snapshot(
             self,
@@ -277,23 +356,34 @@ class WorkspaceRuntimeService:
             raise ValueError("artifact path 不能为空")
 
         async with self._uow_factory() as uow:
-            existing = await uow.workspace_artifact.get_by_workspace_id_and_path(
+            existing = await uow.workspace_artifact.get_by_user_workspace_id_and_path(
+                user_id=self._user_id,
                 workspace_id=workspace.id,
                 path=normalized_path,
             )
             if existing is None:
                 artifact = WorkspaceArtifact(
                     workspace_id=workspace.id,
+                    user_id=workspace.user_id,
+                    session_id=workspace.session_id,
+                    run_id=workspace.current_run_id,
                     path=normalized_path,
                     artifact_type=str(artifact_type or "file").strip() or "file",
                     summary=str(summary or "").strip(),
                     source_step_id=source_step_id,
                     source_capability=source_capability,
                     delivery_state=str(delivery_state or "").strip(),
+                    origin=DataOrigin.AGENT_GENERATED,
+                    trust_level=DataTrustLevel.AGENT_GENERATED,
+                    privacy_level=PrivacyLevel.PRIVATE,
+                    retention_policy=RetentionPolicyKind.WORKSPACE_BOUND,
                     metadata=dict(metadata or {}),
                 )
             else:
                 artifact = existing.model_copy(deep=True)
+                artifact.user_id = artifact.user_id or workspace.user_id
+                artifact.session_id = artifact.session_id or workspace.session_id
+                artifact.run_id = artifact.run_id or workspace.current_run_id
                 artifact.artifact_type = str(artifact_type or artifact.artifact_type or "file").strip() or "file"
                 artifact.summary = str(summary or artifact.summary or "").strip()
                 artifact.source_step_id = source_step_id or artifact.source_step_id
@@ -326,13 +416,15 @@ class WorkspaceRuntimeService:
 
         updated_artifacts: List[WorkspaceArtifact] = []
         async with self._uow_factory() as uow:
-            existing_artifacts = await uow.workspace_artifact.list_by_workspace_id_and_paths(
+            existing_artifacts = await uow.workspace_artifact.list_by_user_workspace_id_and_paths(
+                user_id=self._user_id,
                 workspace_id=workspace.id,
                 paths=normalized_paths,
             )
             if len(existing_artifacts) == 0:
                 return []
-            updated_artifacts = await uow.workspace_artifact.update_delivery_state_by_workspace_id_and_paths(
+            updated_artifacts = await uow.workspace_artifact.update_delivery_state_by_user_workspace_id_and_paths(
+                user_id=self._user_id,
                 workspace_id=workspace.id,
                 paths=normalized_paths,
                 delivery_state=delivery_state,
@@ -365,7 +457,8 @@ class WorkspaceRuntimeService:
 
         authoritative_paths: List[str] = []
         async with self._uow_factory() as uow:
-            artifacts = await uow.workspace_artifact.list_by_workspace_id_and_paths(
+            artifacts = await uow.workspace_artifact.list_by_user_workspace_id_and_paths(
+                user_id=self._user_id,
                 workspace_id=workspace.id,
                 paths=normalized_paths,
             )

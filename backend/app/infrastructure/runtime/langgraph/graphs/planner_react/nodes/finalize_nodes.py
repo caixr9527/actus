@@ -9,6 +9,10 @@ import logging
 import sys
 
 from app.domain.models import DoneEvent
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.contracts.runtime_logging import (
     elapsed_ms,
     log_runtime,
@@ -58,8 +62,14 @@ async def finalize_node(state: PlannerReActLangGraphState) -> PlannerReActLangGr
         emitted_event_count=len(events) + 1,
         elapsed_ms=elapsed_ms(started_at),
     )
+    updates = {}
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.FINALIZE,
+        before_state=state,
+        updates=updates,
+    )
     return _reduce_state_with_events(
         state,
-        updates={},
+        updates=updates,
         events=[done_event],
     )

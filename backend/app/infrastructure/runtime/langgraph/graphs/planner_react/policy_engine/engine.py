@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from app.domain.models import Step, ToolResult
+from app.domain.models.evidence import EvidenceReuseSnapshot
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.workspace_runtime.policies import (
     build_step_candidate_text as _build_step_candidate_text,
@@ -95,6 +96,9 @@ class ToolPolicyEngine:
             execution_context: ExecutionContext,
             execution_state: ExecutionState,
             started_at: float,
+            evidence_reuse_snapshot: EvidenceReuseSnapshot | None = None,
+            has_previous_completed_steps: bool = False,
+            previous_completed_step_task_modes: Optional[Dict[str, str]] = None,
     ) -> PolicyEvaluationResult:
         """统一执行 `constraint guard -> executor -> effects`。
 
@@ -103,6 +107,30 @@ class ToolPolicyEngine:
         - 返回值中的 `final_function_*` 是已经过 rewrite 收口后的最终执行目标；
         - `tool_result` 与 `loop_break_reason` 已经过 effects 域统一归并，可直接供 tools 主循环消费。
         """
+        if isinstance(evidence_reuse_snapshot, EvidenceReuseSnapshot):
+            log_runtime(
+                self._logger,
+                logging.INFO,
+                "evidence_reuse_snapshot_attached_to_guard",
+                run_id=str(evidence_reuse_snapshot.run_id or ""),
+                current_step_id=str(evidence_reuse_snapshot.current_step_id or ""),
+                source_step_ids=list(evidence_reuse_snapshot.source_step_ids or []),
+                do_not_repeat_count=len(list(evidence_reuse_snapshot.do_not_repeat or [])),
+                result_handle_count=len(list(evidence_reuse_snapshot.result_handles or [])),
+                cursor=str(evidence_reuse_snapshot.cursor or ""),
+            )
+        elif has_previous_completed_steps:
+            log_runtime(
+                self._logger,
+                logging.INFO,
+                "evidence_reuse_snapshot_missing",
+                current_step_id=str(getattr(step, "id", "") or ""),
+                source_step_ids=[],
+                do_not_repeat_count=0,
+                result_handle_count=0,
+                cursor="",
+                reason_code="evidence_reuse_snapshot_missing",
+            )
         engine_result = self._constraint_engine.evaluate_guard(
             constraint_input=ConstraintInput(
                 step=step,
@@ -114,6 +142,11 @@ class ToolPolicyEngine:
                 iteration_blocked_function_names=iteration_blocked_function_names,
                 execution_context=execution_context,
                 execution_state=execution_state,
+                external_signals_snapshot={
+                    "evidence_reuse_snapshot": evidence_reuse_snapshot,
+                    "has_previous_completed_steps": has_previous_completed_steps,
+                    "previous_completed_step_task_modes": dict(previous_completed_step_task_modes or {}),
+                },
                 runtime_tools=list(runtime_tools or []),
             ),
             logger=self._logger,
@@ -128,6 +161,10 @@ class ToolPolicyEngine:
             normalized_function_name=final_normalized_function_name,
             function_args=final_function_args,
             intent_text=_build_step_candidate_text(step),
+        )
+        executable_function_args = _strip_verification_audit_metadata(
+            normalized_function_name=final_normalized_function_name,
+            function_args=normalized_final_function_args,
         )
         if engine_result.rewrite_applied:
             run_rewrite_effects_plugin(
@@ -156,7 +193,7 @@ class ToolPolicyEngine:
             # P3-一次性收口：调用前计数只对最终真实执行目标入账一次。
             run_preinvoke_effects_plugin(
                 normalized_function_name=final_normalized_function_name,
-                function_args=normalized_final_function_args,
+                function_args=executable_function_args,
                 execution_state=execution_state,
             )
             resolved_matched_tool = resolve_matched_tool(
@@ -169,7 +206,7 @@ class ToolPolicyEngine:
                 step=step,
                 function_name=final_function_name,
                 normalized_function_name=final_normalized_function_name,
-                function_args=normalized_final_function_args,
+                function_args=executable_function_args,
                 matched_tool=self._require_matched_tool(resolved_matched_tool),
                 tool_name=str(getattr(resolved_matched_tool, "name", "") or ""),
                 started_at=started_at,
@@ -177,7 +214,7 @@ class ToolPolicyEngine:
             loop_break_reason = execution_decision.loop_break_reason
             tool_cost_ms = execution_decision.tool_cost_ms
             tool_result = execution_decision.tool_result
-            final_function_args = dict(execution_decision.executed_function_args or normalized_final_function_args)
+            final_function_args = dict(execution_decision.executed_function_args or executable_function_args)
             tool_executed = True
         else:
             resolved_matched_tool = resolve_matched_tool(
@@ -188,7 +225,7 @@ class ToolPolicyEngine:
             payload = guard_decision.tool_result_payload
             loop_break_reason = str(guard_decision.loop_break_reason or "")
             tool_result = ToolResult(
-                success=False,
+                success=bool(payload.success) if payload is not None else False,
                 message=str(payload.message if payload is not None else f"调用工具失败: {final_function_name}"),
                 data=dict(payload.data or {}) if payload is not None else {},
             )
@@ -302,3 +339,19 @@ class ToolPolicyEngine:
             runtime_recent_action=runtime_recent_action,
             step_file_context=step_file_context,
         )
+
+
+def _strip_verification_audit_metadata(
+        *,
+        normalized_function_name: str,
+        function_args: Dict[str, Any],
+) -> Dict[str, Any]:
+    executable_args = dict(function_args or {})
+    normalized_name = str(normalized_function_name or "").strip().lower()
+    if normalized_name == "search_web":
+        for key in ("query_hash", "verification_reason_code"):
+            executable_args.pop(key, None)
+    elif normalized_name == "fetch_page":
+        for key in ("url_hash", "fetched_url_hash", "verification_reason_code"):
+            executable_args.pop(key, None)
+    return executable_args

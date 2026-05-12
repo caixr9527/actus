@@ -29,12 +29,11 @@ from app.domain.services.runtime.normalizers import (
     normalize_optional_bool,
     normalize_step_result_text,
     normalize_text_list,
-    truncate_text,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import normalize_attachments
-from ..parsers import merge_attachment_paths
 from .working_memory import _ensure_working_memory
+from ..parsers import merge_attachment_paths
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +41,6 @@ _RUNTIME_TEMP_ATTACHMENT_NAME_PATTERN = re.compile(
     r"(^|/)(temp_response\.json|response\.json|final_output\.txt|directory_info\.txt|.*\.tmp|.*\.log)$",
     re.IGNORECASE,
 )
-
-
-def _truncate_text(value: Any, *, max_chars: int) -> str:
-    return truncate_text(value, max_chars=max_chars)
 
 
 def _infer_step_attachment_delivery_preference(
@@ -64,7 +59,7 @@ def _infer_step_attachment_delivery_preference(
     explicit_preference = normalize_optional_bool((normalized_execution or {}).get("deliver_result_as_attachment"))
     if explicit_preference is not None:
         return explicit_preference
-    normalized_message = _truncate_text(user_message, max_chars=600).strip().lower()
+    normalized_message = user_message.strip().lower()
     if not normalized_message:
         return None
     if ATTACHMENT_DELIVERY_DENY_PATTERN.search(normalized_message):
@@ -72,6 +67,7 @@ def _infer_step_attachment_delivery_preference(
     if ATTACHMENT_DELIVERY_ALLOW_PATTERN.search(normalized_message):
         return True
     return None
+
 
 def _is_completed_status(value: Any) -> bool:
     return normalize_controlled_value(value, ExecutionStatus) == ExecutionStatus.COMPLETED.value
@@ -94,9 +90,7 @@ def _hydrate_step_outcome(raw: Any) -> Optional[StepOutcome]:
 def _outcome_is_reusable(outcome: Optional[StepOutcome]) -> bool:
     if outcome is None or not outcome.done:
         return False
-    if normalize_step_result_text(outcome.summary):
-        return True
-    if len(normalize_text_list(list(outcome.facts_learned or []))) > 0:
+    if len(list(getattr(outcome, "evidence_backed_facts", []) or [])) > 0:
         return True
     return len(
         normalize_file_path_list(
@@ -124,6 +118,7 @@ def _normalize_successful_outcome_artifacts(status: Any, outcome_raw: Any) -> Li
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
 
+
 def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[str]:
     artifact_groups: List[List[str]] = []
     for step_state in list(state.get("step_states") or []):
@@ -149,6 +144,24 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
     return normalize_file_path_list(
         merge_attachment_paths(*normalized_groups),
         max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+    )
+
+
+def _collect_completed_step_state_artifacts(state: PlannerReActLangGraphState) -> List[str]:
+    artifact_groups: List[List[str]] = []
+    for step_state in list(state.get("step_states") or []):
+        if not isinstance(step_state, dict):
+            continue
+        artifact_groups.append(
+            _normalize_successful_outcome_artifacts(
+                step_state.get("status"),
+                step_state.get("outcome"),
+            )
+        )
+    return _filter_runtime_temp_attachment_refs(
+        normalize_file_path_list(
+            merge_attachment_paths(*artifact_groups),
+        )
     )
 
 
@@ -203,6 +216,24 @@ def _filter_attachment_refs_by_authoritative_paths(
     return _filter_runtime_temp_attachment_refs([ref for ref in normalized_refs if ref in allowed_paths])
 
 
+def _resolve_summary_authoritative_paths(
+        *,
+        workspace_artifact_paths: List[str],
+        current_run_artifact_refs: List[str],
+) -> List[str]:
+    if len(workspace_artifact_paths) > 0:
+        return workspace_artifact_paths
+    return current_run_artifact_refs
+
+
+def _has_explicit_attachment_payload(parsed_attachments: Any) -> bool:
+    if isinstance(parsed_attachments, str):
+        return bool(parsed_attachments.strip())
+    if isinstance(parsed_attachments, list):
+        return len(parsed_attachments) > 0
+    return False
+
+
 async def _resolve_summary_attachment_refs(
         state: PlannerReActLangGraphState,
         parsed_attachments: Any,
@@ -212,28 +243,33 @@ async def _resolve_summary_attachment_refs(
     if runtime_context_service is not None:
         workspace_artifact_paths = await runtime_context_service.list_workspace_artifact_paths()
 
+    selected_attachment_refs = _filter_runtime_temp_attachment_refs(
+        normalize_file_path_list(state.get("selected_artifacts"), max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
+    )
+    current_run_artifact_refs = _collect_completed_step_state_artifacts(state)
+    authoritative_paths = _resolve_summary_authoritative_paths(
+        workspace_artifact_paths=workspace_artifact_paths,
+        current_run_artifact_refs=current_run_artifact_refs,
+    )
     explicit_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
         normalize_attachments(parsed_attachments),
-        workspace_artifact_paths,
-    )
-    current_run_artifact_refs = _filter_attachment_refs_by_authoritative_paths(
-        _resolve_current_run_attachment_candidates(state),
-        workspace_artifact_paths,
-    )
-    # Phase B：summary 附件只允许来自当前运行可验证产物，避免外部伪路径或陈旧附件污染最终结果。
-    known_attachment_refs = normalize_file_path_list(
-        current_run_artifact_refs,
-        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
+        authoritative_paths,
     )
     if len(explicit_attachment_refs) > 0:
-        resolved_explicit_refs = [ref for ref in explicit_attachment_refs if ref in known_attachment_refs]
-        if len(resolved_explicit_refs) > 0:
-            return resolved_explicit_refs
+        # selected_artifacts 是 summary 本阶段要写入的最终选择结果，不能作为显式附件的前置条件。
+        # 显式附件只要已命中 workspace artifact 或当前 run produced_artifacts，就允许进入最终交付。
+        return explicit_attachment_refs
 
-    if len(current_run_artifact_refs) > 0:
-        return _filter_runtime_temp_attachment_refs(current_run_artifact_refs)
+    if _has_explicit_attachment_payload(parsed_attachments):
+        return []
 
-    return []
+    if len(authoritative_paths) == 0:
+        return []
+
+    return _filter_attachment_refs_by_authoritative_paths(
+        selected_attachment_refs,
+        authoritative_paths,
+    )
 
 
 def _filter_runtime_temp_attachment_refs(refs: List[str]) -> List[str]:
@@ -289,7 +325,10 @@ def _merge_step_outcome_into_working_memory(
             open_question,
         )
 
-    for fact in list(outcome.facts_learned or []):
+    for projection in list(getattr(outcome, "evidence_backed_facts", []) or []):
+        fact = str(getattr(projection, "text", "") or "").strip()
+        if not fact:
+            continue
         updated_working_memory["facts_in_session"] = append_unique_text(
             list(updated_working_memory.get("facts_in_session") or []),
             fact,
@@ -319,7 +358,12 @@ def _build_reused_step_outcome(
             max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
         ),
         blockers=normalize_text_list(list(source_outcome.blockers or [])),
-        facts_learned=normalize_text_list(list(source_outcome.facts_learned or [])),
+        evidence_backed_facts=list(getattr(source_outcome, "evidence_backed_facts", []) or []),
+        facts_learned=[
+            str(item.text or "").strip()
+            for item in list(getattr(source_outcome, "evidence_backed_facts", []) or [])
+            if str(item.text or "").strip()
+        ],
         open_questions=normalize_text_list(list(source_outcome.open_questions or [])),
         deliver_result_as_attachment=source_outcome.deliver_result_as_attachment,
         next_hint=normalize_step_result_text(source_outcome.next_hint),

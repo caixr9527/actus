@@ -105,6 +105,12 @@ FILE_FUNCTION_NAMES: tuple[str, ...] = (
     "write_file",
     "replace_in_file",
 )
+SHELL_AUXILIARY_FUNCTION_NAMES: tuple[str, ...] = (
+    "shell_wait_process",
+    "shell_write_input",
+    "shell_kill_process",
+    "read_shell_output",
+)
 TASK_MODE_ALLOWED_PREFIXES: dict[str, tuple[str, ...]] = {
     "research": (),
     "web_reading": (),
@@ -251,6 +257,8 @@ WRITE_ACTION_PATTERN = re.compile(
 )
 WRITE_ACTION_DENY_PATTERN = re.compile(
     r"((不要|不需要|无需|别|禁止).{0,8}(写入|写文件|改写|修改|替换|删除|创建|执行命令|运行命令|落盘))"
+    r"|((不|不会|不得|不能|并不|且不|不做|未).{0,4}(修改|改写|替换|删除|写入|写文件|创建|保存|落盘|改变))"
+    r"|((保持|内容).{0,8}(不变|不发生变化|未变化))"
     r"|(\b(do not|don't|no need to)\s+(write|modify|replace|delete|create|save|execute)\b)",
     re.IGNORECASE,
 )

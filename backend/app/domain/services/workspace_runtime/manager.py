@@ -144,7 +144,7 @@ class WorkspaceManager:
     ) -> Workspace:
         workspace = await self._load_workspace(session=session, uow=uow)
         if workspace is None:
-            workspace = Workspace(session_id=session.id)
+            workspace = Workspace(session_id=session.id, user_id=session.user_id)
             await uow.workspace.save(workspace=workspace)
             _log_core(
                 logging.INFO,
@@ -152,6 +152,11 @@ class WorkspaceManager:
                 session_id=session.id,
                 workspace_id=workspace.id,
             )
+
+        if workspace.user_id != session.user_id:
+            workspace.user_id = session.user_id
+            workspace.updated_at = datetime.now()
+            await uow.workspace.save(workspace=workspace)
 
         if session.workspace_id != workspace.id:
             previous_workspace_id = str(session.workspace_id or "").strip() or "-"
@@ -176,19 +181,23 @@ class WorkspaceManager:
     ) -> Optional[Workspace]:
         workspace_id = str(session.workspace_id or "").strip()
         if workspace_id:
-            workspace = await uow.workspace.get_by_id(workspace_id=workspace_id)
+            workspace = await uow.workspace.get_by_id_for_user(
+                workspace_id=workspace_id,
+                user_id=session.user_id,
+            )
             if workspace is not None:
                 return workspace
             _log_core(
                 logging.WARNING,
-                "workspace_id 未命中，按 session_id 回退查找",
+                "workspace_id 未命中或归属不匹配",
                 session_id=session.id,
                 workspace_id=workspace_id,
             )
+            return None
 
-        get_by_session_id = getattr(uow.workspace, "get_by_session_id", None)
+        get_by_session_id = getattr(uow.workspace, "get_by_session_id_for_user", None)
         if callable(get_by_session_id):
-            workspace = await get_by_session_id(session_id=session.id)
+            workspace = await get_by_session_id(session_id=session.id, user_id=session.user_id)
             if workspace is not None and workspace_id and workspace.id != workspace_id:
                 _log_core(
                     logging.WARNING,

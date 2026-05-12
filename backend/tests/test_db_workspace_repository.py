@@ -12,6 +12,7 @@ def test_db_workspace_repository_save_should_use_upsert_statement() -> None:
     workspace = Workspace(
         id="workspace-1",
         session_id="session-1",
+        user_id="user-1",
         current_run_id="run-1",
         sandbox_id="sandbox-1",
         task_id="task-1",

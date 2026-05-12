@@ -25,8 +25,20 @@ class _WorkspaceRepo:
     async def get_by_id(self, workspace_id: str):
         return self.workspace_by_id.get(workspace_id)
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str):
+        workspace = self.workspace_by_id.get(workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
+
     async def get_by_session_id(self, session_id: str):
         return self.workspace_by_session_id.get(session_id)
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str):
+        workspace = self.workspace_by_session_id.get(session_id)
+        if workspace is None or workspace.user_id != user_id:
+            return None
+        return workspace
 
 
 class _UoW:
@@ -59,6 +71,7 @@ def test_workspace_manager_should_create_workspace_and_bind_session() -> None:
     workspace = asyncio.run(manager.ensure_workspace(session=session))
 
     assert workspace.session_id == "session-a"
+    assert workspace.user_id == "user-a"
     assert session.workspace_id == workspace.id
     assert workspace_repo.workspace_by_id[workspace.id].session_id == "session-a"
     assert session_repo.saved_sessions[0].workspace_id == workspace.id
@@ -68,13 +81,14 @@ def test_workspace_manager_should_reuse_workspace_by_session_id_when_session_lin
     session_repo = _SessionRepo()
     workspace_repo = _WorkspaceRepo()
     manager = _build_manager(session_repo, workspace_repo)
-    existing_workspace = Workspace(id="workspace-1", session_id="session-a")
+    existing_workspace = Workspace(id="workspace-1", session_id="session-a", user_id="user-a")
     asyncio.run(workspace_repo.save(existing_workspace))
     session = Session(id="session-a", user_id="user-a")
 
     workspace = asyncio.run(manager.ensure_workspace(session=session))
 
     assert workspace.id == "workspace-1"
+    assert workspace.user_id == "user-a"
     assert session.workspace_id == "workspace-1"
     assert session_repo.saved_sessions[0].workspace_id == "workspace-1"
 
@@ -103,3 +117,16 @@ def test_workspace_manager_should_bind_run_and_environment() -> None:
     assert saved_workspace.task_id == "task-1"
     assert saved_workspace.shell_session_id == "shell-1"
     assert saved_workspace.updated_at >= original_updated_at
+
+
+def test_workspace_manager_should_not_fallback_when_bound_workspace_missing() -> None:
+    session_repo = _SessionRepo()
+    workspace_repo = _WorkspaceRepo()
+    manager = _build_manager(session_repo, workspace_repo)
+    existing_workspace = Workspace(id="workspace-other", session_id="session-a", user_id="user-a")
+    asyncio.run(workspace_repo.save(existing_workspace))
+    session = Session(id="session-a", user_id="user-a", workspace_id="workspace-missing")
+
+    workspace = asyncio.run(manager.get_workspace(session=session))
+
+    assert workspace is None

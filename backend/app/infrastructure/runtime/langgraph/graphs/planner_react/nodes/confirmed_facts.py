@@ -48,6 +48,14 @@ def _fact_value_to_text(value: Any) -> str:
         return str(value).strip()
 
 
+def _confirmed_fact_line(*, key: str, value: Any) -> str:
+    if isinstance(value, dict) and len(value) == 1:
+        inner_key, inner_value = next(iter(value.items()))
+        if str(inner_key or "").strip() == key:
+            return f"- {_fact_value_to_text(inner_value)}"
+    return f"- {key}: {_fact_value_to_text(value)}"
+
+
 def _merge_confirmed_facts(
         *,
         memory_facts: Dict[str, Any],
@@ -69,7 +77,7 @@ def _build_step_execution_text(step: Step, *, working_memory: Dict[str, Any]) ->
         return ""
     confirmed_facts = _normalize_confirmed_fact_map(working_memory.get("confirmed_facts"))
     fact_lines = [
-        f"- {key}: {_fact_value_to_text(value)}"
+        _confirmed_fact_line(key=key, value=value)
         for key, value in confirmed_facts.items()
         if not _fact_value_is_missing(value)
     ]

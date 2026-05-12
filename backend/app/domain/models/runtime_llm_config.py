@@ -7,7 +7,9 @@
 """
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+from app.domain.services.runtime.contracts.document_input_contract import normalize_document_supported_input_types
 
 
 class RuntimeLLMConfig(BaseModel):
@@ -23,3 +25,9 @@ class RuntimeLLMConfig(BaseModel):
     # BE-LG-12：模型输入能力声明。
     multimodal: bool = Field(default=False)
     supported: list[str] = Field(default_factory=list)
+
+    @field_validator("supported", mode="before")
+    @classmethod
+    def _normalize_supported(cls, value: object) -> list[str]:
+        """运行时模型能力只保留 P0-5 文档输入类型。"""
+        return normalize_document_supported_input_types(value)

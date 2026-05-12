@@ -21,16 +21,33 @@ from app.domain.models import (
     ExecutionStatus,
     Plan,
     Step,
+    StepArtifactPolicy,
+    StepOutputMode,
     StepEvent,
     StepOutcome,
     ToolEvent,
 )
 from app.domain.services.prompts import EXECUTION_PROMPT
 from app.domain.services.runtime.langgraph_events import append_events
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.services.runtime.contracts.evidence_ledger_contract import (
+    EvidenceBackedFactProjection,
+    EvidenceKind,
+    EvidenceQualityStatus,
+    EvidenceResultHandle,
+    EvidenceSupportLevel,
+    RuntimeEvidenceContextResult,
+)
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_execution_response,
+    normalize_controlled_value,
     normalize_file_path_list,
     normalize_step_result_text,
     normalize_text_list,
@@ -51,10 +68,12 @@ from .delivery_helpers import (
     _infer_step_attachment_delivery_preference,
     _merge_step_outcome_into_working_memory,
 )
+from .evidence_completion_gate import reconcile_step_evidence_before_state_return
 from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
     _extract_prompt_context_state_updates,
+    extract_document_attachment_paths,
 )
 from .wait_helpers import _build_step_label
 from .working_memory import _ensure_working_memory
@@ -82,6 +101,13 @@ class ExecuteStepPreparedInput:
     available_file_context: bool
     execute_context_updates: Dict[str, Any]
     initial_runtime_recent_action: Dict[str, Any]
+    sandbox_capability_profile: Dict[str, Any]
+    runtime_evidence_context: Optional[RuntimeEvidenceContextResult]
+    has_previous_completed_steps: bool
+    previous_completed_step_task_modes: Dict[str, str]
+    result_handle_index: Dict[str, EvidenceResultHandle]
+    pending_evidence_resolution: Dict[str, Any]
+    pending_resolution_tool_result: Optional[Any]
     user_content: List[Dict[str, Any]]
 
 
@@ -319,13 +345,8 @@ async def _build_message(
         user_message_prompt: str,
         input_parts: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """按多模态能力统一构造执行节点 user content。"""
-    if getattr(llm, "multimodal", False) and len(input_parts) > 0:
-        multiplexed_message = await llm.format_multiplexed_message(input_parts)
-        return [
-            {"type": "text", "text": user_message_prompt},
-            *multiplexed_message,
-        ]
+    """构造执行节点 user content。"""
+    # P0-5 禁止 image/audio/video 原生透传，文档内容只通过 document_context 文本上下文进入模型。
     return [{"type": "text", "text": user_message_prompt}]
 
 
@@ -374,7 +395,7 @@ async def prepare_execute_step_input(
         working_memory=working_memory,
     )
     input_parts = list(state.get("input_parts") or [])
-    attachments = [str(part.get("sandbox_filepath") or "") for part in input_parts if part.get("sandbox_filepath")]
+    attachments = extract_document_attachment_paths(input_parts)
     available_file_context_refs = _collect_available_file_context_refs(state)
     available_file_context = has_available_file_context(
         user_message=user_message,
@@ -398,9 +419,17 @@ async def prepare_execute_step_input(
         runtime_context_service=runtime_context_service,
         context_packet=execute_context_packet,
     )
+    runtime_evidence_context = _extract_runtime_evidence_context(execute_context_packet)
+    completed_step_ids = _collect_completed_step_ids_for_execute(state=state, current_step=step)
+    previous_completed_step_task_modes = _collect_completed_step_task_modes_for_execute(
+        state=state,
+        current_step=step,
+        completed_step_ids=completed_step_ids,
+    )
     initial_runtime_recent_action = runtime_context_service.normalize_runtime_recent_action(
         execute_context_packet.get("recent_action_digest")
     )
+    sandbox_capability_profile = _extract_sandbox_capability_profile(execute_context_packet)
     user_message_prompt = _append_prompt_context_to_prompt(user_message_prompt, execute_context_packet)
     user_content = await _build_message(llm, user_message_prompt, input_parts)
     return ExecuteStepPreparedInput(
@@ -414,8 +443,96 @@ async def prepare_execute_step_input(
         available_file_context=available_file_context,
         execute_context_updates=execute_context_updates,
         initial_runtime_recent_action=initial_runtime_recent_action,
+        sandbox_capability_profile=sandbox_capability_profile,
+        runtime_evidence_context=runtime_evidence_context,
+        has_previous_completed_steps=bool(completed_step_ids),
+        previous_completed_step_task_modes=previous_completed_step_task_modes,
+        result_handle_index=(
+            dict(runtime_evidence_context.result_handle_index)
+            if runtime_evidence_context is not None
+            else {}
+        ),
+        pending_evidence_resolution={},
+        pending_resolution_tool_result=None,
         user_content=user_content,
     )
+
+
+def _extract_runtime_evidence_context(context_packet: Dict[str, Any]) -> Optional[RuntimeEvidenceContextResult]:
+    raw_context = context_packet.get("evidence_context")
+    if raw_context is None:
+        return None
+    return RuntimeEvidenceContextResult.model_validate(raw_context)
+
+
+def _extract_sandbox_capability_profile(context_packet: Dict[str, Any]) -> Dict[str, Any]:
+    environment_digest = context_packet.get("environment_digest")
+    if not isinstance(environment_digest, dict):
+        return {}
+    profile = environment_digest.get("sandbox_capability_profile")
+    return dict(profile or {}) if isinstance(profile, dict) else {}
+
+
+def _collect_completed_step_ids_for_execute(
+        *,
+        state: PlannerReActLangGraphState,
+        current_step: Step,
+) -> list[str]:
+    current_step_id = str(getattr(current_step, "id", "") or "").strip()
+    completed_ids: list[str] = []
+    for item in list(state.get("step_states") or []):
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("step_id") or "").strip()
+        if not step_id or step_id == current_step_id or step_id in completed_ids:
+            continue
+        if str(item.get("status") or "") == ExecutionStatus.COMPLETED.value:
+            completed_ids.append(step_id)
+    plan = state.get("plan")
+    for plan_step in list(getattr(plan, "steps", []) or []):
+        step_id = str(getattr(plan_step, "id", "") or "").strip()
+        if not step_id or step_id == current_step_id or step_id in completed_ids:
+            continue
+        if getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED:
+            completed_ids.append(step_id)
+    return completed_ids
+
+
+def _collect_completed_step_task_modes_for_execute(
+        *,
+        state: PlannerReActLangGraphState,
+        current_step: Step,
+        completed_step_ids: list[str],
+) -> Dict[str, str]:
+    completed_id_set = {str(step_id or "").strip() for step_id in list(completed_step_ids or [])}
+    completed_id_set.discard("")
+    if not completed_id_set:
+        return {}
+    current_step_id = str(getattr(current_step, "id", "") or "").strip()
+    task_modes: Dict[str, str] = {}
+    for item in list(state.get("step_states") or []):
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("step_id") or "").strip()
+        if not step_id or step_id == current_step_id or step_id not in completed_id_set:
+            continue
+        mode = _normalize_step_task_mode_value(item.get("task_mode_hint") or item.get("task_mode"))
+        if mode:
+            task_modes[step_id] = mode
+    plan = state.get("plan")
+    for plan_step in list(getattr(plan, "steps", []) or []):
+        step_id = str(getattr(plan_step, "id", "") or "").strip()
+        if not step_id or step_id == current_step_id or step_id not in completed_id_set:
+            continue
+        mode = _normalize_step_task_mode_value(getattr(plan_step, "task_mode_hint", ""))
+        if mode:
+            task_modes[step_id] = mode
+    return task_modes
+
+
+def _normalize_step_task_mode_value(raw_mode: Any) -> str:
+    raw_value = getattr(raw_mode, "value", raw_mode)
+    return str(raw_value or "").strip().lower()
 
 
 def build_timeout_execution_message(*, step: Step, timeout_seconds: int) -> Dict[str, Any]:
@@ -528,6 +645,88 @@ async def build_execute_interrupt_transition(
     )
 
 
+def _normalize_evidence_backed_facts(raw: Any) -> list[EvidenceBackedFactProjection]:
+    projections: list[EvidenceBackedFactProjection] = []
+    for item in list(raw or []):
+        try:
+            projection = (
+                item
+                if isinstance(item, EvidenceBackedFactProjection)
+                else EvidenceBackedFactProjection.model_validate(item)
+            )
+        except Exception:
+            continue
+        projections.append(projection)
+    return projections
+
+
+async def persist_current_step_tool_events_before_evidence_gate(
+        *,
+        state: PlannerReActLangGraphState,
+        step: Step,
+        tool_events: List[ToolEvent],
+        runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None,
+) -> None:
+    if runtime_tool_event_persistence is None:
+        return
+    run_id = str(state.get("run_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    current_step_id = str(getattr(step, "id", "") or "").strip()
+    if not run_id or not session_id or not current_step_id:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "tool_event_fact_projection_scope_missing",
+            state=state,
+            step_id=current_step_id,
+            run_id=run_id,
+            session_id=session_id,
+            reason_code="tool_event_fact_projection_scope_missing",
+        )
+        raise ValueError("ToolEvent fact 投影缺少 run_id/session_id/current_step_id")
+
+    for event in tool_events:
+        event_status = getattr(event, "status", "")
+        normalized_status = str(getattr(event_status, "value", event_status) or "")
+        if normalized_status != "called":
+            continue
+        event_step_id = str(getattr(event, "step_id", "") or "").strip()
+        if event_step_id and event_step_id != current_step_id:
+            raise ValueError("ToolEvent step_id 与当前 step 不一致")
+        try:
+            result = await runtime_tool_event_persistence.persist_tool_event_and_record_facts(
+                event=event,
+                run_id=run_id,
+                session_id=session_id,
+                current_step_id=current_step_id,
+            )
+            log_runtime(
+                logger,
+                logging.INFO,
+                "tool_event_fact_projection_completed_before_evidence_gate",
+                state=state,
+                step_id=current_step_id,
+                function_name=str(getattr(event, "function_name", "") or ""),
+                source_event_id=result.source_event_id,
+                fact_count=result.fact_count,
+                sandbox_fact_event_persisted=result.sandbox_fact_event_persisted,
+                reason_code="tool_event_fact_projection_completed_before_evidence_gate",
+            )
+        except Exception as exc:
+            log_runtime(
+                logger,
+                logging.ERROR,
+                "tool_event_fact_projection_failed_before_evidence_gate",
+                state=state,
+                step_id=current_step_id,
+                function_name=str(getattr(event, "function_name", "") or ""),
+                tool_event_id=str(getattr(event, "id", "") or ""),
+                error_type=exc.__class__.__name__,
+                reason_code="tool_event_fact_projection_failed_before_evidence_gate",
+            )
+            raise
+
+
 async def build_execute_completed_transition(
         *,
         state: PlannerReActLangGraphState,
@@ -544,6 +743,8 @@ async def build_execute_completed_transition(
         user_message: str,
         working_memory: Dict[str, Any],
         is_entry_wait_execute_step: bool,
+        evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+        runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
 ) -> ExecuteStepCompletedTransition:
     """构造 execute 节点 completed 分支的结果落账与状态写回。"""
     step_success = bool(normalized_execution.get("success", True))
@@ -556,23 +757,58 @@ async def build_execute_completed_transition(
         user_message=user_message,
         normalized_execution=normalized_execution,
     )
-    model_attachment_paths = normalize_attachments(normalized_execution.get("attachments"))
     tool_attachment_paths = extract_write_file_paths_from_tool_events(tool_events)
+    if _step_requires_file_write_result(step):
+        model_attachment_paths: List[str] = []
+    else:
+        model_attachment_paths = normalize_attachments(normalized_execution.get("attachments"))
     step_attachment_paths = normalize_file_path_list(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
     )
+    blockers = normalize_text_list(normalized_execution.get("blockers"))
+    if step_success and _step_requires_file_write_result(step) and len(tool_attachment_paths) == 0:
+        step_success = False
+        blockers = [
+            *blockers,
+            "当前步骤要求产出文件，但缺少成功 write_file 或 replace_in_file 工具事件，已拒绝按文件产出成功落账。",
+        ]
+        step_summary = f"步骤执行失败：{step_label}"
     open_questions = normalize_text_list(normalized_execution.get("open_questions"))
+    evidence_backed_facts = _normalize_evidence_backed_facts(
+        normalized_execution.get("evidence_backed_facts")
+    )
     step.outcome = StepOutcome(
         done=step_success,
         summary=step_summary,
         produced_artifacts=step_attachment_paths,
-        blockers=normalize_text_list(normalized_execution.get("blockers")),
-        facts_learned=normalize_text_list(normalized_execution.get("facts_learned")),
+        blockers=blockers,
+        evidence_backed_facts=evidence_backed_facts,
+        facts_learned=[item.text for item in evidence_backed_facts],
         open_questions=open_questions,
         deliver_result_as_attachment=step_deliver_result_as_attachment,
         next_hint=normalize_step_result_text(normalized_execution.get("next_hint")),
     )
     step.status = ExecutionStatus.COMPLETED if step_success else ExecutionStatus.FAILED
+    await persist_current_step_tool_events_before_evidence_gate(
+        state=state,
+        step=step,
+        tool_events=tool_events,
+        runtime_tool_event_persistence=runtime_tool_event_persistence,
+    )
+    evidence_records = await reconcile_step_evidence_before_state_return(
+        state=state,
+        step=step,
+        reconciler=evidence_step_reconciler,
+    )
+    if _should_complete_web_reading_from_page_evidence(task_mode=task_mode, evidence_records=evidence_records):
+        step_success = True
+        step.status = ExecutionStatus.COMPLETED
+        step_summary = _build_web_reading_evidence_summary(step=step, evidence_records=evidence_records)
+        if step.outcome is not None:
+            step.outcome.done = True
+            step.outcome.summary = step_summary
+            step.outcome.blockers = []
+            step.outcome.next_hint = ""
     completed_event = StepEvent(
         step=step.model_copy(deep=True),
         status=step.status,
@@ -625,21 +861,27 @@ async def build_execute_completed_transition(
         runtime_recent_action=runtime_recent_action,
     )
     next_step_id = str(next_step.id or "") if next_step is not None else ""
+    updates = {
+        "plan": plan,
+        **completed_context_updates,
+        "last_executed_step": step.model_copy(deep=True),
+        "execution_count": int(state.get("execution_count", 0)) + 1,
+        "current_step_id": next_step.id if next_step is not None else None,
+        "user_message": user_message,
+        "working_memory": updated_working_memory,
+        "graph_metadata": replace_control_metadata(state, updated_control),
+        # Step 语义已收紧为执行摘要，不再覆盖最终正文；但 final_message 状态键仍需稳定保留。
+        "final_message": str(state.get("final_message") or ""),
+        "selected_artifacts": list(state.get("selected_artifacts") or []),
+        "pending_interrupt": {},
+    }
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.EXECUTE,
+        before_state=state,
+        updates=updates,
+    )
     return ExecuteStepCompletedTransition(
-        updates={
-            "plan": plan,
-            **completed_context_updates,
-            "last_executed_step": step.model_copy(deep=True),
-            "execution_count": int(state.get("execution_count", 0)) + 1,
-            "current_step_id": next_step.id if next_step is not None else None,
-            "user_message": user_message,
-            "working_memory": updated_working_memory,
-            "graph_metadata": replace_control_metadata(state, updated_control),
-            # Step 语义已收紧为执行摘要，不再覆盖最终正文；但 final_message 状态键仍需稳定保留。
-            "final_message": str(state.get("final_message") or ""),
-            "selected_artifacts": list(state.get("selected_artifacts") or []),
-            "pending_interrupt": {},
-        },
+        updates=updates,
         events=events,
         next_step_id=next_step_id or None,
         step_success=step_success,
@@ -648,3 +890,45 @@ async def build_execute_completed_transition(
         blocker_count=len(list(step.outcome.blockers or [])),
         open_question_count=len(list(step.outcome.open_questions or [])),
     )
+
+
+def _should_complete_web_reading_from_page_evidence(
+        *,
+        task_mode: str,
+        evidence_records: List[object],
+) -> bool:
+    if str(task_mode or "").strip().lower() != "web_reading":
+        return False
+    return any(_is_valid_strong_page_evidence(record) for record in list(evidence_records or []))
+
+
+def _step_requires_file_write_result(step: Step) -> bool:
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+    artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
+    return (
+        output_mode == StepOutputMode.FILE.value
+        or artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+    )
+
+
+def _is_valid_strong_page_evidence(record: object) -> bool:
+    evidence_kind = getattr(record, "evidence_kind", None)
+    support_level = getattr(record, "support_level", None)
+    quality_status = getattr(record, "quality_status", None)
+    return (
+        evidence_kind == EvidenceKind.PAGE_EVIDENCE
+        and support_level == EvidenceSupportLevel.STRONG
+        and quality_status == EvidenceQualityStatus.VALID
+    )
+
+
+def _build_web_reading_evidence_summary(*, step: Step, evidence_records: List[object]) -> str:
+    for record in list(evidence_records or []):
+        if not _is_valid_strong_page_evidence(record):
+            continue
+        payload = dict(getattr(record, "payload", None) or {})
+        title = str(payload.get("title") or "").strip()
+        origin = str(payload.get("origin") or "").strip()
+        target = title or origin or _build_step_label(step)
+        return f"当前网页阅读步骤已基于页面证据完成：{target}"
+    return f"当前网页阅读步骤已基于页面证据完成：{_build_step_label(step)}"

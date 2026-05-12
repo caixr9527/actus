@@ -6,6 +6,7 @@
 @File   : __init__.py.py
 """
 from .db_file_repository import DBFileRepository
+from .db_evidence_repository import DBEvidenceRepository
 from .db_llm_model_config_repository import DBLLMModelConfigRepository
 from .db_long_term_memory_repository import DBLongTermMemoryRepository
 from .db_session_repository import DBSessionRepository
@@ -18,6 +19,7 @@ from .file_app_config_repository import FileAppConfigRepository
 
 __all__ = [
     "FileAppConfigRepository",
+    "DBEvidenceRepository",
     "DBFileRepository",
     "DBLLMModelConfigRepository",
     "DBLongTermMemoryRepository",

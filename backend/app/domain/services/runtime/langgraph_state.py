@@ -37,7 +37,6 @@ from app.domain.services.runtime.normalizers import (
     normalize_file_path_list,
     normalize_message_window_entry,
     normalize_plan_payload,
-    normalize_ref_list,
     normalize_step_payload,
     normalize_step_outcome_payload,
     normalize_text_list,
@@ -60,6 +59,7 @@ class StepState(TypedDict, total=False):
     task_mode_hint: str
     output_mode: str
     artifact_policy: str
+    evidence_intent: Dict[str, Any]
     status: str
     outcome: Optional["StepOutcomeState"]
 
@@ -70,8 +70,10 @@ class StepOutcomeState(TypedDict, total=False):
     summary: str
     produced_artifacts: List[str]
     blockers: List[str]
+    evidence_backed_facts: List[Dict[str, Any]]
     facts_learned: List[str]
     open_questions: List[str]
+    evidence_reconcile_metadata: Dict[str, Any]
 
 
 class RetrievedMemoryState(TypedDict, total=False):
@@ -350,19 +352,21 @@ class GraphStateContractMapper:
         return step_state
 
     @classmethod
-    def _normalize_step_control_state(cls, raw: Any) -> Dict[str, str]:
+    def _normalize_step_control_state(cls, raw: Any) -> Dict[str, Any]:
         """统一规整步骤执行语义，保证 plan、step_states、恢复链路使用同一套字段。"""
         if isinstance(raw, Step):
             raw_values = {
                 "task_mode_hint": getattr(raw, "task_mode_hint", None),
                 "output_mode": getattr(raw, "output_mode", None),
                 "artifact_policy": getattr(raw, "artifact_policy", None),
+                "evidence_intent": getattr(raw, "evidence_intent", None),
             }
         elif isinstance(raw, dict):
             raw_values = {
                 "task_mode_hint": raw.get("task_mode_hint"),
                 "output_mode": raw.get("output_mode"),
                 "artifact_policy": raw.get("artifact_policy"),
+                "evidence_intent": raw.get("evidence_intent"),
             }
         else:
             return {}
@@ -377,6 +381,9 @@ class GraphStateContractMapper:
             for key, value in normalized_values.items()
             if value
         }
+        evidence_intent = raw_values.get("evidence_intent")
+        if isinstance(evidence_intent, dict) and evidence_intent:
+            normalized_control["evidence_intent"] = dict(evidence_intent)
         return normalized_control
 
     @classmethod
@@ -395,12 +402,18 @@ class GraphStateContractMapper:
         blockers = normalize_text_list(normalized_payload.get("blockers"))
         if blockers:
             normalized_outcome["blockers"] = blockers
+        evidence_backed_facts = list(normalized_payload.get("evidence_backed_facts") or [])
+        if evidence_backed_facts:
+            normalized_outcome["evidence_backed_facts"] = evidence_backed_facts
         facts_learned = normalize_text_list(normalized_payload.get("facts_learned"))
         if facts_learned:
             normalized_outcome["facts_learned"] = facts_learned
         open_questions = normalize_text_list(normalized_payload.get("open_questions"))
         if open_questions:
             normalized_outcome["open_questions"] = open_questions
+        evidence_reconcile_metadata = normalized_payload.get("evidence_reconcile_metadata")
+        if isinstance(evidence_reconcile_metadata, dict) and evidence_reconcile_metadata:
+            normalized_outcome["evidence_reconcile_metadata"] = dict(evidence_reconcile_metadata)
         return normalized_outcome or None
 
     @classmethod
@@ -615,7 +628,7 @@ class GraphStateContractMapper:
         return cls._normalize_recent_run_briefs(raw)
 
     @staticmethod
-    def _truncate_brief_summary(raw: Any, *, max_chars: int = 200) -> str:
+    def _truncate_brief_summary(raw: Any, *, max_chars: int = 5000) -> str:
         normalized = str(raw or "").strip()
         if len(normalized) <= max_chars:
             return normalized
@@ -880,7 +893,8 @@ class GraphStateContractMapper:
             "task_mode": cls._normalize_task_mode(graph_state_from_metadata.get("task_mode")),
             "environment_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("environment_digest")),
             "observation_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("observation_digest")),
-            "recent_action_digest": cls._normalize_runtime_digest(graph_state_from_metadata.get("recent_action_digest")),
+            "recent_action_digest": cls._normalize_runtime_digest(
+                graph_state_from_metadata.get("recent_action_digest")),
             "retrieved_memories": cls._normalize_retrieved_memories(
                 graph_state_from_metadata.get("retrieved_memories")),
             "pending_memory_writes": cls._normalize_list_memory(graph_state_from_metadata.get("pending_memory_writes")),
@@ -980,14 +994,16 @@ class GraphStateContractMapper:
             if isinstance(event, PlanEvent):
                 plan = event.plan.model_copy(deep=True)
                 step_states = cls._build_step_states_from_plan(plan)
-                next_state["current_step_id"] = None if (waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
+                next_state["current_step_id"] = None if (
+                            waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
                     plan)
                 continue
 
             if isinstance(event, StepEvent):
                 step_states = cls._upsert_step_state(step_states=step_states, step=event.step)
                 plan = cls._upsert_step_into_plan(plan=plan, step=event.step, step_states=step_states)
-                next_state["current_step_id"] = None if (waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
+                next_state["current_step_id"] = None if (
+                            waiting_for_replan or plan_only) else cls._derive_current_step_id_from_plan(
                     plan)
                 continue
 

@@ -9,6 +9,9 @@ from typing import Protocol, Optional, BinaryIO, Self
 
 from app.domain.external import Browser
 from app.domain.models import ToolResult
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SandboxCapabilityProbePayload,
+)
 
 
 class Sandbox(Protocol):
@@ -168,6 +171,13 @@ class Sandbox(Protocol):
         """
         获取沙箱内 SearXNG 服务状态
         :return:
+        """
+        ...
+
+    async def probe_capabilities(self) -> ToolResult[SandboxCapabilityProbePayload]:
+        """
+        返回 sandbox capability profile 原始探测结果。
+        只允许调用 sandbox 服务内固定白名单探测接口，禁止后端随机 shell fallback。
         """
         ...
 

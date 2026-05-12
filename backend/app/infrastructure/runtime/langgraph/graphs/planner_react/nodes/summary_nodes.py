@@ -10,6 +10,7 @@
 
 import json
 import logging
+import re
 import sys
 from typing import Any, Dict, List
 
@@ -31,7 +32,10 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     log_runtime,
     now_perf,
 )
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
+from app.domain.services.runtime.contracts.final_output_contract import (
+    RuntimeOutputStage,
+    assert_state_update_allowed,
+)
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
     normalize_controlled_value,
@@ -48,8 +52,10 @@ from .delivery_helpers import (
     _resolve_attachment_delivery_preference_for_summary,
     _resolve_summary_attachment_refs,
 )
+from .evidence_context_guard import validate_stage_evidence_context_packet
 from .prompt_context_helpers import (
     _build_prompt_context_packet_async,
+    _build_prompt_safe_context_packet,
     _extract_prompt_context_state_updates,
 )
 from .state_reducer import _reduce_state_with_events
@@ -109,6 +115,40 @@ def _resolve_emit_live_events():
     return emit_live_events
 
 
+def _resolve_build_prompt_context_packet_async():
+    """从 nodes 包级入口解析上下文构建函数，便于节点级测试和图装配统一替换。"""
+    package_module = sys.modules.get(
+        "app.infrastructure.runtime.langgraph.graphs.planner_react.nodes"
+    )
+    if package_module is not None:
+        package_builder = getattr(package_module, "_build_prompt_context_packet_async", None)
+        if callable(package_builder):
+            return package_builder
+    return _build_prompt_context_packet_async
+
+
+def _sanitize_final_answer_attachment_paths(
+        *,
+        text: str,
+        attachment_refs: List[str],
+) -> str:
+    """最终正文不直接暴露 sandbox 绝对路径；附件本身通过 MessageEvent.attachments 交付。"""
+    sanitized_text = str(text or "")
+    for ref in attachment_refs:
+        path = str(ref or "").strip()
+        if not path:
+            continue
+        sanitized_text = sanitized_text.replace(path, "")
+    sanitized_text = re.sub(r"[ \t]+(\n|$)", r"\1", sanitized_text).strip()
+    if sanitized_text == str(text or "").strip():
+        return sanitized_text
+    if "完整内容已作为附件交付。" in sanitized_text:
+        return sanitized_text
+    if sanitized_text:
+        return f"{sanitized_text}\n\n完整内容已作为附件交付。"
+    return "完整内容已作为附件交付。"
+
+
 def _build_summary_message_fallback(
         *,
         state: PlannerReActLangGraphState,
@@ -140,32 +180,6 @@ def _build_summary_message_fallback(
     return "任务已完成。"
 
 
-def _extract_step_draft_fact_text(*, state: PlannerReActLangGraphState, last_executed_step: Any) -> str:
-    """提取执行阶段沉淀的正文草稿，供 summary 模型异常时兜底。
-
-    只识别 `STEP_DRAFT_FACT_PREFIX` 标记的事实，避免把普通 facts_learned 误当最终正文。
-    """
-    candidate_facts: List[str] = []
-    step_outcome = getattr(last_executed_step, "outcome", None)
-    candidate_facts.extend([str(item or "") for item in list(getattr(step_outcome, "facts_learned", []) or [])])
-    for step_state in list(state.get("step_states") or []):
-        if not isinstance(step_state, dict):
-            continue
-        outcome = step_state.get("outcome")
-        if not isinstance(outcome, dict):
-            continue
-        candidate_facts.extend([str(item or "") for item in list(outcome.get("facts_learned") or [])])
-
-    for raw_fact in reversed(candidate_facts):
-        fact = str(raw_fact or "").strip()
-        if not fact.startswith(STEP_DRAFT_FACT_PREFIX):
-            continue
-        draft_text = fact[len(STEP_DRAFT_FACT_PREFIX):].strip()
-        if draft_text:
-            return draft_text
-    return ""
-
-
 async def summarize_node(
         state: PlannerReActLangGraphState,
         llm: LLM,
@@ -186,7 +200,7 @@ async def summarize_node(
     last_executed_step = state.get("last_executed_step")
     summary_context_updates: Dict[str, Any] = {}
     summary_context_packet: Dict[str, Any] = {}
-    summary_context_packet = await _build_prompt_context_packet_async(
+    summary_context_packet = await _resolve_build_prompt_context_packet_async()(
         stage="summary",
         state=state,
         runtime_context_service=runtime_context_service,
@@ -199,9 +213,27 @@ async def summarize_node(
         runtime_context_service=runtime_context_service,
         context_packet=summary_context_packet,
     )
+    evidence_guard = validate_stage_evidence_context_packet(
+        stage="summary",
+        context_packet=summary_context_packet,
+    )
+    if evidence_guard.blocked:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "总结 evidence context 校验失败，已 fail closed",
+            state=state,
+            stage_name="summary",
+            reason_code=evidence_guard.reason_code,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return {
+            **state,
+            **summary_context_updates,
+        }
     llm_runtime = describe_llm_runtime(llm)
     summarize_prompt = SUMMARIZE_PROMPT.format(
-        context_packet=json.dumps(summary_context_packet, ensure_ascii=False)
+        context_packet=json.dumps(_build_prompt_safe_context_packet(summary_context_packet), ensure_ascii=False)
     )
     log_runtime(
         logger,
@@ -223,11 +255,12 @@ async def summarize_node(
     )
     llm_cost_ms = elapsed_ms(llm_started_at)
     parsed: Dict[str, Any] = safe_parse_json(llm_message.get("content"))
-    has_failed_last_step = bool(
+    has_failed_last_step = (
         last_executed_step is not None
-        and str(getattr(last_executed_step, "status", "") or "") == ExecutionStatus.FAILED.value
+        and normalize_controlled_value(getattr(last_executed_step, "status", ""), ExecutionStatus)
+        == ExecutionStatus.FAILED.value
     )
-    has_failed_plan = str(getattr(plan, "status", "") or "") == ExecutionStatus.FAILED.value
+    has_failed_plan = normalize_controlled_value(getattr(plan, "status", ""), ExecutionStatus) == ExecutionStatus.FAILED.value
     if has_failed_last_step or has_failed_plan:
         failure_text = _build_failure_final_answer_text(
             plan=plan,
@@ -245,10 +278,6 @@ async def summarize_node(
             step_id=str(getattr(last_executed_step, "id", "") or ""),
         )
     else:
-        draft_fallback_text = _extract_step_draft_fact_text(
-            state=state,
-            last_executed_step=last_executed_step,
-        )
         summary_message = str(
             parsed.get("message")
             or _build_summary_message_fallback(
@@ -259,7 +288,6 @@ async def summarize_node(
         ).strip()
         final_answer_text = str(
             parsed.get("final_answer_text")
-            or draft_fallback_text
             or summary_message
             or ""
         ).strip()
@@ -292,7 +320,10 @@ async def summarize_node(
             final_attachment_paths=summary_attachment_refs,
         )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
-    final_answer_text_to_emit = final_answer_text
+    final_answer_text_to_emit = _sanitize_final_answer_attachment_paths(
+        text=final_answer_text,
+        attachment_refs=summary_attachment_refs,
+    )
     # final_message 流事件只做临时展示，不进入 state 的 emitted_events。
     # 最终 MessageEvent(stage="final") 仍是历史落账和前端 timeline 的唯一真相源。
     final_stream_events = build_text_stream_events(
@@ -324,17 +355,23 @@ async def summarize_node(
         llm_elapsed_ms=llm_cost_ms,
         elapsed_ms=elapsed_ms(started_at),
     )
+    updates = {
+        "plan": plan,
+        **summary_context_updates,
+        "current_step_id": None,
+        "final_message": summary_message,
+        # 最终正文真相源只允许来自 summary/direct 阶段，不再借道 working_memory。
+        "final_answer_text": final_answer_text_to_emit,
+        "working_memory": working_memory,
+        "selected_artifacts": list(summary_attachment_refs),
+    }
+    assert_state_update_allowed(
+        stage=RuntimeOutputStage.SUMMARY,
+        before_state=state,
+        updates=updates,
+    )
     return _reduce_state_with_events(
         state,
-        updates={
-            "plan": plan,
-            **summary_context_updates,
-            "current_step_id": None,
-            "final_message": summary_message,
-            # 最终正文真相源只允许来自 summary/direct 阶段，不再借道 working_memory。
-            "final_answer_text": final_answer_text_to_emit,
-            "working_memory": working_memory,
-            "selected_artifacts": list(summary_attachment_refs),
-        },
+        updates=updates,
         events=final_events,
     )

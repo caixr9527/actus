@@ -11,11 +11,21 @@ from app.domain.models import (
     StepEventStatus,
     Step,
     StepOutcome,
+    SandboxFactEvent,
+    SandboxFactEventRef,
+    SandboxFactKind,
     TextStreamChannel,
     TextStreamDeltaEvent,
     TextStreamEndEvent,
     TextStreamStartEvent,
+    ToolEvent,
+    ToolEventStatus,
+    ToolResult,
     WaitEvent,
+)
+from app.application.service.runtime_observation_service import (
+    RuntimeEventMetaResult,
+    RuntimeObservableEventResult,
 )
 from app.domain.services.runtime.contracts.event_delivery_policy import (
     EventDeliveryPolicy,
@@ -26,17 +36,36 @@ from app.interfaces.schemas.event import (
     BaseEventData,
     CommonEventData,
     EventMapper,
+    RuntimeEventMeta,
 )
 from app.infrastructure.models.workflow_run_event import WorkflowRunEventModel
 
 
+def _map_event(event, *, run_id: str | None = "run-1"):
+    envelope = RuntimeObservableEventResult(
+        event=event,
+        runtime=RuntimeEventMetaResult(
+            session_id="session-1",
+            run_id=run_id,
+            source_event_id=event.id,
+            cursor_event_id=event.id,
+        ),
+    )
+    return EventMapper.observable_event_to_sse_event(envelope)
+
+
 def test_base_event_data_created_at_serialized_as_timestamp() -> None:
     created_at = datetime(2026, 3, 11, 12, 0, 1)
-    data = BaseEventData(event_id="evt-1", created_at=created_at)
+    data = BaseEventData(
+        event_id="evt-1",
+        created_at=created_at,
+        runtime=RuntimeEventMeta(session_id="session-1"),
+    )
 
     payload = data.model_dump(mode="json")
 
     assert payload["created_at"] == int(created_at.timestamp())
+    assert payload["runtime"]["session_id"] == "session-1"
 
 
 def test_common_event_data_keeps_extra_fields_and_timestamp_serializer() -> None:
@@ -45,6 +74,7 @@ def test_common_event_data_keeps_extra_fields_and_timestamp_serializer() -> None
         {
             "event_id": "evt-2",
             "created_at": created_at,
+            "runtime": {"session_id": "session-1"},
             "custom_key": "custom-value",
         }
     )
@@ -64,11 +94,12 @@ def test_event_mapper_preserves_timestamp_json_shape() -> None:
         message="hello",
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["data"]["created_at"] == int(created_at.timestamp())
     assert payload["data"]["stage"] == "intermediate"
+    assert payload["data"]["runtime"]["source_event_id"] == "evt-3"
 
 
 def test_event_mapper_should_serialize_error_event_key_and_params() -> None:
@@ -80,7 +111,7 @@ def test_event_mapper_should_serialize_error_event_key_and_params() -> None:
         error_params={"session_id": "session-1"},
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["event"] == "error"
@@ -116,9 +147,39 @@ def test_event_mapper_should_serialize_text_stream_events() -> None:
         reason="completed",
     )
 
-    start_payload = EventMapper.event_to_sse_event(start_event).model_dump(mode="json")
-    delta_payload = EventMapper.event_to_sse_event(delta_event).model_dump(mode="json")
-    end_payload = EventMapper.event_to_sse_event(end_event).model_dump(mode="json")
+    start_payload = EventMapper.observable_event_to_sse_event(
+        RuntimeObservableEventResult(
+            event=start_event,
+            runtime=RuntimeEventMetaResult(
+                session_id="session-1",
+                run_id="run-1",
+                durability="live_only",
+                visibility="draft",
+            ),
+        )
+    ).model_dump(mode="json")
+    delta_payload = EventMapper.observable_event_to_sse_event(
+        RuntimeObservableEventResult(
+            event=delta_event,
+            runtime=RuntimeEventMetaResult(
+                session_id="session-1",
+                run_id="run-1",
+                durability="live_only",
+                visibility="draft",
+            ),
+        )
+    ).model_dump(mode="json")
+    end_payload = EventMapper.observable_event_to_sse_event(
+        RuntimeObservableEventResult(
+            event=end_event,
+            runtime=RuntimeEventMetaResult(
+                session_id="session-1",
+                run_id="run-1",
+                durability="live_only",
+                visibility="draft",
+            ),
+        )
+    ).model_dump(mode="json")
 
     assert start_payload["event"] == "text_stream_start"
     assert start_payload["data"]["stream_id"] == "stream-1"
@@ -130,6 +191,97 @@ def test_event_mapper_should_serialize_text_stream_events() -> None:
     assert end_payload["event"] == "text_stream_end"
     assert end_payload["data"]["full_text_length"] == 8
     assert end_payload["data"]["reason"] == "completed"
+
+
+def test_event_mapper_should_serialize_sandbox_fact_event_without_raw_payload() -> None:
+    event = SandboxFactEvent(
+        id="evt-fact-1",
+        created_at=datetime(2026, 3, 11, 12, 0, 5),
+        fact_refs=[
+            SandboxFactEventRef(
+                fact_id="fact-1",
+                fact_kind=SandboxFactKind.COMMAND_EXECUTION,
+                summary="exec_command tool fact",
+            )
+        ],
+        summary="记录了 1 条事实",
+        source_event_id="tool-event-1",
+        step_id="step-1",
+    )
+
+    payload = _map_event(event).model_dump(mode="json")
+
+    assert payload["event"] == "sandbox_fact"
+    assert payload["data"]["fact_refs"] == [
+        {
+            "fact_id": "fact-1",
+            "fact_kind": SandboxFactKind.COMMAND_EXECUTION.value,
+            "summary": "exec_command tool fact",
+        }
+    ]
+    assert payload["data"]["summary"] == "记录了 1 条事实"
+    assert payload["data"]["source_event_id"] == "tool-event-1"
+    assert payload["data"]["step_id"] == "step-1"
+    assert "payload" not in payload["data"]
+    assert payload["data"]["runtime"]["status_after_event"] is None
+
+
+def test_tool_sse_event_should_mark_evidence_reuse_virtual_success() -> None:
+    event = ToolEvent(
+        id="evt-tool-virtual",
+        created_at=datetime(2026, 3, 11, 12, 0, 6),
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/a"},
+        function_result=ToolResult(
+            success=True,
+            message="已复用前序证据结果",
+            data={
+                "loop_break_reason": "evidence_reuse_allowed",
+                "duplicate_decision": "reuse_existing_evidence",
+                "result_handle_resolved": True,
+            },
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    payload = _map_event(event).model_dump(mode="json")
+
+    assert payload["event"] == "tool"
+    assert payload["data"]["is_virtual"] is True
+    assert payload["data"]["virtual_kind"] == "evidence_reuse"
+
+
+def test_tool_sse_event_should_not_mark_real_tool_call_virtual() -> None:
+    event = ToolEvent(
+        id="evt-tool-real",
+        created_at=datetime(2026, 3, 11, 12, 0, 7),
+        step_id="step-1",
+        tool_call_id="call-2",
+        tool_name="search",
+        function_name="fetch_page",
+        function_args={"url": "https://example.com/a"},
+        function_result=ToolResult(
+            success=True,
+            data={"url": "https://example.com/a", "title": "Example"},
+        ),
+        status=ToolEventStatus.CALLED,
+    )
+
+    payload = _map_event(event).model_dump(mode="json")
+
+    assert payload["event"] == "tool"
+    assert payload["data"]["is_virtual"] is False
+    assert payload["data"]["virtual_kind"] is None
+
+
+def test_sandbox_fact_event_should_be_persistent() -> None:
+    event = SandboxFactEvent(fact_refs=[], summary="记录了 0 条事实")
+
+    assert get_event_delivery_policy(event) == EventDeliveryPolicy.PERSISTENT_AND_LIVE
+    assert should_persist_event(event) is True
 
 
 def test_text_stream_events_should_be_live_only() -> None:
@@ -168,7 +320,7 @@ def test_plan_sse_event_should_preserve_richer_plan_fields() -> None:
         ),
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["event"] == "plan"
@@ -203,7 +355,7 @@ def test_step_sse_event_should_include_step_outcome() -> None:
         ),
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["event"] == "step"
@@ -231,7 +383,7 @@ def test_event_mapper_should_normalize_live_step_event_outcome_before_sse() -> N
         ),
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["data"]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
@@ -260,10 +412,70 @@ def test_event_mapper_should_normalize_live_plan_event_outcomes_before_sse() -> 
         ),
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["data"]["steps"][0]["outcome"]["produced_artifacts"] == ["/tmp/final.md"]
+
+
+def test_observable_event_mapper_should_attach_runtime_metadata() -> None:
+    event = WaitEvent(
+        id="evt-wait-1",
+        created_at=datetime(2026, 3, 11, 12, 0, 8),
+        interrupt_id="interrupt-1",
+        payload={"kind": "confirm", "prompt": "是否继续？"},
+    )
+    envelope = RuntimeObservableEventResult(
+        event=event,
+        runtime=RuntimeEventMetaResult(
+            session_id="session-1",
+            run_id="run-1",
+            status_after_event="waiting",
+            current_step_id="step-1",
+            source_event_id="record-event-1",
+            cursor_event_id="record-event-1",
+        ),
+    )
+
+    payload = EventMapper.observable_event_to_sse_event(envelope).model_dump(mode="json")
+
+    assert payload["event"] == "wait"
+    assert payload["data"]["runtime"]["session_id"] == "session-1"
+    assert payload["data"]["runtime"]["run_id"] == "run-1"
+    assert payload["data"]["runtime"]["status_after_event"] == "waiting"
+    assert payload["data"]["runtime"]["current_step_id"] == "step-1"
+    assert payload["data"]["runtime"]["cursor_event_id"] == "record-event-1"
+
+
+def test_observable_event_mapper_should_mark_text_stream_as_live_only() -> None:
+    event = TextStreamDeltaEvent(
+        id="evt-ts-live",
+        created_at=datetime(2026, 3, 11, 12, 0, 9),
+        stream_id="stream-1",
+        channel=TextStreamChannel.FINAL_MESSAGE,
+        text="draft",
+        sequence=1,
+    )
+    envelope = RuntimeObservableEventResult(
+        event=event,
+        runtime=RuntimeEventMetaResult(
+            session_id="session-1",
+            run_id="run-1",
+            source_event_id=None,
+            cursor_event_id=None,
+            durability="live_only",
+            visibility="draft",
+        ),
+    )
+
+    payload = EventMapper.observable_event_to_sse_event(envelope).model_dump(mode="json")
+
+    assert payload["event"] == "text_stream_delta"
+    assert payload["data"]["event_id"] is None
+    assert payload["data"]["runtime"]["durability"] == "live_only"
+    assert payload["data"]["runtime"]["visibility"] == "draft"
+    assert payload["data"]["runtime"]["source_event_id"] is None
+    assert payload["data"]["runtime"]["cursor_event_id"] is None
 
 
 def test_workflow_run_event_model_should_normalize_historical_step_event_outcome_on_read() -> None:
@@ -296,6 +508,37 @@ def test_workflow_run_event_model_should_normalize_historical_step_event_outcome
 
     assert isinstance(domain_record.event_payload, StepEvent)
     assert domain_record.event_payload.step.outcome.produced_artifacts == ["/tmp/final.md"]
+
+
+def test_workflow_run_event_model_should_restore_sandbox_fact_event() -> None:
+    event = SandboxFactEvent(
+        id="evt-fact-history",
+        fact_refs=[
+            SandboxFactEventRef(
+                fact_id="fact-1",
+                fact_kind=SandboxFactKind.TOOL_FAILURE,
+                summary="tool failed",
+            )
+        ],
+        summary="tool failed",
+        source_event_id="tool-event-1",
+        step_id=None,
+    )
+    record = WorkflowRunEventModel(
+        id="record-fact-1",
+        run_id="run-1",
+        session_id="session-1",
+        event_id=event.id,
+        event_type=event.type,
+        event_payload=event.model_dump(mode="json"),
+        created_at=datetime(2026, 3, 11, 12, 0, 8),
+    )
+
+    domain_record = record.to_domain()
+
+    assert isinstance(domain_record.event_payload, SandboxFactEvent)
+    assert domain_record.event_payload.source_event_id == "tool-event-1"
+    assert domain_record.event_payload.fact_refs[0].fact_kind == SandboxFactKind.TOOL_FAILURE
 
 
 def test_workflow_run_event_model_should_normalize_historical_plan_event_outcome_on_read() -> None:
@@ -351,7 +594,7 @@ def test_wait_sse_event_should_include_interrupt_payload() -> None:
         },
     )
 
-    sse_event = EventMapper.event_to_sse_event(event)
+    sse_event = _map_event(event)
     payload = sse_event.model_dump(mode="json")
 
     assert payload["event"] == "wait"

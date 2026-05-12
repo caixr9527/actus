@@ -1,5 +1,6 @@
 import { get, post, createSSEStream, parseSSEStream } from "./fetch";
 import { translateRuntime } from "../i18n/runtime";
+import { normalizeEvent } from "../session-event-adapter";
 import type {
   Session,
   SessionDetail,
@@ -9,11 +10,15 @@ import type {
   SessionFile,
   ViewFileParams,
   ViewShellParams,
-  SSEEventData,
   SSEEventHandler,
   UpdateSessionModelParams,
   UpdateSessionModelResponse,
 } from "./types";
+
+export type ChatStreamHandle = {
+  cleanup: () => void;
+  ready: Promise<void>;
+};
 
 /**
  * 会话列表流式更新回调
@@ -152,7 +157,35 @@ export const sessionApi = {
     onEvent: SSEEventHandler,
     onError?: (error: Error) => void
   ): (() => void) => {
+    const handle = sessionApi.openChatStream(sessionId, params, onEvent, onError);
+    handle.ready.catch(() => {
+      // chat() 的旧调用方只消费 onError；避免初始 4xx 拒绝形成未处理 Promise。
+    });
+    return handle.cleanup;
+  },
+
+  openChatStream: (
+    sessionId: string,
+    params: ChatParams,
+    onEvent: SSEEventHandler,
+    onError?: (error: Error) => void
+  ): ChatStreamHandle => {
     const controller = new AbortController();
+    let resolveReady: () => void = () => undefined;
+    let rejectReady: (error: Error) => void = () => undefined;
+    let isReadySettled = false;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = () => {
+        if (isReadySettled) return;
+        isReadySettled = true;
+        resolve();
+      };
+      rejectReady = (error) => {
+        if (isReadySettled) return;
+        isReadySettled = true;
+        reject(error);
+      };
+    });
 
     const startStream = async () => {
       try {
@@ -165,6 +198,7 @@ export const sessionApi = {
             timeout: 5 * 60 * 1000
           }
         );
+        resolveReady();
         
         await parseSSEStream(
           stream,
@@ -177,10 +211,14 @@ export const sessionApi = {
                 ? JSON.parse(messageEvent.data)
                 : messageEvent.data;
             
-            onEvent({
-              type: messageEvent.type as SSEEventData["type"],
+            const event = normalizeEvent({
+              type: messageEvent.type,
               data,
-            } as SSEEventData);
+            });
+            if (!event) {
+              throw new Error("SSE_EVENT_RUNTIME_CONTRACT_INVALID");
+            }
+            onEvent(event);
           },
           (error) => {
             if (!controller.signal.aborted) {
@@ -199,14 +237,15 @@ export const sessionApi = {
       } catch (error) {
         // 忽略 AbortError，这是正常的连接中止
         if (error instanceof Error && error.name === 'AbortError') {
+          resolveReady();
           return;
         }
+        const normalizedError = error instanceof Error
+          ? error
+          : new Error(translateRuntime("sessionApi.startChatStreamFailed"));
+        rejectReady(normalizedError);
         if (!controller.signal.aborted && onError) {
-          onError(
-            error instanceof Error
-              ? error
-              : new Error(translateRuntime("sessionApi.startChatStreamFailed"))
-          );
+          onError(normalizedError);
         }
       }
     };
@@ -214,8 +253,11 @@ export const sessionApi = {
     startStream();
 
     // 返回清理函数：通过 AbortController 中止连接
-    return () => {
-      controller.abort();
+    return {
+      ready,
+      cleanup: () => {
+        controller.abort();
+      },
     };
   },
 

@@ -15,6 +15,11 @@ from app.domain.services.memory_consolidation import (
     MemoryConsolidationInput,
     MemoryConsolidationService,
 )
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataClassificationPolicy,
+    DataOrigin,
+    normalize_tenant_id,
+)
 from app.domain.services.runtime.contracts.runtime_logging import (
     elapsed_ms,
     log_runtime,
@@ -83,10 +88,39 @@ def _build_working_memory_with_consolidation_result(
     return working_memory
 
 
+def _build_owned_memory_candidate(
+        item: Dict[str, object],
+        *,
+        state: PlannerReActLangGraphState,
+        data_retention_policy_service: DataClassificationPolicy,
+) -> Dict[str, object]:
+    """长期记忆写入前补齐强归属字段，namespace 不再承担权限边界。"""
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip() or None
+    run_id = str(state.get("run_id") or "").strip() or None
+    tenant_id = normalize_tenant_id(user_id)
+    classification = data_retention_policy_service.classify_data(
+        tenant_id=tenant_id,
+        origin=DataOrigin.LONG_TERM_MEMORY,
+    )
+    candidate = dict(item)
+    candidate["user_id"] = user_id
+    candidate["tenant_id"] = classification.tenant_id
+    candidate.setdefault("scope", "user")
+    candidate.setdefault("session_id", session_id)
+    candidate.setdefault("run_id", run_id)
+    candidate["origin"] = classification.origin
+    candidate["trust_level"] = classification.trust_level
+    candidate["privacy_level"] = classification.privacy_level
+    candidate["retention_policy"] = classification.retention_policy
+    return candidate
+
+
 async def consolidate_memory_node(
         state: PlannerReActLangGraphState,
         long_term_memory_repository: Optional[LongTermMemoryRepository] = None,
         memory_consolidation_service: Optional[MemoryConsolidationService] = None,
+        data_retention_policy_service: Optional[DataClassificationPolicy] = None,
 ) -> PlannerReActLangGraphState:
     """统一收敛线程级短期记忆，压缩消息窗口并记录压缩元数据。"""
     started_at = now_perf()
@@ -100,6 +134,8 @@ async def consolidate_memory_node(
     )
     consolidation_input = _build_memory_consolidation_input(state)
     consolidation_service = memory_consolidation_service or MemoryConsolidationService()
+    if data_retention_policy_service is None:
+        raise ValueError("data_retention_policy_service 不能为空")
     consolidation_result = await consolidation_service.consolidate(consolidation_input)
     pending_memory_writes = list(consolidation_result.memory_candidates or [])
     remaining_memory_writes: List[Dict[str, object]] = []
@@ -112,7 +148,13 @@ async def consolidate_memory_node(
         write_started_at = now_perf()
         for item in pending_memory_writes:
             try:
-                memory = LongTermMemory.model_validate(item)
+                memory = LongTermMemory.model_validate(
+                    _build_owned_memory_candidate(
+                        item,
+                        state=state,
+                        data_retention_policy_service=data_retention_policy_service,
+                    )
+                )
                 persisted_memory = await long_term_memory_repository.upsert(memory)
                 persisted_memory_ids.append(persisted_memory.id)
             except Exception as e:
@@ -148,6 +190,7 @@ async def consolidate_memory_node(
         trimmed_message_count=consolidation_result.stats.trimmed_message_count,
         kept_candidate_count=consolidation_result.stats.kept_candidate_count,
         dropped_invalid_count=consolidation_result.stats.dropped_invalid_count,
+        dropped_sensitive_count=consolidation_result.stats.dropped_sensitive_count,
         dropped_low_confidence_count=consolidation_result.stats.dropped_low_confidence_count,
         deduped_count=consolidation_result.stats.deduped_count,
         merged_profile_count=consolidation_result.stats.merged_profile_count,

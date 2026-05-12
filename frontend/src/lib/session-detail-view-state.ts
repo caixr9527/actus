@@ -1,4 +1,7 @@
-import type { SessionStatus, StepEvent } from './api/types'
+import type { RuntimeCapabilities, RuntimeInteraction, SessionStatus, StepEvent } from './api/types'
+import type { SSEEventData } from './api/types'
+import { findLatestWaitEventContext } from './run-timeline'
+import { waitEventContextFromRuntimeInteraction, type WaitEventContext } from './wait-event'
 
 export type SessionScopedDetailViewState<TFile = unknown, TTool = unknown> = {
   fileListOpen: boolean
@@ -11,8 +14,15 @@ export type SessionScopedDetailViewState<TFile = unknown, TTool = unknown> = {
 export type SessionScopedRuntimeState = {
   initialMessageSent: boolean
   previousToolCount: number
-  hasAutoScrolled: boolean
+  autoFollowLatest: boolean
   previousSessionStatus: SessionStatus | null
+}
+
+export type SessionActionAvailability = {
+  canSendMessage: boolean
+  canResume: boolean
+  canCancel: boolean
+  canContinueCancelled: boolean
 }
 
 export function createSessionScopedDetailViewState<TFile = unknown, TTool = unknown>(): SessionScopedDetailViewState<TFile, TTool> {
@@ -29,8 +39,19 @@ export function createSessionScopedRuntimeState(): SessionScopedRuntimeState {
   return {
     initialMessageSent: false,
     previousToolCount: 0,
-    hasAutoScrolled: false,
+    autoFollowLatest: true,
     previousSessionStatus: null,
+  }
+}
+
+export function resolveSessionActionAvailability(
+  capabilities: RuntimeCapabilities | null | undefined,
+): SessionActionAvailability {
+  return {
+    canSendMessage: Boolean(capabilities?.can_send_message),
+    canResume: Boolean(capabilities?.can_resume),
+    canCancel: Boolean(capabilities?.can_cancel),
+    canContinueCancelled: Boolean(capabilities?.can_continue_cancelled),
   }
 }
 
@@ -46,6 +67,27 @@ export function resolveStepExpandedState(params: {
   const { currentExpanded, previousStatus, nextStatus } = params
   if (nextStatus === 'running') return true
   if (previousStatus === 'running') return false
+  return currentExpanded
+}
+
+export type AssistantTurnDisplayStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'idle'
+
+export function getInitialAssistantTurnExpandedState(params: {
+  hasFinalMessage: boolean
+}): boolean {
+  return !params.hasFinalMessage
+}
+
+export function resolveAssistantTurnExpandedState(params: {
+  currentExpanded: boolean
+  previousStatus: AssistantTurnDisplayStatus | null
+  nextStatus: AssistantTurnDisplayStatus
+  hasFinalMessage: boolean
+}): boolean {
+  const { currentExpanded, previousStatus, nextStatus, hasFinalMessage } = params
+  if (previousStatus === null) return currentExpanded
+  if (nextStatus === 'running' || nextStatus === 'waiting') return true
+  if (hasFinalMessage && nextStatus === 'completed') return false
   return currentExpanded
 }
 
@@ -85,14 +127,51 @@ export function shouldShowSessionThinking(params: {
   )
 }
 
+export function isNearScrollBottom(params: {
+  scrollTop: number
+  scrollHeight: number
+  clientHeight: number
+  thresholdPx?: number
+}): boolean {
+  const thresholdPx = params.thresholdPx ?? 96
+  return params.scrollHeight - params.scrollTop - params.clientHeight <= thresholdPx
+}
+
 export function shouldAutoScrollToLatest(params: {
-  hasAutoScrolled: boolean
+  autoFollowLatest: boolean
+  sessionStatus: SessionStatus | null | undefined
+  streaming: boolean
   timelineLength: number
   shouldShowThinking: boolean
+  hasVisibleTextStreamDraft: boolean
 }): boolean {
-  const { hasAutoScrolled, timelineLength, shouldShowThinking } = params
-  if (hasAutoScrolled) return false
-  return timelineLength > 0 || shouldShowThinking
+  const {
+    autoFollowLatest,
+    sessionStatus,
+    streaming,
+    timelineLength,
+    shouldShowThinking,
+    hasVisibleTextStreamDraft,
+  } = params
+  if (!autoFollowLatest) return false
+  if (!(sessionStatus === 'running' || sessionStatus === 'waiting' || streaming)) return false
+  return timelineLength > 0 || shouldShowThinking || hasVisibleTextStreamDraft
+}
+
+export function shouldShowJumpToLatestButton(params: {
+  autoFollowLatest: boolean
+  timelineLength: number
+  shouldShowThinking: boolean
+  hasVisibleTextStreamDraft: boolean
+}): boolean {
+  const {
+    autoFollowLatest,
+    timelineLength,
+    shouldShowThinking,
+    hasVisibleTextStreamDraft,
+  } = params
+  if (autoFollowLatest) return false
+  return timelineLength > 0 || shouldShowThinking || hasVisibleTextStreamDraft
 }
 
 export function shouldHideWaitResumeCard(params: {
@@ -113,4 +192,16 @@ export function shouldResetWaitResumePending(params: {
   if (!waitResumePending) return false
   if (sessionStatus !== 'waiting') return true
   return !streaming
+}
+
+export function resolveWaitResumeContext(params: {
+  canResume: boolean
+  runtimeInteraction: RuntimeInteraction | null | undefined
+  events: SSEEventData[]
+}): WaitEventContext | null {
+  if (!params.canResume) return null
+  return (
+    waitEventContextFromRuntimeInteraction(params.runtimeInteraction)
+    ?? findLatestWaitEventContext(params.events)
+  )
 }

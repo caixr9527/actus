@@ -4,12 +4,11 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from app.domain.models import Step
+from app.domain.models import Step, StepArtifactPolicy, StepOutputMode
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime
-from app.domain.services.runtime.contracts.step_evidence_contracts import STEP_DRAFT_FACT_PREFIX
-from app.domain.services.runtime.normalizers import normalize_execution_response
+from app.domain.services.runtime.normalizers import normalize_controlled_value, normalize_execution_response
 from app.domain.services.workspace_runtime.policies import (
     build_human_wait_missing_interrupt_payload as _build_human_wait_missing_interrupt_payload,
     build_loop_break_payload as _build_loop_break_payload,
@@ -112,6 +111,83 @@ def finalize_no_tool_call(
         )
         return NoToolCallFinalizationResult(action="retry", parsed=parsed)
 
+    protected_file_payload = _build_successful_file_tool_payload(
+        step=step,
+        runtime_recent_action=runtime_recent_action,
+    )
+    file_write_result_required = _step_requires_file_write_result(step)
+    protected_write_payload = (
+        protected_file_payload
+        if _is_successful_write_tool_payload(protected_file_payload)
+        else None
+    )
+    if inferred_success and file_write_result_required and protected_write_payload is None:
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "文件产出步骤拒绝无工具伪成功",
+            step_id=str(step.id or ""),
+            iteration=iteration,
+            reason_code="file_output_requires_successful_write_tool",
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return NoToolCallFinalizationResult(
+            action="return",
+            payload=_build_loop_break_payload(
+                step=step,
+                blocker="当前步骤要求产出文件，但本轮没有成功的 write_file 或 replace_in_file 工具事实，已拒绝模型自报文件成功。",
+                next_hint="请调用文件写入工具完成产物落地；如果不需要文件产物，应重新规划为 output_mode=none。",
+                runtime_recent_action={
+                    **dict(runtime_recent_action or {}),
+                    "reason_code": "file_output_requires_successful_write_tool",
+                },
+            ),
+            parsed=parsed,
+        )
+    if not inferred_success and file_write_result_required and protected_write_payload is None:
+        log_runtime(
+            logger,
+            logging.WARNING,
+            "文件产出步骤缺少成功写工具事实",
+            step_id=str(step.id or ""),
+            iteration=iteration,
+            reason_code="file_output_requires_successful_write_tool",
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return NoToolCallFinalizationResult(
+            action="return",
+            payload=_build_loop_break_payload(
+                step=step,
+                blocker="当前步骤要求产出文件，但本轮没有成功的 write_file 或 replace_in_file 工具事实，无法确认文件已落地。",
+                next_hint="请调用文件写入工具完成产物落地；如果不需要文件产物，应重新规划为 output_mode=none。",
+                runtime_recent_action={
+                    **dict(runtime_recent_action or {}),
+                    "reason_code": "file_output_requires_successful_write_tool",
+                },
+            ),
+            parsed=parsed,
+        )
+    if file_write_result_required:
+        protected_file_payload = protected_write_payload
+    if protected_file_payload is not None and not inferred_success:
+        log_runtime(
+            logger,
+            logging.INFO,
+            "已有成功文件工具事实，保护步骤成功收敛",
+            step_id=str(step.id or ""),
+            iteration=iteration,
+            reason_code="successful_file_tool_result_preserved",
+            llm_elapsed_ms=llm_cost_ms,
+            elapsed_ms=elapsed_ms(started_at),
+        )
+        return NoToolCallFinalizationResult(
+            action="return",
+            payload=protected_file_payload,
+            parsed=parsed,
+        )
+
     log_runtime(
         logger,
         logging.INFO,
@@ -136,22 +212,142 @@ def finalize_no_tool_call(
             else f"步骤暂未完成：{step.description}"
         ),
     )
-    if inferred_success and extra_response_text:
-        # 执行模型有时会返回“正文 + JSON”。正文不是最终出口，但必须作为事实证据交给 summary。
-        facts_learned = [
-            str(item or "").strip()
-            for item in list(normalized_payload.get("facts_learned") or [])
-            if str(item or "").strip()
-        ]
-        draft_fact = f"{STEP_DRAFT_FACT_PREFIX}{extra_response_text}"
-        if draft_fact not in facts_learned:
-            facts_learned.append(draft_fact)
-        normalized_payload["facts_learned"] = facts_learned
     return NoToolCallFinalizationResult(
         action="return",
         payload=normalized_payload,
         parsed=parsed,
     )
+
+
+def _step_requires_file_write_result(step: Step) -> bool:
+    output_mode = normalize_controlled_value(getattr(step, "output_mode", None), StepOutputMode)
+    artifact_policy = normalize_controlled_value(getattr(step, "artifact_policy", None), StepArtifactPolicy)
+    return (
+        output_mode == StepOutputMode.FILE.value
+        or artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
+    )
+
+
+def _is_successful_write_tool_payload(payload: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    recent_action = payload.get("runtime_recent_action")
+    if not isinstance(recent_action, dict):
+        return False
+    convergence = recent_action.get("file_tool_success_convergence")
+    if not isinstance(convergence, dict):
+        return False
+    function_name = str(convergence.get("function_name") or "").strip().lower()
+    return function_name in {"write_file", "replace_in_file"}
+
+
+def _build_successful_file_tool_payload(
+        *,
+        step: Step,
+        runtime_recent_action: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """已有成功文件工具结果时，禁止后续自然语言解析失败反向覆盖成功事实。"""
+    recent_action = dict(runtime_recent_action or {})
+    last_success = dict(recent_action.get("last_successful_tool_call") or {})
+    function_name = str(last_success.get("function_name") or "").strip().lower()
+    if function_name not in {"list_files", "find_files", "read_file", "search_in_file", "write_file", "replace_in_file"}:
+        return None
+    data = last_success.get("data")
+    if not isinstance(data, dict):
+        data = {}
+    evidence_lines = _build_file_tool_evidence_lines(function_name=function_name, data=data)
+    if len(evidence_lines) == 0:
+        message = str(last_success.get("message") or "").strip()
+        if message:
+            evidence_lines = [message]
+    if len(evidence_lines) == 0:
+        return None
+    runtime_action = dict(recent_action)
+    runtime_action["file_tool_success_convergence"] = {
+        "reason_code": "successful_file_tool_result_preserved",
+        "function_name": function_name,
+    }
+    summary = f"当前步骤已基于成功文件工具结果完成：{step.description}"
+    attachments: List[str] = []
+    if function_name in {"write_file", "replace_in_file"}:
+        filepath = str(data.get("filepath") or data.get("path") or "").strip()
+        if filepath:
+            attachments.append(filepath)
+    result = "\n".join(evidence_lines)
+    return {
+        "success": True,
+        "summary": summary,
+        "result": result,
+        "attachments": attachments,
+        "blockers": [],
+        "facts_learned": evidence_lines,
+        "open_questions": [],
+        "next_hint": "",
+        "runtime_recent_action": runtime_action,
+    }
+
+
+def _build_file_tool_evidence_lines(*, function_name: str, data: Dict[str, Any]) -> List[str]:
+    evidence_lines: List[str] = []
+    if function_name == "list_files":
+        dir_path = str(data.get("dir_path") or "").strip()
+        if dir_path:
+            evidence_lines.append(f"当前目录：{dir_path}")
+        file_names = _extract_file_names(data.get("files"))
+        if file_names:
+            evidence_lines.append("文件列表：" + "、".join(file_names))
+    elif function_name == "find_files":
+        dir_path = str(data.get("dir_path") or "").strip()
+        if dir_path:
+            evidence_lines.append(f"搜索目录：{dir_path}")
+        file_names = _extract_file_names(data.get("files"))
+        if file_names:
+            evidence_lines.append("匹配文件：" + "、".join(file_names))
+    elif function_name == "read_file":
+        filepath = str(data.get("filepath") or data.get("path") or "").strip()
+        content = str(data.get("content") or "")
+        if filepath:
+            evidence_lines.append(f"已读取文件：{filepath}")
+        if content:
+            evidence_lines.append(f"读取内容长度：{len(content)} 字符")
+    elif function_name == "search_in_file":
+        filepath = str(data.get("filepath") or data.get("path") or "").strip()
+        matches = data.get("matches")
+        if filepath:
+            evidence_lines.append(f"已搜索文件：{filepath}")
+        if isinstance(matches, list):
+            evidence_lines.append(f"匹配数量：{len(matches)}")
+    elif function_name in {"write_file", "replace_in_file"}:
+        filepath = str(data.get("filepath") or data.get("path") or "").strip()
+        if filepath:
+            evidence_lines.append(f"已写入文件：{filepath}")
+    return _dedupe_non_empty(evidence_lines)
+
+
+def _extract_file_names(raw_files: Any) -> List[str]:
+    file_names: List[str] = []
+    if not isinstance(raw_files, list):
+        return file_names
+    for item in raw_files:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("filename") or item.get("path") or "").strip()
+        else:
+            name = str(item or "").strip()
+        if name:
+            file_names.append(name)
+    return _dedupe_non_empty(file_names)
+
+
+def _dedupe_non_empty(values: List[str]) -> List[str]:
+    seen: set[str] = set()
+    result: List[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def finalize_max_iterations(
@@ -189,18 +385,6 @@ def finalize_max_iterations(
             runtime_recent_action=runtime_recent_action,
         )
 
-    log_runtime(
-        logger,
-        logging.INFO,
-        "达到最大工具轮次，步骤判定未完成",
-        step_id=str(step.id or ""),
-        requested_max_tool_iterations=requested_max_tool_iterations,
-        iteration_count=iteration_count,
-        task_mode=task_mode,
-        loop_break_reason="max_tool_iterations",
-        attachment_count=len(normalize_attachments(parsed.get("attachments"))),
-        elapsed_ms=elapsed_ms(started_at),
-    )
     convergence_decision = ConvergenceEngine(logger=logger).evaluate_max_iteration(
         context=MaxIterationConvergenceContext(
             step=step,
@@ -214,6 +398,19 @@ def finalize_max_iterations(
     )
     if convergence_decision.should_break and convergence_decision.payload is not None:
         return convergence_decision.payload
+
+    log_runtime(
+        logger,
+        logging.INFO,
+        "达到最大工具轮次，步骤判定未完成",
+        step_id=str(step.id or ""),
+        requested_max_tool_iterations=requested_max_tool_iterations,
+        iteration_count=iteration_count,
+        task_mode=task_mode,
+        loop_break_reason="max_tool_iterations",
+        attachment_count=len(normalize_attachments(parsed.get("attachments"))),
+        elapsed_ms=elapsed_ms(started_at),
+    )
     # P3-1A 收敛修复：max_tool_iterations 到达后一律按未完成收敛，不再返回 success=true。
     return _build_loop_break_payload(
         step=step,

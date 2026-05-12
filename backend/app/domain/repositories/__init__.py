@@ -6,9 +6,11 @@
 @File   : __init__.py.py
 """
 from .app_config_repository import AppConfigRepository
+from .evidence_repository import EvidenceRepository
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .long_term_memory_repository import LongTermMemoryRepository
+from .sandbox_fact_repository import SandboxFactRepository
 from .session_repository import SessionRepository
 from .session_context_snapshot_repository import SessionContextSnapshotRepository
 from .uow import IUnitOfWork
@@ -20,10 +22,12 @@ from .workspace_repository import WorkspaceRepository
 
 __all__ = [
     "AppConfigRepository",
+    "EvidenceRepository",
     "SessionRepository",
     "FileRepository",
     "LLMModelConfigRepository",
     "LongTermMemoryRepository",
+    "SandboxFactRepository",
     "SessionContextSnapshotRepository",
     "UserRepository",
     "WorkflowRunRepository",

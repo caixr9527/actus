@@ -42,6 +42,7 @@ from .control_state import (
     get_control_metadata as _get_control_metadata,
     replace_control_metadata as _replace_control_metadata,
 )
+from .evidence_context_guard import validate_stage_evidence_context_packet
 from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
@@ -83,6 +84,22 @@ async def replan_node(
         runtime_context_service=runtime_context_service,
         context_packet=replan_context_packet,
     )
+    evidence_guard = validate_stage_evidence_context_packet(
+        stage="replan",
+        context_packet=replan_context_packet,
+    )
+    if evidence_guard.blocked:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "重规划 evidence context 校验失败，已 fail closed",
+            state=state,
+            reason_code=evidence_guard.reason_code,
+        )
+        return {
+            **state,
+            **replan_context_updates,
+        }
     # replan 仅消费摘要字段，避免把完整步骤和整份计划 JSON 再次塞入 Prompt。
     current_step_snapshot = (
         dict(replan_context_packet.get("current_step") or {})
@@ -208,11 +225,34 @@ async def replan_node(
                 logging.WARNING,
                 "重规划已过滤最终交付型步骤",
                 state=state,
-                dropped_step_count=dropped_final_delivery_steps,
+                dropped_final_delivery_steps=dropped_final_delivery_steps,
+                remaining_step_count=len(candidate_steps),
                 success_criteria_missing_count=criteria_missing_count,
                 success_criteria_filtered_count=criteria_filtered_count,
                 attempt=attempt + 1,
             )
+            if len(candidate_steps) == 0:
+                next_step = plan.get_next_step()
+                control = _get_control_metadata(state)
+                control.pop("wait_resume_action", None)
+                control.pop("entry_upgrade", None)
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "重规划仅返回最终交付型步骤，保持原计划并交给后续路由",
+                    state=state,
+                    dropped_final_delivery_steps=dropped_final_delivery_steps,
+                    remaining_step_count=0,
+                    next_step_id=str(next_step.id or "") if next_step is not None else "",
+                    llm_elapsed_ms=llm_cost_ms_total,
+                    elapsed_ms=elapsed_ms(started_at),
+                )
+                return {
+                    **state,
+                    **replan_context_updates,
+                    "current_step_id": next_step.id if next_step is not None else None,
+                    "graph_metadata": _replace_control_metadata(state, control),
+                }
         filtered_steps, dropped_drift_steps = _REPLAN_MERGE_ENGINE.filter_replan_drift_steps(
             candidate_steps,
             user_message=user_message,
@@ -228,6 +268,23 @@ async def replan_node(
                 success_criteria_filtered_count=criteria_filtered_count,
                 attempt=attempt + 1,
             )
+        if filtered_steps:
+            evidence_filtered_steps, dropped_evidence_duplicate_steps = (
+                _REPLAN_MERGE_ENGINE.filter_structured_evidence_duplicate_steps(
+                    filtered_steps,
+                    evidence_context=dict(replan_context_packet.get("evidence_replan_context") or {}),
+                )
+            )
+            if dropped_evidence_duplicate_steps > 0:
+                log_runtime(
+                    logger,
+                    logging.INFO,
+                    "重规划已过滤结构化 evidence 可识别重复步骤",
+                    state=state,
+                    dropped_step_count=dropped_evidence_duplicate_steps,
+                    attempt=attempt + 1,
+                )
+            filtered_steps = evidence_filtered_steps
         if filtered_steps:
             new_steps = filtered_steps
             break

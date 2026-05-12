@@ -20,6 +20,7 @@ from .prompt_context_helpers import (
     _append_prompt_context_to_prompt,
     _build_prompt_context_packet_async,
     _extract_prompt_context_state_updates,
+    extract_document_attachment_paths,
 )
 from .replan_nodes import replan_node
 from .reuse_nodes import guard_step_reuse_node
@@ -32,6 +33,7 @@ __all__ = [
     "_append_prompt_context_to_prompt",
     "_build_prompt_context_packet_async",
     "_extract_prompt_context_state_updates",
+    "extract_document_attachment_paths",
     "atomic_action_node",
     "consolidate_memory_node",
     "create_or_reuse_plan_node",

@@ -55,6 +55,7 @@ class WorkflowRunEventRecord(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     run_id: str
     session_id: str
+    user_id: Optional[str] = None
     event_id: str
     event_type: str
     event_payload: Event

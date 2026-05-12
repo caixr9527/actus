@@ -22,6 +22,8 @@ class WorkspaceArtifactModel(Base):
     __tablename__ = "workspace_artifacts"
     __table_args__ = (
         Index("ix_workspace_artifacts_workspace_id", "workspace_id"),
+        Index("ix_workspace_artifacts_user_workspace", "user_id", "workspace_id"),
+        Index("ix_workspace_artifacts_user_session", "user_id", "session_id"),
         UniqueConstraint(
             "workspace_id",
             "path",
@@ -31,6 +33,9 @@ class WorkspaceArtifactModel(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True, nullable=False)
     workspace_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     path: Mapped[str] = mapped_column(String(2048), nullable=False)
     artifact_type: Mapped[str] = mapped_column(String(128), nullable=False)
     summary: Mapped[str] = mapped_column(
@@ -44,6 +49,26 @@ class WorkspaceArtifactModel(Base):
         String(128),
         nullable=False,
         server_default=text("''::character varying"),
+    )
+    origin: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'agent_generated'::character varying"),
+    )
+    trust_level: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'agent_generated'::character varying"),
+    )
+    privacy_level: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'private'::character varying"),
+    )
+    retention_policy: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'workspace_bound'::character varying"),
     )
     artifact_metadata: Mapped[Dict[str, Any]] = mapped_column(
         "metadata",
@@ -73,12 +98,19 @@ class WorkspaceArtifactModel(Base):
         payload = {
             "id": self.id,
             "workspace_id": self.workspace_id,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "run_id": self.run_id,
             "path": self.path,
             "artifact_type": self.artifact_type,
             "summary": self.summary,
             "source_step_id": self.source_step_id,
             "source_capability": self.source_capability,
             "delivery_state": self.delivery_state,
+            "origin": self.origin,
+            "trust_level": self.trust_level,
+            "privacy_level": self.privacy_level,
+            "retention_policy": self.retention_policy,
             "metadata": dict(self.artifact_metadata or {}),
             "created_at": self.created_at,
             "updated_at": self.updated_at,

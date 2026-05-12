@@ -118,7 +118,7 @@ def test_ollama_llm_should_allow_tool_choice_none() -> None:
     assert client.requests[0]["messages"] == [{"role": "user", "content": "hello"}]
 
 
-def test_ollama_llm_should_reject_non_text_multiplexed_input() -> None:
+def test_ollama_llm_should_reject_legacy_native_multiplexed_input() -> None:
     llm = OllamaLLM(
         base_url="http://ollama.test",
         model="qwen2.5:3b",
@@ -126,7 +126,7 @@ def test_ollama_llm_should_reject_non_text_multiplexed_input() -> None:
         client=_FakeOllamaClient(),
     )
 
-    with pytest.raises(ServerError, match="不支持 image 输入"):
+    with pytest.raises(ServerError, match="不支持 image 原生输入"):
         asyncio.run(
             llm.format_multiplexed_message(
                 [{"type": "image", "file_url": "https://example.com/a.png"}]

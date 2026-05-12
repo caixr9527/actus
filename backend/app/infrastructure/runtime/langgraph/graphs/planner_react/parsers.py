@@ -35,21 +35,25 @@ def merge_attachment_paths(*path_groups: List[str]) -> List[str]:
 
 
 def extract_write_file_paths_from_tool_events(tool_events: List[ToolEvent]) -> List[str]:
-    """从 write_file 工具事件提取产物路径，作为附件兜底来源。"""
+    """从成功写文件工具事件提取产物路径，作为文件产物唯一事实来源。"""
     attachment_paths: List[str] = []
     for tool_event in tool_events:
         if tool_event.status != ToolEventStatus.CALLED:
             continue
         function_name = str(tool_event.function_name or "").strip().lower()
-        if function_name != "write_file":
+        if function_name not in {"write_file", "replace_in_file"}:
+            continue
+        function_result = tool_event.function_result
+        if function_result is None or not bool(getattr(function_result, "success", False)):
             continue
 
         arg_path = str(tool_event.function_args.get("filepath") or "").strip()
+        if not arg_path:
+            arg_path = str(tool_event.function_args.get("path") or "").strip()
         if arg_path:
             attachment_paths.append(arg_path)
             continue
 
-        function_result = tool_event.function_result
         result_data = function_result.data if function_result is not None and hasattr(function_result, "data") else None
         if isinstance(result_data, dict):
             result_path = str(
@@ -142,6 +146,7 @@ def build_step_from_payload(payload: Any, fallback_index: int, *, user_message: 
             artifact_policy=artifact_policy,
             objective_key=str(payload.get("objective_key") or build_step_objective_key(title, description)),
             success_criteria=success_criteria,
+            evidence_intent=dict(payload.get("evidence_intent") or {}) if isinstance(payload.get("evidence_intent"), dict) else {},
             status=ExecutionStatus.PENDING,
         )
 

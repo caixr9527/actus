@@ -5,8 +5,20 @@ import type { ToolEvent } from '../src/lib/api/types'
 import type { TimelineItem } from '../src/lib/session-events'
 import { resolvePreviewToolFromTimeline } from '../src/lib/session-preview-tool'
 
+const runtime = {
+  session_id: 'session-1',
+  run_id: 'run-1',
+  status_after_event: null,
+  current_step_id: null,
+  source_event_id: 'evt-1',
+  cursor_event_id: 'evt-1',
+  durability: 'persistent',
+  visibility: 'timeline',
+} as const
+
 function buildToolEvent(toolCallId: string, status: 'calling' | 'called', content?: unknown): ToolEvent {
   return {
+    runtime,
     tool_call_id: toolCallId,
     name: 'mcp',
     function: 'mcp_demo',
@@ -40,6 +52,7 @@ test('resolvePreviewToolFromTimeline should prefer latest called tool event in s
 
 test('resolvePreviewToolFromTimeline should fallback to original preview tool when tool_call_id missing', () => {
   const previewTool = {
+    runtime,
     name: 'message',
     function: 'message_notify_user',
     args: {},

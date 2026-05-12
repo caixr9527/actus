@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -14,6 +15,13 @@ from app.domain.models import (
     StepOutputMode,
     StepTaskModeHint,
     normalize_wait_payload,
+)
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceRuntimeContextProviderPort
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
+    validate_sandbox_capability_profile_payload,
 )
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.normalizers import (
@@ -28,6 +36,8 @@ from app.domain.services.workspace_runtime import WorkspaceEnvironmentSnapshot, 
 from .contracts import PendingConfirmationPacket, PromptContextPacket, PromptStage
 from .policies import ContextPolicy, get_context_policy
 
+logger = logging.getLogger(__name__)
+
 # P2 上下文裁剪常量集中在这里，避免 domain 反向依赖 infrastructure settings。
 _ARTIFACT_LIMIT = 6
 _BRIEF_LIMIT = 3
@@ -41,6 +51,8 @@ _MEMORY_CONTENT_MAX_CHARS = 240
 _STEP_SUMMARY_MAX_CHARS = 160
 _FINAL_MESSAGE_MAX_CHARS = 240
 _DIGEST_TEXT_MAX_CHARS = 240
+_RUN_BRIEF_SUMMARY_MAX_CHARS = 120
+_RUN_BRIEF_EXCERPT_MAX_CHARS = 160
 _SEARCH_EVIDENCE_SNIPPET_MAX_CHARS = 520
 _WEB_EVIDENCE_SUMMARY_MAX_CHARS = 720
 _DEFAULT_RUNTIME_TIMEZONE = "Asia/Shanghai"
@@ -52,8 +64,10 @@ class RuntimeContextService:
     def __init__(
             self,
             workspace_runtime_service: Optional[WorkspaceRuntimeService] = None,
+            evidence_context_provider: EvidenceRuntimeContextProviderPort | None = None,
     ) -> None:
         self._workspace_runtime_service = workspace_runtime_service
+        self._evidence_context_provider = evidence_context_provider
 
     def build_packet(
             self,
@@ -62,6 +76,7 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             step: Optional[Step] = None,
             task_mode: str = "",
+            include_sandbox_profile_for_summary: bool = False,
     ) -> PromptContextPacket:
         """统一生成结构化 Prompt 上下文数据包。"""
         return self._build_packet(
@@ -70,6 +85,7 @@ class RuntimeContextService:
             step=step,
             task_mode=task_mode,
             workspace_snapshot=None,
+            include_sandbox_profile_for_summary=include_sandbox_profile_for_summary,
         )
 
     async def build_packet_async(
@@ -79,18 +95,74 @@ class RuntimeContextService:
             state: PlannerReActLangGraphState,
             step: Optional[Step] = None,
             task_mode: str = "",
+            include_sandbox_profile_for_summary: bool = False,
     ) -> PromptContextPacket:
         """基于 workspace 快照构造 Prompt 上下文数据包。"""
         workspace_snapshot = None
         if self._workspace_runtime_service is not None:
             workspace_snapshot = await self._workspace_runtime_service.build_environment_snapshot()
-        return self._build_packet(
+        packet = self._build_packet(
             stage=stage,
             state=state,
             step=step,
             task_mode=task_mode,
             workspace_snapshot=workspace_snapshot,
+            include_sandbox_profile_for_summary=include_sandbox_profile_for_summary,
         )
+        evidence_context = await self._build_runtime_evidence_context(
+            stage=stage,
+            state=state,
+            step=step,
+            task_mode=str(packet.get("task_mode") or task_mode or ""),
+        )
+        has_completed_steps = self._has_completed_steps(state=state)
+        if evidence_context is not None:
+            snapshot = evidence_context.evidence_reuse_snapshot
+            log_runtime(
+                logger,
+                logging.INFO,
+                "runtime_evidence_context_built",
+                run_id=str(evidence_context.run_id or ""),
+                current_step_id=str(evidence_context.current_step_id or ""),
+                source_step_ids=list(evidence_context.source_step_ids or []),
+                do_not_repeat_count=(
+                    len(list(snapshot.do_not_repeat or []))
+                    if snapshot is not None
+                    else 0
+                ),
+                result_handle_count=len(list(evidence_context.result_handles or [])),
+                cursor=str(evidence_context.cursor or ""),
+            )
+            packet.update(
+                self._build_stage_evidence_packet_fields(
+                    stage=stage,
+                    evidence_context=evidence_context,
+                )
+            )
+            visible_fields = [
+                field_name
+                for field_name in list(packet.get("prompt_visible_fields") or [])
+                if field_name not in {"evidence_context", "summary_evidence_context", "evidence_replan_context"}
+            ]
+            if evidence_context.prompt_digest and "evidence_prompt_digest" not in visible_fields:
+                visible_fields.append("evidence_prompt_digest")
+            if stage == "summary" and "summary_evidence_context" not in visible_fields:
+                visible_fields.append("summary_evidence_context")
+            if stage == "replan" and "evidence_replan_context" not in visible_fields:
+                visible_fields.append("evidence_replan_context")
+            packet["prompt_visible_fields"] = visible_fields
+        elif stage in {"replan", "summary"} and has_completed_steps:
+            packet["evidence_context_error"] = {
+                "reason_code": "evidence_context_missing",
+                "stage": stage,
+                "completed_step_ids": self._collect_completed_step_ids_for_error(state=state),
+            }
+            packet["prompt_visible_fields"] = [
+                field_name
+                for field_name in list(packet.get("prompt_visible_fields") or [])
+                if field_name != "evidence_context_error"
+            ]
+        return packet
 
     def _build_packet(
             self,
@@ -100,6 +172,7 @@ class RuntimeContextService:
             step: Optional[Step],
             task_mode: str,
             workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+            include_sandbox_profile_for_summary: bool,
     ) -> PromptContextPacket:
         """统一生成结构化 Prompt 上下文数据包。"""
         resolved_task_mode = self._resolve_task_mode(stage=stage, state=state, step=step, task_mode=task_mode)
@@ -117,12 +190,17 @@ class RuntimeContextService:
             packet["open_questions"] = self._build_open_questions(state=state, step=step)
         if policy.include_pending_confirmation:
             packet["pending_confirmation"] = self._build_pending_confirmation(state=state)
-        if policy.include_environment_digest:
+        should_include_sandbox_profile = (
+                policy.include_sandbox_profile
+                or (stage == "summary" and include_sandbox_profile_for_summary)
+        )
+        if policy.include_environment_digest or should_include_sandbox_profile:
             packet["environment_digest"] = self._build_environment_digest(
                 state=state,
                 stage=stage,
                 task_mode=resolved_task_mode,
                 workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=should_include_sandbox_profile,
             )
         if policy.include_observation_digest:
             packet["observation_digest"] = self._build_observation_digest(
@@ -135,6 +213,7 @@ class RuntimeContextService:
         if policy.include_recent_action_digest:
             packet["recent_action_digest"] = self._build_recent_action_digest(
                 state=state,
+                stage=stage,
                 task_mode=resolved_task_mode,
             )
         if policy.include_working_memory_digest:
@@ -175,6 +254,153 @@ class RuntimeContextService:
             "recent_action_digest": self._wrap_state_digest(task_mode=task_mode,
                                                             payload=packet.get("recent_action_digest")),
         }
+
+    async def _build_runtime_evidence_context(
+            self,
+            *,
+            stage: PromptStage,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+            task_mode: str,
+    ):
+        if self._evidence_context_provider is None or stage not in {"execute", "replan", "summary"}:
+            return None
+        scope = self._build_access_scope(state=state, step=step)
+        if scope is None:
+            return None
+        completed_step_ids = self._collect_completed_step_ids(state=state, current_step=step)
+        return await self._evidence_context_provider.build_context(
+            stage=stage,
+            scope=scope,
+            completed_step_ids=completed_step_ids,
+            step=step,
+            task_mode=task_mode,
+        )
+
+    @staticmethod
+    def _build_stage_evidence_packet_fields(
+            *,
+            stage: PromptStage,
+            evidence_context,
+    ) -> Dict[str, Any]:
+        context_payload = evidence_context.model_dump(mode="json")
+        if stage == "summary":
+            return {
+                "evidence_context_cursor": evidence_context.cursor,
+                "evidence_prompt_digest": evidence_context.prompt_digest,
+                "summary_evidence_context": {
+                    "evidence_prompt_digest": evidence_context.prompt_digest,
+                    "completed_actions": context_payload.get("evidence_reuse_snapshot", {}).get(
+                        "completed_actions", []
+                    ) if isinstance(context_payload.get("evidence_reuse_snapshot"), dict) else [],
+                    "available_artifacts": context_payload.get("evidence_reuse_snapshot", {}).get(
+                        "available_artifacts", []
+                    ) if isinstance(context_payload.get("evidence_reuse_snapshot"), dict) else [],
+                    "verified_claims": context_payload.get("evidence_reuse_snapshot", {}).get(
+                        "verified_claims", []
+                    ) if isinstance(context_payload.get("evidence_reuse_snapshot"), dict) else [],
+                    "evidence_gaps": context_payload.get("evidence_gaps", []),
+                    "cursor": evidence_context.cursor,
+                },
+            }
+        if stage == "replan":
+            snapshot = context_payload.get("evidence_reuse_snapshot")
+            return {
+                "evidence_context": context_payload,
+                "evidence_context_cursor": evidence_context.cursor,
+                "evidence_prompt_digest": evidence_context.prompt_digest,
+                "evidence_replan_context": {
+                    "completed_actions": snapshot.get("completed_actions", []) if isinstance(snapshot, dict) else [],
+                    "available_artifacts": snapshot.get("available_artifacts", []) if isinstance(snapshot, dict) else [],
+                    "verified_claims": snapshot.get("verified_claims", []) if isinstance(snapshot, dict) else [],
+                    "evidence_gaps": context_payload.get("evidence_gaps", []),
+                    "do_not_repeat": snapshot.get("do_not_repeat", []) if isinstance(snapshot, dict) else [],
+                    "result_handles": context_payload.get("result_handles", []),
+                    "cursor": evidence_context.cursor,
+                },
+            }
+        return {
+            "evidence_context": context_payload,
+            "evidence_context_cursor": evidence_context.cursor,
+            "evidence_prompt_digest": evidence_context.prompt_digest,
+        }
+
+    @staticmethod
+    def _build_access_scope(
+            *,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+    ) -> AccessScopeResult | None:
+        user_id = str(state.get("user_id") or "").strip()
+        session_id = str(state.get("session_id") or "").strip()
+        workspace_id = str(state.get("workspace_id") or "").strip()
+        run_id = str(state.get("run_id") or "").strip()
+        if not user_id or not session_id or not workspace_id or not run_id:
+            return None
+        return AccessScopeResult(
+            tenant_id=user_id,
+            user_id=user_id,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            current_step_id=str(getattr(step, "id", None) or state.get("current_step_id") or "").strip() or None,
+        )
+
+    @staticmethod
+    def _collect_completed_step_ids(
+            *,
+            state: PlannerReActLangGraphState,
+            current_step: Optional[Step],
+    ) -> list[str]:
+        current_step_id = str(getattr(current_step, "id", None) or "").strip()
+        completed_ids: list[str] = []
+        for item in list(state.get("step_states") or []):
+            if not isinstance(item, dict):
+                continue
+            step_id = str(item.get("step_id") or "").strip()
+            if not step_id or step_id == current_step_id:
+                continue
+            if str(item.get("status") or "") != ExecutionStatus.COMPLETED.value:
+                continue
+            if step_id not in completed_ids:
+                completed_ids.append(step_id)
+        plan = state.get("plan")
+        for plan_step in list(getattr(plan, "steps", []) or []):
+            step_id = str(getattr(plan_step, "id", "") or "").strip()
+            if not step_id or step_id == current_step_id or step_id in completed_ids:
+                continue
+            if getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED:
+                completed_ids.append(step_id)
+        return completed_ids
+
+    @staticmethod
+    def _has_completed_steps(*, state: PlannerReActLangGraphState) -> bool:
+        for item in list(state.get("step_states") or []):
+            if isinstance(item, dict) and str(item.get("status") or "") == ExecutionStatus.COMPLETED.value:
+                return True
+        plan = state.get("plan")
+        return any(
+            getattr(plan_step, "status", None) == ExecutionStatus.COMPLETED
+            for plan_step in list(getattr(plan, "steps", []) or [])
+        )
+
+    @staticmethod
+    def _collect_completed_step_ids_for_error(*, state: PlannerReActLangGraphState) -> list[str]:
+        completed_ids: list[str] = []
+        for item in list(state.get("step_states") or []):
+            if not isinstance(item, dict) or str(item.get("status") or "") != ExecutionStatus.COMPLETED.value:
+                continue
+            step_id = str(item.get("step_id") or "").strip()
+            if step_id and step_id not in completed_ids:
+                completed_ids.append(step_id)
+        plan = state.get("plan")
+        for plan_step in list(getattr(plan, "steps", []) or []):
+            if getattr(plan_step, "status", None) != ExecutionStatus.COMPLETED:
+                continue
+            step_id = str(getattr(plan_step, "id", "") or "").strip()
+            if step_id and step_id not in completed_ids:
+                completed_ids.append(step_id)
+        return completed_ids
 
     def normalize_runtime_recent_action(self, raw: Any) -> Dict[str, Any]:
         """统一接收执行阶段产出的 recent_action 结构，避免节点自己做字段筛选。"""
@@ -398,6 +624,7 @@ class RuntimeContextService:
             stage: PromptStage,
             task_mode: str,
             workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot] = None,
+            include_sandbox_profile: bool = False,
     ) -> Dict[str, Any]:
         # environment 只保留“当前模式还能依赖什么”，不负责回放完整轨迹。
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
@@ -419,7 +646,11 @@ class RuntimeContextService:
                     workspace_snapshot=workspace_snapshot,
                 ),
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
         if task_mode == StepTaskModeHint.BROWSER_INTERACTION.value:
             current_page = self._collect_browser_page_summary(
                 workspace_snapshot=workspace_snapshot,
@@ -428,7 +659,11 @@ class RuntimeContextService:
                 "current_page": current_page,
                 "actionable_elements": list(current_page.get("actionable_elements") or [])[:_OPEN_QUESTION_LIMIT],
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
         if task_mode in {StepTaskModeHint.CODING.value, StepTaskModeHint.FILE_PROCESSING.value}:
             digest = {
                 "cwd": self._extract_latest_shell_cwd(
@@ -447,7 +682,11 @@ class RuntimeContextService:
                     workspace_snapshot=workspace_snapshot,
                 ),
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
             pending_confirmation = self._build_pending_confirmation(state=state)
             digest = {
@@ -455,7 +694,11 @@ class RuntimeContextService:
                 "wait_prompt": str(pending_confirmation.get("prompt") or "").strip(),
                 "wait_options": list(pending_confirmation.get("options") or []),
             }
-            return self._clean_dict(digest)
+            return self._with_sandbox_profile(
+                digest=self._clean_dict(digest),
+                workspace_snapshot=workspace_snapshot,
+                include_sandbox_profile=include_sandbox_profile,
+            )
 
         digest = {
             "available_artifacts": self._collect_available_artifacts(
@@ -463,7 +706,43 @@ class RuntimeContextService:
             ),
             "stage": stage,
         }
-        return self._clean_dict(digest)
+        return self._with_sandbox_profile(
+            digest=self._clean_dict(digest),
+            workspace_snapshot=workspace_snapshot,
+            include_sandbox_profile=include_sandbox_profile,
+        )
+
+    def _with_sandbox_profile(
+            self,
+            *,
+            digest: Dict[str, Any],
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+            include_sandbox_profile: bool,
+    ) -> Dict[str, Any]:
+        if not include_sandbox_profile:
+            return digest
+        profile_summary = self._extract_sandbox_profile_prompt_summary(workspace_snapshot=workspace_snapshot)
+        if profile_summary:
+            return {**digest, "sandbox_capability_profile": profile_summary}
+        return digest
+
+    @staticmethod
+    def _extract_sandbox_profile_prompt_summary(
+            *,
+            workspace_snapshot: Optional[WorkspaceEnvironmentSnapshot],
+    ) -> Dict[str, Any]:
+        if workspace_snapshot is None:
+            return {}
+        raw_profile = dict(workspace_snapshot.workspace.environment_summary or {}).get(
+            SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY
+        )
+        if not isinstance(raw_profile, dict):
+            return {}
+        try:
+            profile = validate_sandbox_capability_profile_payload(raw_profile)
+        except ValueError:
+            return {}
+        return profile.prompt_summary.model_dump(mode="json")
 
     def _build_observation_digest(
             self,
@@ -486,10 +765,10 @@ class RuntimeContextService:
                     item
                     for item in normalize_text_list(last_step.outcome.blockers)
                 ]
-                # facts_learned 作为步骤级证据文本，需要把完整内容传给后续 step，而不是再次截断成摘要。
                 digest["last_step_facts"] = [
-                    str(item)
-                    for item in normalize_text_list(last_step.outcome.facts_learned)
+                    str(item.text)
+                    for item in list(getattr(last_step.outcome, "evidence_backed_facts", []) or [])
+                    if str(item.text or "").strip()
                 ]
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             latest_fetch_summary = self._collect_fetch_page_summaries(
@@ -522,6 +801,7 @@ class RuntimeContextService:
             self,
             *,
             state: PlannerReActLangGraphState,
+            stage: PromptStage,
             task_mode: str,
     ) -> Dict[str, Any]:
         # recent_action 的失败/阻断只读同模式，research/web_reading 证据允许向后投影给下一阶段消费。
@@ -541,12 +821,14 @@ class RuntimeContextService:
             digest["last_blocked_tool_call"] = dict(same_mode_digest.get("last_blocked_tool_call") or {})
         if task_mode in {StepTaskModeHint.RESEARCH.value, StepTaskModeHint.WEB_READING.value}:
             digest["recent_search_queries"] = normalize_text_list(same_mode_digest.get("recent_search_queries"))
-        digest.update(
-            self._project_cross_step_evidence(
-                task_mode=task_mode,
-                source_digest=cross_mode_digest,
+        # PR4 后 replan/summary 的 evidence 来源统一走 EvidenceDigestResult。
+        if stage not in {"replan", "summary"}:
+            digest.update(
+                self._project_cross_step_evidence(
+                    task_mode=task_mode,
+                    source_digest=cross_mode_digest,
+                )
             )
-        )
         if task_mode == StepTaskModeHint.HUMAN_WAIT.value:
             digest["last_user_wait_reason"] = str(
                 self._build_pending_confirmation(state=state).get("prompt") or "").strip()
@@ -572,17 +854,17 @@ class RuntimeContextService:
                 self._normalize_search_evidence_items(research_progress.get("search_evidence_summaries"))
             )
             search_evidence = self._dedupe_evidence_items(search_evidence, key_names=("url", "snippet"))[:5]
+            progress_metrics = {
+                "candidate_url_count": int(research_progress.get("candidate_url_count") or len(search_evidence)),
+                "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
+                "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
+                "coverage_score": float(research_progress.get("coverage_score") or 0.0),
+                "latest_query": str(research_progress.get("latest_query") or "").strip(),
+                "missing_signals": normalize_text_list(research_progress.get("missing_signals")),
+            }
             if search_evidence:
                 projected["search_evidence_summaries"] = search_evidence
-                projected["research_progress"] = {
-                    "candidate_url_count": int(research_progress.get("candidate_url_count") or len(search_evidence)),
-                    "fetched_url_count": int(research_progress.get("fetched_url_count") or 0),
-                    "fetch_success_count": int(research_progress.get("fetch_success_count") or 0),
-                    "coverage_score": float(research_progress.get("coverage_score") or 0.0),
-                    "latest_query": str(research_progress.get("latest_query") or "").strip(),
-                    "missing_signals": normalize_text_list(research_progress.get("missing_signals")),
-                    "search_evidence_summaries": search_evidence,
-                }
+                projected["research_progress"] = progress_metrics
             web_evidence = self._normalize_web_reading_evidence_items(
                 source_digest.get("web_reading_evidence_summaries")
             )
@@ -592,7 +874,7 @@ class RuntimeContextService:
             web_evidence = self._dedupe_evidence_items(web_evidence, key_names=("url", "summary"))[:6]
             if web_evidence:
                 projected["web_reading_evidence_summaries"] = web_evidence
-                projected.setdefault("research_progress", {})["web_reading_evidence_summaries"] = web_evidence
+                projected.setdefault("research_progress", progress_metrics)
             explicit_url_state = source_digest.get("explicit_url_read_state") or research_progress.get(
                 "explicit_url_read_state"
             )
@@ -1014,10 +1296,14 @@ class RuntimeContextService:
                     item
                     for item in normalize_text_list(target_step.outcome.blockers)
                 ],
-                # 当前步骤执行结果里的证据文本必须完整暴露给后续 prompt，上层模型才能直接复用。
+                "evidence_backed_facts": [
+                    item.model_dump(mode="json")
+                    for item in list(getattr(target_step.outcome, "evidence_backed_facts", []) or [])
+                ],
                 "facts_learned": [
-                    str(item)
-                    for item in normalize_text_list(target_step.outcome.facts_learned)
+                    str(item.text)
+                    for item in list(getattr(target_step.outcome, "evidence_backed_facts", []) or [])
+                    if str(item.text or "").strip()
                 ],
                 "open_questions": [
                     item
@@ -1070,10 +1356,11 @@ class RuntimeContextService:
                     "description": item.get("description"),
                     "status": str(item.get("status") or "").strip(),
                     "summary": outcome.get("summary"),
-                    # 已完成步骤摘要中的 facts_learned 同样保留全文，避免下游只能看到残缺片段。
+                    "evidence_backed_facts": list(outcome.get("evidence_backed_facts") or []),
                     "facts_learned": [
-                        str(item)
-                        for item in normalize_text_list(outcome.get("facts_learned"))
+                        str(item.get("text") or "").strip()
+                        for item in list(outcome.get("evidence_backed_facts") or [])
+                        if isinstance(item, dict) and str(item.get("text") or "").strip()
                     ],
                 }
             )
@@ -1095,10 +1382,18 @@ class RuntimeContextService:
                     "title": str(item.get("title") or "").strip(),
                     "goal": str(item.get("goal") or "").strip(),
                     "status": str(item.get("status") or "").strip(),
-                    "final_answer_summary": item.get("final_answer_summary"),
-                    "final_answer_text_excerpt": item.get("final_answer_text_excerpt"),
+                    "final_answer_summary": self._truncate_text(
+                        item.get("final_answer_summary"),
+                        max_chars=_RUN_BRIEF_SUMMARY_MAX_CHARS,
+                    ),
+                    "final_answer_text_excerpt": self._truncate_text(
+                        item.get("final_answer_text_excerpt"),
+                        max_chars=_RUN_BRIEF_EXCERPT_MAX_CHARS,
+                    ),
                 }
             )
+            if len(briefs) >= _BRIEF_LIMIT:
+                break
         return briefs
 
     def _build_plan_snapshot(self, *, state: PlannerReActLangGraphState) -> Dict[str, Any]:

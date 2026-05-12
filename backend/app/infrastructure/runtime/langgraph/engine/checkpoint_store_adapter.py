@@ -8,6 +8,7 @@
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from app.domain.models import CheckpointRef
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.workspace_runtime import WorkspaceManager
 
@@ -100,10 +101,10 @@ class CheckpointStoreAdapter:
             run_id: Optional[str],
             checkpointer: Any,
             invoke_config: Dict[str, Dict[str, str]],
-    ) -> None:
-        """从 checkpointer 读取最新 checkpoint，并回写 WorkflowRun 引用。"""
+    ) -> CheckpointRef | None:
+        """从 checkpointer 读取最新 checkpoint 引用，不直接写入数据库状态。"""
         if not run_id or checkpointer is None:
-            return
+            return None
 
         configurable = invoke_config.get("configurable") or {}
         lookup_config = {
@@ -120,26 +121,16 @@ class CheckpointStoreAdapter:
                 config=lookup_config,
             )
             if checkpoint_tuple is None:
-                return
+                return None
 
             checkpoint_namespace, checkpoint_id = self._extract_checkpoint_ref(checkpoint_tuple.config)
             if not checkpoint_id:
-                return
+                return None
 
-            async with self._uow_factory() as uow:
-                run = await uow.workflow_run.get_by_id(run_id)
-                if run is None:
-                    logger.warning("运行[%s]不存在，跳过checkpoint引用回写", run_id)
-                    return
-
-                current_namespace = self._normalize_checkpoint_namespace(run.checkpoint_namespace)
-                if current_namespace == checkpoint_namespace and run.checkpoint_id == checkpoint_id:
-                    return
-
-                await uow.workflow_run.update_checkpoint_ref(
-                    run_id=run_id,
-                    checkpoint_namespace=checkpoint_namespace,
-                    checkpoint_id=checkpoint_id,
-                )
+            return CheckpointRef(
+                namespace=checkpoint_namespace,
+                checkpoint_id=checkpoint_id,
+            )
         except Exception as e:
             logger.warning("会话[%s]同步checkpoint引用失败: %s", self._session_id, e)
+            return None

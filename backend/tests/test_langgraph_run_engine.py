@@ -1,5 +1,6 @@
 import asyncio
 import io
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,11 +18,15 @@ from app.domain.models import (
     SessionContextSnapshot,
     Plan,
     Step,
+    StepOutcome,
     ExecutionStatus,
     Workspace,
+    SessionStatus,
 )
 from app.domain.services.workspace_runtime.context import RuntimeContextService
-from app.infrastructure.runtime.langgraph.engine.run_engine import LangGraphRunEngine
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContext
+from app.infrastructure.runtime.langgraph.engine.run_engine import DocumentInputContractError, LangGraphRunEngine
 
 
 class _FakeGraph:
@@ -70,6 +75,7 @@ class _FakeUoW:
         self.session_context_snapshot = session_context_snapshot_repo
         self.workspace = workspace_repo or SimpleNamespace(
             get_by_id=AsyncMock(return_value=None),
+            get_by_id_for_user=AsyncMock(return_value=None),
             get_by_session_id=AsyncMock(return_value=None),
         )
 
@@ -78,6 +84,53 @@ class _FakeUoW:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return None
+
+
+class _CoordinatorSessionRepo:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+        self.update_runtime_state = AsyncMock(side_effect=self._update_runtime_state)
+
+    async def get_by_id_for_update(self, session_id: str):
+        return self.session if session_id == self.session.id else None
+
+    async def _update_runtime_state(self, session_id: str, *, status: SessionStatus, **kwargs) -> None:
+        self.session.status = status
+
+
+class _CoordinatorWorkflowRunRepo:
+    def __init__(self, run: WorkflowRun) -> None:
+        self.run = run
+        self.update_status = AsyncMock(side_effect=self._update_status)
+        self.update_runtime_metadata = AsyncMock(side_effect=self._update_runtime_metadata)
+        self.update_checkpoint_ref = AsyncMock(side_effect=self._update_checkpoint_ref)
+
+    async def get_by_id(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def get_by_id_for_update(self, run_id: str):
+        return self.run if run_id == self.run.id else None
+
+    async def _update_status(self, run_id: str, *, status: WorkflowRunStatus, **kwargs) -> None:
+        self.run.status = status
+        if "current_step_id" in kwargs:
+            self.run.current_step_id = kwargs["current_step_id"]
+
+    async def _update_runtime_metadata(self, run_id: str, runtime_metadata: dict, current_step_id: str | None) -> None:
+        self.run.runtime_metadata.update(runtime_metadata)
+        self.run.current_step_id = current_step_id
+
+    async def _update_checkpoint_ref(
+            self,
+            run_id: str,
+            checkpoint_namespace: str | None,
+            checkpoint_id: str | None,
+    ) -> None:
+        self.run.checkpoint_namespace = checkpoint_namespace
+        self.run.checkpoint_id = checkpoint_id
+
+    async def list_event_records_by_session(self, session_id: str):
+        return []
 
 
 def _build_stage_llms(llm=object()) -> dict[str, object]:
@@ -274,10 +327,37 @@ class _InputPartsFileStorage:
         return f"https://cdn.example.com/{file.id}"
 
 
-def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_attachments() -> None:
+class _DocumentFactContextBuilder:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def build_for_tool_event(self, *, source_event_id: str, current_step_id: str | None = None):
+        raise AssertionError("document input fact 不应调用 tool event context builder")
+
+    async def build_for_document_input(self, *, source_event_id: str, scope: AccessScopeResult):
+        self.calls.append({"source_event_id": source_event_id, "scope": scope})
+        return SandboxFactProjectionContext(
+            scope=scope,
+            profile_ref={"status": "missing"},
+            sandbox_id=None,
+            source_event_id=source_event_id,
+            current_step_id=scope.current_step_id,
+        )
+
+
+class _DocumentFactProjector:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def record_document_context(self, *, context, parts):
+        self.calls.append({"context": context, "parts": list(parts)})
+
+
+def test_langgraph_run_engine_build_input_parts_should_emit_document_parts_for_attachments() -> None:
     engine = _build_run_engine(
         session_id="session-1",
         stage_llms=_build_stage_llms(),
+        user_id="user-1",
         file_storage=_InputPartsFileStorage(
             {
                 "file-1": b"content-a",
@@ -293,15 +373,26 @@ def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_att
                     filename="same.txt",
                     filepath="/home/ubuntu/upload/file-1/same.txt",
                     mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
                 ),
                 "/home/ubuntu/upload/file-2/same.txt": File(
                     id="file-2",
                     filename="same.txt",
                     filepath="/home/ubuntu/upload/file-2/same.txt",
                     mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
                 ),
             }
         )
+    )
+    scope = AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
     )
 
     parts = asyncio.run(
@@ -314,18 +405,217 @@ def test_langgraph_run_engine_build_input_parts_should_distinguish_same_name_att
                 ],
             ),
             uow=uow,
+            scope=scope,
         )
     )
 
-    assert [part["sandbox_filepath"] for part in parts] == [
+    assert [part["type"] for part in parts] == ["document", "document"]
+    assert [part["source"]["sandbox_filepath"] for part in parts] == [
         "/home/ubuntu/upload/file-1/same.txt",
         "/home/ubuntu/upload/file-2/same.txt",
     ]
-    assert [part["file_url"] for part in parts] == [
-        "https://cdn.example.com/file-1",
-        "https://cdn.example.com/file-2",
-    ]
-    assert parts[0]["base64_payload"] != parts[1]["base64_payload"]
+    assert [part["source"]["file_id"] for part in parts] == ["file-1", "file-2"]
+    assert [part["text_excerpt"] for part in parts] == ["content-a", "content-b"]
+    assert "base64_payload" not in parts[0]
+    assert "file_url" not in parts[0]
+
+
+def test_langgraph_run_engine_build_input_parts_should_record_document_facts_with_message_source() -> None:
+    context_builder = _DocumentFactContextBuilder()
+    document_projector = _DocumentFactProjector()
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content-a"}),
+        sandbox_fact_context_builder=context_builder,
+        sandbox_fact_document_projector=document_projector,
+    )
+    uow = SimpleNamespace(
+        session=_InputPartsSessionRepo(
+            {
+                "/home/ubuntu/upload/file-1/note.txt": File(
+                    id="file-1",
+                    filename="note.txt",
+                    filepath="/home/ubuntu/upload/file-1/note.txt",
+                    mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
+                )
+            }
+        )
+    )
+    scope = AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
+    )
+
+    parts = asyncio.run(
+        engine._build_input_parts(
+            Message(
+                message="读取附件",
+                attachments=["/home/ubuntu/upload/file-1/note.txt"],
+                source_event_id="message-event-1",
+            ),
+            uow=uow,
+            scope=scope,
+        )
+    )
+
+    assert parts[0]["source"]["file_id"] == "file-1"
+    assert context_builder.calls[0]["source_event_id"] == "message-event-1"
+    assert document_projector.calls[0]["context"].source_event_id == "message-event-1"
+    assert document_projector.calls[0]["parts"][0].source.file_id == "file-1"
+
+
+def test_langgraph_run_engine_build_input_parts_should_skip_document_fact_without_source_event_id() -> None:
+    context_builder = _DocumentFactContextBuilder()
+    document_projector = _DocumentFactProjector()
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content-a"}),
+        sandbox_fact_context_builder=context_builder,
+        sandbox_fact_document_projector=document_projector,
+    )
+    uow = SimpleNamespace(
+        session=_InputPartsSessionRepo(
+            {
+                "/home/ubuntu/upload/file-1/note.txt": File(
+                    id="file-1",
+                    filename="note.txt",
+                    filepath="/home/ubuntu/upload/file-1/note.txt",
+                    mime_type="text/plain",
+                    extension=".txt",
+                    size=9,
+                )
+            }
+        )
+    )
+    scope = AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
+    )
+
+    parts = asyncio.run(
+        engine._build_input_parts(
+            Message(
+                message="读取附件",
+                attachments=["/home/ubuntu/upload/file-1/note.txt"],
+            ),
+            uow=uow,
+            scope=scope,
+        )
+    )
+
+    assert parts[0]["source"]["file_id"] == "file-1"
+    assert context_builder.calls == []
+    assert document_projector.calls == []
+
+
+def test_langgraph_run_engine_build_input_parts_should_fail_when_scope_missing_for_attachments() -> None:
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content"}),
+    )
+    uow = SimpleNamespace(session=_InputPartsSessionRepo({}))
+
+    with pytest.raises(RuntimeError, match="document input contract dependency missing"):
+        asyncio.run(
+            engine._build_input_parts(
+                Message(
+                    message="读取附件",
+                    attachments=["/home/ubuntu/upload/file-1/notes.txt"],
+                ),
+                uow=uow,
+                scope=None,
+            )
+        )
+
+
+def test_langgraph_run_engine_build_graph_input_state_should_not_fallback_when_document_scope_missing(monkeypatch) -> None:
+    fake_graph = _FakeGraph()
+    monkeypatch.setattr(
+        "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
+        lambda **kwargs: fake_graph,
+    )
+    session_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Session(
+                id="session-1",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                current_run_id="run-1",
+            )
+        )
+    )
+    workspace_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                user_id="user-1",
+                current_run_id="run-1",
+            )
+        ),
+        get_by_id_for_user=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                user_id="user-1",
+                current_run_id="run-1",
+            )
+        ),
+        get_by_session_id=AsyncMock(return_value=None),
+    )
+    workflow_run_repo = SimpleNamespace(
+        get_by_id=AsyncMock(
+            return_value=WorkflowRun(
+                id="run-1",
+                session_id="session-1",
+                user_id="user-1",
+                status=WorkflowRunStatus.RUNNING,
+            )
+        )
+    )
+    workflow_run_summary_repo = SimpleNamespace(list_by_session_id=AsyncMock(side_effect=[[], []]))
+    session_context_snapshot_repo = SimpleNamespace(get_by_session_id=AsyncMock(return_value=None))
+    engine = _build_run_engine(
+        session_id="session-1",
+        stage_llms=_build_stage_llms(),
+        user_id="user-1",
+        file_storage=_InputPartsFileStorage({"file-1": b"content"}),
+        uow_factory=lambda: _FakeUoW(
+            session_repo=session_repo,
+            workflow_run_repo=workflow_run_repo,
+            workflow_run_summary_repo=workflow_run_summary_repo,
+            session_context_snapshot_repo=session_context_snapshot_repo,
+            workspace_repo=workspace_repo,
+        ),
+        access_control_service=None,
+    )
+    engine._access_control_service = None
+
+    with pytest.raises(DocumentInputContractError, match="scope"):
+        asyncio.run(
+            engine._build_graph_input_state(
+                message=Message(
+                    message="读取附件",
+                    attachments=["/home/ubuntu/upload/file-1/notes.txt"],
+                ),
+                run_id="run-1",
+                invoke_config={"configurable": {"thread_id": "session-1"}},
+            )
+        )
 
 
 def test_langgraph_run_engine_resume_should_use_command_resume(monkeypatch) -> None:
@@ -546,7 +836,10 @@ def test_langgraph_run_engine_should_normalize_checkpoint_state_on_load(monkeypa
     assert state["current_step_id"] is None
 
 
-def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_and_completed_summaries(monkeypatch) -> None:
+def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_and_completed_summaries(
+        monkeypatch,
+        caplog,
+) -> None:
     fake_graph = _FakeGraph()
     monkeypatch.setattr(
         "app.infrastructure.runtime.langgraph.engine.run_engine.build_planner_react_langgraph_graph",
@@ -563,14 +856,15 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
             )
         )
     )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        user_id="user-1",
+        current_run_id="run-1",
+    )
     workspace_repo = SimpleNamespace(
-        get_by_id=AsyncMock(
-            return_value=Workspace(
-                id="workspace-1",
-                session_id="session-1",
-                current_run_id="run-1",
-            )
-        ),
+        get_by_id=AsyncMock(return_value=workspace),
+        get_by_id_for_user=AsyncMock(return_value=workspace),
         get_by_session_id=AsyncMock(return_value=None),
     )
     workflow_run_repo = SimpleNamespace(
@@ -638,16 +932,22 @@ def test_langgraph_run_engine_should_build_initial_state_with_session_snapshot_a
         ),
     )
 
-    state = asyncio.run(
-        engine._build_graph_input_state(
-            message=Message(message="hello"),
-            run_id="run-1",
-            invoke_config={"configurable": {"thread_id": "session-1"}},
+    with caplog.at_level(logging.WARNING):
+        state = asyncio.run(
+            engine._build_graph_input_state(
+                message=Message(message="hello"),
+                run_id="run-1",
+                invoke_config={"configurable": {"thread_id": "session-1"}},
+            )
         )
-    )
 
     assert state["conversation_summary"] == "跨轮会话摘要"
     assert state["workspace_id"] == "workspace-1"
+    workspace_repo.get_by_id_for_user.assert_awaited_once_with(
+        workspace_id="workspace-1",
+        user_id="user-1",
+    )
+    assert "构建初始状态失败，回退最小输入" not in caplog.text
     assert workflow_run_summary_repo.list_by_session_id.await_args_list[0].kwargs["statuses"] == [WorkflowRunStatus.COMPLETED]
     assert workflow_run_summary_repo.list_by_session_id.await_args_list[1].kwargs["statuses"] == [
         WorkflowRunStatus.FAILED,
@@ -680,9 +980,24 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
         thread_id="thread-1",
         status=WorkflowRunStatus.RUNNING,
     )
-    workflow_run_repo = SimpleNamespace(
-        get_by_id=AsyncMock(return_value=run),
-        update_runtime_metadata=AsyncMock(),
+    session = Session(
+        id="session-1",
+        user_id="user-1",
+        workspace_id="workspace-1",
+        current_run_id="run-1",
+        status=SessionStatus.RUNNING,
+    )
+    workspace = Workspace(
+        id="workspace-1",
+        session_id="session-1",
+        current_run_id="run-1",
+    )
+    session_repo = _CoordinatorSessionRepo(session)
+    workflow_run_repo = _CoordinatorWorkflowRunRepo(run)
+    workspace_repo = SimpleNamespace(
+        get_by_id=AsyncMock(return_value=workspace),
+        get_by_id_for_user=AsyncMock(return_value=workspace),
+        get_by_session_id=AsyncMock(return_value=workspace),
     )
     first_summary = WorkflowRunSummary(
         run_id="run-1",
@@ -707,10 +1022,11 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
         session_id="session-1",
         stage_llms=_build_stage_llms(),
         uow_factory=lambda: _FakeUoW(
-            session_repo=SimpleNamespace(),
+            session_repo=session_repo,
             workflow_run_repo=workflow_run_repo,
             workflow_run_summary_repo=workflow_run_summary_repo,
             session_context_snapshot_repo=session_context_snapshot_repo,
+            workspace_repo=workspace_repo,
         ),
     )
 
@@ -784,6 +1100,10 @@ def test_langgraph_run_engine_should_sync_run_summary_and_session_snapshot(monke
     asyncio.run(engine._sync_graph_state_contract(run_id="run-1", state=state))
 
     workflow_run_repo.update_runtime_metadata.assert_awaited_once()
+    workflow_run_repo.update_status.assert_awaited_once()
+    session_repo.update_runtime_state.assert_awaited_once()
+    assert run.status == WorkflowRunStatus.COMPLETED
+    assert session.status == SessionStatus.COMPLETED
     workflow_run_summary_repo.upsert.assert_awaited_once()
     session_context_snapshot_repo.upsert.assert_awaited_once()
 
@@ -1031,6 +1351,14 @@ def test_langgraph_run_engine_should_not_fallback_to_session_current_run_id_when
             return_value=Workspace(
                 id="workspace-1",
                 session_id="session-1",
+                current_run_id=None,
+            )
+        ),
+        get_by_id_for_user=AsyncMock(
+            return_value=Workspace(
+                id="workspace-1",
+                session_id="session-1",
+                user_id="user-1",
                 current_run_id=None,
             )
         ),

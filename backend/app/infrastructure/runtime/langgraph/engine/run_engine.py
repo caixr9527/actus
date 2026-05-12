@@ -6,19 +6,25 @@
 @File   : langgraph_run_engine.py
 """
 import asyncio
-import base64
 import json
 import logging
-import mimetypes
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Dict, Optional, List
 
 from langgraph.types import Command
 
+from app.application.service.document_input_service import (
+    DocumentAttachmentSource,
+    DocumentInputService,
+    FileStorageDocumentAttachmentReader,
+)
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.domain.external import LLM, FileStorage
 from app.domain.models import (
     BaseEvent,
+    CheckpointRef,
     Message,
     File,
     Workspace,
@@ -26,10 +32,20 @@ from app.domain.models import (
     WorkflowRunSummary,
     SessionContextSnapshot,
     WorkflowRunStatus,
+    ToolEvent,
 )
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.memory_consolidation import MemoryConsolidationService
 from app.domain.services.runtime import RunEngine
+from app.domain.services.runtime.contracts.data_access_contract import (
+    DataAccessAction,
+    DataClassificationPolicy,
+    DefaultDataClassificationPolicy,
+)
+from app.domain.services.runtime.contracts.evidence_runtime_ports import (
+    EvidenceResultHandleResolverPort,
+    EvidenceStepReconcilerPort,
+)
 from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
     build_trace_id,
@@ -39,6 +55,8 @@ from app.domain.services.runtime.contracts.runtime_logging import (
     now_perf,
     reset_trace_id,
 )
+from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
+from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
 from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
     PlannerReActLangGraphState,
@@ -54,20 +72,23 @@ from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime import WorkspaceManager
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.infrastructure.external.llm import OllamaLLMFactory
 from app.infrastructure.runtime.langgraph.engine.checkpoint_store_adapter import CheckpointStoreAdapter
 from app.infrastructure.runtime.langgraph.graphs import (
-    bind_live_event_sink,
+    bind_live_event_sinks,
     build_planner_react_langgraph_graph,
-    unbind_live_event_sink,
+    unbind_live_event_sinks,
 )
 from app.infrastructure.runtime.langgraph.memory.long_term_memory_repository import LangGraphLongTermMemoryRepository
-from app.infrastructure.external.llm import OllamaLLMFactory
-from app.infrastructure.utils import BaseUtils
 from core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 SESSION_CONTEXT_SUMMARY_LIMIT = 20
+
+
+class DocumentInputContractError(RuntimeError):
+    """文档输入契约错误必须失败关闭，禁止回退为空附件继续执行。"""
 
 
 @dataclass(frozen=True)
@@ -137,14 +158,35 @@ class LangGraphRunEngine(RunEngine):
             runtime_context_service: RuntimeContextService,
             max_tool_iterations: Optional[int] = None,
             checkpointer: Any | None = None,
+            data_retention_policy_service: DataClassificationPolicy | None = None,
+            document_input_service: DocumentInputService | None = None,
+            sandbox_fact_document_projector: SandboxFactDocumentInputProjector | None = None,
+            sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
+            access_control_service: RuntimeAccessControlService | None = None,
+            evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
+        effective_data_retention_policy_service = data_retention_policy_service or DefaultDataClassificationPolicy()
         self._session_id = session_id
         self._file_storage = file_storage
         self._user_id = user_id
         self._uow_factory = uow_factory
         self._checkpointer = checkpointer
+        self._data_retention_policy_service = effective_data_retention_policy_service
+        self._document_input_service = document_input_service or DocumentInputService()
+        self._sandbox_fact_document_projector = sandbox_fact_document_projector
+        self._sandbox_fact_context_builder = sandbox_fact_context_builder
+        self._evidence_result_handle_resolver = evidence_result_handle_resolver
+        self._evidence_step_reconciler = evidence_step_reconciler
+        self._runtime_tool_event_persistence = runtime_tool_event_persistence
+        self._access_control_service = access_control_service or (
+            RuntimeAccessControlService(uow_factory=uow_factory)
+            if uow_factory is not None
+            else None
+        )
         normalized_stage_llms = ensure_required_stage_llms(stage_llms)
         self._long_term_memory_repository = (
             LangGraphLongTermMemoryRepository(uow_factory=uow_factory)
@@ -165,12 +207,28 @@ class LangGraphRunEngine(RunEngine):
             checkpointer=self._checkpointer,
             long_term_memory_repository=self._long_term_memory_repository,
             memory_consolidation_service=self._memory_consolidation_service,
+            data_retention_policy_service=self._data_retention_policy_service,
+            evidence_result_handle_resolver=self._evidence_result_handle_resolver,
+            evidence_step_reconciler=self._evidence_step_reconciler,
+            runtime_tool_event_persistence=self._runtime_tool_event_persistence,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
             if uow_factory is not None
             else None
         )
+        self._runtime_state_coordinator = (
+            self._build_runtime_state_coordinator(uow_factory=uow_factory)
+            if uow_factory is not None
+            else None
+        )
+
+    @staticmethod
+    def _build_runtime_state_coordinator(uow_factory: Callable[[], IUnitOfWork]) -> Any:
+        # 延迟导入避免 application.service 包导出 AgentService 时反向导入 LangGraphRunEngine。
+        from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+
+        return RuntimeStateCoordinator(uow_factory=uow_factory)
 
     @staticmethod
     def _build_graph(
@@ -182,17 +240,25 @@ class LangGraphRunEngine(RunEngine):
             checkpointer: Any,
             long_term_memory_repository: Any,
             memory_consolidation_service: MemoryConsolidationService,
+            data_retention_policy_service: DataClassificationPolicy | None,
+            evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None,
+            evidence_step_reconciler: EvidenceStepReconcilerPort | None,
+            runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
             "checkpointer": checkpointer,
             "long_term_memory_repository": long_term_memory_repository,
             "memory_consolidation_service": memory_consolidation_service,
+            "data_retention_policy_service": data_retention_policy_service,
         }
         if runtime_tools is not None or max_tool_iterations is not None:
             graph_kwargs["runtime_tools"] = runtime_tools
             graph_kwargs["max_tool_iterations"] = max_tool_iterations or 5
         graph_kwargs["runtime_context_service"] = runtime_context_service
+        graph_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver
+        graph_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
+        graph_kwargs["runtime_tool_event_persistence"] = runtime_tool_event_persistence
 
         log_runtime(
             logger,
@@ -205,6 +271,7 @@ class LangGraphRunEngine(RunEngine):
             has_checkpointer=checkpointer is not None,
             has_repository=long_term_memory_repository is not None,
             has_memory_consolidation_service=memory_consolidation_service is not None,
+            has_data_retention_policy_service=data_retention_policy_service is not None,
         )
         return build_planner_react_langgraph_graph(**graph_kwargs)
 
@@ -227,39 +294,105 @@ class LangGraphRunEngine(RunEngine):
             self,
             message: Message,
             uow: Optional[IUnitOfWork] = None,
+            scope: Any | None = None,
+            request_id: str | None = None,
     ) -> List[Dict[str, Any]]:
-        """根据 message.attachments 构建输入片段。"""
-        parts: List[Dict[str, Any]] = []
+        """根据 message.attachments 构建文档输入片段。"""
         attachment_paths = message.attachments or []
-
+        if not attachment_paths:
+            return []
+        missing_dependencies = []
+        if uow is None:
+            missing_dependencies.append("uow")
+        if scope is None:
+            missing_dependencies.append("scope")
+        if self._file_storage is None:
+            missing_dependencies.append("file_storage")
+        if self._user_id is None:
+            missing_dependencies.append("user_id")
+        if missing_dependencies:
+            logger.error(
+                "document_input_contract_dependency_missing session_id=%s missing=%s request_id=%s",
+                self._session_id,
+                ",".join(missing_dependencies),
+                request_id or "",
+            )
+            raise DocumentInputContractError(
+                "document input contract dependency missing: " + ",".join(missing_dependencies)
+            )
+        sources: List[DocumentAttachmentSource] = []
         for filepath in attachment_paths:
-            part_type = BaseUtils.resolve_part_type_by_filepath(filepath=filepath)
             file_record: Optional[File] = await uow.session.get_file_by_path(
                 session_id=self._session_id,
                 filepath=filepath,
             )
             if file_record is None:
                 continue
-
-            guessed_mime_type = str(mimetypes.guess_type(filepath)[0] or "").strip()
-            mime_type = file_record.mime_type or guessed_mime_type or "application/octet-stream"
-
-            file_stream, _ = await self._file_storage.download_file(
-                file_id=file_record.id,
-                user_id=self._user_id,
+            sources.append(
+                DocumentAttachmentSource(
+                    scope=scope,
+                    file=file_record,
+                    sandbox_filepath=filepath,
+                    reader=FileStorageDocumentAttachmentReader(
+                        file_storage=self._file_storage,
+                        file=file_record,
+                        user_id=self._user_id,
+                    ),
+                )
             )
+        parts = await self._document_input_service.build_input_parts(
+            scope=scope,
+            attachments=sources,
+            request_id=request_id,
+        )
+        await self._record_document_context_facts(
+            message=message,
+            scope=scope,
+            parts=parts,
+            request_id=request_id,
+        )
+        return [part.model_dump(mode="json") for part in parts]
 
-            bytes_raw, _ = BaseUtils.read_limited_bytes(stream=file_stream)
-
-            part: Dict[str, Any] = {
-                "type": part_type,
-                "base64_payload": base64.b64encode(bytes_raw).decode('utf-8'),
-                "mime_type": mime_type,
-                "file_url": self._file_storage.get_file_url(file=file_record),
-                "sandbox_filepath": filepath,
-            }
-            parts.append(part)
-        return parts
+    async def _record_document_context_facts(
+            self,
+            *,
+            message: Message,
+            scope: Any,
+            parts: list[Any],
+            request_id: str | None,
+    ) -> None:
+        projector = self._sandbox_fact_document_projector
+        context_builder = self._sandbox_fact_context_builder
+        if projector is None or context_builder is None or not parts:
+            return
+        source_event_id = str(message.source_event_id or "").strip()
+        if not source_event_id:
+            logger.warning(
+                "sandbox_fact_record_failed",
+                extra={
+                    "reason_code": "document_source_event_id_missing",
+                    "session_id": self._session_id,
+                    "request_id": request_id or "",
+                },
+            )
+            return
+        try:
+            context = await context_builder.build_for_document_input(
+                source_event_id=source_event_id,
+                scope=scope,
+            )
+            await projector.record_document_context(context=context, parts=parts)
+        except Exception as exc:
+            logger.exception(
+                "sandbox_fact_record_failed",
+                extra={
+                    "reason_code": "document_context_projection_failed",
+                    "session_id": self._session_id,
+                    "source_event_id": source_event_id,
+                    "request_id": request_id or "",
+                    "error_type": exc.__class__.__name__,
+                },
+            )
 
     async def _build_graph_input_state(
             self,
@@ -293,6 +426,14 @@ class LangGraphRunEngine(RunEngine):
                     if resolved_run_id
                     else None
                 )
+                scope = None
+                if run is not None and self._access_control_service is not None and self._user_id is not None:
+                    scope = await self._access_control_service.assert_run_access(
+                        user_id=self._user_id,
+                        run_id=run.id,
+                        action=DataAccessAction.READ,
+                        expected_session_id=self._session_id,
+                    )
                 completed_run_summaries = await uow.workflow_run_summary.list_by_session_id(
                     session_id=session.id,
                     limit=SESSION_CONTEXT_SUMMARY_LIMIT,
@@ -306,7 +447,12 @@ class LangGraphRunEngine(RunEngine):
                 session_context_snapshot = await uow.session_context_snapshot.get_by_session_id(
                     session_id=session.id,
                 )
-                input_parts = await self._build_input_parts(message=message, uow=uow)
+                input_parts = await self._build_input_parts(
+                    message=message,
+                    uow=uow,
+                    scope=scope,
+                    request_id=thread_id,
+                )
 
                 return GraphStateContractMapper.build_initial_state(
                     session=session,
@@ -323,6 +469,8 @@ class LangGraphRunEngine(RunEngine):
                     workspace_id=workspace.id if workspace is not None else session.workspace_id,
                     thread_id=thread_id,
                 )
+        except DocumentInputContractError:
+            raise
         except Exception as e:
             # 状态构建失败时必须降级，不能阻断主链路执行。
             log_runtime(
@@ -426,6 +574,13 @@ class LangGraphRunEngine(RunEngine):
             run: Any,
             state: PlannerReActLangGraphState,
     ) -> WorkflowRunStatus:
+        if run.status in {
+            WorkflowRunStatus.COMPLETED,
+            WorkflowRunStatus.FAILED,
+            WorkflowRunStatus.CANCELLED,
+        }:
+            return run.status
+
         pending_interrupt = GraphStateContractMapper.get_pending_interrupt(state)
         if pending_interrupt:
             return WorkflowRunStatus.WAITING
@@ -483,7 +638,11 @@ class LangGraphRunEngine(RunEngine):
 
         # final_message 是轻量摘要；final_answer_text 才是 summary/direct 阶段产出的最终正文真相源。
         final_message = str(state.get("final_message") or "").strip()
-        final_answer_text = str(state.get("final_answer_text") or "").strip() or final_message
+        if "final_answer_text" in state:
+            final_answer_text = str(state.get("final_answer_text") or "").strip()
+        else:
+            # 历史 checkpoint 可能只有旧 final_message；仅缺字段的恢复态保留兼容 fallback。
+            final_answer_text = final_message
 
         # 运行摘要状态必须从当前 graph state 真实语义推导，不能依赖外部事件是否已先落库。
         run_status = cls._resolve_run_status_for_projection(run=run, state=state)
@@ -587,17 +746,22 @@ class LangGraphRunEngine(RunEngine):
             self,
             run_id: Optional[str],
             state: Optional[PlannerReActLangGraphState],
+            checkpoint_ref: CheckpointRef | None = None,
     ) -> None:
-        """回写 BE-LG-04 graph state contract 到 runtime_metadata。"""
-        if self._uow_factory is None or state is None:
+        """通过 coordinator 回写 graph state contract 并执行 runtime 状态对账。"""
+        if self._uow_factory is None or self._runtime_state_coordinator is None or state is None:
             return
 
         resolved_run_id = run_id or state.get("run_id")
         if not resolved_run_id:
             return
 
-        runtime_metadata = GraphStateContractMapper.build_runtime_metadata(state)
         try:
+            snapshot = await self._runtime_state_coordinator.sync_graph_state(
+                run_id=resolved_run_id,
+                state=state,
+                checkpoint_ref=checkpoint_ref,
+            )
             async with self._uow_factory() as uow:
                 run = await uow.workflow_run.get_by_id(resolved_run_id)
                 if run is None:
@@ -609,11 +773,6 @@ class LangGraphRunEngine(RunEngine):
                         run_id=resolved_run_id,
                     )
                     return
-                await uow.workflow_run.update_runtime_metadata(
-                    run_id=resolved_run_id,
-                    runtime_metadata=runtime_metadata,
-                    current_step_id=state.get("current_step_id"),
-                )
                 await self._sync_context_projections(
                     run=run,
                     state=state,
@@ -625,6 +784,7 @@ class LangGraphRunEngine(RunEngine):
                     "状态合同回写完成",
                     state=state,
                     run_id=resolved_run_id,
+                    status=snapshot.run_status.value if snapshot.run_status else None,
                 )
         except Exception as e:
             log_runtime(
@@ -787,7 +947,7 @@ class LangGraphRunEngine(RunEngine):
     async def _run_graph(
             self,
             *,
-            graph_input: Any,
+            graph_input: PlannerReActLangGraphState,
             invoke_config: Dict[str, Dict[str, str]],
             run_id: Optional[str],
             fallback_state: Optional[PlannerReActLangGraphState],
@@ -806,11 +966,14 @@ class LangGraphRunEngine(RunEngine):
             run_id=run_id,
             graph_input_type=type(graph_input).__name__,
         )
+        self._current_run_id = str(run_id or "")
 
-        async def _enqueue_live_event(base_event: BaseEvent) -> None:
-            await live_event_queue.put(base_event)
+        async def _ack_live_event(base_event: BaseEvent) -> BaseEvent:
+            persisted_event = await self._persist_live_event_before_graph_continues(base_event)
+            await live_event_queue.put(persisted_event)
+            return persisted_event
 
-        sink_token = bind_live_event_sink(_enqueue_live_event)
+        sink_binding = bind_live_event_sinks(None, _ack_live_event)
         graph_task: asyncio.Task | None = None
         try:
             graph_task = asyncio.create_task(
@@ -851,15 +1014,16 @@ class LangGraphRunEngine(RunEngine):
                     emitted_event_count=len(list((state or {}).get("emitted_events") or [])),
                 )
         finally:
-            unbind_live_event_sink(sink_token)
+            unbind_live_event_sinks(sink_binding)
             if graph_task is not None and not graph_task.done():
                 graph_task.cancel()
                 with suppress(Exception):
                     await graph_task
 
+            checkpoint_ref: CheckpointRef | None = None
             if self._checkpoint_adapter is not None:
                 # 无论图执行成功或失败，都尝试同步最新 checkpoint 引用，保证恢复点尽量前移。
-                await self._checkpoint_adapter.sync_latest_checkpoint_ref(
+                checkpoint_ref = await self._checkpoint_adapter.sync_latest_checkpoint_ref(
                     run_id=run_id,
                     checkpointer=getattr(self._graph, "checkpointer", None),
                     invoke_config=invoke_config,
@@ -868,6 +1032,7 @@ class LangGraphRunEngine(RunEngine):
             await self._sync_graph_state_contract(
                 run_id=run_id,
                 state=state or fallback_state,
+                checkpoint_ref=checkpoint_ref,
             )
             log_runtime(
                 logger,
@@ -877,6 +1042,7 @@ class LangGraphRunEngine(RunEngine):
                 run_id=run_id,
                 elapsed_ms=elapsed_ms(started_at),
             )
+            self._current_run_id = ""
 
         for event in self._resolve_output_events(state=state, baseline_state=fallback_state):
             if deduplicator.should_emit(event):
@@ -979,3 +1145,38 @@ class LangGraphRunEngine(RunEngine):
             if deduplicator.should_emit(event):
                 # 对外输出副本，避免下游写入 event.id 反向污染 graph state 中的同一对象。
                 yield event.model_copy(deep=True)
+
+    async def _persist_live_event_before_graph_continues(self, event: BaseEvent) -> BaseEvent:
+        if self._runtime_tool_event_persistence is None or not isinstance(event, ToolEvent):
+            return event
+        function_name = str(getattr(event, "function_name", "") or "")
+        try:
+            result = await self._runtime_tool_event_persistence.persist_tool_event_and_record_facts(
+                event=event,
+                run_id=str(getattr(self, "_current_run_id", "") or ""),
+                session_id=self._session_id,
+                current_step_id=str(getattr(event, "step_id", "") or "").strip(),
+            )
+            log_runtime(
+                logger,
+                logging.INFO,
+                "tool_event_persisted_before_graph_continues",
+                session_id=self._session_id,
+                source_event_id=result.source_event_id,
+                function_name=function_name,
+                fact_count=result.fact_count,
+                reason_code="tool_event_persisted_before_graph_continues",
+            )
+        except Exception as exc:
+            log_runtime(
+                logger,
+                logging.ERROR,
+                "tool_event_live_persistence_failed",
+                session_id=self._session_id,
+                tool_event_id=str(getattr(event, "id", "") or ""),
+                function_name=function_name,
+                error_type=exc.__class__.__name__,
+                reason_code="tool_event_live_persistence_failed",
+            )
+            raise
+        return event

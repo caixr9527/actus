@@ -16,6 +16,7 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.contracts import build_default_external_signals_snapshot
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.artifact_policy import evaluate_artifact_policy
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.human_wait_policy import evaluate_human_wait_policy
+from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.evidence_reuse_policy import evaluate_evidence_reuse_policy
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.repeat_loop_policy import evaluate_repeat_loop_policy
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.research_route_policy import build_research_route_rewrite_decision
 from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine.policies.research_route_policy import evaluate_research_route_policy
@@ -180,6 +181,12 @@ class ConstraintEngine:
             rewrite_function_name or ""
         ).strip().lower()
         rewrite_function_args = dict(rewrite_target.get("function_args") or {})
+        rewritten_external_signals = dict(constraint_input.external_signals_snapshot or {})
+        if str((first_decision.metadata or {}).get("rewrite_type") or "") == "evidence_verification_audit_metadata":
+            rewritten_external_signals["evidence_verification_rewrite"] = {
+                "rewrite_type": "evidence_verification_audit_metadata",
+                "function_name": rewrite_normalized_name,
+            }
         rewritten_matched_tool = resolve_matched_tool(
             function_name=rewrite_function_name,
             fallback_tool=constraint_input.matched_tool,
@@ -195,7 +202,7 @@ class ConstraintEngine:
             iteration_blocked_function_names=set(constraint_input.iteration_blocked_function_names or set()),
             execution_context=constraint_input.execution_context,
             execution_state=constraint_input.execution_state,
-            external_signals_snapshot=dict(constraint_input.external_signals_snapshot or {}),
+            external_signals_snapshot=rewritten_external_signals,
             runtime_tools=list(constraint_input.runtime_tools or []),
         )
         second_pass = self._evaluate_policies_once(
@@ -267,6 +274,7 @@ class ConstraintEngine:
         trace: list[ConstraintPolicyTraceEntry] = []
         winning_policy = ""
         for policy_name, evaluator in (
+                ("evidence_reuse_policy", evaluate_evidence_reuse_policy),
                 ("task_mode_policy", evaluate_task_mode_policy),
                 ("artifact_policy", evaluate_artifact_policy),
                 ("human_wait_policy", evaluate_human_wait_policy),

@@ -30,6 +30,10 @@ from .event import (
     StepEvent,
     MessageEvent,
     ToolEvent,
+    SandboxFactEvent,
+    SandboxFactEventRef,
+    EvidenceEvent,
+    EvidenceEventRef,
     WaitEvent,
     ErrorEvent,
     DoneEvent,
@@ -50,6 +54,20 @@ from .event import (
     MCPToolContent,
     A2AToolContent,
 )
+from .evidence import (
+    EvidenceBackedFactProjection,
+    EvidenceKind,
+    EvidenceQualityStatus,
+    EvidenceRecord,
+    EvidenceResultHandle,
+    EvidenceResultRef,
+    EvidenceResultRefType,
+    EvidenceReusePolicy,
+    EvidenceScope,
+    EvidenceSourceType,
+    EvidenceStalenessPolicy,
+    EvidenceSupportLevel,
+)
 from .file import File
 from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
@@ -68,6 +86,24 @@ from .plan import (
 )
 from .runtime_input import ContinueCancelledTaskInput, ResumeInput, RuntimeInput, RuntimeInputPayload
 from .runtime_llm_config import RuntimeLLMConfig
+from .runtime_state import (
+    CheckpointRef,
+    RuntimeCommand,
+    RuntimeEventPersistResult,
+    RuntimeEventProjection,
+    RuntimeReconcileResult,
+    RuntimeStateSnapshot,
+    RuntimeStateSource,
+    RuntimeTransition,
+    ResumeGateInspection,
+)
+from .sandbox_fact import (
+    SandboxFactKind,
+    SandboxFactRecord,
+    SandboxFactScope,
+    SandboxFactSourceType,
+    SandboxFactVisibility,
+)
 from .search import FetchedPage, SearchResults, SearchResultItem
 from .session import Session, SessionStatus
 from .tool_result import ToolResult
@@ -121,12 +157,17 @@ __all__ = [
     "build_step_objective_source",
     "RuntimeLLMConfig",
     "ExecutionStatus",
+    "EvidenceBackedFactProjection",
     "BaseEvent",
     "PlanEvent",
     "TitleEvent",
     "StepEvent",
     "MessageEvent",
     "ToolEvent",
+    "SandboxFactEvent",
+    "SandboxFactEventRef",
+    "EvidenceEvent",
+    "EvidenceEventRef",
     "WaitEvent",
     "ErrorEvent",
     "DoneEvent",
@@ -143,6 +184,20 @@ __all__ = [
     "ContinueCancelledTaskInput",
     "RuntimeInput",
     "RuntimeInputPayload",
+    "CheckpointRef",
+    "RuntimeCommand",
+    "RuntimeEventPersistResult",
+    "RuntimeEventProjection",
+    "RuntimeReconcileResult",
+    "RuntimeStateSnapshot",
+    "RuntimeStateSource",
+    "RuntimeTransition",
+    "ResumeGateInspection",
+    "SandboxFactKind",
+    "SandboxFactRecord",
+    "SandboxFactScope",
+    "SandboxFactSourceType",
+    "SandboxFactVisibility",
     "File",
     "Message",
     "MessageCommand",
@@ -168,6 +223,17 @@ __all__ = [
     "FileToolContent",
     "MCPToolContent",
     "A2AToolContent",
+    "EvidenceKind",
+    "EvidenceQualityStatus",
+    "EvidenceRecord",
+    "EvidenceResultHandle",
+    "EvidenceResultRef",
+    "EvidenceResultRefType",
+    "EvidenceReusePolicy",
+    "EvidenceScope",
+    "EvidenceSourceType",
+    "EvidenceStalenessPolicy",
+    "EvidenceSupportLevel",
     "User",
     "UserProfile",
     "UserStatus",

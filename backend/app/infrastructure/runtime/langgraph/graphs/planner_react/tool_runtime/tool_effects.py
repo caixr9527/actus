@@ -150,6 +150,11 @@ def apply_tool_result_effects(
     - failure 路径：沉淀 recent_action、失败计数、黑名单与降级信息；
     - 这是 executor 与 convergence 之间唯一的状态归并入口。
     """
+    if str(loop_break_reason or "").strip() == "virtual_success_pending_resolution":
+        return ToolEffectsResult(
+            tool_result=tool_result,
+            loop_break_reason=loop_break_reason,
+        )
     if bool(tool_result.success):
         execution_state.consecutive_failure_count = 0
         execution_state.last_successful_tool_call = {
@@ -458,8 +463,12 @@ def apply_tool_result_effects(
         elif normalized_function_name == "browser_find_actionable_elements":
             execution_state.browser_actionables_ready = True
         if normalized_function_name in {
+            "browser_view",
             "browser_read_current_page_structured",
             "browser_extract_main_content",
+            "browser_extract_cards",
+            "browser_find_link_by_text",
+            "browser_click",
             "browser_find_actionable_elements",
         }:
             _append_web_reading_evidence(
@@ -667,9 +676,9 @@ def _build_research_progress_snapshot(state: ExecutionState) -> Dict[str, Any]:
         "missing_signals": missing_signals,
         "latest_query": str(state.research_query_history[-1] if state.research_query_history else ""),
         "latest_fetched_url": str(state.research_fetched_urls[-1] if state.research_fetched_urls else ""),
-        # 搜索摘要证据是 research 收敛的一等输入，供 max-iteration 降级收敛与后续 summary 消费。
+        # 搜索候选摘要只用于后续模型选择来源，不作为 Evidence Ledger evidence 或完成判定依据。
         "search_evidence_summaries": _build_search_evidence_summaries(state),
-        # 页面读取证据供 web_reading/general 收敛消费，避免 browser 成功后继续抓取。
+        # 页面候选摘要只用于进度展示；完成/阻断必须消费 evidence-backed/fact-backed 投影。
         "web_reading_evidence_summaries": _build_web_reading_evidence_summaries(state),
         "explicit_url_read_state": _build_explicit_url_read_state(state),
     }
@@ -687,9 +696,9 @@ def _build_search_evidence_summaries(state: ExecutionState) -> List[Dict[str, st
             continue
         summaries.append(
             {
-                "title": title[:100],
-                "url": url[:240],
-                "snippet": snippet[:320],
+                "title": title,
+                "url": url,
+                "snippet": snippet,
             }
         )
     return summaries
@@ -839,11 +848,22 @@ def _extract_web_reading_evidence(
             or data.get("text")
             or ""
         ).strip()
+        if not summary and normalized_function_name == "browser_extract_main_content" and (url or title):
+            summary = "已通过受控浏览器读取当前页面正文。"
+        elif not summary and normalized_function_name == "browser_view" and (url or title):
+            summary = "已通过受控浏览器打开并读取当前页面。"
         actionables = data.get("actionable_elements")
         cards = data.get("cards")
         link_count = (len(actionables) if isinstance(actionables, list) else 0) + (
             len(cards) if isinstance(cards, list) else 0
         )
+        if normalized_function_name == "browser_find_link_by_text" and str(data.get("matched_text") or "").strip():
+            link_count = max(link_count, 1)
+            if not summary:
+                summary = f"已定位页面链接：{str(data.get('matched_text') or '').strip()}"
+        elif normalized_function_name == "browser_click" and (url or title):
+            if not summary:
+                summary = "已通过受控浏览器进入匹配页面。"
         if not summary and link_count <= 0:
             return {}
         return {
@@ -852,11 +872,53 @@ def _extract_web_reading_evidence(
             "url": url,
             "title": title,
             "summary": summary[:420] if summary else "已读取页面结构和候选链接。",
-            "content_length": int(data.get("content_length") or len(summary)),
+            "content_length": _infer_browser_evidence_content_length(
+                function_name=normalized_function_name,
+                data=data,
+                summary=summary,
+            ),
             "link_count": link_count,
-            "quality": "strong" if summary else "weak",
+            "quality": _infer_browser_evidence_quality(
+                function_name=normalized_function_name,
+                summary=summary,
+                link_count=link_count,
+            ),
         }
     return {}
+
+
+def _infer_browser_evidence_content_length(
+        *,
+        function_name: str,
+        data: Dict[str, Any],
+        summary: str,
+) -> int:
+    raw_content_length = data.get("content_length")
+    if raw_content_length:
+        return int(raw_content_length)
+    if function_name in {"browser_extract_main_content", "browser_view", "browser_click"} and summary:
+        return max(len(summary), 120)
+    return len(summary)
+
+
+def _infer_browser_evidence_quality(
+        *,
+        function_name: str,
+        summary: str,
+        link_count: int,
+) -> str:
+    if not summary:
+        return "weak"
+    if function_name in {
+        "browser_extract_main_content",
+        "browser_view",
+        "browser_find_link_by_text",
+        "browser_click",
+    }:
+        return "strong"
+    if function_name == "browser_read_current_page_structured" and link_count > 0:
+        return "weak"
+    return "strong"
 
 
 def _build_web_reading_evidence_summaries(state: ExecutionState) -> List[Dict[str, Any]]:

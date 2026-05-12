@@ -6,7 +6,14 @@ from .execution.execution_context import ExecutionContext, step_allows_user_wait
 from .execution.execution_state import ExecutionState
 from .execution.finalizer import finalize_max_iterations, finalize_no_tool_call
 from .graph import build_planner_react_langgraph_graph
-from .live_events import bind_live_event_sink, unbind_live_event_sink
+from .live_events import (
+    bind_live_event_ack_sink,
+    bind_live_event_sink,
+    bind_live_event_sinks,
+    unbind_live_event_ack_sink,
+    unbind_live_event_sink,
+    unbind_live_event_sinks,
+)
 from .loop_breaks import build_loop_break_result
 from .research.research_intent_policy import is_explicit_single_page_fetch_intent
 from .research.research_url_extractor import extract_explicit_url_from_research_context
@@ -26,7 +33,11 @@ from .tool_runtime.tool_handlers import (
 __all__ = [
     "build_planner_react_langgraph_graph",
     "bind_live_event_sink",
+    "bind_live_event_ack_sink",
+    "bind_live_event_sinks",
     "unbind_live_event_sink",
+    "unbind_live_event_ack_sink",
+    "unbind_live_event_sinks",
     "step_allows_user_wait",
     "ExecutionContext",
     "is_explicit_single_page_fetch_intent",

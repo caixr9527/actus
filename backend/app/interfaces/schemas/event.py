@@ -18,17 +18,39 @@ from app.domain.models import (
     WaitEvent,
     ToolEvent,
     ToolEventStatus,
+    SandboxFactEvent,
+    EvidenceEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
     TextStreamChannel,
+    SessionStatus,
 )
+from app.application.service.runtime_observation_service import RuntimeObservableEventResult
 from app.domain.services.runtime.normalizers import normalize_event_payload
+
+
+class RuntimeEventMeta(BaseModel):
+    """运行观察元数据，是前端判断运行态、游标和展示层级的唯一事件上下文。"""
+
+    session_id: str
+    run_id: Optional[str] = None
+    status_after_event: Optional[SessionStatus] = None
+    current_step_id: Optional[str] = None
+    source_event_id: Optional[str] = None
+    cursor_event_id: Optional[str] = None
+    durability: Literal["persistent", "live_only"] = "persistent"
+    visibility: Literal["timeline", "draft", "control", "hidden"] = "timeline"
+
+    @classmethod
+    def from_result(cls, envelope: RuntimeObservableEventResult) -> "RuntimeEventMeta":
+        return cls.model_validate(envelope.runtime.model_dump(mode="json"))
 
 class BaseEventData(BaseModel):
     """基础事件数据"""
     event_id: Optional[str] = None  # 事件id
     created_at: datetime = Field(default_factory=datetime.now)  # 事件时间
+    runtime: RuntimeEventMeta  # Runtime 观察元数据
 
     @field_serializer("created_at", when_used="json")
     def serialize_created_at(self, value: datetime) -> int:
@@ -36,18 +58,20 @@ class BaseEventData(BaseModel):
         return int(value.timestamp())
 
     @classmethod
-    def base_event_data(cls, event: Event) -> Dict[str, Any]:
+    def base_event_data(cls, event: Event, runtime: RuntimeEventMeta) -> Dict[str, Any]:
         """类方法，用于将事件Domain模型转换成基础事件数据字典"""
+        event_id = None if runtime.durability == "live_only" else event.id
         return {
-            "event_id": event.id,
+            "event_id": event_id,
             "created_at": int(event.created_at.timestamp()),
+            "runtime": runtime,
         }
 
     @classmethod
-    def from_event(cls, event: Event) -> Self:
+    def from_event(cls, event: Event, runtime: RuntimeEventMeta) -> Self:
         """从事件Domain模型中构建基础事件数据"""
         return cls(
-            **cls.base_event_data(event),
+            **cls.base_event_data(event, runtime),
             **event.model_dump(mode="json", exclude={"id", "type", "created_at"}),
         )
 
@@ -58,7 +82,7 @@ class BaseSSEEvent(BaseModel):
     data: BaseEventData  # 数据
 
     @classmethod
-    def from_event(cls, event: Event) -> Self:
+    def from_event(cls, event: Event, runtime: RuntimeEventMeta) -> Self:
         """将事件Domain模型转换成基础流式事件"""
         # 获取data字段的类型注解，如果不存在则默认使用BaseEventData
         data_class: Type[BaseEventData] = cls.__annotations__.get("data", BaseEventData)
@@ -66,7 +90,7 @@ class BaseSSEEvent(BaseModel):
         # 构造SSE事件对象，设置事件类型和数据
         return cls(
             event=event.type,
-            data=data_class.from_event(event),
+            data=data_class.from_event(event, runtime),
         )
 
 
@@ -95,10 +119,10 @@ class MessageSSEEvent(BaseSSEEvent):
     data: MessageEventData
 
     @classmethod
-    def from_event(cls, event: Event) -> Self:
+    def from_event(cls, event: Event, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=MessageEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 role=event.role,
                 message=event.message,
                 attachments=event.attachments,
@@ -132,6 +156,7 @@ class StepOutcomeData(BaseModel):
     summary: str = ""
     produced_artifacts: List[str] = Field(default_factory=list)
     blockers: List[str] = Field(default_factory=list)
+    evidence_backed_facts: List[Dict[str, Any]] = Field(default_factory=list)
     facts_learned: List[str] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
     next_hint: Optional[str] = None
@@ -145,10 +170,10 @@ class StepSSEEvent(BaseSSEEvent):
     data: StepEventData
 
     @classmethod
-    def from_event(cls, event: StepEvent) -> Self:
+    def from_event(cls, event: StepEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=StepEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 status=event.step.status,
                 id=event.step.id,
                 description=event.step.description,
@@ -178,13 +203,13 @@ class PlanSSEEvent(BaseSSEEvent):
     data: PlanEventData
 
     @classmethod
-    def from_event(cls, event: PlanEvent) -> Self:
+    def from_event(cls, event: PlanEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=PlanEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 steps=[
                     StepEventData(
-                        **BaseEventData.base_event_data(event),
+                        **BaseEventData.base_event_data(event, runtime),
                         id=step.id,
                         status=step.status,
                         description=step.description,
@@ -214,6 +239,8 @@ class ToolEventData(BaseEventData):
     function: str  # 工具名字
     args: Dict[str, Any]  # 工具参数
     content: Optional[Any] = None  # 工具调用结果
+    is_virtual: bool = False  # 是否为后端复用/投影产生的虚拟工具事件
+    virtual_kind: Optional[str] = None  # 虚拟工具事件类型
 
 
 class ToolSSEEvent(BaseSSEEvent):
@@ -222,16 +249,123 @@ class ToolSSEEvent(BaseSSEEvent):
     data: ToolEventData
 
     @classmethod
-    def from_event(cls, event: ToolEvent) -> Self:
+    def from_event(cls, event: ToolEvent, runtime: RuntimeEventMeta) -> Self:
+        is_virtual = _is_evidence_reuse_virtual_tool_event(event)
         return cls(
             data=ToolEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 tool_call_id=event.tool_call_id,
                 name=event.tool_name,
                 status=event.status,
                 function=event.function_name,
                 args=event.function_args,
                 content=event.tool_content,
+                is_virtual=is_virtual,
+                virtual_kind="evidence_reuse" if is_virtual else None,
+            )
+        )
+
+
+def _is_evidence_reuse_virtual_tool_event(event: ToolEvent) -> bool:
+    if event.status != ToolEventStatus.CALLED:
+        return False
+    result = event.function_result
+    if result is None:
+        return False
+    data = result.data
+    if not isinstance(data, dict):
+        return False
+    return (
+        data.get("result_handle_resolved") is True
+        or data.get("duplicate_decision") == "reuse_existing_evidence"
+        or data.get("loop_break_reason") == "evidence_reuse_allowed"
+    )
+
+
+class SandboxFactEventRefData(BaseModel):
+    """Fact timeline 引用数据；禁止携带 fact raw payload。"""
+
+    fact_id: str
+    fact_kind: str
+    summary: str = ""
+
+
+class SandboxFactEventData(BaseEventData):
+    """Sandbox Fact 轻量事件数据。"""
+
+    fact_refs: List[SandboxFactEventRefData] = Field(default_factory=list)
+    summary: str = ""
+    source_event_id: Optional[str] = None
+    step_id: Optional[str] = None
+
+
+class SandboxFactSSEEvent(BaseSSEEvent):
+    """Sandbox Fact timeline 事件。"""
+
+    event: Literal["sandbox_fact"] = "sandbox_fact"
+    data: SandboxFactEventData
+
+    @classmethod
+    def from_event(cls, event: SandboxFactEvent, runtime: RuntimeEventMeta) -> Self:
+        return cls(
+            data=SandboxFactEventData(
+                **BaseEventData.base_event_data(event, runtime),
+                fact_refs=[
+                    SandboxFactEventRefData.model_validate(ref.model_dump(mode="json"))
+                    for ref in event.fact_refs
+                ],
+                summary=event.summary,
+                source_event_id=event.source_event_id,
+                step_id=event.step_id,
+            )
+        )
+
+
+class EvidenceEventRefData(BaseModel):
+    """Evidence 轻量引用数据；禁止携带 raw evidence payload。"""
+
+    evidence_id: str
+    evidence_kind: str
+    quality_status: str
+    support_level: str
+    summary: str = ""
+
+
+class EvidenceEventData(BaseEventData):
+    """Evidence step 聚合事件数据。"""
+
+    step_id: str
+    evidence_refs: List[EvidenceEventRefData] = Field(default_factory=list)
+    source_event_ids: List[str] = Field(default_factory=list)
+    quality_status_counts: Dict[str, int] = Field(default_factory=dict)
+    support_level_counts: Dict[str, int] = Field(default_factory=dict)
+    gap_count: int = 0
+    summary: str = ""
+    runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceSSEEvent(BaseSSEEvent):
+    """Evidence/Audit 专用回放事件，普通 timeline 默认隐藏。"""
+
+    event: Literal["evidence"] = "evidence"
+    data: EvidenceEventData
+
+    @classmethod
+    def from_event(cls, event: EvidenceEvent, runtime: RuntimeEventMeta) -> Self:
+        return cls(
+            data=EvidenceEventData(
+                **BaseEventData.base_event_data(event, runtime),
+                step_id=event.step_id,
+                evidence_refs=[
+                    EvidenceEventRefData.model_validate(ref.model_dump(mode="json"))
+                    for ref in event.evidence_refs
+                ],
+                source_event_ids=list(event.source_event_ids or []),
+                quality_status_counts=dict(event.quality_status_counts or {}),
+                support_level_counts=dict(event.support_level_counts or {}),
+                gap_count=event.gap_count,
+                summary=event.summary,
+                runtime_metadata=dict(event.runtime_metadata or {}),
             )
         )
 
@@ -254,10 +388,10 @@ class WaitSSEEvent(BaseSSEEvent):
     data: WaitEventData
 
     @classmethod
-    def from_event(cls, event: WaitEvent) -> Self:
+    def from_event(cls, event: WaitEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=WaitEventData(
-                **BaseEventData.base_event_data(event),
+                **BaseEventData.base_event_data(event, runtime),
                 interrupt_id=event.interrupt_id,
                 payload=dict(event.payload or {}),
             )
@@ -334,6 +468,8 @@ AgentSSEEvent = Union[
     StepSSEEvent,
     PlanSSEEvent,
     ToolSSEEvent,
+    SandboxFactSSEEvent,
+    EvidenceSSEEvent,
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,
@@ -398,8 +534,8 @@ class EventMapper:
         return mapping
 
     @staticmethod
-    def event_to_sse_event(event: Event) -> AgentSSEEvent:
-        """将领域事件转换为Agent流式事件模型"""
+    def _event_to_sse_event(event: Event, runtime: RuntimeEventMeta) -> AgentSSEEvent:
+        """将领域事件和运行观察元数据转换为 SSE schema。"""
         # live SSE 与历史回放统一吃同一份干净事件，避免再出现事件层 outcome 旁路。
         event = normalize_event_payload(event)
         # 获取事件类型到SSE事件类的映射关系
@@ -410,15 +546,16 @@ class EventMapper:
 
         # 如果找到匹配的事件映射，则使用对应SSE事件类构建流式事件
         if event_mapping:
-            sse_event = event_mapping.sse_event_class.from_event(event)
+            sse_event = event_mapping.sse_event_class.from_event(event, runtime)
         else:
             # 如果未找到匹配的事件映射，则使用通用SSE事件类进行转换
-            sse_event = CommonSSEEvent.from_event(event)
+            sse_event = CommonSSEEvent.from_event(event, runtime)
         return sse_event
 
     @staticmethod
-    def events_to_sse_events(events: List[Event]) -> List[AgentSSEEvent]:
-        """将领域事件模型列表转换为SSE流式事件列表"""
-        return list(filter(lambda x: x is not None, [
-            EventMapper.event_to_sse_event(event) for event in events
-        ]))
+    def observable_event_to_sse_event(envelope: RuntimeObservableEventResult) -> AgentSSEEvent:
+        """将 RuntimeObservableEventResult envelope 转换为前端统一事件结构。"""
+        return EventMapper._event_to_sse_event(
+            envelope.event,
+            RuntimeEventMeta.from_result(envelope),
+        )

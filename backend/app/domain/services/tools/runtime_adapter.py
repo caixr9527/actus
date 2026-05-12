@@ -5,10 +5,12 @@
 @Author : caixiaorong01@outlook.com
 @File   : runtime_adapter.py
 """
-import logging
 import json
+import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional
+
+from pydantic import BaseModel
 
 from app.domain.models import (
     A2AToolContent,
@@ -31,6 +33,11 @@ from app.domain.models import (
     ToolResult,
 )
 from app.domain.models.app_config import A2AConfig, MCPConfig
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
+    RuntimeToolCapabilitySnapshot,
+    RuntimeToolCapabilitySnapshotItem,
+)
+from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotArtifactRef
 from app.domain.services.tools.a2a import A2ATool
 from app.domain.services.tools.base import BaseTool
 from app.domain.services.tools.capability_registry import CapabilityBuildContext, CapabilityRegistry
@@ -41,6 +48,7 @@ logger = logging.getLogger(__name__)
 FILE_CONTENT_PREVIEW_MAX_CHARS = 2000
 BROWSER_SCREENSHOT_FUNCTIONS: tuple[str, ...] = (
     "browser_view",
+    "browser_read_current_page_structured",
     "browser_navigate",
     "browser_restart",
     "browser_click",
@@ -60,10 +68,16 @@ class ToolRuntimeEventHooks:
     - 非热路径或当前阶段不需要的能力允许留空，避免调用方传递 no-op 占位函数。
     """
 
-    get_browser_screenshot: Optional[Callable[[], Awaitable[str]]] = None
+    get_browser_screenshot: Optional[Callable[[], Awaitable[BrowserScreenshotArtifactRef | None]]] = None
     get_shell_tool_result: Optional[Callable[[], Awaitable[ToolResult]]] = None
     read_file_content: Optional[Callable[[str], Awaitable[ToolResult]]] = None
     sync_file_to_storage: Optional[Callable[[str], Awaitable[object]]] = None
+
+
+@dataclass(frozen=True)
+class RuntimeToolsWithSnapshot:
+    runtime_tools: List[BaseTool]
+    snapshot: RuntimeToolCapabilitySnapshot
 
 
 class ToolRuntimeAdapter:
@@ -282,6 +296,62 @@ class ToolRuntimeAdapter:
             tools.append(a2a_tool)
         return tools
 
+    def build_runtime_tools_with_snapshot(
+            self,
+            capability_context: CapabilityBuildContext,
+            mcp_tool: Optional[MCPTool] = None,
+            mcp_config: Optional[MCPConfig] = None,
+            a2a_tool: Optional[A2ATool] = None,
+    ) -> RuntimeToolsWithSnapshot:
+        tools = self.build_runtime_tools(
+            capability_context=capability_context,
+            mcp_tool=mcp_tool,
+            mcp_config=mcp_config,
+            a2a_tool=a2a_tool,
+        )
+        return RuntimeToolsWithSnapshot(
+            runtime_tools=tools,
+            snapshot=RuntimeToolCapabilitySnapshot(
+                items=[
+                    RuntimeToolCapabilitySnapshotItem(
+                        capability_id=self._resolve_capability_id(tool),
+                        tool_family=str(getattr(tool, "name", "") or tool.__class__.__name__).strip(),
+                        source=self._resolve_tool_source(tool, a2a_tool=a2a_tool),
+                    )
+                    for tool in tools
+                ]
+            ),
+        )
+
+    @staticmethod
+    def _resolve_tool_source(tool: BaseTool, *, a2a_tool: Optional[A2ATool]) -> str:
+        if a2a_tool is not None and tool is a2a_tool:
+            return "a2a"
+        if tool.__class__.__name__ == "MCPCapabilityAdapter":
+            return "mcp"
+        if ToolRuntimeAdapter._resolve_capability_id(tool) not in (
+                CapabilityRegistry.CAPABILITY_LOCAL_SHELL,
+                CapabilityRegistry.CAPABILITY_SEARCH,
+                CapabilityRegistry.CAPABILITY_BROWSER,
+                CapabilityRegistry.CAPABILITY_SANDBOX_FILE,
+                CapabilityRegistry.CAPABILITY_MESSAGE,
+        ):
+            return "custom"
+        return "local"
+
+    @staticmethod
+    def _resolve_capability_id(tool: BaseTool) -> str:
+        tool_name = str(getattr(tool, "name", "") or "").strip()
+        capability_by_tool_name = {
+            "shell": CapabilityRegistry.CAPABILITY_LOCAL_SHELL,
+            "search": CapabilityRegistry.CAPABILITY_SEARCH,
+            "browser": CapabilityRegistry.CAPABILITY_BROWSER,
+            "file": CapabilityRegistry.CAPABILITY_SANDBOX_FILE,
+            "message": CapabilityRegistry.CAPABILITY_MESSAGE,
+            "mcp": CapabilityRegistry.CAPABILITY_MCP,
+        }
+        return capability_by_tool_name.get(tool_name) or tool_name or tool.__class__.__name__
+
     @staticmethod
     async def initialize_remote_tools(
             mcp_tool: Optional[MCPTool],
@@ -327,9 +397,30 @@ class ToolRuntimeAdapter:
         if event.tool_name == "browser":
             function_name = str(event.function_name or "").strip().lower()
             screenshot = ""
+            screenshot_artifact = None
             if hooks.get_browser_screenshot is not None and function_name in BROWSER_SCREENSHOT_FUNCTIONS:
-                screenshot = str(await hooks.get_browser_screenshot() or "").strip()
+                screenshot_ref = await hooks.get_browser_screenshot()
+                if screenshot_ref is not None:
+                    if not isinstance(screenshot_ref, BrowserScreenshotArtifactRef):
+                        logger.warning(
+                            "browser_screenshot_artifact_ref_invalid",
+                            extra={"ref_type": screenshot_ref.__class__.__name__},
+                        )
+                    else:
+                        screenshot = str(screenshot_ref.url or "").strip()
+                        artifact_id = str(screenshot_ref.artifact_id or "").strip()
+                        artifact_path = str(screenshot_ref.artifact_path or "").strip()
+                        if artifact_id and artifact_path:
+                            screenshot_artifact = {
+                                "artifact_id": artifact_id,
+                                "artifact_path": artifact_path,
+                            }
             event.tool_content = self._build_browser_content(event, screenshot)
+            if screenshot_artifact is not None and event.function_result is not None:
+                event.function_result.data = self._merge_screenshot_artifact(
+                    data=event.function_result.data,
+                    screenshot_artifact=screenshot_artifact,
+                )
             return True
 
         if event.tool_name == "search":
@@ -419,3 +510,14 @@ class ToolRuntimeAdapter:
             return True
 
         return False
+
+    @staticmethod
+    def _merge_screenshot_artifact(*, data: object, screenshot_artifact: dict[str, str]) -> dict:
+        if isinstance(data, BaseModel):
+            values = data.model_dump(mode="json")
+        elif isinstance(data, dict):
+            values = dict(data)
+        else:
+            values = {}
+        values["screenshot_artifact"] = dict(screenshot_artifact)
+        return values

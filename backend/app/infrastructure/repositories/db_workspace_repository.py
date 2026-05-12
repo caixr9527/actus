@@ -6,7 +6,7 @@
 @File   : db_workspace_repository.py
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
@@ -47,11 +47,34 @@ class DBWorkspaceRepository(WorkspaceRepository):
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
 
+    async def get_by_id_for_user(self, workspace_id: str, user_id: str) -> Optional[Workspace]:
+        stmt = select(WorkspaceModel).where(
+            WorkspaceModel.id == workspace_id,
+            WorkspaceModel.user_id == user_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
     async def get_by_session_id(self, session_id: str) -> Optional[Workspace]:
         stmt = select(WorkspaceModel).where(WorkspaceModel.session_id == session_id)
         result = await self.db_session.execute(stmt)
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
+
+    async def get_by_session_id_for_user(self, session_id: str, user_id: str) -> Optional[Workspace]:
+        stmt = select(WorkspaceModel).where(
+            WorkspaceModel.session_id == session_id,
+            WorkspaceModel.user_id == user_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
+    async def list_by_session_id(self, session_id: str) -> List[Workspace]:
+        stmt = select(WorkspaceModel).where(WorkspaceModel.session_id == session_id)
+        result = await self.db_session.execute(stmt)
+        return [record.to_domain() for record in result.scalars().all()]
 
     async def delete_by_id(self, workspace_id: str) -> None:
         await self.db_session.execute(

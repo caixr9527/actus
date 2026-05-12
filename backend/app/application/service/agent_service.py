@@ -14,6 +14,20 @@ from typing import AsyncGenerator, Optional, List, Type, Callable, Any
 from pydantic import TypeAdapter
 
 from app.application.errors import AppException, BadRequestError, NotFoundError
+from app.application.service.document_input_preflight_policy import DocumentInputPreflightPolicy
+from app.application.service.evidence_digest_projector import EvidenceDigestProjector
+from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
+from app.application.service.evidence_ledger_service import EvidenceLedgerService
+from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
+from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
+from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
+from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
+from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
+from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
+from app.application.service.sandbox_capability_profile_service import SandboxCapabilityProfileService
+from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.errors import error_keys
 from app.domain.external import Task, Sandbox, LLM, JSONParser, SearchEngine, FileStorage, Browser
 from app.domain.models import (
@@ -31,7 +45,6 @@ from app.domain.models import (
     Event,
     DoneEvent,
     WaitEvent,
-    WorkflowRunStatus,
     validate_wait_resume_value,
     RuntimeInput,
     TaskStreamRecord,
@@ -44,13 +57,13 @@ from app.domain.repositories import IUnitOfWork
 from app.domain.services.agent_task_runner import AgentTaskRunner
 from app.domain.services.runtime import RunEngine, GraphRuntime, DefaultGraphRuntime
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
+from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
+from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import SandboxProfileRefreshReason
 from app.domain.services.runtime.stage_llm import build_uniform_stage_llms
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
-from app.domain.services.runtime.cancellation import (
-    build_cancelled_runtime_events,
-)
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.context import RuntimeContextService
+from app.domain.services.workspace_runtime.projectors import SandboxFactToolEventProjector, ToolEventProjector
 from app.infrastructure.runtime.langgraph import LangGraphRunEngine, get_langgraph_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -76,6 +89,8 @@ class AgentService:
             llm_factory=None,
             run_engine_factory: Optional[Callable[..., RunEngine]] = None,
             graph_runtime: Optional[GraphRuntime] = None,
+            access_control_service: RuntimeAccessControlService | None = None,
+            document_input_preflight_policy: DocumentInputPreflightPolicy | None = None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -92,6 +107,17 @@ class AgentService:
         self._tool_runtime_adapter = ToolRuntimeAdapter(
             capability_registry=CapabilityRegistry.default_v1(),
         )
+        self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
+        self._runtime_state_coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
+        self._access_control_service = access_control_service or RuntimeAccessControlService(
+            uow_factory=self._uow_factory,
+        )
+        self._sandbox_capability_profile_service = SandboxCapabilityProfileService(
+            uow_factory=self._uow_factory,
+            sandbox_cls=self._sandbox_cls,
+            access_control_service=self._access_control_service,
+        )
+        self._document_input_preflight_policy = document_input_preflight_policy or DocumentInputPreflightPolicy()
         # BE-LG-07：将任务实例生命周期访问点统一收口到 GraphRuntime。
         # 这样 AgentService 只保留 facade 职责，不再直接操作 task registry。
         self._graph_runtime = graph_runtime or DefaultGraphRuntime(
@@ -99,8 +125,9 @@ class AgentService:
             task_cls=self._task_cls,
             uow_factory=self._uow_factory,
             task_runner_factory=self._build_task_runner,
+            runtime_state_coordinator=self._runtime_state_coordinator,
+            sandbox_capability_profile_refresher=self._sandbox_capability_profile_service,
         )
-        self._workspace_manager = WorkspaceManager(uow_factory=self._uow_factory)
         logger.info(f"初始化会话服务: {self.__class__.__name__}")
 
     def _get_workspace_manager(self) -> WorkspaceManager:
@@ -110,15 +137,108 @@ class AgentService:
             self._workspace_manager = manager
         return manager
 
-    def _build_task_runner(
+    def _get_runtime_state_coordinator(self) -> RuntimeStateCoordinator:
+        coordinator = getattr(self, "_runtime_state_coordinator", None)
+        if coordinator is None:
+            coordinator = RuntimeStateCoordinator(uow_factory=self._uow_factory)
+        self._runtime_state_coordinator = coordinator
+        return coordinator
+
+    def _get_document_input_preflight_policy(self) -> DocumentInputPreflightPolicy:
+        policy = getattr(self, "_document_input_preflight_policy", None)
+        if policy is None:
+            policy = DocumentInputPreflightPolicy()
+            self._document_input_preflight_policy = policy
+        return policy
+
+    def _get_access_control_service(self) -> RuntimeAccessControlService:
+        access_control_service = getattr(self, "_access_control_service", None)
+        if access_control_service is None:
+            access_control_service = RuntimeAccessControlService(uow_factory=self._uow_factory)
+            self._access_control_service = access_control_service
+        return access_control_service
+
+    async def _load_and_validate_message_attachments(
+            self,
+            *,
+            attachments: List[str],
+            user_id: str,
+            session_id: str,
+            request_id: str,
+    ) -> list[Any]:
+        """加载当前用户附件元数据，并在创建 task/message 前完成文档 preflight。"""
+        db_attachments = []
+        async with self._uow_factory() as uow:
+            for file_id in attachments:
+                await self._get_access_control_service().assert_file_access(
+                    user_id=user_id,
+                    file_id=file_id,
+                    action=DataAccessAction.READ,
+                )
+                attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
+                if attachment is not None:
+                    db_attachments.append(attachment)
+                else:
+                    raise NotFoundError(
+                        msg=f"该文件[{file_id}]不存在",
+                        error_key=error_keys.FILE_NOT_FOUND,
+                        error_params={"file_id": file_id},
+                    )
+        self._get_document_input_preflight_policy().validate(
+            db_attachments,
+            user_id=user_id,
+            session_id=session_id,
+            request_id=request_id,
+        )
+        return db_attachments
+
+    async def _build_task_runner(
             self,
             session: Session,
+            task: Task,
             llm: LLM,
             sandbox: Sandbox,
             browser: Browser,
     ) -> AgentTaskRunner:
         """构建任务执行器，供 GraphRuntime 在创建任务时回调。"""
-        return AgentTaskRunner(
+        evidence_step_projection = EvidenceDigestProjector(uow_factory=self._uow_factory)
+        sandbox_fact_recorder = SandboxFactToolEventProjector(
+            ledger_service=SandboxFactLedgerService(uow_factory=self._uow_factory),
+        )
+        sandbox_fact_event_projector = SandboxFactEventProjector(
+            uow_factory=self._uow_factory,
+        )
+        sandbox_fact_context_builder = SandboxFactProjectionContextBuilder(
+            access_control_service=self._get_access_control_service(),
+            workspace_runtime_service=WorkspaceRuntimeService(
+                session_id=session.id,
+                user_id=session.user_id,
+                uow_factory=self._uow_factory,
+            ),
+            user_id=session.user_id,
+            session_id=session.id,
+        )
+        runtime_tool_event_persistence = RuntimeToolEventPersistenceService(
+            session_id=session.id,
+            task=task,
+            uow_factory=self._uow_factory,
+            runtime_state_coordinator=self._get_runtime_state_coordinator(),
+            sandbox_fact_recorder=sandbox_fact_recorder,
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            sandbox_fact_event_projector=sandbox_fact_event_projector,
+            tool_event_display_projector=ToolEventProjector(
+                adapter=self._tool_runtime_adapter,
+                browser=browser,
+                file_storage=self._file_storage,
+                workspace_runtime_service=WorkspaceRuntimeService(
+                    session_id=session.id,
+                    user_id=session.user_id,
+                    uow_factory=self._uow_factory,
+                ),
+                user_id=session.user_id,
+            ),
+        )
+        return await AgentTaskRunner.create(
             llm=llm,
             agent_config=self._agent_config,
             mcp_config=self._mcp_config,
@@ -133,13 +253,39 @@ class AgentService:
             sandbox=sandbox,
             run_engine_factory=self._run_engine_factory,
             tool_runtime_adapter=self._tool_runtime_adapter,
+            runtime_state_coordinator=self._get_runtime_state_coordinator(),
+            runtime_tool_snapshot_recorder=self._sandbox_capability_profile_service,
+            sandbox_fact_recorder=sandbox_fact_recorder,
+            sandbox_fact_event_projector=sandbox_fact_event_projector,
+            evidence_step_reconciler=EvidenceLedgerService(
+                uow_factory=self._uow_factory,
+                assembler=EvidenceFactAssembler(),
+                step_projection=evidence_step_projection,
+            ),
+            sandbox_fact_context_builder=sandbox_fact_context_builder,
+            runtime_tool_event_persistence=runtime_tool_event_persistence,
+        )
+
+    async def _ensure_periodic_sandbox_profile(self, *, user_id: str, session_id: str) -> None:
+        async with self._uow_factory() as uow:
+            workspace = await uow.workspace.get_by_session_id_for_user(
+                session_id=session_id,
+                user_id=user_id,
+            )
+        if workspace is None or not str(workspace.sandbox_id or "").strip():
+            return
+        await self._sandbox_capability_profile_service.ensure_fresh_profile(
+            user_id=user_id,
+            session_id=session_id,
+            reason=SandboxProfileRefreshReason.PERIODIC,
         )
 
     async def _get_task(self, session: Session) -> Optional[Task]:
         """读取会话任务实例。"""
         runtime = getattr(self, "_graph_runtime", None)
         if runtime is None:
-            raise RuntimeError("未配置GraphRuntime，无法读取会话任务")
+            # 历史单元测试会用 object.__new__ 构造服务，只注入 task_cls。
+            return self._task_cls.get(session.id)
         return await runtime.get_task(session=session)
 
     async def _resolve_runtime_llm(self, session: Session) -> LLM:
@@ -199,8 +345,10 @@ class AgentService:
         if not should_persist_event(event):
             return
         try:
-            async with self._uow_factory() as uow:
-                await uow.session.add_event_if_absent(session_id=session_id, event=event)
+            await self._get_runtime_state_coordinator().persist_runtime_event(
+                session_id=session_id,
+                event=event,
+            )
         except Exception as e:
             # 修复失败不影响当前SSE消息继续下发，避免用户流式体验被阻断。
             logger.warning(f"会话{session_id}输出流事件历史修复失败: {e}")
@@ -210,8 +358,10 @@ class AgentService:
         llm = await self._resolve_runtime_llm(session)
         workspace_runtime_service = WorkspaceRuntimeService(
             session_id=session.id,
+            user_id=session.user_id,
             uow_factory=self._uow_factory,
         )
+        evidence_digest_projector = EvidenceDigestProjector(uow_factory=self._uow_factory)
         inspector = LangGraphRunEngine(
             session_id=session.id,
             stage_llms=build_uniform_stage_llms(llm),
@@ -219,8 +369,19 @@ class AgentService:
             uow_factory=self._uow_factory,
             runtime_context_service=RuntimeContextService(
                 workspace_runtime_service=workspace_runtime_service,
+                evidence_context_provider=EvidenceRuntimeContextProvider(
+                    ledger_service=EvidenceLedgerService(
+                        uow_factory=self._uow_factory,
+                        assembler=EvidenceFactAssembler(),
+                        step_projection=evidence_digest_projector,
+                    ),
+                    projector=evidence_digest_projector,
+                ),
             ),
+            evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=self._uow_factory),
             checkpointer=get_langgraph_checkpointer().get_checkpointer(),
+            data_retention_policy_service=DataRetentionPolicyService(),
+            access_control_service=self._get_access_control_service(),
         )
         return await inspector.inspect_resume_checkpoint()
 
@@ -297,6 +458,23 @@ class AgentService:
             error_params={"session_id": session.id},
         )
 
+    @staticmethod
+    def _reject_unresolved_runtime_conflict(*, session: Session, reconcile_result: Any) -> None:
+        warnings = set(getattr(reconcile_result, "warnings", []) or [])
+        snapshot = getattr(reconcile_result, "snapshot_after", None)
+        if "session_status_mismatch_run_status" not in warnings:
+            return
+
+        session_status = getattr(snapshot, "session_status", session.status)
+        if session_status == SessionStatus.WAITING:
+            return
+
+        raise BadRequestError(
+            msg="当前运行状态不一致，请稍后重试",
+            error_key=error_keys.SESSION_RUNTIME_STATE_CONFLICT,
+            error_params={"session_id": session.id},
+        )
+
     async def chat(
             self,
             session_id: str,
@@ -311,6 +489,10 @@ class AgentService:
         unread_reset_pending = False
         request_id: Optional[str] = None
         try:
+            await self._get_access_control_service().resolve_session_scope(
+                user_id=user_id,
+                session_id=session_id,
+            )
             # 获取会话信息
             async with self._uow_factory() as uow:
                 session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
@@ -321,6 +503,23 @@ class AgentService:
                     error_key=error_keys.SESSION_NOT_FOUND,
                     error_params={"session_id": session_id},
                 )
+            reconcile_result = await self._get_runtime_state_coordinator().reconcile_current_run(
+                session_id=session_id,
+                reason="before_chat",
+            )
+            async with self._uow_factory() as uow:
+                session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
+            if not session:
+                logger.error(f"会话{session_id}不存在")
+                raise NotFoundError(
+                    msg=f"会话{session_id}不存在",
+                    error_key=error_keys.SESSION_NOT_FOUND,
+                    error_params={"session_id": session_id},
+                )
+            self._reject_unresolved_runtime_conflict(
+                session=session,
+                reconcile_result=reconcile_result,
+            )
             # Context: 高频事件流会导致“每条事件重置未读数”的写放大。
             # Decision: 未读数只在首条输出事件重置一次，finally 仅在 pending 时兜底。
             # Trade-off: 状态收敛略依赖流程标志位，但显著降低无效写入。
@@ -360,6 +559,14 @@ class AgentService:
                 # 统一归一化可选参数，避免后续列表处理触发None错误。
                 attachments = attachments or []
 
+                request_id = str(uuid.uuid4())
+                db_attachments = await self._load_and_validate_message_attachments(
+                    attachments=attachments,
+                    user_id=user_id,
+                    session_id=session_id,
+                    request_id=request_id,
+                )
+
                 # 如果会话未处于运行状态，或者没有任务，则创建/恢复任务。
                 if task is None:
                     current_run_id = await self._get_workspace_manager().resolve_current_run_id(session=session)
@@ -379,28 +586,13 @@ class AgentService:
                         logger.error(f"会话{session_id}的聊天请求失败: 创建任务失败")
                         raise RuntimeError(f"会话{session_id}的聊天请求失败: 创建任务失败")
 
-                # 先查询附件元数据，构建完整消息事件。
-                # 该步骤为只读，不涉及会话投影写入，因此不会产生“先写latest_message”的窗口。
-                async with self._uow_factory() as uow:
-                    db_attachments = []
-                    for file_id in attachments:
-                        attachment = await uow.file.get_by_id_and_user_id(file_id=file_id, user_id=user_id)
-                        if attachment is not None:
-                            db_attachments.append(attachment)
-                        else:
-                            raise NotFoundError(
-                                msg=f"该文件[{file_id}]不存在",
-                                error_key=error_keys.FILE_NOT_FOUND,
-                                error_params={"file_id": file_id},
-                            )
-
                 # 创建用户消息事件
                 message_event = MessageEvent(
                     role="user",
                     message=message,
                     attachments=[attachment for attachment in db_attachments if attachment is not None],
                 )
-                request_id = str(uuid.uuid4())
+                await self._ensure_periodic_sandbox_profile(user_id=user_id, session_id=session_id)
                 runtime_input = RuntimeInput(
                     request_id=request_id,
                     payload=message_event,
@@ -411,15 +603,12 @@ class AgentService:
                 event_id = await task.input_stream.put(runtime_input.model_dump_json())
                 message_event.id = event_id
                 try:
-                    async with self._uow_factory() as uow:
-                        await uow.session.add_event_with_snapshot_if_absent(
-                            session_id=session_id,
-                            event=message_event,
-                            latest_message=message,
-                            latest_message_at=timestamp or datetime.now(),
-                            # 用户发起新一轮输入后立即置为 RUNNING，避免前端切换会话后丢失运行态。
-                            status=SessionStatus.RUNNING,
-                        )
+                    await self._get_runtime_state_coordinator().accept_user_message(
+                        session_id=session_id,
+                        event=message_event,
+                        latest_message_at=timestamp or datetime.now(),
+                        stream_event_id=event_id,
+                    )
                 except Exception as add_err:
                     logger.error(f"会话{session_id}保存用户事件失败，开始补偿输入流消息: {add_err}")
                     try:
@@ -442,6 +631,7 @@ class AgentService:
                         raise RuntimeError(f"会话{session_id}的恢复请求失败: 创建恢复任务失败")
 
                 request_id = str(uuid.uuid4())
+                await self._ensure_periodic_sandbox_profile(user_id=user_id, session_id=session_id)
                 event_id = await task.input_stream.put(
                     RuntimeInput(
                         request_id=request_id,
@@ -449,8 +639,11 @@ class AgentService:
                     ).model_dump_json()
                 )
                 try:
-                    async with self._uow_factory() as uow:
-                        await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                    await self._get_runtime_state_coordinator().mark_resume_requested(
+                        session_id=session_id,
+                        request_id=request_id,
+                        pending_interrupt=inspection.pending_interrupt,
+                    )
                 except Exception as update_err:
                     logger.error(f"会话{session_id}更新恢复状态失败，开始补偿输入流消息: {update_err}")
                     try:
@@ -469,6 +662,7 @@ class AgentService:
                         raise RuntimeError(f"会话{session_id}的继续取消任务请求失败: 创建任务失败")
 
                 request_id = str(uuid.uuid4())
+                await self._ensure_periodic_sandbox_profile(user_id=user_id, session_id=session_id)
                 event_id = await task.input_stream.put(
                     RuntimeInput(
                         request_id=request_id,
@@ -476,8 +670,10 @@ class AgentService:
                     ).model_dump_json()
                 )
                 try:
-                    async with self._uow_factory() as uow:
-                        await uow.session.update_status(session_id=session_id, status=SessionStatus.RUNNING)
+                    await self._get_runtime_state_coordinator().mark_continue_cancelled_requested(
+                        session_id=session_id,
+                        request_id=request_id,
+                    )
                 except Exception as update_err:
                     logger.error(f"会话{session_id}更新继续取消任务状态失败，开始补偿输入流消息: {update_err}")
                     try:
@@ -590,6 +786,11 @@ class AgentService:
                     logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
 
     async def stop_session(self, session_id: str, user_id: str) -> None:
+        await self._get_access_control_service().assert_session_access(
+            user_id=user_id,
+            session_id=session_id,
+            action=DataAccessAction.UPDATE,
+        )
         # 获取指定会话的信息
         async with self._uow_factory() as uow:
             session = await uow.session.get_by_id(session_id=session_id, user_id=user_id)
@@ -617,53 +818,11 @@ class AgentService:
         await self._persist_cancelled_session_state(session_id=session_id)
 
     async def _persist_cancelled_session_state(self, session_id: str) -> None:
-        """在没有活跃 task 实例时，直接收敛 session/run/step 为 cancelled。"""
-        async with self._uow_factory() as uow:
-            session = await uow.session.get_by_id(session_id=session_id)
-            if session is None:
-                return
-
-            await uow.session.update_status(
-                session_id=session_id,
-                status=SessionStatus.CANCELLED,
-            )
-
-            run_id = await self._get_workspace_manager().resolve_current_run_id(
-                session=session,
-                uow=uow,
-            )
-            if not run_id:
-                return
-
-            run = await uow.workflow_run.get_by_id(run_id)
-            if run is None:
-                return
-
-            if run.status == WorkflowRunStatus.CANCELLED:
-                return
-
-            run_events = await uow.workflow_run.list_events(run_id)
-            await uow.workflow_run.cancel_run(run_id)
-
-            runtime_metadata = run.runtime_metadata if isinstance(run.runtime_metadata, dict) else {}
-            cancelled_plan_event, cancelled_step_event = build_cancelled_runtime_events(
-                runtime_metadata,
-                run_events=run_events,
-                current_step_id=run.current_step_id,
-            )
-
-            if cancelled_step_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=session_id,
-                    event=cancelled_step_event,
-                )
-
-            if cancelled_plan_event is not None:
-                await uow.session.add_event_with_snapshot_if_absent(
-                    session_id=session_id,
-                    event=cancelled_plan_event,
-                    status=SessionStatus.CANCELLED,
-                )
+        """在没有活跃 task 实例时，通过 coordinator 收敛 cancelled 状态。"""
+        await self._get_runtime_state_coordinator().cancel_current_run(
+            session_id=session_id,
+            reason="stop_session",
+        )
 
     async def shutdown(self) -> None:
         """关闭会话服务"""
