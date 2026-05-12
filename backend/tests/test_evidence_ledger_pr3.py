@@ -1800,7 +1800,9 @@ def test_two_step_fact_to_evidence_reuse_closed_loop_should_resolve_without_exec
 
     assert payload["success"] is True
     assert payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert payload["summary"] == "已复用前序文件处理结果。"
     assert payload["data"]["result_handle_resolved"] is True
+    assert payload["data"]["resolved_result"]["summary"] == "safe summary"
     assert tool.invocations == []
     called_events = [
         event for event in tool_events
@@ -1808,6 +1810,7 @@ def test_two_step_fact_to_evidence_reuse_closed_loop_should_resolve_without_exec
     ]
     assert len(called_events) == 1
     assert called_events[0].function_result.success is True
+    assert called_events[0].function_result.message == "已复用前序文件处理结果。"
 
 
 def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executor(caplog) -> None:
@@ -1863,7 +1866,7 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
     assert tool.invocations == []
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert next_state["last_executed_step"].outcome.done is True
-    assert next_state["last_executed_step"].outcome.summary == "safe summary"
+    assert next_state["last_executed_step"].outcome.summary == "已复用前序文件处理结果。"
     called_events = [
         event for event in next_state["emitted_events"]
         if getattr(event, "type", "") == "tool" and event.status.value == "called"
@@ -1871,6 +1874,7 @@ def test_execute_step_node_should_resolve_evidence_reuse_without_calling_executo
     assert len(called_events) == 1
     assert called_events[0].function_name == "read_file"
     assert called_events[0].function_result.data["result_handle_id"] == resolver.result_handle_id
+    assert called_events[0].function_result.data["resolved_result"]["summary"] == "safe summary"
     log_text = caplog.text
     expected_log_events = [
         "reuse_existing_evidence_pending_resolution",
@@ -2034,6 +2038,8 @@ def test_search_evidence_reuse_main_chain_should_resolve_without_second_executor
     assert direct_resolver.called is True
     assert direct_payload["success"] is True
     assert direct_payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert direct_payload["summary"] == "已复用前序搜索结果。"
+    assert direct_payload["data"]["resolved_result"]["summary"] == "search_web tool fact"
     assert tool.invocations == [("search_web", {"query": query})]
     live_called_events = [
         event for event in live_events
@@ -2043,6 +2049,7 @@ def test_search_evidence_reuse_main_chain_should_resolve_without_second_executor
     ]
     assert len(live_called_events) == 1
     assert live_called_events[0].function_result.success is True
+    assert live_called_events[0].function_result.message == "已复用前序搜索结果。"
     assert live_called_events[0].function_result.data["result_handle_resolved"] is True
     assert not [
         event for event in live_events
@@ -2057,6 +2064,7 @@ def test_search_evidence_reuse_main_chain_should_resolve_without_second_executor
 
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert next_state["last_executed_step"].outcome.done is True
+    assert next_state["last_executed_step"].outcome.summary == "已复用前序搜索结果。"
     assert "技术问题" not in next_state["last_executed_step"].outcome.summary
     second_called_events = [
         event for event in next_state["emitted_events"]
@@ -2066,7 +2074,9 @@ def test_search_evidence_reuse_main_chain_should_resolve_without_second_executor
     ]
     assert len(second_called_events) == 1
     assert second_called_events[0].function_result.success is True
+    assert second_called_events[0].function_result.message == "已复用前序搜索结果。"
     assert second_called_events[0].function_result.data["result_handle_resolved"] is True
+    assert second_called_events[0].function_result.data["resolved_result"]["summary"] == "search_web tool fact"
 
     log_text = caplog.text
     assert "reuse_existing_evidence_pending_resolution" in log_text
@@ -2192,6 +2202,7 @@ def test_fetch_page_reuse_main_chain_should_resolve_without_second_executor_call
     assert tool.invocations == [("fetch_page", {"url": url})]
     assert next_state["last_executed_step"].status == ExecutionStatus.COMPLETED
     assert next_state["last_executed_step"].outcome.done is True
+    assert next_state["last_executed_step"].outcome.summary == "已复用前序页面读取结果。"
     second_called_events = [
         event for event in next_state["emitted_events"]
         if getattr(event, "type", "") == "tool"
@@ -2200,7 +2211,9 @@ def test_fetch_page_reuse_main_chain_should_resolve_without_second_executor_call
     ]
     assert len(second_called_events) == 1
     assert second_called_events[0].function_result.success is True
+    assert second_called_events[0].function_result.message == "已复用前序页面读取结果。"
     assert second_called_events[0].function_result.data["result_handle_resolved"] is True
+    assert second_called_events[0].function_result.data["resolved_result"]["summary"] == "fetch_page tool fact"
 
     prepared = asyncio.run(prepare_execute_step_input(
         state={
@@ -2242,6 +2255,8 @@ def test_fetch_page_reuse_main_chain_should_resolve_without_second_executor_call
     assert direct_resolver.called is True
     assert direct_payload["success"] is True
     assert direct_payload["loop_break_reason"] == "evidence_reuse_allowed"
+    assert direct_payload["summary"] == "已复用前序页面读取结果。"
+    assert direct_payload["data"]["resolved_result"]["summary"] == "fetch_page tool fact"
     assert tool.invocations == [("fetch_page", {"url": url})]
     live_called_events = [
         event for event in live_events
@@ -2251,6 +2266,7 @@ def test_fetch_page_reuse_main_chain_should_resolve_without_second_executor_call
     ]
     assert len(live_called_events) == 1
     assert live_called_events[0].function_result.success is True
+    assert live_called_events[0].function_result.message == "已复用前序页面读取结果。"
     assert live_called_events[0].function_result.data["result_handle_resolved"] is True
     assert not [
         event for event in live_events

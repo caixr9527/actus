@@ -1024,6 +1024,33 @@ def _normalize_tool_result_data(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _build_evidence_reuse_user_summary(*, data: Dict[str, Any], handle: Any) -> str:
+    action_key = str(data.get("action_key") or "").strip().lower()
+    subject_key = str(
+        getattr(handle, "subject_key", "")
+        or data.get("subject_key")
+        or ""
+    ).strip().lower()
+    result_handle = data.get("result_handle")
+    if isinstance(result_handle, dict):
+        action_key = action_key or str(result_handle.get("action_key") or "").strip().lower()
+        subject_key = subject_key or str(result_handle.get("subject_key") or "").strip().lower()
+
+    if action_key.startswith("search:") or subject_key.startswith("query:"):
+        return "已复用前序搜索结果。"
+    if action_key.startswith("fetch:") or subject_key.startswith("page:"):
+        return "已复用前序页面读取结果。"
+    if action_key.startswith(("file_read:", "file_write:", "file_search:")) or subject_key.startswith("file:"):
+        return "已复用前序文件处理结果。"
+    if action_key.startswith(("shell:", "command:")) or subject_key.startswith(("shell:", "command:")):
+        return "已复用前序命令执行结果。"
+    if action_key.startswith("browser:") or subject_key.startswith("browser:"):
+        return "已复用前序浏览器操作结果。"
+    if action_key.startswith("document:") or subject_key.startswith("document:"):
+        return "已复用前序文档处理结果。"
+    return "已复用前序执行结果。"
+
+
 async def _resolve_pending_evidence_reuse_before_emit(
         *,
         llm_message: Dict[str, Any],
@@ -1128,7 +1155,7 @@ async def _resolve_pending_evidence_reuse_before_emit(
     return {
         **llm_message,
         "success": True,
-        "summary": str(resolved.summary or data.get("reuse_summary") or "已复用前序证据结果"),
+        "summary": _build_evidence_reuse_user_summary(data=data, handle=handle),
         "loop_break_reason": "evidence_reuse_allowed",
         "data": {
             **data,

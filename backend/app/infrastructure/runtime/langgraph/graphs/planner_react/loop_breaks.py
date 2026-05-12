@@ -23,7 +23,7 @@ def build_loop_break_result(
         message_text = str(getattr(tool_result, "message", "") or "").strip()
         return {
             "success": False,
-            "summary": message_text or "已命中可复用 evidence，等待解析 result handle。",
+            "summary": message_text or "已命中可复用前序结果，等待解析结果句柄。",
             "result": message_text,
             "attachments": [],
             "blockers": [],
@@ -37,7 +37,7 @@ def build_loop_break_result(
         message_text = str(getattr(tool_result, "message", "") or "").strip()
         return {
             "success": True,
-            "summary": message_text or "已复用前序 evidence 结果。",
+            "summary": message_text or "已复用前序执行结果。",
             "result": message_text,
             "attachments": [],
             "blockers": [],
@@ -51,11 +51,11 @@ def build_loop_break_result(
         message_text = str(getattr(tool_result, "message", "") or "").strip()
         return {
             "success": False,
-            "summary": message_text or "前序步骤 evidence context 缺失，已停止真实工具调用。",
+            "summary": message_text or "前序步骤证据上下文缺失，已停止真实工具调用。",
             "result": message_text,
             "attachments": [],
-            "blockers": [message_text or "前序 completed step 存在，但缺少 evidence reuse snapshot。"],
-            "next_hint": "请先修复 evidence context 构建或等待 previous-step evidence gap 对账完成。",
+            "blockers": [message_text or "前序已完成步骤存在，但缺少证据复用快照。"],
+            "next_hint": "请先修复证据上下文构建，或等待前序步骤证据缺口对账完成。",
             "loop_break_reason": "evidence_reuse_snapshot_missing",
             "data": data if isinstance(data, dict) else {},
             "runtime_recent_action": runtime_recent_action or {},
