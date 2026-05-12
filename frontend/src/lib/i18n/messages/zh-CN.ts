@@ -194,6 +194,8 @@ export const zhCNMessages: MessageDictionary = {
   "sessionDetail.stepStatus.waiting": "等待中",
   "sessionDetail.stepStatus.completed": "已完成",
   "sessionDetail.stepStatus.failed": "失败",
+  "sessionDetail.turnSummary.working": "工作中",
+  "sessionDetail.turnSummary.done": "工作完成",
   "sessionDetail.turnSummary.runningNoProcess": "正在处理",
   "sessionDetail.turnSummary.runningSteps": "正在处理 · {completed}/{total} 步 · {tools} 次工具使用",
   "sessionDetail.turnSummary.runningTools": "正在处理 · {tools} 次工具使用",

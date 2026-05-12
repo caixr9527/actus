@@ -14,6 +14,7 @@ import type { StepEvent, ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
 import { resolveStepDetail } from '@/lib/run-timeline'
 import { resolveStepProcessSectionOrder } from '@/lib/step-process-display'
+import { resolveAssistantTurnSummary } from '@/lib/assistant-turn-summary'
 import {
   getInitialAssistantTurnExpandedState,
   resolveAssistantTurnExpandedState,
@@ -215,55 +216,7 @@ function getProcessStatusIcon(status: StepEvent['status']) {
 }
 
 function getAssistantTurnSummary(item: AssistantTurnItem, t: ReturnType<typeof useI18n>['t']): string {
-  if (item.stepCount === 0 && item.toolCount === 0) {
-    if (item.status === 'running') return t('sessionDetail.turnSummary.runningNoProcess')
-    if (item.status === 'failed') return t('sessionDetail.turnSummary.failedNoProcess')
-    return t('sessionDetail.turnSummary.completedNoProcess')
-  }
-
-  if (item.status === 'running') {
-    return item.stepCount > 0
-      ? t('sessionDetail.turnSummary.runningSteps', {
-        completed: item.completedStepCount,
-        total: item.stepCount,
-        tools: item.toolCount,
-      })
-      : t('sessionDetail.turnSummary.runningTools', { tools: item.toolCount })
-  }
-
-  if (item.status === 'waiting') {
-    return item.stepCount > 0
-      ? t('sessionDetail.turnSummary.waitingSteps', {
-        completed: item.completedStepCount,
-        total: item.stepCount,
-      })
-      : t('sessionDetail.turnSummary.waiting')
-  }
-
-  if (item.status === 'failed') {
-    return item.stepCount > 0
-      ? t('sessionDetail.turnSummary.failedSteps', {
-        completed: item.completedStepCount,
-        total: item.stepCount,
-      })
-      : t('sessionDetail.turnSummary.failedNoProcess')
-  }
-
-  if (item.status === 'cancelled') {
-    return item.stepCount > 0
-      ? t('sessionDetail.turnSummary.cancelledSteps', {
-        completed: item.completedStepCount,
-        total: item.stepCount,
-      })
-      : t('sessionDetail.turnSummary.cancelled')
-  }
-
-  return item.stepCount > 0
-    ? t('sessionDetail.turnSummary.completedSteps', {
-      total: item.stepCount,
-      tools: item.toolCount,
-    })
-    : t('sessionDetail.turnSummary.completedTools', { tools: item.toolCount })
+  return resolveAssistantTurnSummary(item.status, t)
 }
 
 function AssistantTurnBlock({
