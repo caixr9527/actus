@@ -17,20 +17,12 @@ class WorkspaceArtifactRepository(Protocol):
         """保存或更新工作区产物。"""
         ...
 
-    async def list_by_workspace_id(self, workspace_id: str) -> List[WorkspaceArtifact]:
-        """按工作区 ID 查询全部产物。"""
+    async def insert_current_index_if_absent(self, artifact: WorkspaceArtifact) -> None:
+        """仅在不存在时创建 current artifact 行，冲突时不得覆盖 current projection。"""
         ...
 
     async def list_by_user_workspace_id(self, user_id: str, workspace_id: str) -> List[WorkspaceArtifact]:
         """按用户与工作区 ID 查询全部产物。"""
-        ...
-
-    async def list_by_workspace_id_and_paths(
-            self,
-            workspace_id: str,
-            paths: List[str],
-    ) -> List[WorkspaceArtifact]:
-        """按工作区 ID + 路径列表批量查询产物。"""
         ...
 
     async def list_by_user_workspace_id_and_paths(
@@ -40,14 +32,6 @@ class WorkspaceArtifactRepository(Protocol):
             paths: List[str],
     ) -> List[WorkspaceArtifact]:
         """按用户 + 工作区 ID + 路径列表批量查询产物。"""
-        ...
-
-    async def get_by_workspace_id_and_path(
-            self,
-            workspace_id: str,
-            path: str,
-    ) -> Optional[WorkspaceArtifact]:
-        """按工作区 ID + 路径查询单个产物。"""
         ...
 
     async def get_by_user_workspace_id_and_path(
@@ -66,25 +50,4 @@ class WorkspaceArtifactRepository(Protocol):
             artifact_id: str,
     ) -> Optional[WorkspaceArtifact]:
         """按用户 + 工作区 ID + 产物 ID 强过滤查询单个产物。"""
-        ...
-
-    async def update_delivery_state_by_workspace_id_and_paths(
-            self,
-            *,
-            workspace_id: str,
-            paths: List[str],
-            delivery_state: str,
-    ) -> List[WorkspaceArtifact]:
-        """按工作区 ID + 路径列表批量更新交付状态。"""
-        ...
-
-    async def update_delivery_state_by_user_workspace_id_and_paths(
-            self,
-            *,
-            user_id: str,
-            workspace_id: str,
-            paths: List[str],
-            delivery_state: str,
-    ) -> List[WorkspaceArtifact]:
-        """按用户 + 工作区 ID + 路径列表批量更新交付状态。"""
         ...

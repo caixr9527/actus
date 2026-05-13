@@ -14,12 +14,14 @@ from pydantic import ValidationError
 from app.domain.models import Workspace, WorkspaceArtifact
 from app.domain.models.tool_result import ToolResult
 from app.domain.repositories import IUnitOfWork
-from app.domain.services.runtime.contracts.data_access_contract import (
-    DataOrigin,
-    DataTrustLevel,
-    PrivacyLevel,
-    RetentionPolicyKind,
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionIdentity,
+    ArtifactRevisionRegistrationCommand,
+    ResolvedArtifactRevisionResult,
 )
+from app.domain.services.runtime.contracts.artifact_governance_ports import ArtifactLedgerPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
     SandboxCapabilityProfile,
@@ -50,6 +52,7 @@ class WorkspaceRuntimeService:
             session_id: str,
             uow_factory: Callable[[], IUnitOfWork],
             user_id: str,
+            artifact_ledger: ArtifactLedgerPort | None = None,
     ) -> None:
         self._session_id = session_id
         self._user_id = str(user_id or "").strip()
@@ -57,6 +60,7 @@ class WorkspaceRuntimeService:
             raise ValueError("WorkspaceRuntimeService 必须提供 user_id")
         self._uow_factory = uow_factory
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
+        self._artifact_ledger = artifact_ledger
 
     @property
     def session_id(self) -> str:
@@ -341,136 +345,73 @@ class WorkspaceRuntimeService:
     async def upsert_artifact(
             self,
             *,
-            path: str,
-            artifact_type: str,
-            summary: str = "",
-            source_capability: Optional[str] = None,
-            source_step_id: Optional[str] = None,
-            delivery_state: str = "",
-            metadata: Optional[Dict[str, Any]] = None,
-            record_as_changed_file: bool = True,
-    ) -> WorkspaceArtifact:
-        workspace = await self.get_workspace_or_raise()
-        normalized_path = str(path or "").strip()
-        if not normalized_path:
-            raise ValueError("artifact path 不能为空")
+            command: ArtifactRevisionRegistrationCommand,
+    ) -> ResolvedArtifactRevisionResult:
+        if self._artifact_ledger is None:
+            raise RuntimeError("WorkspaceRuntimeService 未配置 ArtifactLedgerPort")
+        return await self._artifact_ledger.register_revision(command=command)
 
-        async with self._uow_factory() as uow:
-            existing = await uow.workspace_artifact.get_by_user_workspace_id_and_path(
-                user_id=self._user_id,
-                workspace_id=workspace.id,
-                path=normalized_path,
-            )
-            if existing is None:
-                artifact = WorkspaceArtifact(
-                    workspace_id=workspace.id,
-                    user_id=workspace.user_id,
-                    session_id=workspace.session_id,
-                    run_id=workspace.current_run_id,
-                    path=normalized_path,
-                    artifact_type=str(artifact_type or "file").strip() or "file",
-                    summary=str(summary or "").strip(),
-                    source_step_id=source_step_id,
-                    source_capability=source_capability,
-                    delivery_state=str(delivery_state or "").strip(),
-                    origin=DataOrigin.AGENT_GENERATED,
-                    trust_level=DataTrustLevel.AGENT_GENERATED,
-                    privacy_level=PrivacyLevel.PRIVATE,
-                    retention_policy=RetentionPolicyKind.WORKSPACE_BOUND,
-                    metadata=dict(metadata or {}),
-                )
-            else:
-                artifact = existing.model_copy(deep=True)
-                artifact.user_id = artifact.user_id or workspace.user_id
-                artifact.session_id = artifact.session_id or workspace.session_id
-                artifact.run_id = artifact.run_id or workspace.current_run_id
-                artifact.artifact_type = str(artifact_type or artifact.artifact_type or "file").strip() or "file"
-                artifact.summary = str(summary or artifact.summary or "").strip()
-                artifact.source_step_id = source_step_id or artifact.source_step_id
-                artifact.source_capability = source_capability or artifact.source_capability
-                artifact.delivery_state = str(delivery_state or artifact.delivery_state or "").strip()
-                artifact.metadata = {
-                    **dict(artifact.metadata or {}),
-                    **dict(metadata or {}),
-                }
-                artifact.updated_at = datetime.now()
-            await uow.workspace_artifact.save(artifact=artifact)
-        if record_as_changed_file:
-            await self.record_changed_file(filepath=normalized_path)
-        return artifact
+    async def resolve_authoritative_artifact_revisions(
+            self,
+            *,
+            paths: List[str],
+    ) -> List[ResolvedArtifactRevisionResult]:
+        if self._artifact_ledger is None:
+            return []
+        scope = await self._build_current_scope()
+        if scope is None:
+            return []
+        return await self._artifact_ledger.resolve_authoritative_artifact_revisions(
+            scope=scope,
+            paths=paths,
+        )
+
+    async def mark_artifact_revisions_delivery_state(
+            self,
+            *,
+            revisions: List[ArtifactRevisionIdentity],
+            delivery_state: ArtifactDeliveryState,
+    ) -> List[ResolvedArtifactRevisionResult]:
+        if self._artifact_ledger is None:
+            return []
+        scope = await self._build_current_scope()
+        if scope is None:
+            return []
+        return await self._artifact_ledger.mark_artifact_revisions_delivery_state(
+            scope=scope,
+            revisions=revisions,
+            delivery_state=delivery_state,
+        )
 
     async def mark_artifacts_delivery_state(
             self,
             *,
             paths: List[str],
             delivery_state: str,
-    ) -> List[WorkspaceArtifact]:
-        workspace = await self.get_workspace()
-        normalized_paths = [
-            str(path or "").strip()
-            for path in paths
-            if str(path or "").strip()
-        ]
-        if workspace is None or len(normalized_paths) == 0:
-            return []
-
-        updated_artifacts: List[WorkspaceArtifact] = []
-        async with self._uow_factory() as uow:
-            existing_artifacts = await uow.workspace_artifact.list_by_user_workspace_id_and_paths(
-                user_id=self._user_id,
-                workspace_id=workspace.id,
-                paths=normalized_paths,
+    ) -> List[ResolvedArtifactRevisionResult]:
+        resolved = await self.resolve_authoritative_artifact_revisions(paths=paths)
+        identities = [
+            ArtifactRevisionIdentity(
+                artifact_id=item.artifact_id,
+                revision_id=item.revision_id,
+                content_hash=item.content_hash,
             )
-            if len(existing_artifacts) == 0:
-                return []
-            updated_artifacts = await uow.workspace_artifact.update_delivery_state_by_user_workspace_id_and_paths(
-                user_id=self._user_id,
-                workspace_id=workspace.id,
-                paths=normalized_paths,
-                delivery_state=delivery_state,
-            )
-        artifact_by_path = {
-            str(artifact.path or "").strip(): artifact
-            for artifact in updated_artifacts
-            if str(artifact.path or "").strip()
-        }
-        return [
-            artifact_by_path[path]
-            for path in normalized_paths
-            if path in artifact_by_path
+            for item in resolved
         ]
+        return await self.mark_artifact_revisions_delivery_state(
+            revisions=identities,
+            delivery_state=ArtifactDeliveryState(delivery_state),
+        )
 
     async def resolve_authoritative_artifact_paths(
             self,
             *,
             paths: List[str],
     ) -> List[str]:
-        workspace = await self.get_workspace()
-        normalized_paths: List[str] = []
-        for path in paths:
-            normalized_path = str(path or "").strip()
-            if not normalized_path or normalized_path in normalized_paths:
-                continue
-            normalized_paths.append(normalized_path)
-        if workspace is None or len(normalized_paths) == 0:
-            return []
-
-        authoritative_paths: List[str] = []
-        async with self._uow_factory() as uow:
-            artifacts = await uow.workspace_artifact.list_by_user_workspace_id_and_paths(
-                user_id=self._user_id,
-                workspace_id=workspace.id,
-                paths=normalized_paths,
-            )
-        indexed_paths = {
-            str(artifact.path or "").strip()
-            for artifact in artifacts
-            if str(artifact.path or "").strip()
-        }
-        for path in normalized_paths:
-            if path in indexed_paths:
-                authoritative_paths.append(path)
-        return authoritative_paths
+        return [
+            item.path
+            for item in await self.resolve_authoritative_artifact_revisions(paths=paths)
+        ]
 
     @staticmethod
     def _clean_mapping(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -483,3 +424,16 @@ class WorkspaceRuntimeService:
     async def _save_workspace(self, workspace: Workspace) -> None:
         async with self._uow_factory() as uow:
             await uow.workspace.save(workspace=workspace)
+
+    async def _build_current_scope(self) -> AccessScopeResult | None:
+        workspace = await self.get_workspace()
+        if workspace is None:
+            return None
+        return AccessScopeResult(
+            tenant_id=self._user_id,
+            user_id=self._user_id,
+            session_id=workspace.session_id,
+            workspace_id=workspace.id,
+            run_id=workspace.current_run_id,
+            current_step_id=None,
+        )

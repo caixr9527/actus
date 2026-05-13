@@ -149,7 +149,7 @@ class MessageAttachmentProjector:
             if event.stage == "final" and delivered_paths:
                 await self._workspace_runtime_service.mark_artifacts_delivery_state(
                     paths=delivered_paths,
-                    delivery_state="final_delivered",
+                    delivery_state="selected",
                 )
         except Exception as e:
             logger.exception(f"同步消息附件到存储失败: {e}")

@@ -33,7 +33,6 @@ class ToolEventProjector:
         self._browser_screenshot_service = BrowserScreenshotArtifactService(
             browser=browser,
             file_storage=file_storage,
-            workspace_runtime_service=workspace_runtime_service,
             user_id=user_id,
         )
 

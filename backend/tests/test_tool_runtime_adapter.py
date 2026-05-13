@@ -26,7 +26,7 @@ from app.domain.services.tools import (
     ToolRuntimeAdapter,
     ToolRuntimeEventHooks,
 )
-from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotArtifactRef
+from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotCaptureResult
 from app.domain.services.workspace_runtime.capabilities import (
     WorkspaceBrowserCapability,
     WorkspaceFileCapability,
@@ -272,12 +272,16 @@ def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions(
     adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
     screenshot_calls: list[str] = []
 
-    async def _get_browser_screenshot() -> BrowserScreenshotArtifactRef:
+    async def _get_browser_screenshot() -> BrowserScreenshotCaptureResult:
         screenshot_calls.append("shot")
-        return BrowserScreenshotArtifactRef(
+        return BrowserScreenshotCaptureResult(
             url="https://cdn.example.com/browser-shot.png",
-            artifact_id="artifact-1",
-            artifact_path="/.workspace/browser-screenshots/shot.png",
+            file_id="file-1",
+            filename="shot.png",
+            filepath="/tmp/shot.png",
+            key="2026/03/19/shot.png",
+            mime_type="image/png",
+            size=128,
         )
 
     view_event = ToolEvent(
@@ -317,14 +321,18 @@ def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions(
     assert screenshot_calls == ["shot"]
 
 
-def test_tool_runtime_adapter_should_write_screenshot_artifact_ref_to_function_result() -> None:
+def test_tool_runtime_adapter_should_write_screenshot_file_to_function_result() -> None:
     adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
 
-    async def _get_browser_screenshot() -> BrowserScreenshotArtifactRef:
-        return BrowserScreenshotArtifactRef(
+    async def _get_browser_screenshot() -> BrowserScreenshotCaptureResult:
+        return BrowserScreenshotCaptureResult(
             url="https://cdn.example.com/browser-shot.png",
-            artifact_id="artifact-1",
-            artifact_path="/.workspace/browser-screenshots/shot.png",
+            file_id="file-1",
+            filename="shot.png",
+            filepath="/tmp/shot.png",
+            key="2026/03/19/shot.png",
+            mime_type="image/png",
+            size=128,
         )
 
     event = ToolEvent(
@@ -346,20 +354,29 @@ def test_tool_runtime_adapter_should_write_screenshot_artifact_ref_to_function_r
     assert event.tool_content is not None
     assert event.tool_content.screenshot == "https://cdn.example.com/browser-shot.png"
     assert event.function_result is not None
-    assert event.function_result.data["screenshot_artifact"] == {
-        "artifact_id": "artifact-1",
-        "artifact_path": "/.workspace/browser-screenshots/shot.png",
+    assert event.function_result.data["screenshot_file"] == {
+        "file_id": "file-1",
+        "filename": "shot.png",
+        "filepath": "/tmp/shot.png",
+        "key": "2026/03/19/shot.png",
+        "mime_type": "image/png",
+        "size": 128,
+        "url": "https://cdn.example.com/browser-shot.png",
     }
 
 
-def test_tool_runtime_adapter_should_merge_screenshot_artifact_into_pydantic_browser_result() -> None:
+def test_tool_runtime_adapter_should_merge_screenshot_file_into_pydantic_browser_result() -> None:
     adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
 
-    async def _get_browser_screenshot() -> BrowserScreenshotArtifactRef:
-        return BrowserScreenshotArtifactRef(
+    async def _get_browser_screenshot() -> BrowserScreenshotCaptureResult:
+        return BrowserScreenshotCaptureResult(
             url="https://cdn.example.com/browser-shot.png",
-            artifact_id="artifact-1",
-            artifact_path="/.workspace/browser-screenshots/shot.png",
+            file_id="file-1",
+            filename="shot.png",
+            filepath="/tmp/shot.png",
+            key="2026/03/19/shot.png",
+            mime_type="image/png",
+            size=128,
         )
 
     event = ToolEvent(
@@ -390,9 +407,14 @@ def test_tool_runtime_adapter_should_merge_screenshot_artifact_into_pydantic_bro
     assert event.tool_content.url == "https://example.com/docs/runtime"
     assert event.tool_content.screenshot == "https://cdn.example.com/browser-shot.png"
     assert isinstance(event.function_result.data, dict)
-    assert event.function_result.data["screenshot_artifact"] == {
-        "artifact_id": "artifact-1",
-        "artifact_path": "/.workspace/browser-screenshots/shot.png",
+    assert event.function_result.data["screenshot_file"] == {
+        "file_id": "file-1",
+        "filename": "shot.png",
+        "filepath": "/tmp/shot.png",
+        "key": "2026/03/19/shot.png",
+        "mime_type": "image/png",
+        "size": 128,
+        "url": "https://cdn.example.com/browser-shot.png",
     }
     assert event.function_result.data["url"] == "https://example.com/docs/runtime"
 
@@ -422,7 +444,7 @@ def test_tool_runtime_adapter_should_reject_string_screenshot_hook_result() -> N
     assert event.tool_content is not None
     assert event.tool_content.screenshot == ""
     assert event.function_result is not None
-    assert "screenshot_artifact" not in event.function_result.data
+    assert "screenshot_file" not in event.function_result.data
 
 
 def test_tool_runtime_adapter_should_reject_non_contract_screenshot_ref_with_matching_attrs() -> None:
@@ -431,8 +453,12 @@ def test_tool_runtime_adapter_should_reject_non_contract_screenshot_ref_with_mat
     async def _get_browser_screenshot():
         return SimpleNamespace(
             url="https://cdn.example.com/browser-shot.png",
-            artifact_id="artifact-1",
-            artifact_path="/.workspace/browser-screenshots/shot.png",
+            file_id="file-1",
+            filename="shot.png",
+            filepath="/tmp/shot.png",
+            key="2026/03/19/shot.png",
+            mime_type="image/png",
+            size=128,
         )
 
     event = ToolEvent(
@@ -454,7 +480,7 @@ def test_tool_runtime_adapter_should_reject_non_contract_screenshot_ref_with_mat
     assert event.tool_content is not None
     assert event.tool_content.screenshot == ""
     assert event.function_result is not None
-    assert "screenshot_artifact" not in event.function_result.data
+    assert "screenshot_file" not in event.function_result.data
 
 
 def test_tool_runtime_adapter_should_keep_browser_event_usable_without_screenshot_hook() -> None:

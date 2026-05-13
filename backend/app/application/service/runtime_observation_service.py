@@ -34,6 +34,7 @@ from app.domain.services.runtime.contracts.data_access_contract import DataAcces
 from app.domain.services.runtime.contracts.event_delivery_policy import should_persist_event
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import SandboxCapabilityProfile
 from app.domain.services.workspace_runtime import WorkspaceRuntimeService
+from app.application.service.artifact_ledger_service import ArtifactLedgerService
 
 logger = logging.getLogger(__name__)
 
@@ -452,6 +453,7 @@ class RuntimeObservationService:
             user_id=user_id,
             session_id=session_id,
             uow_factory=self._uow_factory,
+            artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
         )
         profile = await workspace_runtime.get_sandbox_capability_profile()
         if profile is None:

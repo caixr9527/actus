@@ -157,7 +157,7 @@ def test_search_tool_should_record_workspace_observations() -> None:
     ]
 
 
-def test_file_capability_should_record_artifact_and_tree_summary() -> None:
+def test_file_capability_should_only_record_tree_summary() -> None:
     workspace_runtime_service = _FakeWorkspaceRuntimeService()
     tool = WorkspaceFileCapability(
         sandbox=_FakeSandbox(),
@@ -169,20 +169,7 @@ def test_file_capability_should_record_artifact_and_tree_summary() -> None:
 
     assert write_result.success is True
     assert find_result.success is True
-    assert workspace_runtime_service.artifacts == [
-        {
-            "path": "/workspace/project/report.md",
-            "artifact_type": "file",
-            "summary": "通过 write_file 更新文件: /workspace/project/report.md",
-            "source_capability": "write_file",
-            "metadata": {
-                "append": False,
-                "leading_newline": False,
-                "trailing_newline": False,
-                "sudo": False,
-            },
-        }
-    ]
+    assert workspace_runtime_service.artifacts == []
     assert workspace_runtime_service.file_tree_summaries == [
         "目录 /workspace/project 共 2 项"
     ]

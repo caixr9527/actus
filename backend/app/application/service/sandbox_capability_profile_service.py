@@ -43,6 +43,7 @@ from app.domain.services.runtime.contracts.sandbox_capability_profile_ports impo
     SandboxCapabilityProfileRefresherPort,
 )
 from app.domain.services.workspace_runtime import WorkspaceRuntimeService
+from app.application.service.artifact_ledger_service import ArtifactLedgerService
 
 
 logger = logging.getLogger(__name__)
@@ -740,6 +741,7 @@ class SandboxCapabilityProfileService(
             user_id=user_id,
             session_id=session_id,
             uow_factory=self._uow_factory,
+            artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
         )
 
     def _build_refresh_error(

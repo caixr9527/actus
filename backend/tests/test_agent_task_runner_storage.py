@@ -187,6 +187,31 @@ class _NoopA2ATool:
         return None
 
 
+class _FakeAgentConfig:
+    max_iterations = 1
+
+
+class _FakeWorkspaceRuntimeWithLedger:
+    session_id = "session-1"
+
+    def __init__(self) -> None:
+        self.resolve_calls: list[list[str]] = []
+        self.mark_calls: list[dict] = []
+
+    async def resolve_authoritative_artifact_revisions(self, *, paths: list[str]):
+        self.resolve_calls.append(list(paths))
+        return []
+
+    async def mark_artifact_revisions_delivery_state(self, *, revisions, delivery_state):
+        self.mark_calls.append({"revisions": list(revisions), "delivery_state": delivery_state})
+        return []
+
+
+class _FakeSnapshotRecorder:
+    async def record_runtime_tool_snapshot(self, *, user_id: str, session_id: str, snapshot):
+        return object()
+
+
 class _InvokeSessionRepo:
     def __init__(self) -> None:
         self.updated_status: Optional[SessionStatus] = None
@@ -276,6 +301,41 @@ def _build_user_input_attachment_projector(
         file_storage=file_storage or _SandboxSyncFileStorage(),
         uow_factory=uow_factory or (lambda: _SandboxSyncUoW()),
     )
+
+
+def test_agent_task_runner_create_should_use_injected_ledger_backed_workspace_runtime() -> None:
+    runtime = _FakeWorkspaceRuntimeWithLedger()
+    captured: dict[str, object] = {}
+
+    async def _run_engine_factory(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    runner = asyncio.run(
+        AgentTaskRunner.create(
+            llm=object(),
+            agent_config=_FakeAgentConfig(),
+            mcp_config=object(),
+            a2a_config=None,
+            session_id="session-1",
+            user_id="user-1",
+            file_storage=object(),
+            uow_factory=lambda: _DummyUoW(),
+            json_parser=object(),
+            browser=object(),
+            search_engine=object(),
+            sandbox=_NoopSandbox(),
+            run_engine_factory=_run_engine_factory,
+            tool_runtime_adapter=ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1()),
+            runtime_tool_snapshot_recorder=_FakeSnapshotRecorder(),
+            workspace_runtime_factory=lambda: runtime,
+        )
+    )
+
+    assert captured["workspace_runtime_service"] is runtime
+    assert runner._workspace_runtime_service is runtime
+    assert runner._tool_event_projector._workspace_runtime_service is runtime
+    assert runner._message_attachment_projector._workspace_runtime_service is runtime
 
 
 class _SandboxUploadFail:
@@ -668,7 +728,7 @@ def test_sync_message_attachments_to_storage_should_mark_final_artifacts_deliver
     assert workspace_runtime_service.delivery_calls == [
         {
             "paths": ["/tmp/final.md", "/tmp/report.md"],
-            "delivery_state": "final_delivered",
+            "delivery_state": "selected",
         }
     ]
 
@@ -705,7 +765,7 @@ def test_sync_message_attachments_to_storage_should_filter_non_workspace_final_a
     assert workspace_runtime_service.delivery_calls == [
         {
             "paths": ["/tmp/final.md"],
-            "delivery_state": "final_delivered",
+            "delivery_state": "selected",
         }
     ]
 
@@ -1090,43 +1150,28 @@ class _ScreenshotFileStorage:
         return f"https://cdn.example.com/{file.key}"
 
 
-def test_browser_screenshot_artifact_service_should_upload_and_index_workspace_artifact() -> None:
+def test_browser_screenshot_artifact_service_should_upload_temporary_file_result() -> None:
     file_storage = _ScreenshotFileStorage()
-    workspace_runtime_service = _CaptureWorkspaceRuntimeService()
     service = BrowserScreenshotArtifactService(
         browser=_BrowserScreenshot(),
         file_storage=file_storage,
-        workspace_runtime_service=workspace_runtime_service,
         user_id="user-1",
     )
 
     screenshot_ref = asyncio.run(service.capture(source_capability="browser_view"))
 
     assert screenshot_ref.url == "https://cdn.example.com/2026/03/19/s.png"
-    assert screenshot_ref.artifact_id == "artifact-screenshot"
-    assert screenshot_ref.artifact_path == "/.workspace/browser-screenshots/2026/03/19/s.png"
+    assert screenshot_ref.file_id == "file-screenshot"
+    assert screenshot_ref.filename.endswith(".png")
+    assert screenshot_ref.key == "2026/03/19/s.png"
+    assert screenshot_ref.mime_type == "image/png"
+    assert screenshot_ref.size == len(b"fake-image-bytes")
     assert file_storage.upload_user_ids == ["user-1"]
     payload = file_storage.upload_payloads[0]
     assert getattr(payload, "filename").endswith(".png")
     assert getattr(payload, "content_type") == "image/png"
     assert getattr(payload, "size") == len(b"fake-image-bytes")
     assert getattr(payload, "file").read() == b"fake-image-bytes"
-    assert len(workspace_runtime_service.artifact_calls) == 1
-    artifact_call = workspace_runtime_service.artifact_calls[0]
-    assert artifact_call["path"] == "/.workspace/browser-screenshots/2026/03/19/s.png"
-    assert artifact_call["artifact_type"] == "browser_screenshot"
-    assert artifact_call["summary"] == "浏览器截图: /.workspace/browser-screenshots/2026/03/19/s.png"
-    assert artifact_call["source_capability"] == "browser_view"
-    assert artifact_call["record_as_changed_file"] is False
-    assert artifact_call["metadata"] == {
-        "file_id": "file-screenshot",
-        "filename": getattr(payload, "filename"),
-        "filepath": "",
-        "key": "2026/03/19/s.png",
-        "mime_type": "image/png",
-        "size": len(b"fake-image-bytes"),
-        "url": "https://cdn.example.com/2026/03/19/s.png",
-    }
 
 
 class _ShellObservationWorkspaceRuntimeService:

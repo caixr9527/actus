@@ -37,7 +37,7 @@ from app.domain.services.runtime.contracts.sandbox_capability_profile_contract i
     RuntimeToolCapabilitySnapshot,
     RuntimeToolCapabilitySnapshotItem,
 )
-from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotArtifactRef
+from app.domain.services.runtime.contracts.browser_artifact_contract import BrowserScreenshotCaptureResult
 from app.domain.services.tools.a2a import A2ATool
 from app.domain.services.tools.base import BaseTool
 from app.domain.services.tools.capability_registry import CapabilityBuildContext, CapabilityRegistry
@@ -68,7 +68,7 @@ class ToolRuntimeEventHooks:
     - 非热路径或当前阶段不需要的能力允许留空，避免调用方传递 no-op 占位函数。
     """
 
-    get_browser_screenshot: Optional[Callable[[], Awaitable[BrowserScreenshotArtifactRef | None]]] = None
+    get_browser_screenshot: Optional[Callable[[], Awaitable[BrowserScreenshotCaptureResult | None]]] = None
     get_shell_tool_result: Optional[Callable[[], Awaitable[ToolResult]]] = None
     read_file_content: Optional[Callable[[str], Awaitable[ToolResult]]] = None
     sync_file_to_storage: Optional[Callable[[str], Awaitable[object]]] = None
@@ -397,29 +397,31 @@ class ToolRuntimeAdapter:
         if event.tool_name == "browser":
             function_name = str(event.function_name or "").strip().lower()
             screenshot = ""
-            screenshot_artifact = None
+            screenshot_file = None
             if hooks.get_browser_screenshot is not None and function_name in BROWSER_SCREENSHOT_FUNCTIONS:
                 screenshot_ref = await hooks.get_browser_screenshot()
                 if screenshot_ref is not None:
-                    if not isinstance(screenshot_ref, BrowserScreenshotArtifactRef):
+                    if not isinstance(screenshot_ref, BrowserScreenshotCaptureResult):
                         logger.warning(
-                            "browser_screenshot_artifact_ref_invalid",
+                            "browser_screenshot_capture_result_invalid",
                             extra={"ref_type": screenshot_ref.__class__.__name__},
                         )
                     else:
                         screenshot = str(screenshot_ref.url or "").strip()
-                        artifact_id = str(screenshot_ref.artifact_id or "").strip()
-                        artifact_path = str(screenshot_ref.artifact_path or "").strip()
-                        if artifact_id and artifact_path:
-                            screenshot_artifact = {
-                                "artifact_id": artifact_id,
-                                "artifact_path": artifact_path,
-                            }
+                        screenshot_file = {
+                            "file_id": str(screenshot_ref.file_id or "").strip(),
+                            "filename": str(screenshot_ref.filename or "").strip(),
+                            "filepath": str(screenshot_ref.filepath or "").strip(),
+                            "key": str(screenshot_ref.key or "").strip(),
+                            "mime_type": str(screenshot_ref.mime_type or "").strip(),
+                            "size": screenshot_ref.size,
+                            "url": screenshot,
+                        }
             event.tool_content = self._build_browser_content(event, screenshot)
-            if screenshot_artifact is not None and event.function_result is not None:
-                event.function_result.data = self._merge_screenshot_artifact(
+            if screenshot_file is not None and event.function_result is not None:
+                event.function_result.data = self._merge_screenshot_file(
                     data=event.function_result.data,
-                    screenshot_artifact=screenshot_artifact,
+                    screenshot_file=screenshot_file,
                 )
             return True
 
@@ -512,12 +514,12 @@ class ToolRuntimeAdapter:
         return False
 
     @staticmethod
-    def _merge_screenshot_artifact(*, data: object, screenshot_artifact: dict[str, str]) -> dict:
+    def _merge_screenshot_file(*, data: object, screenshot_file: dict[str, object]) -> dict:
         if isinstance(data, BaseModel):
             values = data.model_dump(mode="json")
         elif isinstance(data, dict):
             values = dict(data)
         else:
             values = {}
-        values["screenshot_artifact"] = dict(screenshot_artifact)
+        values["screenshot_file"] = dict(screenshot_file)
         return values

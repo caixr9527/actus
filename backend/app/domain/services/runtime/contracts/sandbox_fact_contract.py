@@ -238,6 +238,12 @@ class BrowserSnapshotPayload(_StrictPayload):
     structured_summary: str
     actionable_element_count: int
     degrade_reason: str | None
+    screenshot_file_id: str | None = None
+    screenshot_filename: str | None = None
+    screenshot_filepath: str | None = None
+    screenshot_key: str | None = None
+    screenshot_mime_type: str | None = None
+    screenshot_size: int | None = None
     missing_fields: list[str] | None = None
     reason_code: str | None = None
 

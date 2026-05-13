@@ -406,30 +406,22 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             data: Mapping[str, Any],
     ) -> BrowserSnapshotFactInput:
         actionable_elements = _sequence(data.get("actionable_elements") or data.get("elements"))
-        screenshot_artifact = _to_mapping(data.get("screenshot_artifact"))
-        screenshot_artifact_id = _optional_text(screenshot_artifact.get("artifact_id"))
-        screenshot_artifact_path = _optional_text(screenshot_artifact.get("artifact_path"))
-        has_screenshot_artifact = bool(screenshot_artifact_id and screenshot_artifact_path)
+        screenshot_file = _to_mapping(data.get("screenshot_file"))
         return BrowserSnapshotFactInput(
-            **_with_overrides(
-                base,
-                missing_fields=_missing_fields(
-                    base,
-                    [] if has_screenshot_artifact else ["screenshot_artifact"],
-                ),
-                reason_code=_reason_code(
-                    base,
-                    None if has_screenshot_artifact else "screenshot_artifact_missing",
-                ),
-            ),
+            **base,
             url=_first_text(data.get("url"), default=""),
             title=_first_text(data.get("title"), default=""),
-            screenshot_artifact_id=screenshot_artifact_id,
-            screenshot_artifact_path=screenshot_artifact_path,
+            screenshot_artifact_id=None,
+            screenshot_artifact_path=None,
+            screenshot_file_id=_optional_text(screenshot_file.get("file_id")),
+            screenshot_filename=_optional_text(screenshot_file.get("filename")),
+            screenshot_filepath=_optional_text(screenshot_file.get("filepath")),
+            screenshot_key=_optional_text(screenshot_file.get("key")),
+            screenshot_mime_type=_optional_text(screenshot_file.get("mime_type")),
+            screenshot_size=_optional_int(screenshot_file.get("size")),
             structured_summary=_first_text(data.get("content_summary"), data.get("main_content_preview"), data.get("excerpt"), data.get("content"), default=""),
             actionable_element_count=len(actionable_elements),
-            degrade_reason=_optional_text(data.get("degrade_reason"))
-            or (None if has_screenshot_artifact else "screenshot_artifact_missing"),
+            degrade_reason=_optional_text(data.get("degrade_reason")),
         )
 
     @staticmethod

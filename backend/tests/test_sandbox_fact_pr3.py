@@ -698,9 +698,11 @@ def test_pr3_should_not_create_browser_screenshot_artifact_fact() -> None:
     assert facts[0].fact_kind == SandboxFactKind.BROWSER_SNAPSHOT
     assert facts[0].source_ref.artifact_id is None
     assert facts[0].payload["screenshot_artifact_id"] is None
+    assert facts[0].payload["screenshot_artifact_path"] is None
+    assert facts[0].payload["reason_code"] is None
 
 
-def test_browser_screenshot_fact_should_reference_workspace_artifact() -> None:
+def test_browser_screenshot_fact_should_project_temporary_screenshot_file_metadata() -> None:
     repo = _SandboxFactRepo()
     event = ToolEvent(
         id="tool-event-9",
@@ -713,9 +715,14 @@ def test_browser_screenshot_fact_should_reference_workspace_artifact() -> None:
             data={
                 "url": "https://example.com",
                 "title": "Example",
-                "screenshot_artifact": {
-                    "artifact_id": "artifact-1",
-                    "artifact_path": "/.workspace/browser-screenshots/shot.png",
+                "screenshot_file": {
+                    "file_id": "file-1",
+                    "filename": "shot.png",
+                    "filepath": "/tmp/shot.png",
+                    "key": "2026/03/19/shot.png",
+                    "mime_type": "image/png",
+                    "size": 128,
+                    "url": "https://cdn.example.com/shot.png",
                 },
             },
         ),
@@ -725,8 +732,15 @@ def test_browser_screenshot_fact_should_reference_workspace_artifact() -> None:
     facts = asyncio.run(_projector(repo).record_from_tool_event(context=_context(), event=event))
 
     assert facts[0].fact_kind == SandboxFactKind.BROWSER_SNAPSHOT
-    assert facts[0].payload["screenshot_artifact_id"] == "artifact-1"
-    assert facts[0].payload["screenshot_artifact_path"] == "/.workspace/browser-screenshots/shot.png"
+    assert facts[0].payload["screenshot_artifact_id"] is None
+    assert facts[0].payload["screenshot_artifact_path"] is None
+    assert facts[0].payload["screenshot_file_id"] == "file-1"
+    assert facts[0].payload["screenshot_filename"] == "shot.png"
+    assert facts[0].payload["screenshot_filepath"] == "/tmp/shot.png"
+    assert facts[0].payload["screenshot_key"] == "2026/03/19/shot.png"
+    assert facts[0].payload["screenshot_mime_type"] == "image/png"
+    assert facts[0].payload["screenshot_size"] == 128
+    assert "shot.png" not in str(facts[0].payload.get("url"))
 
 
 def test_browser_screenshot_fact_should_not_read_tool_content_screenshot_as_artifact() -> None:
@@ -749,4 +763,4 @@ def test_browser_screenshot_fact_should_not_read_tool_content_screenshot_as_arti
 
     assert facts[0].payload["screenshot_artifact_id"] is None
     assert facts[0].payload["screenshot_artifact_path"] is None
-    assert facts[0].payload["reason_code"] == "screenshot_artifact_missing"
+    assert facts[0].payload["reason_code"] is None

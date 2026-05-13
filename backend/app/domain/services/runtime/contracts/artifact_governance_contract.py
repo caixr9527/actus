@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.data_access_contract import (
     DataOrigin,
     DataTrustLevel,
@@ -295,6 +296,26 @@ class WorkspaceArtifactRevision(BaseModel):
         if self.size_bytes is not None and self.size_bytes < 0:
             raise ValueError("size_bytes 不能为负数")
 
+        if self.source_kind in {
+            ArtifactRevisionSourceKind.TOOL_WRITE_FILE,
+            ArtifactRevisionSourceKind.TOOL_REPLACE_FILE,
+        }:
+            expected_function_name = (
+                "write_file"
+                if self.source_kind == ArtifactRevisionSourceKind.TOOL_WRITE_FILE
+                else "replace_in_file"
+            )
+            if not self.tool_call_id:
+                raise ValueError("工具 artifact revision 必须包含 tool_call_id")
+            if self.function_name != expected_function_name:
+                raise ValueError("工具 artifact revision function_name 与 source_kind 不匹配")
+            if not self.source_fact_ids:
+                raise ValueError("工具 artifact revision 必须包含 source_fact_ids")
+            if self.size_bytes is None or self.size_bytes <= 0 or not self.mime_type:
+                raise ValueError("工具 artifact revision 必须包含正数 size_bytes 和 mime_type")
+            if self.storage_ref.storage_backend == ArtifactStorageBackend.INLINE_SNAPSHOT:
+                raise ValueError("工具 artifact revision 不得使用 inline_snapshot storage backend")
+
         if self.source_kind == ArtifactRevisionSourceKind.FINAL_ANSWER_SNAPSHOT:
             if not self.source_final_answer_hash:
                 raise ValueError("final_answer_snapshot 必须包含 source_final_answer_hash")
@@ -315,6 +336,136 @@ class WorkspaceArtifactRevision(BaseModel):
             raise ValueError("sandbox storage revision 只能保持 candidate")
 
         return self
+
+
+class ArtifactRevisionRegistrationCommand(BaseModel):
+    """PR2 受控 artifact revision 注册命令。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: AccessScopeResult
+    path: str
+    storage_ref: ArtifactStorageRef
+    content_hash: str
+    storage_hash: str | None = None
+    hash_algorithm: Literal["sha256"] = "sha256"
+    size_bytes: int | None = None
+    mime_type: str | None = None
+    artifact_type: ArtifactType
+    delivery_state: ArtifactDeliveryState = ArtifactDeliveryState.CANDIDATE
+    source_kind: ArtifactRevisionSourceKind
+    source_event_id: str
+    source_run_id: str | None = None
+    source_message_event_id: str | None = None
+    source_revision_id: str | None = None
+    source_fact_ids: list[str] = Field(default_factory=list)
+    source_evidence_ids: list[str] = Field(default_factory=list)
+    source_final_answer_hash: str | None = None
+    derived_content_hash: str | None = None
+    tool_call_id: str | None = None
+    function_name: str | None = None
+    profile_hash: str | None = None
+    profile_status: str = "missing"
+    origin: DataOrigin = DataOrigin.AGENT_GENERATED
+    trust_level: DataTrustLevel = DataTrustLevel.AGENT_GENERATED
+    privacy_level: PrivacyLevel = PrivacyLevel.PRIVATE
+    retention_policy: RetentionPolicyKind = RetentionPolicyKind.WORKSPACE_BOUND
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("path", "content_hash", "source_event_id")
+    @classmethod
+    def _required_command_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("artifact revision registration command 必填文本字段不能为空")
+        return normalized
+
+    @field_validator(
+        "storage_hash",
+        "mime_type",
+        "source_run_id",
+        "source_message_event_id",
+        "source_revision_id",
+        "source_final_answer_hash",
+        "derived_content_hash",
+        "tool_call_id",
+        "function_name",
+        "profile_hash",
+        "profile_status",
+    )
+    @classmethod
+    def _normalize_optional_command_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @field_validator("source_fact_ids", "source_evidence_ids")
+    @classmethod
+    def _normalize_command_id_list(cls, value: list[str]) -> list[str]:
+        return [item for item in [str(item or "").strip() for item in value or []] if item]
+
+    @model_validator(mode="after")
+    def _validate_command_contract(self) -> "ArtifactRevisionRegistrationCommand":
+        if self.size_bytes is not None and self.size_bytes < 0:
+            raise ValueError("size_bytes 不能为负数")
+        if self.source_kind in {
+            ArtifactRevisionSourceKind.TOOL_WRITE_FILE,
+            ArtifactRevisionSourceKind.TOOL_REPLACE_FILE,
+        }:
+            expected_function_name = (
+                "write_file"
+                if self.source_kind == ArtifactRevisionSourceKind.TOOL_WRITE_FILE
+                else "replace_in_file"
+            )
+            if not self.tool_call_id:
+                raise ValueError("工具 artifact revision 注册命令必须包含 tool_call_id")
+            if self.function_name != expected_function_name:
+                raise ValueError("工具 artifact revision 注册命令 function_name 与 source_kind 不匹配")
+            if not self.source_fact_ids:
+                raise ValueError("工具 artifact revision 注册命令必须包含 source_fact_ids")
+            if self.size_bytes is None or self.size_bytes <= 0 or not self.mime_type:
+                raise ValueError("工具 artifact revision 注册命令必须包含正数 size_bytes 和 mime_type")
+            if self.storage_ref.storage_backend == ArtifactStorageBackend.INLINE_SNAPSHOT:
+                raise ValueError("工具 artifact revision 注册命令不得使用 inline_snapshot storage backend")
+        if self.source_kind == ArtifactRevisionSourceKind.FINAL_ANSWER_SNAPSHOT:
+            if self.content_hash != self.source_final_answer_hash:
+                raise ValueError("final_answer_snapshot content_hash 必须等于 source_final_answer_hash")
+        if self.source_kind == ArtifactRevisionSourceKind.DERIVED_EXPORT:
+            if not self.source_revision_id or not self.source_final_answer_hash or not self.derived_content_hash:
+                raise ValueError("derived_export 必须包含 source_revision_id/source_final_answer_hash/derived_content_hash")
+            if self.derived_content_hash != self.content_hash:
+                raise ValueError("derived_export derived_content_hash 必须等于 content_hash")
+        return self
+
+
+class ArtifactRevisionIdentity(BaseModel):
+    """revision-aware 状态迁移身份锁。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str
+    revision_id: str
+    content_hash: str
+
+
+class ResolvedArtifactRevisionResult(BaseModel):
+    """path current projection 解析出的 version-locked revision。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str
+    revision_id: str
+    content_hash: str
+    path: str
+    artifact_type: ArtifactType
+    delivery_state: ArtifactDeliveryState
+    session_id: str
+    run_id: str | None = None
+    source_run_id: str | None = None
+    source_step_id: str | None = None
+    source_event_id: str | None = None
+    source_kind: ArtifactRevisionSourceKind
 
 
 class SelectedArtifactRevisionResult(BaseModel):
@@ -382,12 +533,15 @@ __all__ = [
     "ArtifactDeliveryState",
     "ArtifactEventArtifactRef",
     "ArtifactEventPayload",
+    "ArtifactRevisionIdentity",
     "ArtifactRevisionEventRef",
+    "ArtifactRevisionRegistrationCommand",
     "ArtifactRevisionSourceKind",
     "ArtifactStatus",
     "ArtifactStorageBackend",
     "ArtifactStorageRef",
     "ArtifactType",
+    "ResolvedArtifactRevisionResult",
     "SelectedArtifactRevisionResult",
     "WorkspaceArtifactRevision",
 ]

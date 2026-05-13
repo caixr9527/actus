@@ -22,6 +22,7 @@ from app.application.service.evidence_result_handle_resolver import EvidenceResu
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
+from app.application.service.artifact_ledger_service import ArtifactLedgerService
 from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
@@ -214,6 +215,7 @@ class AgentService:
                 session_id=session.id,
                 user_id=session.user_id,
                 uow_factory=self._uow_factory,
+                artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
             ),
             user_id=session.user_id,
             session_id=session.id,
@@ -234,6 +236,7 @@ class AgentService:
                     session_id=session.id,
                     user_id=session.user_id,
                     uow_factory=self._uow_factory,
+                    artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
                 ),
                 user_id=session.user_id,
             ),
@@ -264,6 +267,12 @@ class AgentService:
             ),
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
+            workspace_runtime_factory=lambda: WorkspaceRuntimeService(
+                session_id=session.id,
+                user_id=session.user_id,
+                uow_factory=self._uow_factory,
+                artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
+            ),
         )
 
     async def _ensure_periodic_sandbox_profile(self, *, user_id: str, session_id: str) -> None:
@@ -360,6 +369,7 @@ class AgentService:
             session_id=session.id,
             user_id=session.user_id,
             uow_factory=self._uow_factory,
+            artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
         )
         evidence_digest_projector = EvidenceDigestProjector(uow_factory=self._uow_factory)
         inspector = LangGraphRunEngine(

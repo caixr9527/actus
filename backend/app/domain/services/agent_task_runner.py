@@ -98,6 +98,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+            workspace_runtime_factory: Callable[[], WorkspaceRuntimeService] | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -112,10 +113,14 @@ class AgentTaskRunner(TaskRunner):
         self._a2a_tool = a2a_tool or A2ATool()
         self._file_storage = file_storage
         self._uow_factory = uow_factory
-        self._workspace_runtime_service = workspace_runtime_service or WorkspaceRuntimeService(
-            session_id=session_id,
-            user_id=user_id,
-            uow_factory=uow_factory,
+        self._workspace_runtime_service = workspace_runtime_service or (
+            workspace_runtime_factory()
+            if workspace_runtime_factory is not None
+            else WorkspaceRuntimeService(
+                session_id=session_id,
+                user_id=user_id,
+                uow_factory=uow_factory,
+            )
         )
         self._workspace_manager = WorkspaceManager(uow_factory=uow_factory)
         self._runtime_state_coordinator = runtime_state_coordinator
@@ -174,6 +179,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+            workspace_runtime_factory: Callable[[], WorkspaceRuntimeService] | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
             raise RuntimeError(
@@ -183,14 +189,12 @@ class AgentTaskRunner(TaskRunner):
             raise RuntimeError("未配置 RuntimeToolSnapshotRecorderPort，禁止构建未记录 snapshot 的运行引擎")
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
+        if workspace_runtime_factory is None:
+            raise RuntimeError("AgentTaskRunner.create 必须由 application 层注入 ledger-backed WorkspaceRuntimeService factory")
 
         mcp_tool = MCPTool()
         a2a_tool = A2ATool()
-        workspace_runtime_service = WorkspaceRuntimeService(
-            session_id=session_id,
-            user_id=user_id,
-            uow_factory=uow_factory,
-        )
+        workspace_runtime_service = workspace_runtime_factory()
         run_engine = await cls._build_run_engine(
             llm=llm,
             agent_config=agent_config,

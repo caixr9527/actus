@@ -179,7 +179,8 @@ def test_browser_snapshot_fact_should_not_use_environment_summary_as_screenshot_
 
     assert facts[0].payload["screenshot_artifact_id"] is None
     assert facts[0].payload["screenshot_artifact_path"] is None
-    assert "screenshot_artifact" in facts[0].payload["missing_fields"]
+    assert "screenshot_artifact" not in (facts[0].payload["missing_fields"] or [])
+    assert facts[0].payload["reason_code"] == "current_step_missing"
 
 
 def test_fact_related_modules_should_not_reference_environment_summary_fallback() -> None:

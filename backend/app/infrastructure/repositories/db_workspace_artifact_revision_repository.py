@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Artifact revision DB 仓储实现。"""
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.models import WorkspaceArtifactRevision
 from app.domain.repositories import WorkspaceArtifactRevisionRepository
 from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionIdentity,
     ArtifactRevisionSourceKind,
 )
 from app.infrastructure.models import WorkspaceArtifactModel, WorkspaceArtifactRevisionModel
@@ -64,6 +66,29 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
             return existing_after_conflict
         raise WorkspaceArtifactRevisionConflictError("artifact revision 幂等冲突后无法读取既有记录")
 
+    async def append_revision_for_artifact(self, revision: WorkspaceArtifactRevision) -> WorkspaceArtifactRevision:
+        await self._lock_artifact_scope(revision)
+        existing = await self._get_existing_by_idempotency_key(revision)
+        if existing is not None:
+            return existing
+
+        last_error: Exception | None = None
+        for _ in range(3):
+            next_revision = revision.model_copy(deep=True)
+            next_revision.revision_no = await self._next_revision_no(
+                user_id=revision.user_id,
+                workspace_id=revision.workspace_id,
+                artifact_id=revision.artifact_id,
+            )
+            try:
+                return await self.insert_or_get_existing(next_revision)
+            except (IntegrityError, WorkspaceArtifactRevisionConflictError) as exc:
+                existing_after_conflict = await self._get_existing_by_idempotency_key(revision)
+                if existing_after_conflict is not None:
+                    return existing_after_conflict
+                last_error = exc
+        raise WorkspaceArtifactRevisionConflictError("artifact revision_no 冲突重试后仍无法写入") from last_error
+
     async def get_by_user_workspace_revision_id(
             self,
             *,
@@ -107,6 +132,39 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
             for record in records
         ]
 
+    async def update_delivery_state_by_identities(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            identities: list[ArtifactRevisionIdentity],
+            delivery_state: ArtifactDeliveryState,
+    ) -> list[WorkspaceArtifactRevision]:
+        updated: list[WorkspaceArtifactRevision] = []
+        for identity in identities:
+            stmt = (
+                update(WorkspaceArtifactRevisionModel)
+                .where(
+                    WorkspaceArtifactRevisionModel.user_id == user_id,
+                    WorkspaceArtifactRevisionModel.workspace_id == workspace_id,
+                    WorkspaceArtifactRevisionModel.session_id == session_id,
+                    WorkspaceArtifactRevisionModel.artifact_id == identity.artifact_id,
+                    WorkspaceArtifactRevisionModel.revision_id == identity.revision_id,
+                    WorkspaceArtifactRevisionModel.content_hash == identity.content_hash,
+                )
+                .values(delivery_state=delivery_state.value)
+                .returning(WorkspaceArtifactRevisionModel)
+            )
+            result = await self.db_session.execute(stmt)
+            record = result.scalar_one_or_none()
+            if record is None:
+                continue
+            revision = record if isinstance(record, WorkspaceArtifactRevision) else record.to_domain()
+            await self._sync_current_delivery_state(revision)
+            updated.append(revision)
+        return updated
+
     async def _ensure_artifact_scope(self, revision: WorkspaceArtifactRevision) -> None:
         stmt = select(WorkspaceArtifactModel.id).where(
             WorkspaceArtifactModel.user_id == revision.user_id,
@@ -116,6 +174,35 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
         result = await self.db_session.execute(stmt)
         if result.scalar_one_or_none() is None:
             raise WorkspaceArtifactRevisionScopeError("artifact revision 与 artifact scope 不一致")
+
+    async def _lock_artifact_scope(self, revision: WorkspaceArtifactRevision) -> None:
+        stmt = (
+            select(WorkspaceArtifactModel.id)
+            .where(
+                WorkspaceArtifactModel.user_id == revision.user_id,
+                WorkspaceArtifactModel.workspace_id == revision.workspace_id,
+                WorkspaceArtifactModel.id == revision.artifact_id,
+            )
+            .with_for_update()
+        )
+        result = await self.db_session.execute(stmt)
+        if result.scalar_one_or_none() is None:
+            raise WorkspaceArtifactRevisionScopeError("artifact revision 与 artifact scope 不一致")
+
+    async def _next_revision_no(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            artifact_id: str,
+    ) -> int:
+        stmt = select(func.coalesce(func.max(WorkspaceArtifactRevisionModel.revision_no), 0)).where(
+            WorkspaceArtifactRevisionModel.user_id == user_id,
+            WorkspaceArtifactRevisionModel.workspace_id == workspace_id,
+            WorkspaceArtifactRevisionModel.artifact_id == artifact_id,
+        )
+        result = await self.db_session.execute(stmt)
+        return int(result.scalar_one() or 0) + 1
 
     async def _update_current_projection(self, revision: WorkspaceArtifactRevision) -> None:
         stmt = (
@@ -133,6 +220,19 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
                 artifact_type=revision.artifact_type.value,
                 delivery_state=revision.delivery_state.value,
             )
+        )
+        await self.db_session.execute(stmt)
+
+    async def _sync_current_delivery_state(self, revision: WorkspaceArtifactRevision) -> None:
+        stmt = (
+            update(WorkspaceArtifactModel)
+            .where(
+                WorkspaceArtifactModel.user_id == revision.user_id,
+                WorkspaceArtifactModel.workspace_id == revision.workspace_id,
+                WorkspaceArtifactModel.id == revision.artifact_id,
+                WorkspaceArtifactModel.current_revision_id == revision.revision_id,
+            )
+            .values(delivery_state=revision.delivery_state.value)
         )
         await self.db_session.execute(stmt)
 

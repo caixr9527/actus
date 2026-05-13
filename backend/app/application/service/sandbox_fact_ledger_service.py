@@ -201,6 +201,12 @@ class BrowserSnapshotFactInput(_FactInput):
     title: str = ""
     screenshot_artifact_id: str | None = None
     screenshot_artifact_path: str | None = None
+    screenshot_file_id: str | None = None
+    screenshot_filename: str | None = None
+    screenshot_filepath: str | None = None
+    screenshot_key: str | None = None
+    screenshot_mime_type: str | None = None
+    screenshot_size: int | None = None
     structured_summary: str = ""
     actionable_element_count: int = 0
     degrade_reason: str | None = None
@@ -474,6 +480,12 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             structured_summary=_sanitize_payload_text(fact_input.structured_summary)[0],
             actionable_element_count=fact_input.actionable_element_count,
             degrade_reason=fact_input.degrade_reason,
+            screenshot_file_id=fact_input.screenshot_file_id,
+            screenshot_filename=fact_input.screenshot_filename,
+            screenshot_filepath=fact_input.screenshot_filepath,
+            screenshot_key=fact_input.screenshot_key,
+            screenshot_mime_type=fact_input.screenshot_mime_type,
+            screenshot_size=fact_input.screenshot_size,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
         )

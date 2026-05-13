@@ -123,19 +123,6 @@ class WorkspaceFileCapability(BaseTool):
             trailing_newline=trailing_newline,
             sudo=sudo,
         )
-        if result.success:
-            await self._workspace_runtime_service.upsert_artifact(
-                path=filepath,
-                artifact_type="file",
-                summary=f"通过 write_file 更新文件: {filepath}",
-                source_capability="write_file",
-                metadata={
-                    "append": bool(append),
-                    "leading_newline": bool(leading_newline),
-                    "trailing_newline": bool(trailing_newline),
-                    "sudo": bool(sudo),
-                },
-            )
         return result
 
     @tool(
@@ -174,16 +161,6 @@ class WorkspaceFileCapability(BaseTool):
             new_text=new_str,
             sudo=sudo,
         )
-        if result.success:
-            await self._workspace_runtime_service.upsert_artifact(
-                path=filepath,
-                artifact_type="file",
-                summary=f"通过 replace_in_file 更新文件: {filepath}",
-                source_capability="replace_in_file",
-                metadata={
-                    "sudo": bool(sudo),
-                },
-            )
         return result
 
     @tool(
