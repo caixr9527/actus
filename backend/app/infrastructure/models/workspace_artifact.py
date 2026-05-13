@@ -23,6 +23,7 @@ class WorkspaceArtifactModel(Base):
     __table_args__ = (
         Index("ix_workspace_artifacts_workspace_id", "workspace_id"),
         Index("ix_workspace_artifacts_user_workspace", "user_id", "workspace_id"),
+        Index("ix_workspace_artifacts_user_workspace_current_revision", "user_id", "workspace_id", "id", "current_revision_id"),
         Index("ix_workspace_artifacts_user_session", "user_id", "session_id"),
         UniqueConstraint(
             "workspace_id",
@@ -49,6 +50,15 @@ class WorkspaceArtifactModel(Base):
         String(128),
         nullable=False,
         server_default=text("''::character varying"),
+    )
+    current_revision_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    latest_content_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    latest_size: Mapped[Optional[int]] = mapped_column(nullable=True)
+    latest_mime_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    artifact_status: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default=text("'active'::character varying"),
     )
     origin: Mapped[str] = mapped_column(
         String(64),
@@ -107,6 +117,11 @@ class WorkspaceArtifactModel(Base):
             "source_step_id": self.source_step_id,
             "source_capability": self.source_capability,
             "delivery_state": self.delivery_state,
+            "current_revision_id": self.current_revision_id,
+            "latest_content_hash": self.latest_content_hash,
+            "latest_size": self.latest_size,
+            "latest_mime_type": self.latest_mime_type,
+            "artifact_status": self.artifact_status,
             "origin": self.origin,
             "trust_level": self.trust_level,
             "privacy_level": self.privacy_level,

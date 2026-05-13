@@ -17,6 +17,7 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     PrivacyLevel,
     RetentionPolicyKind,
 )
+from app.domain.services.runtime.contracts.artifact_governance_contract import ArtifactStatus
 
 
 class WorkspaceArtifact(BaseModel):
@@ -33,6 +34,11 @@ class WorkspaceArtifact(BaseModel):
     source_step_id: Optional[str] = None
     source_capability: Optional[str] = None
     delivery_state: str = ""
+    current_revision_id: Optional[str] = None
+    latest_content_hash: Optional[str] = None
+    latest_size: Optional[int] = None
+    latest_mime_type: Optional[str] = None
+    artifact_status: ArtifactStatus = ArtifactStatus.ACTIVE
     origin: DataOrigin = DataOrigin.AGENT_GENERATED
     trust_level: DataTrustLevel = DataTrustLevel.AGENT_GENERATED
     privacy_level: PrivacyLevel = PrivacyLevel.PRIVATE

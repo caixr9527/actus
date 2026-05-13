@@ -21,6 +21,7 @@ from .workflow_run_step import WorkflowRunStepModel
 from .workflow_run_summary import WorkflowRunSummaryModel
 from .workspace import WorkspaceModel
 from .workspace_artifact import WorkspaceArtifactModel
+from .workspace_artifact_revision import WorkspaceArtifactRevisionModel
 
 __all__ = [
     "Base",
@@ -39,4 +40,5 @@ __all__ = [
     "WorkflowRunSummaryModel",
     "WorkspaceModel",
     "WorkspaceArtifactModel",
+    "WorkspaceArtifactRevisionModel",
 ]

@@ -68,6 +68,19 @@ from .evidence import (
     EvidenceStalenessPolicy,
     EvidenceSupportLevel,
 )
+from .artifact_governance import (
+    ArtifactDeliveryState,
+    ArtifactEventArtifactRef,
+    ArtifactEventPayload,
+    ArtifactRevisionEventRef,
+    ArtifactRevisionSourceKind,
+    ArtifactStatus,
+    ArtifactStorageBackend,
+    ArtifactStorageRef,
+    ArtifactType,
+    SelectedArtifactRevisionResult,
+    WorkspaceArtifactRevision,
+)
 from .file import File
 from .health_status import HealthStatus
 from .llm_model_config import LLMModelConfig
@@ -157,6 +170,17 @@ __all__ = [
     "build_step_objective_source",
     "RuntimeLLMConfig",
     "ExecutionStatus",
+    "ArtifactDeliveryState",
+    "ArtifactEventArtifactRef",
+    "ArtifactEventPayload",
+    "ArtifactRevisionEventRef",
+    "ArtifactRevisionSourceKind",
+    "ArtifactStatus",
+    "ArtifactStorageBackend",
+    "ArtifactStorageRef",
+    "ArtifactType",
+    "SelectedArtifactRevisionResult",
+    "WorkspaceArtifactRevision",
     "EvidenceBackedFactProjection",
     "BaseEvent",
     "PlanEvent",

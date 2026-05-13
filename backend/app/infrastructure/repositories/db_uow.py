@@ -22,6 +22,7 @@ from .db_user_repository import DBUserRepository
 from .db_workflow_run_repository import DBWorkflowRunRepository
 from .db_workflow_run_summary_repository import DBWorkflowRunSummaryRepository
 from .db_workspace_artifact_repository import DBWorkspaceArtifactRepository
+from .db_workspace_artifact_revision_repository import DBWorkspaceArtifactRevisionRepository
 from .db_workspace_repository import DBWorkspaceRepository
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class DBUnitOfWork(IUnitOfWork):
         self.session_context_snapshot = DBSessionContextSnapshotRepository(db_session=self.db_session)
         self.workspace = DBWorkspaceRepository(db_session=self.db_session)
         self.workspace_artifact = DBWorkspaceArtifactRepository(db_session=self.db_session)
+        self.workspace_artifact_revision = DBWorkspaceArtifactRevisionRepository(db_session=self.db_session)
 
         return self
 

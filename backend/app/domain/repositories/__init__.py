@@ -17,6 +17,7 @@ from .uow import IUnitOfWork
 from .user_repository import UserRepository
 from .workflow_run_repository import WorkflowRunRepository
 from .workflow_run_summary_repository import WorkflowRunSummaryRepository
+from .workspace_artifact_revision_repository import WorkspaceArtifactRevisionRepository
 from .workspace_artifact_repository import WorkspaceArtifactRepository
 from .workspace_repository import WorkspaceRepository
 
@@ -34,5 +35,6 @@ __all__ = [
     "WorkflowRunSummaryRepository",
     "WorkspaceRepository",
     "WorkspaceArtifactRepository",
+    "WorkspaceArtifactRevisionRepository",
     "IUnitOfWork",
 ]
