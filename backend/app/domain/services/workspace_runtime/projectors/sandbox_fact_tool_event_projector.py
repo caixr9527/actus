@@ -268,6 +268,7 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             operation: str,
     ) -> FileMutationFactInput:
         path = _first_text(data.get("filepath"), data.get("path"), args.get("filepath"), args.get("file_path"), default="")
+        storage_file = _to_mapping(data.get("storage_file"))
         return FileMutationFactInput(
             **base,
             fact_kind=fact_kind,
@@ -288,6 +289,10 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             after_content_sha256=_optional_text(data.get("after_content_sha256") or data.get("content_sha256") or data.get("sha256")),
             content_sha256_kind=_sha256_kind(data.get("content_sha256_kind") or data.get("sha256_kind")),
             size_after=_optional_int(data.get("size_after") or data.get("size")),
+            file_id=_optional_text(data.get("file_id") or storage_file.get("file_id")),
+            object_key=_optional_text(data.get("object_key") or data.get("key") or storage_file.get("key")),
+            mime_type=_optional_text(data.get("mime_type") or storage_file.get("mime_type")),
+            storage_hash=_optional_text(data.get("storage_hash") or storage_file.get("storage_hash")),
             changed=bool(data.get("changed", True)),
         )
 
@@ -419,6 +424,8 @@ class SandboxFactToolEventProjector(SandboxFactRecorderPort):
             screenshot_key=_optional_text(screenshot_file.get("key")),
             screenshot_mime_type=_optional_text(screenshot_file.get("mime_type")),
             screenshot_size=_optional_int(screenshot_file.get("size")),
+            screenshot_content_hash=_optional_text(screenshot_file.get("content_hash")),
+            screenshot_storage_hash=_optional_text(screenshot_file.get("storage_hash")),
             structured_summary=_first_text(data.get("content_summary"), data.get("main_content_preview"), data.get("excerpt"), data.get("content"), default=""),
             actionable_element_count=len(actionable_elements),
             degrade_reason=_optional_text(data.get("degrade_reason")),

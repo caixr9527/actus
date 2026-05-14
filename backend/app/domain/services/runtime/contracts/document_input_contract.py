@@ -96,6 +96,7 @@ class DocumentInputSourceRef(BaseModel):
     run_id: str | None = None
     sandbox_filepath: str | None = None
     filename: str
+    object_key: str | None = None
     mime_type: str
     extension: str
     size: int

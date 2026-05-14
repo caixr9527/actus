@@ -1686,7 +1686,7 @@ def test_runtime_tool_event_persistence_should_mark_calling_event_as_graph_proje
         task=task,
         uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
         runtime_state_coordinator=_PersistingCoordinator(),
-        sandbox_fact_recorder=_FactRecorder(),
+        sandbox_fact_recorder=_FileWriteFactRecorder(),
         sandbox_fact_context_builder=_StaticFactContextBuilder(),
     )
     event = ToolEvent(
@@ -1756,6 +1756,41 @@ def test_runtime_tool_event_persistence_should_project_tool_content_before_persi
     assert persisted_event.tool_content is not None
     assert persisted_event.tool_content.results[0].title == "Example"
     assert event.tool_content is not None
+
+
+def test_runtime_tool_event_persistence_should_project_artifact_revision_after_fact_saved() -> None:
+    task = _SerialInvokeTask([])
+    artifact_projector = _ArtifactRevisionProjector()
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: _EvidenceScopeUoW(_EvidenceScopeWorkflowRunRepo()),
+        runtime_state_coordinator=_PersistingCoordinator(),
+        sandbox_fact_recorder=_FileWriteFactRecorder(),
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+        artifact_revision_projector=artifact_projector,
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="file",
+        function_name="write_file",
+        function_args={"filepath": "/workspace/report.md"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+    )
+
+    asyncio.run(service.persist_tool_event_and_record_facts(
+        event=event,
+        run_id="run-1",
+        session_id="session-1",
+        current_step_id="step-1",
+    ))
+
+    assert artifact_projector.calls[0]["source_event_id"] == "evt-1"
+    assert artifact_projector.calls[0]["fact_ids"] == ["fact-1"]
+    assert event.runtime_fact_projection["artifact_revision_count"] == 1
 
 
 def test_runtime_tool_event_persistence_should_keep_stream_when_fact_projection_fails_after_db_persist() -> None:
@@ -1915,9 +1950,87 @@ class _FactRecorder:
         ]
 
 
+class _FileWriteFactRecorder:
+    async def record_from_tool_event(self, *, context, event):
+        payload = {
+            "path": "/workspace/report.md",
+            "operation": "write",
+            "mutation_intent_hash": "sha256:" + "1" * 64,
+            "exists": True,
+            "before_content_sha256": None,
+            "after_content_sha256": "sha256:" + "2" * 64,
+            "content_sha256_kind": "full_file_sha256",
+            "size_after": 128,
+            "file_id": "file-1",
+            "object_key": "objects/report.md",
+            "mime_type": "text/markdown",
+            "storage_hash": "sha256:" + "2" * 64,
+            "changed": True,
+            "missing_fields": None,
+            "reason_code": None,
+        }
+        payload_hash = build_sandbox_fact_payload_hash(payload)
+        source_ref = SandboxFactSourceRef(
+            source_type=SandboxFactSourceType.TOOL_EVENT,
+            source_event_id=context.source_event_id,
+            source_event_status="available",
+            tool_event_id=event.id,
+            tool_call_id=event.tool_call_id,
+            function_name=event.function_name,
+        )
+        subject_ref = SandboxFactSubjectRef(subject_type="file", subject_key="/workspace/report.md", path="/workspace/report.md")
+        return [
+            SandboxFactRecord(
+                id="fact-1",
+                user_id="user-1",
+                session_id="session-1",
+                workspace_id="workspace-1",
+                fact_scope=SandboxFactScope.STEP,
+                run_id="run-1",
+                step_id="step-1",
+                fact_kind=SandboxFactKind.FILE_WRITE,
+                source_ref=source_ref,
+                subject_ref=subject_ref,
+                summary="file write fact",
+                payload=payload,
+                payload_hash=payload_hash,
+                idempotency_key=build_sandbox_fact_idempotency_key(
+                    user_id="user-1",
+                    session_id="session-1",
+                    workspace_id="workspace-1",
+                    fact_scope=SandboxFactScope.STEP,
+                    run_id="run-1",
+                    step_id="step-1",
+                    fact_kind=SandboxFactKind.FILE_WRITE,
+                    source_event_id=context.source_event_id,
+                    tool_call_id=event.tool_call_id,
+                    subject_key=subject_ref.subject_key,
+                    payload_hash=payload_hash,
+                ),
+            )
+        ]
+
+
 class _EmptyFactRecorder:
     async def record_from_tool_event(self, *, context, event):
         return []
+
+
+class _ArtifactRevisionProjector:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def project_from_tool_event_facts(self, *, scope, event, facts):
+        from app.domain.services.runtime.contracts.artifact_governance_ports import ArtifactRevisionProjectionResult
+
+        self.calls.append(
+            {
+                "source_event_id": event.id,
+                "fact_ids": [fact.id for fact in facts],
+                "scope_run_id": scope.run_id,
+            }
+        )
+        return ArtifactRevisionProjectionResult(revision_count=1)
 
 
 class _FailingFactRecorder:

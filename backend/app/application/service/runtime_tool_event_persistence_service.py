@@ -10,6 +10,10 @@ from typing import Callable
 from app.domain.external import Task
 from app.domain.models import RuntimeEventProjection, TaskStreamEventRecord, ToolEvent, ToolEventStatus
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.artifact_governance_ports import (
+    ArtifactRevisionProjectionResult,
+    ArtifactRevisionProjectorPort,
+)
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     RuntimeToolEventPersistencePort,
     SandboxFactEventProjectorPort,
@@ -36,6 +40,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             tool_event_display_projector: ToolEventDisplayProjectorPort | None = None,
+            artifact_revision_projector: ArtifactRevisionProjectorPort | None = None,
     ) -> None:
         self._session_id = str(session_id or "").strip()
         self._task = task
@@ -45,6 +50,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._tool_event_display_projector = tool_event_display_projector
+        self._artifact_revision_projector = artifact_revision_projector
 
     async def persist_tool_event_and_record_facts(
             self,
@@ -63,6 +69,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 fact_count=int(existing_projection.get("fact_count") or 0),
                 sandbox_fact_event_persisted=bool(existing_projection.get("sandbox_fact_event_persisted")),
                 event_inserted=bool(existing_projection.get("event_inserted")),
+                artifact_revision_count=int(existing_projection.get("artifact_revision_count") or 0),
             )
         if str(session_id or "").strip() != self._session_id:
             raise ValueError("ToolEvent session_id 与运行实例不一致")
@@ -91,6 +98,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             event.id = source_event_id
 
             fact_count = 0
+            artifact_projection = ArtifactRevisionProjectionResult()
             sandbox_fact_event_persisted = False
             if event.status == ToolEventStatus.CALLED:
                 context = await self._sandbox_fact_context_builder.build_for_tool_event(
@@ -104,6 +112,11 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                     event=event,
                 )
                 fact_count = len(list(facts or []))
+                artifact_projection = await self._project_artifact_revisions(
+                    context=context,
+                    event=event,
+                    facts=list(facts or []),
+                )
                 sandbox_fact_event_persisted = await self._project_sandbox_fact_event(
                     context=context,
                     facts=list(facts or []),
@@ -114,6 +127,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 "fact_count": fact_count,
                 "sandbox_fact_event_persisted": sandbox_fact_event_persisted,
                 "event_inserted": bool(getattr(persist_result, "event_inserted", False)),
+                "artifact_revision_count": artifact_projection.revision_count,
             }
         except Exception:
             if not db_event_persisted:
@@ -146,6 +160,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             fact_count=fact_count,
             sandbox_fact_event_persisted=sandbox_fact_event_persisted,
             event_inserted=bool(getattr(persist_result, "event_inserted", False)),
+            artifact_revision_count=artifact_projection.revision_count,
         )
 
     async def _project_tool_event_display_content(self, event: ToolEvent) -> None:
@@ -187,7 +202,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                     "session_id": getattr(context.scope, "session_id", None),
                     "run_id": getattr(context.scope, "run_id", None),
                     "step_id": getattr(context, "current_step_id", None)
-                    or getattr(context.scope, "current_step_id", None),
+                               or getattr(context.scope, "current_step_id", None),
                     "source_event_id": getattr(context, "source_event_id", None),
                     "fact_ids": [getattr(fact, "id", None) for fact in facts],
                     "error_type": exc.__class__.__name__,
@@ -195,3 +210,18 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 },
             )
             return False
+
+    async def _project_artifact_revisions(
+            self,
+            *,
+            context,
+            event: ToolEvent,
+            facts,
+    ) -> ArtifactRevisionProjectionResult:
+        if self._artifact_revision_projector is None or not facts:
+            return ArtifactRevisionProjectionResult()
+        return await self._artifact_revision_projector.project_from_tool_event_facts(
+            scope=context.scope,
+            event=event,
+            facts=list(facts or []),
+        )

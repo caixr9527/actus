@@ -134,6 +134,7 @@ class AgentTaskRunner(TaskRunner):
             adapter=tool_runtime_adapter,
             browser=browser,
             file_storage=file_storage,
+            sandbox=sandbox,
             workspace_runtime_service=self._workspace_runtime_service,
             user_id=user_id,
         )

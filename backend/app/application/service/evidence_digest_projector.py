@@ -12,6 +12,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Iterable
 
+from app.application.service.artifact_revision_resolver import ArtifactRevisionResolver
 from app.domain.models import Step
 from app.domain.models.evidence import (
     EvidenceAvailableArtifactResult,
@@ -35,6 +36,10 @@ from app.domain.models.evidence import (
     build_evidence_result_refs_hash,
 )
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactRevisionResolveCommand,
+    ArtifactRevisionResolveStatus,
+)
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceRuntimeContextProviderPort
 
 _DIGEST_LIMIT = 200
@@ -62,6 +67,7 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
 
     def __init__(self, *, uow_factory) -> None:
         self._uow_factory = uow_factory
+        self._artifact_revision_resolver = ArtifactRevisionResolver(uow_factory=uow_factory)
 
     async def build_context(
             self,
@@ -156,12 +162,46 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
                 for record in records
                 if str(record.source_step_id or record.step_id or "").strip() in set(source_step_ids)
             ]
+        resolved_artifact_handle_ids = await self._resolve_artifact_handle_ids(
+            scope=scope,
+            records=records,
+        )
         return self._project_records(
             records=records,
             run_id=run_id,
             current_step_id=current_step_id,
             source_step_ids=source_step_ids,
+            resolved_artifact_handle_ids=resolved_artifact_handle_ids,
         )
+
+    async def _resolve_artifact_handle_ids(
+            self,
+            *,
+            scope: AccessScopeResult,
+            records: list[EvidenceRecord],
+    ) -> set[str]:
+        resolved: set[str] = set()
+        for record in records:
+            if record.evidence_kind != EvidenceKind.ARTIFACT_EVIDENCE:
+                continue
+            for ref in list(record.result_refs or []):
+                handle = build_evidence_result_handle(ref)
+                if not handle.artifact_id or not handle.revision_id or not handle.content_hash:
+                    continue
+                result = await self._artifact_revision_resolver.resolve(
+                    ArtifactRevisionResolveCommand(
+                        user_id=scope.user_id,
+                        workspace_id=str(scope.workspace_id),
+                        session_id=str(scope.session_id),
+                        artifact_id=handle.artifact_id,
+                        revision_id=handle.revision_id,
+                        content_hash=handle.content_hash,
+                        run_id=scope.run_id,
+                    )
+                )
+                if result.status == ArtifactRevisionResolveStatus.RESOLVED:
+                    resolved.add(handle.result_handle_id)
+        return resolved
 
     def _project_records(
             self,
@@ -170,6 +210,7 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
             run_id: str,
             current_step_id: str | None,
             source_step_ids: list[str],
+            resolved_artifact_handle_ids: set[str] | None = None,
     ) -> EvidenceDigestResult:
         valid_records = [record for record in records if _result_refs_hash_matches(record)]
         handles_by_id = {}
@@ -193,7 +234,11 @@ class EvidenceDigestProjector(EvidenceRuntimeContextProviderPort):
             if projection is not None:
                 evidence_backed_facts.append(projection)
 
-            if record.evidence_kind == EvidenceKind.ARTIFACT_EVIDENCE and primary_handle is not None:
+            if (
+                    record.evidence_kind == EvidenceKind.ARTIFACT_EVIDENCE
+                    and primary_handle is not None
+                    and primary_handle.result_handle_id in (resolved_artifact_handle_ids or set())
+            ):
                 available_artifacts.append(_available_artifact(record, primary_handle))
 
             if record.action_key and record.subject_key:
@@ -257,14 +302,24 @@ def _available_artifact(
         result_handle,
 ) -> EvidenceAvailableArtifactResult:
     payload = dict(record.payload or {})
+    storage_ref = payload.get("storage_ref") or getattr(result_handle, "storage_ref", None)
     return EvidenceAvailableArtifactResult(
         artifact_id=str(payload.get("artifact_id") or record.primary_artifact_id or result_handle.artifact_id or ""),
+        revision_id=str(payload.get("revision_id") or result_handle.revision_id or ""),
+        content_hash=str(payload.get("content_hash") or result_handle.content_hash or ""),
+        storage_ref=storage_ref,
         path=str(payload.get("artifact_path") or result_handle.artifact_path or ""),
         artifact_type=str(payload.get("artifact_type") or "file"),
+        source_event_id=str(payload.get("source_event_id") or record.source_event_id or result_handle.source_event_id or "") or None,
+        source_fact_ids=_unique_strings([
+            *list(payload.get("source_fact_ids") or []),
+            *list(record.source_ref.fact_ids or []),
+            result_handle.source_fact_id,
+        ]),
         source_step_id=str(record.source_step_id or record.step_id or ""),
         source_evidence_ids=[record.id],
         delivery_candidate=bool(payload.get("delivery_candidate")),
-        version_locked=bool(payload.get("version_locked")),
+        version_locked=True,
         reuse_policy=record.reuse_policy,
         result_handle=result_handle,
     )

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
-from app.domain.models import Step
+from app.domain.models import Step, WorkspaceArtifactRevision
 from app.domain.models.evidence import (
     EvidenceKind,
     EvidenceQualityStatus,
@@ -49,6 +49,7 @@ class EvidenceStrategy(Protocol):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         ...
 
@@ -61,6 +62,7 @@ class CommandEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_command_evidence(fact=fact, key_result=key_result)]
 
@@ -80,11 +82,18 @@ class FileEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         items = [_file_evidence(fact=fact, key_result=key_result)]
-        artifact_evidence = _artifact_evidence_from_file_fact(fact=fact, key_result=key_result)
+        artifact_evidence = _artifact_evidence_from_file_fact(
+            fact=fact,
+            key_result=key_result,
+            artifact_revisions=artifact_revisions or [],
+        )
         if artifact_evidence is not None:
             items.append(artifact_evidence)
+        elif fact.fact_kind == SandboxFactKind.FILE_WRITE:
+            items.append(_gap_input_for_fact(fact=fact, reason_code="artifact_revision_missing"))
         return items
 
 
@@ -96,6 +105,7 @@ class SearchEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_search_evidence(fact=fact, key_result=key_result)]
 
@@ -108,6 +118,7 @@ class PageEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_page_evidence(fact=fact, key_result=key_result)]
 
@@ -120,6 +131,7 @@ class BrowserEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_browser_evidence(fact=fact, key_result=key_result)]
 
@@ -132,6 +144,7 @@ class DocumentEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_document_evidence(fact=fact, key_result=key_result)]
 
@@ -144,6 +157,7 @@ class ToolFailureEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_tool_failure_evidence(fact=fact, key_result=key_result)]
 
@@ -156,6 +170,7 @@ class HumanConfirmationEvidenceStrategy(EvidenceStrategy):
             *,
             fact: SandboxFactRecord,
             key_result: EvidenceActionSubjectKeyResult,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
     ) -> list[EvidenceRecordInput]:
         return [_human_confirmation_evidence(fact=fact, key_result=key_result)]
 
@@ -186,11 +201,16 @@ class EvidenceFactAssembler:
             *,
             step: Step,
             facts: list[SandboxFactRecord],
+            artifact_revisions_by_fact_id: dict[str, list[WorkspaceArtifactRevision]] | None = None,
     ) -> EvidenceAssemblyResult:
         evidence_inputs: list[EvidenceRecordInput] = []
         gap_inputs: list[EvidenceRecordInput] = []
+        revisions_by_fact_id = artifact_revisions_by_fact_id or {}
         for fact in list(facts or []):
-            assembled_items = self._assemble_fact(fact=fact)
+            assembled_items = self._assemble_fact(
+                fact=fact,
+                artifact_revisions=revisions_by_fact_id.get(fact.id, []),
+            )
             if assembled_items is None:
                 gap_inputs.append(_gap_input_for_fact(fact=fact, reason_code="unsupported_fact_kind"))
                 continue
@@ -203,7 +223,12 @@ class EvidenceFactAssembler:
             gap_inputs.append(_gap_input_for_step(step=step, reason_code="step_fact_missing"))
         return EvidenceAssemblyResult(evidence_inputs=evidence_inputs, gap_inputs=gap_inputs)
 
-    def _assemble_fact(self, *, fact: SandboxFactRecord) -> list[EvidenceRecordInput] | None:
+    def _assemble_fact(
+            self,
+            *,
+            fact: SandboxFactRecord,
+            artifact_revisions: list[WorkspaceArtifactRevision] | None = None,
+    ) -> list[EvidenceRecordInput] | None:
         key_result = build_evidence_action_subject_key_from_fact(fact)
         if key_result.normalization_status != "normalized":
             return [_gap_input_for_fact(fact=fact, reason_code=key_result.reason_code or "evidence_key_normalize_skipped")]
@@ -213,7 +238,11 @@ class EvidenceFactAssembler:
         strategy = self._strategies_by_kind.get(fact.fact_kind)
         if strategy is None:
             return None
-        return strategy.assemble(fact=fact, key_result=key_result)
+        return strategy.assemble(
+            fact=fact,
+            key_result=key_result,
+            artifact_revisions=artifact_revisions or [],
+        )
 
 
 def _build_strategy_registry(strategies: tuple[EvidenceStrategy, ...]) -> dict[SandboxFactKind, EvidenceStrategy]:
@@ -544,26 +573,26 @@ def _artifact_evidence_from_file_fact(
         *,
         fact: SandboxFactRecord,
         key_result: EvidenceActionSubjectKeyResult,
+        artifact_revisions: list[WorkspaceArtifactRevision],
 ) -> EvidenceRecordInput | None:
-    artifact_id = str(fact.source_ref.artifact_id or "").strip()
-    if not artifact_id:
+    revision = artifact_revisions[0] if artifact_revisions else None
+    if revision is None:
         return None
     payload = dict(fact.payload or {})
-    content_hash = str(payload.get("after_content_sha256") or payload.get("content_sha256") or "").strip()
-    if not content_hash:
-        return None
-    artifact_path = str(payload.get("path") or "")
+    artifact_path = revision.path
     result_ref = EvidenceResultRef(
         result_ref_type=EvidenceResultRefType.ARTIFACT_REF,
-        ref_id=artifact_id,
+        ref_id=revision.revision_id,
         source_step_id=fact.step_id,
         source_fact_id=fact.id,
         source_event_id=fact.source_ref.source_event_id,
-        artifact_id=artifact_id,
+        artifact_id=revision.artifact_id,
+        revision_id=revision.revision_id,
         artifact_path=artifact_path,
-        artifact_hash_kind=str(payload.get("content_sha256_kind") or "content_hash"),
+        artifact_version_locked=True,
+        storage_ref=revision.storage_ref,
         subject_key=key_result.subject_key,
-        content_hash=content_hash,
+        content_hash=revision.content_hash,
         quality_status=EvidenceQualityStatus.VALID,
         support_level=EvidenceSupportLevel.STRONG,
         reuse_policy=EvidenceReusePolicy.REUSE_ALLOWED,
@@ -582,25 +611,28 @@ def _artifact_evidence_from_file_fact(
             source_type=EvidenceSourceType.ARTIFACT,
             source_event_id=fact.source_ref.source_event_id,
             fact_ids=[fact.id],
-            artifact_ids=[artifact_id],
+            artifact_ids=[revision.artifact_id],
             tool_call_id=fact.source_ref.tool_call_id,
         ),
         subject_ref=EvidenceSubjectRef(
             subject_type="artifact",
-            subject_key=key_result.subject_key or f"artifact:{artifact_id}",
+            subject_key=key_result.subject_key or f"artifact:{revision.artifact_id}:{revision.revision_id}",
             artifact_path=artifact_path,
         ),
         support_level=EvidenceSupportLevel.STRONG,
         quality_status=EvidenceQualityStatus.VALID,
         summary=fact.summary,
         payload={
-            "artifact_id": artifact_id,
+            "artifact_id": revision.artifact_id,
+            "revision_id": revision.revision_id,
+            "content_hash": revision.content_hash,
+            "storage_ref": revision.storage_ref.model_dump(mode="json"),
             "artifact_path": artifact_path,
-            "artifact_type": "file",
+            "artifact_type": revision.artifact_type.value,
             "source_fact_ids": [fact.id],
-            "current_hash": content_hash,
-            "hash_kind": str(payload.get("content_sha256_kind") or "content_hash"),
+            "source_event_id": revision.source_event_id,
             "delivery_candidate": True,
+            "version_locked": True,
         },
         confidence=0.8,
         reusable=True,

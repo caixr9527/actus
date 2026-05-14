@@ -26,6 +26,7 @@ from app.domain.services.runtime.contracts.data_access_contract import (
 )
 
 from app.domain.services.runtime.contracts.document_input_contract import DocumentParseStatus
+from app.domain.services.runtime.contracts.artifact_governance_contract import ArtifactStorageRef
 
 
 class EvidenceScope(str, Enum):
@@ -215,14 +216,15 @@ class ClaimSupportPayload(_StrictPayload):
 
 class ArtifactEvidencePayload(_StrictPayload):
     artifact_id: str
+    revision_id: str
+    content_hash: str
+    storage_ref: ArtifactStorageRef
     artifact_path: str
     artifact_type: str
     source_fact_ids: list[str] = Field(default_factory=list)
-    current_hash: str | None = None
-    hash_kind: str
+    source_event_id: str | None = None
     delivery_candidate: bool
-    version_locked: Literal[False] = False
-    reason_code: Literal["artifact_revision_not_available"] = "artifact_revision_not_available"
+    version_locked: Literal[True] = True
 
 
 class DocumentEvidencePayload(_StrictPayload):
@@ -348,9 +350,11 @@ class EvidenceResultRef(BaseModel):
     source_fact_id: str | None = None
     source_event_id: str | None = None
     artifact_id: str | None = None
+    revision_id: str | None = None
     artifact_path: str | None = None
     artifact_version_locked: bool = False
     artifact_hash_kind: str | None = None
+    storage_ref: ArtifactStorageRef | None = None
     document_file_id: str | None = None
     subject_key: str | None = None
     payload_hash: str | None = None
@@ -384,6 +388,7 @@ class EvidenceResultRef(BaseModel):
             document_file_id=self.document_file_id,
             payload_hash=self.payload_hash,
             content_hash=self.content_hash,
+            revision_id=self.revision_id,
             read_strategy=self.read_strategy,
             reason_code=self.reason_code,
             allowed_verification_actions=self.allowed_verification_actions,
@@ -403,9 +408,11 @@ class EvidenceResultHandle(BaseModel):
     source_fact_id: str | None = None
     source_event_id: str | None = None
     artifact_id: str | None = None
+    revision_id: str | None = None
     artifact_path: str | None = None
     artifact_version_locked: bool = False
     artifact_hash_kind: str | None = None
+    storage_ref: ArtifactStorageRef | None = None
     document_file_id: str | None = None
     subject_key: str | None = None
     payload_hash: str | None = None
@@ -439,6 +446,7 @@ class EvidenceResultHandle(BaseModel):
             document_file_id=self.document_file_id,
             payload_hash=self.payload_hash,
             content_hash=self.content_hash,
+            revision_id=self.revision_id,
             read_strategy=self.read_strategy,
             reason_code=self.reason_code,
             allowed_verification_actions=self.allowed_verification_actions,
@@ -450,6 +458,7 @@ class EvidenceResultHandle(BaseModel):
             source_fact_id=self.source_fact_id,
             source_event_id=self.source_event_id,
             artifact_id=self.artifact_id,
+            revision_id=self.revision_id,
             document_file_id=self.document_file_id,
             subject_key=self.subject_key,
             payload_hash=self.payload_hash,
@@ -469,6 +478,7 @@ class EvidenceResolvedResult(BaseModel):
     source_fact_id: str | None = None
     source_event_id: str | None = None
     artifact_id: str | None = None
+    revision_id: str | None = None
     document_file_id: str | None = None
     subject_key: str | None = None
     read_strategy: EvidenceReadStrategy
@@ -527,12 +537,17 @@ class EvidenceCompletedActionResult(BaseModel):
 class EvidenceAvailableArtifactResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     artifact_id: str
+    revision_id: str
+    content_hash: str
+    storage_ref: ArtifactStorageRef
     path: str
     artifact_type: str
+    source_event_id: str | None = None
+    source_fact_ids: list[str] = Field(default_factory=list)
     source_step_id: str
     source_evidence_ids: list[str]
     delivery_candidate: bool
-    version_locked: bool
+    version_locked: Literal[True]
     reuse_policy: EvidenceReusePolicy
     result_handle: EvidenceResultHandle | None = None
 
@@ -996,6 +1011,7 @@ def build_evidence_result_handle_id_from_parts(
     source_fact_id: str | None,
     source_event_id: str | None,
     artifact_id: str | None,
+    revision_id: str | None = None,
     document_file_id: str | None,
     subject_key: str | None,
     payload_hash: str | None,
@@ -1009,6 +1025,7 @@ def build_evidence_result_handle_id_from_parts(
         source_fact_id or "",
         source_event_id or "",
         artifact_id or "",
+        revision_id or "",
         document_file_id or "",
         subject_key or "",
         payload_hash or "",
@@ -1029,6 +1046,7 @@ def build_evidence_result_handle(result_ref: EvidenceResultRef) -> EvidenceResul
         source_fact_id=result_ref.source_fact_id,
         source_event_id=result_ref.source_event_id,
         artifact_id=result_ref.artifact_id,
+        revision_id=result_ref.revision_id,
         document_file_id=result_ref.document_file_id,
         subject_key=result_ref.subject_key,
         payload_hash=result_ref.payload_hash,
@@ -1125,6 +1143,7 @@ def _validate_result_ref_recoverability(
     *,
     result_ref_type: EvidenceResultRefType,
     artifact_id: str | None,
+    revision_id: str | None,
     source_fact_id: str | None,
     source_event_id: str | None,
     document_file_id: str | None,
@@ -1136,8 +1155,9 @@ def _validate_result_ref_recoverability(
 ) -> None:
     if read_strategy == EvidenceReadStrategy.NOT_READABLE and not str(reason_code or "").strip():
         raise ValueError("not_readable result ref/handle 必须携带 reason_code")
-    if result_ref_type == EvidenceResultRefType.ARTIFACT_REF and (not artifact_id or not (content_hash or payload_hash)):
-        raise ValueError("artifact_ref 必须包含 artifact_id 以及 content_hash 或 payload_hash")
+    if result_ref_type == EvidenceResultRefType.ARTIFACT_REF:
+        if not artifact_id or not revision_id or not content_hash:
+            raise ValueError("artifact_ref 必须包含 artifact_id/revision_id/content_hash")
     if result_ref_type == EvidenceResultRefType.FACT_REF and not source_fact_id:
         raise ValueError("fact_ref 必须包含 source_fact_id")
     if result_ref_type == EvidenceResultRefType.SOURCE_EVENT_REF and not source_event_id:

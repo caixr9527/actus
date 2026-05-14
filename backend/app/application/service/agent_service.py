@@ -23,6 +23,7 @@ from app.application.service.evidence_runtime_context_provider import EvidenceRu
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.artifact_ledger_service import ArtifactLedgerService
+from app.application.service.artifact_revision_projector import ArtifactRevisionProjector
 from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
@@ -228,10 +229,14 @@ class AgentService:
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
+            artifact_revision_projector=ArtifactRevisionProjector(
+                ledger_service=ArtifactLedgerService(uow_factory=self._uow_factory),
+            ),
             tool_event_display_projector=ToolEventProjector(
                 adapter=self._tool_runtime_adapter,
                 browser=browser,
                 file_storage=self._file_storage,
+                sandbox=sandbox,
                 workspace_runtime_service=WorkspaceRuntimeService(
                     session_id=session.id,
                     user_id=session.user_id,

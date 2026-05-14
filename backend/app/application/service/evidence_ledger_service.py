@@ -72,7 +72,13 @@ class EvidenceAssemblyResultLike(Protocol):
 class EvidenceStepAssembler(Protocol):
     """EvidenceLedgerService 所需的 fact 组织器接口。"""
 
-    def assemble_step(self, *, step: Step, facts: list[SandboxFactRecord]) -> EvidenceAssemblyResultLike:
+    def assemble_step(
+            self,
+            *,
+            step: Step,
+            facts: list[SandboxFactRecord],
+            artifact_revisions_by_fact_id: dict[str, list[Any]] | None = None,
+    ) -> EvidenceAssemblyResultLike:
         ...
 
 
@@ -260,7 +266,16 @@ class EvidenceLedgerService:
                     step_id=step_id,
                     limit=100,
                 )
-            assembled = self._assembler.assemble_step(step=step, facts=facts)
+                artifact_revisions_by_fact_id = await self._load_artifact_revisions_by_fact_id(
+                    uow=uow,
+                    scope=scope,
+                    facts=facts,
+                )
+            assembled = self._assembler.assemble_step(
+                step=step,
+                facts=facts,
+                artifact_revisions_by_fact_id=artifact_revisions_by_fact_id,
+            )
             for evidence_input in [*assembled.evidence_inputs, *assembled.gap_inputs]:
                 saved.append(await self.record_evidence(scope=scope, evidence_input=evidence_input))
         except Exception as exc:
@@ -275,6 +290,34 @@ class EvidenceLedgerService:
             gap_input = _reconcile_failed_gap_input(step=step, run_id=run_id)
             saved.append(await self.record_evidence(scope=scope, evidence_input=gap_input))
         return saved
+
+    async def _load_artifact_revisions_by_fact_id(
+            self,
+            *,
+            uow,
+            scope: AccessScopeResult,
+            facts: list[SandboxFactRecord],
+    ) -> dict[str, list[Any]]:
+        revisions_by_fact_id: dict[str, list[Any]] = {}
+        for fact in list(facts or []):
+            source_event_id = str(fact.source_ref.source_event_id or "").strip()
+            if not source_event_id:
+                continue
+            content_hash = _content_hash_for_artifact_fact(fact)
+            if not content_hash:
+                continue
+            revisions = await uow.workspace_artifact_revision.list_by_source_facts(
+                user_id=scope.user_id,
+                workspace_id=str(scope.workspace_id),
+                session_id=str(scope.session_id),
+                source_event_id=source_event_id,
+                source_fact_ids=[fact.id],
+                tool_call_id=fact.source_ref.tool_call_id,
+                content_hash=content_hash,
+            )
+            if revisions:
+                revisions_by_fact_id[fact.id] = revisions
+        return revisions_by_fact_id
 
     async def record_reconcile_failed_gap(
             self,
@@ -535,21 +578,23 @@ class EvidenceLedgerService:
             )
         artifact_ids.update(result_artifact_ids)
         artifact_ids.update(payload_artifact_ids)
-        for artifact_id in _normalize_text_list(list(artifact_ids)):
-            artifact = await uow.workspace_artifact.get_by_user_workspace_id_and_id(
+        for ref in evidence.result_refs:
+            if not ref.artifact_id:
+                continue
+            revision = await uow.workspace_artifact_revision.get_by_identity(
                 user_id=scope.user_id,
                 workspace_id=str(scope.workspace_id),
-                artifact_id=artifact_id,
+                session_id=str(scope.session_id),
+                artifact_id=ref.artifact_id,
+                revision_id=str(ref.revision_id or ""),
+                content_hash=str(ref.content_hash or ""),
             )
-            if artifact is None:
-                raise EvidenceSourceMissingError("artifact 不存在或不属于当前 workspace scope")
-            expected_session_id = str(scope.session_id)
-            if artifact.session_id != expected_session_id:
-                raise EvidenceScopeMismatchError("artifact session 与 access scope 不一致")
-            if evidence.run_id and artifact.run_id != evidence.run_id:
-                raise EvidenceScopeMismatchError("artifact run 与 evidence run 不一致")
-            if evidence.source_step_id and artifact.source_step_id != evidence.source_step_id:
-                raise EvidenceScopeMismatchError("artifact source_step_id 与 evidence 不一致")
+            if revision is None:
+                raise EvidenceSourceMissingError("artifact revision 不存在或不属于当前 scope")
+            if evidence.run_id and revision.run_id != evidence.run_id:
+                raise EvidenceScopeMismatchError("artifact revision run 与 evidence run 不一致")
+            if evidence.source_step_id and revision.step_id != evidence.source_step_id:
+                raise EvidenceScopeMismatchError("artifact revision step_id 与 evidence 不一致")
 
 
 def _sanitize_payload(value: Any) -> Any:
@@ -616,6 +661,22 @@ def _extract_payload_refs(payload: dict[str, Any], keys: tuple[str, ...]) -> set
         if normalized:
             refs.add(normalized)
     return refs
+
+
+def _content_hash_for_artifact_fact(fact: SandboxFactRecord) -> str | None:
+    payload = dict(fact.payload or {})
+    for key in (
+            "after_content_sha256",
+            "content_hash",
+            "storage_hash",
+            "screenshot_content_hash",
+            "screenshot_storage_hash",
+            "full_file_sha256",
+    ):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _ensure_payload_refs_covered(

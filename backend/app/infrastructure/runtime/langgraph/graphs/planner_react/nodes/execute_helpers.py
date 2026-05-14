@@ -727,6 +727,19 @@ async def persist_current_step_tool_events_before_evidence_gate(
             raise
 
 
+def _artifact_revision_count_from_tool_events(tool_events: List[ToolEvent]) -> int:
+    count = 0
+    for event in list(tool_events or []):
+        projection = getattr(event, "runtime_fact_projection", None)
+        if not isinstance(projection, dict):
+            continue
+        try:
+            count += int(projection.get("artifact_revision_count") or 0)
+        except (TypeError, ValueError):
+            continue
+    return count
+
+
 async def build_execute_completed_transition(
         *,
         state: PlannerReActLangGraphState,
@@ -795,6 +808,18 @@ async def build_execute_completed_transition(
         tool_events=tool_events,
         runtime_tool_event_persistence=runtime_tool_event_persistence,
     )
+    if step_success and _step_requires_file_write_result(step) and _artifact_revision_count_from_tool_events(tool_events) <= 0:
+        step_success = False
+        step.status = ExecutionStatus.FAILED
+        blockers = [
+            *blockers,
+            "当前步骤要求产出文件，但缺少对应 ArtifactRevision，已拒绝按文件产出成功落账。",
+        ]
+        step_summary = f"步骤执行失败：{step_label}"
+        if step.outcome is not None:
+            step.outcome.done = False
+            step.outcome.summary = step_summary
+            step.outcome.blockers = blockers
     evidence_records = await reconcile_step_evidence_before_state_return(
         state=state,
         step=step,

@@ -109,6 +109,64 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
             return record
         return record.to_domain()
 
+    async def get_by_identity(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            artifact_id: str,
+            revision_id: str,
+            content_hash: str,
+    ) -> WorkspaceArtifactRevision | None:
+        stmt = select(WorkspaceArtifactRevisionModel).where(
+            WorkspaceArtifactRevisionModel.user_id == user_id,
+            WorkspaceArtifactRevisionModel.workspace_id == workspace_id,
+            WorkspaceArtifactRevisionModel.session_id == session_id,
+            WorkspaceArtifactRevisionModel.artifact_id == artifact_id,
+            WorkspaceArtifactRevisionModel.revision_id == revision_id,
+            WorkspaceArtifactRevisionModel.content_hash == content_hash,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record is None:
+            return None
+        if isinstance(record, WorkspaceArtifactRevision):
+            return record
+        return record.to_domain()
+
+    async def list_by_source_facts(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            source_event_id: str,
+            source_fact_ids: list[str],
+            tool_call_id: str | None = None,
+            content_hash: str | None = None,
+    ) -> list[WorkspaceArtifactRevision]:
+        fact_ids = [str(item or "").strip() for item in source_fact_ids or [] if str(item or "").strip()]
+        if not fact_ids:
+            return []
+        stmt = select(WorkspaceArtifactRevisionModel).where(
+            WorkspaceArtifactRevisionModel.user_id == user_id,
+            WorkspaceArtifactRevisionModel.workspace_id == workspace_id,
+            WorkspaceArtifactRevisionModel.session_id == session_id,
+            WorkspaceArtifactRevisionModel.source_event_id == source_event_id,
+            WorkspaceArtifactRevisionModel.source_fact_ids.contains(fact_ids),
+        )
+        if tool_call_id:
+            stmt = stmt.where(WorkspaceArtifactRevisionModel.tool_call_id == tool_call_id)
+        if content_hash:
+            stmt = stmt.where(WorkspaceArtifactRevisionModel.content_hash == content_hash)
+        result = await self.db_session.execute(stmt)
+        records = result.scalars().all()
+        return [
+            record if isinstance(record, WorkspaceArtifactRevision) else record.to_domain()
+            for record in records
+        ]
+
     async def list_by_user_workspace_artifact_id(
             self,
             *,

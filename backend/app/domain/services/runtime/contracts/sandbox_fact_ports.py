@@ -80,6 +80,7 @@ class ToolEventFactProjectionResult(BaseModel):
 
     source_event_id: str
     fact_count: int = 0
+    artifact_revision_count: int = 0
     sandbox_fact_event_persisted: bool = False
     event_inserted: bool = False
 

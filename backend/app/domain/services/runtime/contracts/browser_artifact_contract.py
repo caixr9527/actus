@@ -19,3 +19,5 @@ class BrowserScreenshotCaptureResult(BaseModel):
     key: str | None = None
     mime_type: str
     size: int | None = None
+    content_hash: str
+    storage_hash: str | None = None

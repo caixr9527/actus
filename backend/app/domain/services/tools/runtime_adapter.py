@@ -415,6 +415,8 @@ class ToolRuntimeAdapter:
                             "key": str(screenshot_ref.key or "").strip(),
                             "mime_type": str(screenshot_ref.mime_type or "").strip(),
                             "size": screenshot_ref.size,
+                            "content_hash": str(screenshot_ref.content_hash or "").strip(),
+                            "storage_hash": str(screenshot_ref.storage_hash or screenshot_ref.content_hash or "").strip(),
                             "url": screenshot,
                         }
             event.tool_content = self._build_browser_content(event, screenshot)
@@ -469,6 +471,20 @@ class ToolRuntimeAdapter:
             return True
 
         if event.tool_name == "file":
+            function_name = str(event.function_name or "").strip().lower()
+            if (
+                    function_name in {"write_file", "replace_in_file"}
+                    and event.function_result is not None
+                    and bool(getattr(event.function_result, "success", False))
+                    and hooks.sync_file_to_storage is not None
+            ):
+                filepath = self._resolve_file_result_path(event)
+                if filepath:
+                    stored_file = await hooks.sync_file_to_storage(filepath)
+                    event.function_result.data = self._merge_storage_file(
+                        data=event.function_result.data,
+                        stored_file=stored_file,
+                    )
             rendered_result = self._render_file_tool_result(event)
             event.tool_content = FileToolContent(content=rendered_result or "(No Content)")
             return True
@@ -522,4 +538,59 @@ class ToolRuntimeAdapter:
         else:
             values = {}
         values["screenshot_file"] = dict(screenshot_file)
+        return values
+
+    @staticmethod
+    def _resolve_file_result_path(event: ToolEvent) -> str:
+        data = event.function_result.data if event.function_result is not None else None
+        if isinstance(data, BaseModel):
+            data_values = data.model_dump(mode="json")
+        elif isinstance(data, dict):
+            data_values = dict(data)
+        else:
+            data_values = {}
+        for value in (
+                data_values.get("filepath"),
+                data_values.get("file_path"),
+                data_values.get("path"),
+                event.function_args.get("filepath"),
+                event.function_args.get("file_path"),
+                event.function_args.get("path"),
+        ):
+            normalized = str(value or "").strip()
+            if normalized:
+                return normalized
+        return ""
+
+    @staticmethod
+    def _merge_storage_file(*, data: object, stored_file: object) -> dict:
+        if isinstance(data, BaseModel):
+            values = data.model_dump(mode="json")
+        elif isinstance(data, dict):
+            values = dict(data)
+        else:
+            values = {}
+        storage_file: dict[str, object] = {
+            "file_id": str(getattr(stored_file, "id", "") or "").strip(),
+            "filename": str(getattr(stored_file, "filename", "") or "").strip(),
+            "filepath": str(getattr(stored_file, "filepath", "") or "").strip(),
+            "key": str(getattr(stored_file, "key", "") or "").strip(),
+            "mime_type": str(getattr(stored_file, "mime_type", "") or "").strip(),
+            "size": getattr(stored_file, "size", None),
+        }
+        content_hash = str(
+            getattr(stored_file, "content_hash", "")
+            or getattr(stored_file, "storage_hash", "")
+            or ""
+        ).strip()
+        if content_hash:
+            storage_file["content_hash"] = content_hash
+            storage_file["storage_hash"] = content_hash
+            values.setdefault("content_hash", content_hash)
+            values.setdefault("after_content_sha256", content_hash)
+        values["storage_file"] = storage_file
+        values["file_id"] = storage_file["file_id"]
+        values["object_key"] = storage_file["key"]
+        values["mime_type"] = storage_file["mime_type"]
+        values["size"] = storage_file["size"]
         return values

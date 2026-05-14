@@ -297,6 +297,7 @@ class DocumentInputService:
             run_id=attachment.scope.run_id,
             sandbox_filepath=attachment.sandbox_filepath,
             filename=file.filename,
+            object_key=file.key or None,
             mime_type=file.mime_type or "",
             extension=normalize_document_extension(file.extension, file.filename),
             size=int(file.size or 0),

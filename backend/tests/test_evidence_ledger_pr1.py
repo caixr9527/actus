@@ -47,6 +47,10 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     PrivacyLevel,
     RetentionPolicyKind,
 )
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactStorageBackend,
+    ArtifactStorageRef,
+)
 from app.domain.services.runtime.contracts.evidence_key_normalizer import (
     build_evidence_action_subject_key_from_tool_call,
     hash_query,
@@ -60,6 +64,17 @@ from app.infrastructure.repositories.db_evidence_repository import (
 )
 
 
+def _artifact_storage_ref() -> ArtifactStorageRef:
+    return ArtifactStorageRef(
+        storage_backend=ArtifactStorageBackend.FILE_STORAGE,
+        file_id="file-1",
+        object_key="objects/a.txt",
+        storage_hash="sha256:content",
+        size_bytes=128,
+        mime_type="text/plain",
+    )
+
+
 def _result_ref(
         *,
         ref_id: str = "fact-1",
@@ -68,7 +83,9 @@ def _result_ref(
         source_fact_id: str = "fact-1",
         source_event_id: str = "event-1",
         artifact_id: str | None = None,
+        revision_id: str | None = None,
         artifact_path: str | None = None,
+        storage_ref: ArtifactStorageRef | None = None,
         document_file_id: str | None = None,
         subject_key: str = "query:abc",
         payload_hash: str = "sha256:payload",
@@ -86,7 +103,9 @@ def _result_ref(
         source_fact_id=source_fact_id,
         source_event_id=source_event_id,
         artifact_id=artifact_id,
+        revision_id=revision_id,
         artifact_path=artifact_path,
+        storage_ref=storage_ref,
         document_file_id=document_file_id,
         subject_key=subject_key,
         payload_hash=payload_hash,
@@ -220,14 +239,15 @@ def _payload_for_kind(
         },
         EvidenceKind.ARTIFACT_EVIDENCE: {
             "artifact_id": "artifact-1",
+            "revision_id": "revision-1",
+            "content_hash": "sha256:content",
+            "storage_ref": _artifact_storage_ref().model_dump(mode="json"),
             "artifact_path": "/artifacts/a.txt",
-            "artifact_type": "text",
+            "artifact_type": "file",
             "source_fact_ids": ["fact-1"],
-            "current_hash": "sha256:content",
-            "hash_kind": "content_sha256",
+            "source_event_id": source_event_id or "event-1",
             "delivery_candidate": True,
-            "version_locked": False,
-            "reason_code": "artifact_revision_not_available",
+            "version_locked": True,
         },
         EvidenceKind.DOCUMENT_EVIDENCE: {
             "file_id": "file-1",
@@ -515,8 +535,8 @@ def test_result_handle_id_should_be_stable_and_use_result_handle_id_as_index_key
     [
         (
             EvidenceResultRefType.ARTIFACT_REF,
-            {"ref_id": "artifact-1", "artifact_id": "artifact-1", "content_hash": "sha256:content", "read_strategy": EvidenceReadStrategy.READ_ARTIFACT},
-            {"ref_id": "artifact-1", "artifact_id": None, "content_hash": None, "read_strategy": EvidenceReadStrategy.READ_ARTIFACT},
+            {"ref_id": "revision-1", "artifact_id": "artifact-1", "revision_id": "revision-1", "content_hash": "sha256:content", "read_strategy": EvidenceReadStrategy.READ_ARTIFACT},
+            {"ref_id": "revision-1", "artifact_id": "artifact-1", "revision_id": None, "content_hash": "sha256:content", "read_strategy": EvidenceReadStrategy.READ_ARTIFACT},
         ),
         (
             EvidenceResultRefType.FACT_REF,

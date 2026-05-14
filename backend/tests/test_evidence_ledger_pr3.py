@@ -66,6 +66,7 @@ from app.domain.models.sandbox_fact import (
     SandboxFactSubjectRef,
     build_sandbox_fact_idempotency_key,
     build_sandbox_fact_payload_hash,
+    validate_sandbox_fact_payload,
 )
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.evidence_key_normalizer import (
@@ -178,12 +179,21 @@ class _ArtifactRepo:
         return None
 
 
+class _RevisionRepo:
+    async def list_by_source_facts(self, **_kwargs):
+        return []
+
+    async def get_by_identity(self, **_kwargs):
+        return None
+
+
 class _UoW:
     def __init__(self, *, evidence=None, facts=None) -> None:
         self.evidence = evidence or _EvidenceRepo()
         self.sandbox_fact = _FactRepo(facts if facts is not None else [])
         self.workflow_run = _WorkflowRunRepo()
         self.workspace_artifact = _ArtifactRepo()
+        self.workspace_artifact_revision = _RevisionRepo()
 
     async def __aenter__(self):
         return self
@@ -376,7 +386,10 @@ def _verification_required_page_snapshot(*, url: str = "https://example.com/a") 
 
 
 def _fact(kind: SandboxFactKind, *, fact_id: str = "fact-1", step_id: str = "step-1", payload=None) -> SandboxFactRecord:
-    payload = payload or _payload_for_fact(kind)
+    payload = validate_sandbox_fact_payload(
+        fact_kind=kind,
+        payload=payload or _payload_for_fact(kind),
+    ).model_dump(mode="json")
     payload_hash = build_sandbox_fact_payload_hash(payload)
     source_ref = SandboxFactSourceRef(
         source_type=SandboxFactSourceType.TOOL_EVENT,
@@ -2684,6 +2697,10 @@ def test_execute_step_node_should_resolve_run_scoped_page_reuse_without_task_mod
                 "after_content_sha256": "sha256:file-v2",
                 "content_sha256_kind": "read_content_sha256",
                 "size_after": 11,
+                "file_id": "file-1",
+                "object_key": "objects/a.txt",
+                "mime_type": "text/plain",
+                "storage_hash": "sha256:file-v2",
                 "changed": True,
                 "missing_fields": None,
                 "reason_code": None,
@@ -2710,6 +2727,10 @@ def test_execute_step_node_should_resolve_run_scoped_page_reuse_without_task_mod
                 "after_content_sha256": "sha256:file-v2",
                 "content_sha256_kind": "read_content_sha256",
                 "size_after": 11,
+                "file_id": "file-1",
+                "object_key": "objects/a.txt",
+                "mime_type": "text/plain",
+                "storage_hash": "sha256:file-v2",
                 "changed": True,
                 "missing_fields": None,
                 "reason_code": None,
@@ -2780,6 +2801,10 @@ def test_file_mutation_duplicate_should_normalize_fact_and_tool_paths() -> None:
             "after_content_sha256": "sha256:file-v2",
             "content_sha256_kind": "read_content_sha256",
             "size_after": 11,
+            "file_id": "file-1",
+            "object_key": "objects/a.txt",
+            "mime_type": "text/plain",
+            "storage_hash": "sha256:file-v2",
             "changed": True,
             "missing_fields": None,
             "reason_code": None,
@@ -3960,8 +3985,10 @@ def _payload_for_fact(kind: SandboxFactKind) -> dict:
     if kind == SandboxFactKind.DOCUMENT_CONTEXT:
         return {
             "file_id": "file-1",
+            "object_key": "objects/file-1.pdf",
             "filename_extension": ".pdf",
             "mime_type": "application/pdf",
+            "size_bytes": 128,
             "parse_status": "parsed",
             "reason_code": None,
             "full_file_sha256": "sha256:full",
@@ -4029,6 +4056,10 @@ def _payload_for_fact(kind: SandboxFactKind) -> dict:
             "after_content_sha256": "sha256:file",
             "content_sha256_kind": "read_content_sha256",
             "size_after": 10,
+            "file_id": "file-1",
+            "object_key": "objects/a.txt",
+            "mime_type": "text/plain",
+            "storage_hash": "sha256:file",
             "changed": True,
             "missing_fields": None,
             "reason_code": None,

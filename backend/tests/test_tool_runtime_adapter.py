@@ -218,24 +218,41 @@ def test_tool_runtime_adapter_should_enrich_file_event_and_sync_storage() -> Non
 
 def test_tool_runtime_adapter_should_sync_storage_only_for_write_file() -> None:
     adapter = ToolRuntimeAdapter(capability_registry=CapabilityRegistry.default_v1())
+    synced_paths: list[str] = []
+
+    async def _sync_file_to_storage(path: str):
+        synced_paths.append(path)
+        return SimpleNamespace(
+            id="file-1",
+            filename="a.txt",
+            filepath="/files/a.txt",
+            key="objects/a.txt",
+            mime_type="text/plain",
+            size=5,
+            content_hash="sha256:" + "a" * 64,
+        )
+
     event = ToolEvent(
         tool_name="file",
         function_name="write_file",
         function_args={"filepath": "/tmp/a.txt"},
-        function_result=ToolResult(success=True, data={"filepath": "/tmp/a.txt"}),
+        function_result=ToolResult(success=True, data={"filepath": "/tmp/a.txt", "content": "hello"}),
         status=ToolEventStatus.CALLED,
     )
 
     handled = asyncio.run(
         adapter.enrich_tool_event(
             event=event,
-            hooks=ToolRuntimeEventHooks(),
+            hooks=ToolRuntimeEventHooks(sync_file_to_storage=_sync_file_to_storage),
         )
     )
 
     assert handled is True
     assert event.tool_content is not None
     assert "/tmp/a.txt" in event.tool_content.content
+    assert synced_paths == ["/tmp/a.txt"]
+    assert event.function_result.data["storage_file"]["file_id"] == "file-1"
+    assert event.function_result.data["content_hash"] == "sha256:" + "a" * 64
 
 
 def test_tool_runtime_adapter_should_enrich_list_files_event_without_filepath() -> None:
@@ -282,6 +299,8 @@ def test_tool_runtime_adapter_should_capture_screenshot_for_key_browser_actions(
             key="2026/03/19/shot.png",
             mime_type="image/png",
             size=128,
+            content_hash="sha256:" + "b" * 64,
+            storage_hash="sha256:" + "b" * 64,
         )
 
     view_event = ToolEvent(
@@ -333,6 +352,8 @@ def test_tool_runtime_adapter_should_write_screenshot_file_to_function_result() 
             key="2026/03/19/shot.png",
             mime_type="image/png",
             size=128,
+            content_hash="sha256:" + "b" * 64,
+            storage_hash="sha256:" + "b" * 64,
         )
 
     event = ToolEvent(
@@ -361,6 +382,8 @@ def test_tool_runtime_adapter_should_write_screenshot_file_to_function_result() 
         "key": "2026/03/19/shot.png",
         "mime_type": "image/png",
         "size": 128,
+        "content_hash": "sha256:" + "b" * 64,
+        "storage_hash": "sha256:" + "b" * 64,
         "url": "https://cdn.example.com/browser-shot.png",
     }
 
@@ -377,6 +400,8 @@ def test_tool_runtime_adapter_should_merge_screenshot_file_into_pydantic_browser
             key="2026/03/19/shot.png",
             mime_type="image/png",
             size=128,
+            content_hash="sha256:" + "b" * 64,
+            storage_hash="sha256:" + "b" * 64,
         )
 
     event = ToolEvent(
@@ -414,6 +439,8 @@ def test_tool_runtime_adapter_should_merge_screenshot_file_into_pydantic_browser
         "key": "2026/03/19/shot.png",
         "mime_type": "image/png",
         "size": 128,
+        "content_hash": "sha256:" + "b" * 64,
+        "storage_hash": "sha256:" + "b" * 64,
         "url": "https://cdn.example.com/browser-shot.png",
     }
     assert event.function_result.data["url"] == "https://example.com/docs/runtime"

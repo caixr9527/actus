@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import uuid
 from typing import Optional
 
@@ -29,6 +30,7 @@ class BrowserScreenshotArtifactService:
 
     async def capture(self, *, source_capability: str = "browser_screenshot") -> BrowserScreenshotCaptureResult:
         screenshot = await self._browser.screenshot()
+        content_hash = "sha256:" + hashlib.sha256(screenshot).hexdigest()
         screenshot_stream = io.BytesIO(screenshot)
         filename = f"{str(uuid.uuid4())}.png"
         size = get_stream_size(screenshot_stream)
@@ -50,4 +52,6 @@ class BrowserScreenshotArtifactService:
             key=uploaded_file.key,
             mime_type=uploaded_file.mime_type or "image/png",
             size=uploaded_file.size or size,
+            content_hash=content_hash,
+            storage_hash=content_hash,
         )

@@ -154,6 +154,10 @@ class FileMutationFactInput(_FactInput):
     after_content_sha256: str | None = None
     content_sha256_kind: Literal["full_file_sha256", "read_content_sha256", "unknown"]
     size_after: int | None = None
+    file_id: str | None = None
+    object_key: str | None = None
+    mime_type: str | None = None
+    storage_hash: str | None = None
     changed: bool
     missing_fields: list[str] | None = None
     reason_code: str | None = None
@@ -207,6 +211,8 @@ class BrowserSnapshotFactInput(_FactInput):
     screenshot_key: str | None = None
     screenshot_mime_type: str | None = None
     screenshot_size: int | None = None
+    screenshot_content_hash: str | None = None
+    screenshot_storage_hash: str | None = None
     structured_summary: str = ""
     actionable_element_count: int = 0
     degrade_reason: str | None = None
@@ -253,8 +259,10 @@ class DocumentContextFactInput(_FactInput):
     fact_kind: Literal[SandboxFactKind.DOCUMENT_CONTEXT] = SandboxFactKind.DOCUMENT_CONTEXT
     source_type: SandboxFactSourceType = SandboxFactSourceType.DOCUMENT_INPUT
     file_id: str
+    object_key: str | None = None
     filename_extension: str
     mime_type: str
+    size_bytes: int | None = None
     parse_status: str
     reason_code: str | None
     full_file_sha256: str | None = None
@@ -432,6 +440,10 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             after_content_sha256=fact_input.after_content_sha256,
             content_sha256_kind=fact_input.content_sha256_kind,
             size_after=fact_input.size_after,
+            file_id=fact_input.file_id,
+            object_key=fact_input.object_key,
+            mime_type=fact_input.mime_type,
+            storage_hash=fact_input.storage_hash,
             changed=fact_input.changed,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
@@ -486,6 +498,8 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
             screenshot_key=fact_input.screenshot_key,
             screenshot_mime_type=fact_input.screenshot_mime_type,
             screenshot_size=fact_input.screenshot_size,
+            screenshot_content_hash=fact_input.screenshot_content_hash,
+            screenshot_storage_hash=fact_input.screenshot_storage_hash,
             missing_fields=fact_input.missing_fields,
             reason_code=fact_input.reason_code,
         )
@@ -550,8 +564,10 @@ def normalize_fact_input(fact_input: SandboxFactInput) -> tuple[dict[str, Any], 
     if isinstance(fact_input, DocumentContextFactInput):
         payload = DocumentContextPayload(**fact_input.model_dump(include={
             "file_id",
+            "object_key",
             "filename_extension",
             "mime_type",
+            "size_bytes",
             "parse_status",
             "reason_code",
             "full_file_sha256",

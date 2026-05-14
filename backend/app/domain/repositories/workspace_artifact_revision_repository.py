@@ -28,6 +28,33 @@ class WorkspaceArtifactRevisionRepository(Protocol):
         """按用户 + workspace + revision_id 强过滤查询。"""
         ...
 
+    async def get_by_identity(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            artifact_id: str,
+            revision_id: str,
+            content_hash: str,
+    ) -> Optional[WorkspaceArtifactRevision]:
+        """按 artifact revision 强身份锁读取。"""
+        ...
+
+    async def list_by_source_facts(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            source_event_id: str,
+            source_fact_ids: List[str],
+            tool_call_id: str | None = None,
+            content_hash: str | None = None,
+    ) -> List[WorkspaceArtifactRevision]:
+        """按 source event/fact/tool/hash 强过滤查询 revision。"""
+        ...
+
     async def list_by_user_workspace_artifact_id(
             self,
             *,

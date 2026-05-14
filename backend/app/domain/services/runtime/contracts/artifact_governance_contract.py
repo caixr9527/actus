@@ -468,6 +468,60 @@ class ResolvedArtifactRevisionResult(BaseModel):
     source_kind: ArtifactRevisionSourceKind
 
 
+class ArtifactRevisionResolveStatus(str, Enum):
+    RESOLVED = "resolved"
+    NOT_FOUND = "not_found"
+    SCOPE_MISMATCH = "scope_mismatch"
+    HASH_MISMATCH = "hash_mismatch"
+    STALE_CURRENT_POINTER = "stale_current_pointer"
+    NOT_READABLE = "not_readable"
+    EXPIRED = "expired"
+    QUARANTINED = "quarantined"
+
+
+class ArtifactRevisionResolveCommand(BaseModel):
+    """ArtifactRevisionResolver 的强身份读取输入。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    workspace_id: str
+    session_id: str
+    artifact_id: str
+    revision_id: str
+    content_hash: str
+    run_id: str | None = None
+    source_run_id: str | None = None
+
+    @field_validator("user_id", "workspace_id", "session_id", "artifact_id", "revision_id", "content_hash")
+    @classmethod
+    def _required_identity_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("artifact revision resolver identity 字段不能为空")
+        return normalized
+
+
+class ArtifactRevisionResolveResult(BaseModel):
+    """ArtifactRevisionResolver 的读取结果。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: ArtifactRevisionResolveStatus
+    reason_code: str | None = None
+    revision: WorkspaceArtifactRevision | None = None
+
+    @model_validator(mode="after")
+    def _validate_status_payload(self) -> "ArtifactRevisionResolveResult":
+        if self.status == ArtifactRevisionResolveStatus.RESOLVED:
+            if self.revision is None:
+                raise ValueError("resolved artifact revision result 必须包含 revision")
+            return self
+        if not str(self.reason_code or "").strip():
+            raise ValueError("非 resolved artifact revision result 必须包含 reason_code")
+        return self
+
+
 class SelectedArtifactRevisionResult(BaseModel):
     """Summary 选择的 revision-aware 最终附件候选。"""
 
@@ -542,6 +596,9 @@ __all__ = [
     "ArtifactStorageRef",
     "ArtifactType",
     "ResolvedArtifactRevisionResult",
+    "ArtifactRevisionResolveCommand",
+    "ArtifactRevisionResolveResult",
+    "ArtifactRevisionResolveStatus",
     "SelectedArtifactRevisionResult",
     "WorkspaceArtifactRevision",
 ]

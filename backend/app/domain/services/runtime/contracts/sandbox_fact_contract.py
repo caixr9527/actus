@@ -191,6 +191,10 @@ class FileMutationPayload(_StrictPayload):
     after_content_sha256: str | None
     content_sha256_kind: Literal["full_file_sha256", "read_content_sha256", "unknown"]
     size_after: int | None
+    file_id: str | None = None
+    object_key: str | None = None
+    mime_type: str | None = None
+    storage_hash: str | None = None
     changed: bool
     missing_fields: list[str] | None = None
     reason_code: str | None = None
@@ -244,6 +248,8 @@ class BrowserSnapshotPayload(_StrictPayload):
     screenshot_key: str | None = None
     screenshot_mime_type: str | None = None
     screenshot_size: int | None = None
+    screenshot_content_hash: str | None = None
+    screenshot_storage_hash: str | None = None
     missing_fields: list[str] | None = None
     reason_code: str | None = None
 
@@ -290,8 +296,10 @@ class FetchedPagePayload(_StrictPayload):
 
 class DocumentContextPayload(_StrictPayload):
     file_id: str
+    object_key: str | None = None
     filename_extension: str
     mime_type: str
+    size_bytes: int | None = None
     parse_status: str
     reason_code: str | None
     full_file_sha256: str | None

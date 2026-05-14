@@ -8,6 +8,8 @@
 import logging
 from typing import Callable, Dict
 
+from app.application.service.artifact_ledger_service import ArtifactLedgerService
+from app.application.service.artifact_revision_projector import ArtifactRevisionProjector
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.service.evidence_digest_projector import EvidenceDigestProjector
 from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
@@ -171,6 +173,9 @@ async def build_run_engine(
         data_retention_policy_service=DataRetentionPolicyService(),
         sandbox_fact_document_projector=SandboxFactDocumentInputProjector(
             ledger_service=SandboxFactLedgerService(uow_factory=uow_factory),
+            artifact_revision_projector=ArtifactRevisionProjector(
+                ledger_service=ArtifactLedgerService(uow_factory=uow_factory),
+            ),
         ) if sandbox_fact_context_builder is not None else None,
         sandbox_fact_context_builder=sandbox_fact_context_builder,
         access_control_service=RuntimeAccessControlService(uow_factory=uow_factory),

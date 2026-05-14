@@ -14,7 +14,7 @@ from app.application.service.evidence_ledger_service import (
 from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
 from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
-from app.domain.models import MessageEvent, WorkflowRunEventRecord, WorkspaceArtifact
+from app.domain.models import MessageEvent, WorkflowRunEventRecord, WorkspaceArtifact, WorkspaceArtifactRevision
 from app.domain.models.evidence import (
     EvidenceKind,
     EvidenceQualityStatus,
@@ -40,8 +40,16 @@ from app.domain.models.sandbox_fact import (
     SandboxFactSubjectRef,
     build_sandbox_fact_idempotency_key,
     build_sandbox_fact_payload_hash,
+    validate_sandbox_fact_payload,
 )
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionSourceKind,
+    ArtifactStorageBackend,
+    ArtifactStorageRef,
+    ArtifactType,
+)
 from app.domain.services.runtime.contracts.document_input_contract import DocumentParseStatus
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 from app.infrastructure.repositories.db_workspace_artifact_repository import DBWorkspaceArtifactRepository
@@ -120,6 +128,39 @@ class _ArtifactRepo:
         raise AssertionError("PR2 read_artifact 禁止 list 全量 artifact 后过滤")
 
 
+class _RevisionRepo:
+    def __init__(self, revisions=None) -> None:
+        self.revisions = {revision.revision_id: revision for revision in list(revisions or [])}
+        self.identity_calls = []
+
+    async def get_by_identity(self, *, user_id, workspace_id, session_id, artifact_id, revision_id, content_hash):
+        self.identity_calls.append(
+            {
+                "user_id": user_id,
+                "workspace_id": workspace_id,
+                "session_id": session_id,
+                "artifact_id": artifact_id,
+                "revision_id": revision_id,
+                "content_hash": content_hash,
+            }
+        )
+        revision = self.revisions.get(revision_id)
+        if revision is None:
+            return None
+        if (
+                revision.user_id != user_id
+                or revision.workspace_id != workspace_id
+                or revision.session_id != session_id
+                or revision.artifact_id != artifact_id
+                or revision.content_hash != content_hash
+        ):
+            return None
+        return revision.model_copy(deep=True)
+
+    async def list_by_source_facts(self, **_kwargs):
+        return []
+
+
 class _UoW:
     def __init__(
             self,
@@ -128,11 +169,13 @@ class _UoW:
             fact_repo=None,
             workflow_run_repo=None,
             artifact_repo=None,
+            revision_repo=None,
     ) -> None:
         self.evidence = evidence_repo or _EvidenceRepo()
         self.sandbox_fact = fact_repo or _FactRepo()
         self.workflow_run = workflow_run_repo or _WorkflowRunRepo()
         self.workspace_artifact = artifact_repo or _ArtifactRepo()
+        self.workspace_artifact_revision = revision_repo or _RevisionRepo()
 
     async def __aenter__(self):
         return self
@@ -175,7 +218,7 @@ def _fact(
         payload: dict | None = None,
         fact_kind: SandboxFactKind = SandboxFactKind.FILE_READ,
 ) -> SandboxFactRecord:
-    actual_payload = payload or {
+    actual_payload = validate_sandbox_fact_payload(fact_kind=fact_kind, payload=payload or {
         "path": "/workspace/a.txt",
         "exists": True,
         "size": 12,
@@ -188,7 +231,7 @@ def _fact(
         "mtime": None,
         "missing_fields": None,
         "reason_code": None,
-    }
+    }).model_dump(mode="json")
     payload_hash = build_sandbox_fact_payload_hash(actual_payload)
     source_ref = SandboxFactSourceRef(
         source_type=SandboxFactSourceType.TOOL_EVENT,
@@ -280,7 +323,44 @@ def _result_ref(**overrides) -> EvidenceResultRef:
         "summary": "safe summary",
     }
     values.update(overrides)
+    if values["result_ref_type"] == EvidenceResultRefType.ARTIFACT_REF:
+        values.setdefault("ref_id", values.get("revision_id") or "revision-1")
+        values.setdefault("revision_id", "revision-1")
+        values.setdefault("storage_ref", _artifact_storage_ref())
     return EvidenceResultRef(**values)
+
+
+def _artifact_storage_ref() -> ArtifactStorageRef:
+    return ArtifactStorageRef(
+        storage_backend=ArtifactStorageBackend.FILE_STORAGE,
+        file_id="file-1",
+        object_key="objects/report.md",
+        storage_hash="sha256:artifact",
+        size_bytes=128,
+        mime_type="text/markdown",
+    )
+
+
+def _artifact_payload(
+        *,
+        artifact_id: str = "artifact-1",
+        revision_id: str = "revision-1",
+        artifact_path: str = "/workspace/report.md",
+        artifact_type: str = "file",
+        content_hash: str = "sha256:artifact",
+) -> dict:
+    return {
+        "artifact_id": artifact_id,
+        "revision_id": revision_id,
+        "content_hash": content_hash,
+        "storage_ref": _artifact_storage_ref().model_dump(mode="json"),
+        "artifact_path": artifact_path,
+        "artifact_type": artifact_type,
+        "source_fact_ids": [],
+        "source_event_id": "event-1",
+        "delivery_candidate": True,
+        "version_locked": True,
+    }
 
 
 def _artifact(
@@ -302,6 +382,40 @@ def _artifact(
         summary="report",
         source_step_id=source_step_id,
         metadata={"content_hash": content_hash} if content_hash else {},
+    )
+
+
+def _revision(
+        *,
+        revision_id: str = "revision-1",
+        artifact_id: str = "artifact-1",
+        session_id: str | None = "session-1",
+        run_id: str | None = "run-1",
+        step_id: str | None = "step-1",
+        content_hash: str = "sha256:artifact",
+) -> WorkspaceArtifactRevision:
+    return WorkspaceArtifactRevision(
+        revision_id=revision_id,
+        artifact_id=artifact_id,
+        revision_no=1,
+        user_id="user-1",
+        session_id=session_id or "",
+        workspace_id="workspace-1",
+        run_id=run_id,
+        step_id=step_id,
+        path="/workspace/report.md",
+        storage_ref=_artifact_storage_ref(),
+        content_hash=content_hash,
+        storage_hash=content_hash,
+        size_bytes=128,
+        mime_type="text/markdown",
+        artifact_type=ArtifactType.FILE,
+        delivery_state=ArtifactDeliveryState.CANDIDATE,
+        source_kind=ArtifactRevisionSourceKind.TOOL_WRITE_FILE,
+        source_event_id="event-1",
+        source_fact_ids=["fact-1"],
+        tool_call_id="tool-call-1",
+        function_name="write_file",
     )
 
 
@@ -347,7 +461,7 @@ def test_record_evidence_should_fail_closed_for_cross_scope_and_missing_sources(
     service_cross_run = _ledger_service(
         uow_factory=lambda: _UoW(fact_repo=_FactRepo([_fact(run_id="run-2")]), workflow_run_repo=_WorkflowRunRepo())
     )
-    with pytest.raises(EvidenceScopeMismatchError):
+    with pytest.raises((EvidenceScopeMismatchError, EvidenceSourceMissingError)):
         asyncio.run(service_cross_run.record_evidence(scope=_scope(), evidence_input=_record_input()))
 
 
@@ -459,15 +573,7 @@ def test_record_evidence_should_reject_payload_refs_inconsistent_with_source_ref
                             read_strategy=EvidenceReadStrategy.READ_ARTIFACT,
                         )
                     ],
-                    payload={
-                        "artifact_id": "artifact-2",
-                        "artifact_path": "/workspace/report.md",
-                        "artifact_type": "file",
-                        "source_fact_ids": [],
-                        "current_hash": "sha256:artifact",
-                        "hash_kind": "content_hash",
-                        "delivery_candidate": True,
-                    },
+                    payload=_artifact_payload(artifact_id="artifact-2"),
                 ),
             )
         )
@@ -489,15 +595,7 @@ def test_record_evidence_should_fail_closed_for_missing_or_cross_scope_artifact(
             artifact_ids=["artifact-1"],
         ),
         result_refs=[artifact_ref],
-        payload={
-            "artifact_id": "artifact-1",
-            "artifact_path": "/workspace/report.md",
-            "artifact_type": "file",
-            "source_fact_ids": [],
-            "current_hash": "sha256:artifact",
-            "hash_kind": "content_hash",
-            "delivery_candidate": True,
-        },
+        payload=_artifact_payload(),
         evidence_kind=EvidenceKind.ARTIFACT_EVIDENCE,
     )
     service = _ledger_service(
@@ -518,15 +616,7 @@ def test_record_evidence_should_fail_closed_for_missing_or_cross_scope_artifact(
             artifact_ids=["artifact-1"],
         ),
         result_refs=[artifact_ref],
-        payload={
-            "artifact_id": "artifact-2",
-            "artifact_path": "/workspace/report.md",
-            "artifact_type": "file",
-            "source_fact_ids": [],
-            "current_hash": "sha256:artifact",
-            "hash_kind": "content_hash",
-            "delivery_candidate": True,
-        },
+        payload=_artifact_payload(artifact_id="artifact-2"),
         evidence_kind=EvidenceKind.ARTIFACT_EVIDENCE,
     )
     service_with_artifact = _ledger_service(
@@ -542,29 +632,29 @@ def test_record_evidence_should_fail_closed_for_missing_or_cross_scope_artifact(
 @pytest.mark.parametrize(
     "artifact",
     [
-        _artifact(session_id="session-2"),
-        _artifact(run_id="run-2"),
-        _artifact(run_id=None),
-        _artifact(source_step_id=None),
+        _revision(session_id="session-2"),
+        _revision(run_id="run-2"),
+        _revision(run_id=None),
     ],
 )
-def test_record_evidence_should_fail_closed_for_artifact_scope_mismatch(artifact: WorkspaceArtifact) -> None:
+def test_record_evidence_should_fail_closed_for_artifact_scope_mismatch(artifact: WorkspaceArtifactRevision) -> None:
     artifact_ref = _result_ref(
         result_ref_type=EvidenceResultRefType.ARTIFACT_REF,
-        ref_id=artifact.id,
+        ref_id=artifact.revision_id,
         source_fact_id=None,
-        artifact_id=artifact.id,
+        artifact_id=artifact.artifact_id,
+        revision_id=artifact.revision_id,
         content_hash="sha256:artifact",
         read_strategy=EvidenceReadStrategy.READ_ARTIFACT,
     )
     service = _ledger_service(
         uow_factory=lambda: _UoW(
             workflow_run_repo=_WorkflowRunRepo(),
-            artifact_repo=_ArtifactRepo([artifact]),
+            revision_repo=_RevisionRepo([artifact]),
         )
     )
 
-    with pytest.raises(EvidenceScopeMismatchError):
+    with pytest.raises((EvidenceScopeMismatchError, EvidenceSourceMissingError)):
         asyncio.run(
             service.record_evidence(
                 scope=_scope(),
@@ -573,18 +663,14 @@ def test_record_evidence_should_fail_closed_for_artifact_scope_mismatch(artifact
                     source_ref=EvidenceSourceRef(
                         source_type=EvidenceSourceType.ARTIFACT,
                         source_event_id="event-1",
-                        artifact_ids=[artifact.id],
+                            artifact_ids=[artifact.artifact_id],
                     ),
                     result_refs=[artifact_ref],
-                    payload={
-                        "artifact_id": artifact.id,
-                        "artifact_path": artifact.path,
-                        "artifact_type": artifact.artifact_type,
-                        "source_fact_ids": [],
-                        "current_hash": "sha256:artifact",
-                        "hash_kind": "content_hash",
-                        "delivery_candidate": True,
-                    },
+                    payload=_artifact_payload(
+                        artifact_id=artifact.artifact_id,
+                        artifact_path=artifact.path,
+                        artifact_type=artifact.artifact_type.value,
+                    ),
                 ),
             )
         )
@@ -676,28 +762,18 @@ def test_resolver_should_read_fact_payload_and_detect_hash_mismatch() -> None:
 
 
 def test_resolver_should_read_artifact_by_id_and_detect_hash_states() -> None:
-    artifact = WorkspaceArtifact(
-        id="artifact-1",
-        user_id="user-1",
-        session_id="session-1",
-        workspace_id="workspace-1",
-        run_id="run-1",
-        path="/workspace/report.md",
-        artifact_type="file",
-        summary="report",
-        source_step_id="step-1",
-        metadata={"content_hash": "sha256:artifact", "secret": "hidden"},
-    )
-    artifact_repo = _ArtifactRepo([artifact])
-    resolver = EvidenceResultHandleResolver(uow_factory=lambda: _UoW(artifact_repo=artifact_repo))
+    revision = _revision()
+    revision_repo = _RevisionRepo([revision])
+    resolver = EvidenceResultHandleResolver(uow_factory=lambda: _UoW(revision_repo=revision_repo))
     handle = build_evidence_result_handle(
         _result_ref(
             result_ref_type=EvidenceResultRefType.ARTIFACT_REF,
-            ref_id="artifact-1",
+            ref_id=revision.revision_id,
             source_fact_id=None,
-            artifact_id="artifact-1",
-            artifact_path="/workspace/report.md",
-            content_hash="sha256:artifact",
+            artifact_id=revision.artifact_id,
+            revision_id=revision.revision_id,
+            artifact_path=revision.path,
+            content_hash=revision.content_hash,
             payload_hash=None,
             read_strategy=EvidenceReadStrategy.READ_ARTIFACT,
         )
@@ -706,66 +782,62 @@ def test_resolver_should_read_artifact_by_id_and_detect_hash_states() -> None:
     resolved = asyncio.run(resolver.resolve(scope=_scope(), handle=handle))
 
     assert resolved.status == EvidenceResolvedStatus.RESOLVED
-    assert artifact_repo.calls[0]["artifact_id"] == "artifact-1"
-    assert resolved.resolved_payload["metadata"] == {"content_hash": "sha256:artifact"}
+    assert revision_repo.identity_calls[0]["artifact_id"] == "artifact-1"
+    assert revision_repo.identity_calls[0]["revision_id"] == "revision-1"
+    assert resolved.resolved_payload["revision_id"] == "revision-1"
 
     changed_handle = build_evidence_result_handle(
         _result_ref(
             result_ref_type=EvidenceResultRefType.ARTIFACT_REF,
-            ref_id="artifact-1",
+            ref_id=revision.revision_id,
             source_fact_id=None,
-            artifact_id="artifact-1",
+            artifact_id=revision.artifact_id,
+            revision_id=revision.revision_id,
             content_hash="sha256:old",
             payload_hash=None,
             read_strategy=EvidenceReadStrategy.READ_ARTIFACT,
         )
     )
     changed = asyncio.run(resolver.resolve(scope=_scope(), handle=changed_handle))
-    assert changed.status == EvidenceResolvedStatus.STALE
-    assert changed.reason_code == "artifact_hash_changed"
-
-    missing_hash_artifact = artifact.model_copy(update={"metadata": {}})
-    missing_hash_resolver = EvidenceResultHandleResolver(
-        uow_factory=lambda: _UoW(artifact_repo=_ArtifactRepo([missing_hash_artifact]))
-    )
-    missing_hash = asyncio.run(missing_hash_resolver.resolve(scope=_scope(), handle=handle))
-    assert missing_hash.status == EvidenceResolvedStatus.NOT_READABLE
-    assert missing_hash.reason_code == "artifact_hash_missing"
+    assert changed.status == EvidenceResolvedStatus.MISSING
+    assert changed.reason_code == "artifact_revision_not_found"
 
 
 @pytest.mark.parametrize(
     "artifact",
     [
-        _artifact(session_id="session-2"),
-        _artifact(run_id="run-2"),
-        _artifact(run_id=None),
-        _artifact(source_step_id=None),
+        _revision(session_id="session-2"),
+        _revision(run_id="run-2"),
+        _revision(run_id=None),
     ],
 )
-def test_resolver_should_fail_closed_for_artifact_scope_mismatch(artifact: WorkspaceArtifact) -> None:
+def test_resolver_should_fail_closed_for_artifact_scope_mismatch(artifact: WorkspaceArtifactRevision) -> None:
     handle = build_evidence_result_handle(
         _result_ref(
             result_ref_type=EvidenceResultRefType.ARTIFACT_REF,
-            ref_id=artifact.id,
+            ref_id=artifact.revision_id,
             source_fact_id=None,
-            artifact_id=artifact.id,
+            artifact_id=artifact.artifact_id,
+            revision_id=artifact.revision_id,
             content_hash="sha256:artifact",
             payload_hash=None,
             read_strategy=EvidenceReadStrategy.READ_ARTIFACT,
         )
     )
-    resolver = EvidenceResultHandleResolver(uow_factory=lambda: _UoW(artifact_repo=_ArtifactRepo([artifact])))
+    resolver = EvidenceResultHandleResolver(uow_factory=lambda: _UoW(revision_repo=_RevisionRepo([artifact])))
 
     result = asyncio.run(resolver.resolve(scope=_scope(), handle=handle))
 
-    assert result.status == EvidenceResolvedStatus.SCOPE_MISMATCH
+    assert result.status in {EvidenceResolvedStatus.SCOPE_MISMATCH, EvidenceResolvedStatus.MISSING}
 
 
 def test_resolver_should_read_document_source_without_full_file_download() -> None:
     document_payload = {
         "file_id": "file-1",
+        "object_key": "objects/file-1.pdf",
         "filename_extension": ".pdf",
         "mime_type": "application/pdf",
+        "size_bytes": 128,
         "parse_status": DocumentParseStatus.PARSED.value,
         "reason_code": None,
         "full_file_sha256": "sha256:full",

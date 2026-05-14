@@ -16,7 +16,12 @@ from app.domain.models.evidence import (
     EvidenceResultHandle,
 )
 from app.domain.models.sandbox_fact import SandboxFactKind
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactRevisionResolveCommand,
+    ArtifactRevisionResolveStatus,
+)
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.application.service.artifact_revision_resolver import ArtifactRevisionResolver
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,7 @@ class EvidenceResultHandleResolver:
 
     def __init__(self, *, uow_factory) -> None:
         self._uow_factory = uow_factory
+        self._artifact_revision_resolver = ArtifactRevisionResolver(uow_factory=uow_factory)
 
     async def resolve(
             self,
@@ -54,15 +60,16 @@ class EvidenceResultHandleResolver:
             result = self._resolve_digest_summary(handle)
             _log_resolve_result(scope=scope, handle=handle, result=result)
             return result
-        async with self._uow_factory() as uow:
-            if handle.read_strategy == EvidenceReadStrategy.READ_FACT_PAYLOAD:
-                result = await self._resolve_fact_payload(uow=uow, scope=scope, handle=handle)
-            elif handle.read_strategy == EvidenceReadStrategy.READ_ARTIFACT:
-                result = await self._resolve_artifact(uow=uow, scope=scope, handle=handle)
-            elif handle.read_strategy == EvidenceReadStrategy.READ_DOCUMENT_SOURCE:
-                result = await self._resolve_document_source(uow=uow, scope=scope, handle=handle)
-            else:
-                result = _unresolved(handle, EvidenceResolvedStatus.NOT_READABLE, "read_strategy_not_supported")
+        if handle.read_strategy == EvidenceReadStrategy.READ_ARTIFACT:
+            result = await self._resolve_artifact(scope=scope, handle=handle)
+        else:
+            async with self._uow_factory() as uow:
+                if handle.read_strategy == EvidenceReadStrategy.READ_FACT_PAYLOAD:
+                    result = await self._resolve_fact_payload(uow=uow, scope=scope, handle=handle)
+                elif handle.read_strategy == EvidenceReadStrategy.READ_DOCUMENT_SOURCE:
+                    result = await self._resolve_document_source(uow=uow, scope=scope, handle=handle)
+                else:
+                    result = _unresolved(handle, EvidenceResolvedStatus.NOT_READABLE, "read_strategy_not_supported")
         _log_resolve_result(scope=scope, handle=handle, result=result)
         return result
 
@@ -126,48 +133,57 @@ class EvidenceResultHandleResolver:
     async def _resolve_artifact(
             self,
             *,
-            uow,
             scope: AccessScopeResult,
             handle: EvidenceResultHandle,
     ) -> EvidenceResolvedResult:
-        if not handle.artifact_id:
-            return _unresolved(handle, EvidenceResolvedStatus.MISSING, "artifact_id_missing")
-        artifact = await uow.workspace_artifact.get_by_user_workspace_id_and_id(
-            user_id=scope.user_id,
-            workspace_id=str(scope.workspace_id),
-            artifact_id=handle.artifact_id,
+        if not handle.artifact_id or not handle.revision_id or not handle.content_hash:
+            return _unresolved(handle, EvidenceResolvedStatus.NOT_READABLE, "artifact_revision_identity_missing")
+        resolved_revision = await self._artifact_revision_resolver.resolve(
+            ArtifactRevisionResolveCommand(
+                user_id=scope.user_id,
+                workspace_id=str(scope.workspace_id),
+                session_id=str(scope.session_id),
+                artifact_id=handle.artifact_id,
+                revision_id=handle.revision_id,
+                content_hash=handle.content_hash,
+                run_id=scope.run_id,
+            )
         )
-        if artifact is None:
-            return _unresolved(handle, EvidenceResolvedStatus.MISSING, "artifact_missing")
-        scope_status = _validate_scoped_record(
-            scope=scope,
-            session_id=artifact.session_id,
-            workspace_id=artifact.workspace_id,
-            run_id=artifact.run_id,
-        )
-        if scope_status is not None:
-            return _unresolved(handle, EvidenceResolvedStatus.SCOPE_MISMATCH, scope_status)
-        if handle.source_step_id and artifact.source_step_id != handle.source_step_id:
-            return _unresolved(handle, EvidenceResolvedStatus.SCOPE_MISMATCH, "artifact_source_step_mismatch")
-        current_hash = _artifact_current_hash(artifact.metadata)
-        if not current_hash:
-            return _unresolved(handle, EvidenceResolvedStatus.NOT_READABLE, "artifact_hash_missing")
-        expected_hash = handle.content_hash or handle.payload_hash
-        if expected_hash and current_hash != expected_hash:
-            return _unresolved(handle, EvidenceResolvedStatus.STALE, "artifact_hash_changed")
+        if resolved_revision.status != ArtifactRevisionResolveStatus.RESOLVED or resolved_revision.revision is None:
+            status = EvidenceResolvedStatus.MISSING
+            reason_code = str(resolved_revision.reason_code or "artifact_revision_not_found")
+            if resolved_revision.status == ArtifactRevisionResolveStatus.HASH_MISMATCH:
+                status = EvidenceResolvedStatus.STALE
+                reason_code = "artifact_hash_changed"
+            elif resolved_revision.status in {
+                ArtifactRevisionResolveStatus.SCOPE_MISMATCH,
+                ArtifactRevisionResolveStatus.NOT_FOUND,
+            }:
+                status = EvidenceResolvedStatus.MISSING
+            elif resolved_revision.status in {
+                ArtifactRevisionResolveStatus.NOT_READABLE,
+                ArtifactRevisionResolveStatus.EXPIRED,
+                ArtifactRevisionResolveStatus.QUARANTINED,
+            }:
+                status = EvidenceResolvedStatus.NOT_READABLE
+            return _unresolved(handle, status, reason_code)
+        revision = resolved_revision.revision
         return _resolved(
             handle,
             payload={
-                "artifact_id": artifact.id,
-                "path": artifact.path,
-                "artifact_type": artifact.artifact_type,
-                "summary": artifact.summary,
-                "source_step_id": artifact.source_step_id,
-                "delivery_state": artifact.delivery_state,
-                "metadata": _safe_artifact_metadata(artifact.metadata),
+                "artifact_id": revision.artifact_id,
+                "revision_id": revision.revision_id,
+                "path": revision.path,
+                "artifact_type": revision.artifact_type.value,
+                "storage_ref": revision.storage_ref.model_dump(mode="json"),
+                "source_event_id": revision.source_event_id,
+                "source_fact_ids": list(revision.source_fact_ids or []),
+                "source_step_id": revision.step_id,
+                "delivery_state": revision.delivery_state.value,
+                "metadata": dict(revision.metadata or {}),
             },
             payload_hash=handle.payload_hash,
-            content_hash=current_hash,
+            content_hash=revision.content_hash,
         )
 
     async def _resolve_document_source(
@@ -280,6 +296,7 @@ def _resolved(
         source_fact_id=handle.source_fact_id,
         source_event_id=handle.source_event_id,
         artifact_id=handle.artifact_id,
+        revision_id=handle.revision_id,
         document_file_id=handle.document_file_id,
         subject_key=handle.subject_key,
         read_strategy=handle.read_strategy,
@@ -357,22 +374,6 @@ def _validate_scoped_record(
     if scope.run_id and run_id != scope.run_id:
         return "run_scope_mismatch"
     return None
-
-
-def _artifact_current_hash(metadata: dict[str, Any]) -> str | None:
-    for key in ("content_hash", "sha256", "current_hash"):
-        value = str((metadata or {}).get(key) or "").strip()
-        if value:
-            return value
-    return None
-
-
-def _safe_artifact_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in dict(metadata or {}).items()
-        if str(key) in {"content_hash", "sha256", "current_hash", "size", "mime_type"}
-    }
 
 
 def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
