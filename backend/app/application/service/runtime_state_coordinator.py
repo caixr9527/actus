@@ -313,6 +313,7 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
                 )
                 return RuntimeEventPersistResult(
                     event_inserted=False,
+                    run_id=None,
                     transition_applied=snapshot.session_status != SessionStatus.CANCELLED,
                     from_session_status=snapshot.session_status,
                     to_session_status=SessionStatus.CANCELLED,
@@ -329,6 +330,7 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
                 )
                 return RuntimeEventPersistResult(
                     event_inserted=False,
+                    run_id=snapshot.run_id,
                     transition_applied=snapshot.session_status != SessionStatus.CANCELLED,
                     from_session_status=snapshot.session_status,
                     to_session_status=SessionStatus.CANCELLED,
@@ -544,6 +546,8 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
             )
             return RuntimeEventPersistResult(
                 event_inserted=event_inserted,
+                run_id=snapshot.run_id,
+                event_id=str(event.id),
                 transition_applied=False,
                 from_session_status=snapshot.session_status,
                 to_session_status=snapshot.session_status,
@@ -584,6 +588,8 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
 
         return RuntimeEventPersistResult(
             event_inserted=event_inserted,
+            run_id=snapshot.run_id,
+            event_id=str(event.id),
             transition_applied=transition_applied,
             from_session_status=transition.from_session_status,
             to_session_status=transition.to_session_status,
@@ -652,6 +658,7 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
         ):
             return RuntimeEventPersistResult(
                 event_inserted=False,
+                run_id=snapshot.run_id,
                 transition_applied=False,
                 from_session_status=snapshot.session_status,
                 to_session_status=snapshot.session_status,
@@ -712,6 +719,8 @@ class RuntimeStateCoordinator(RuntimeStateCoordinatorPort):
 
         return RuntimeEventPersistResult(
             event_inserted=event_inserted,
+            run_id=snapshot.run_id,
+            event_id=str(trigger_event.id) if trigger_event is not None else None,
             transition_applied=transition_applied,
             from_session_status=transition.from_session_status,
             to_session_status=transition.to_session_status,

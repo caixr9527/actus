@@ -5,11 +5,18 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from typing import Any, Callable, Optional
 
 from app.domain.external import FileStorage, FileUploadPayload, Sandbox
 from app.domain.models import File, MessageEvent
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionIdentity,
+    ArtifactStorageBackend,
+    SelectedArtifactRevisionResult,
+)
 from .helpers import get_stream_size
 from ..service import WorkspaceRuntimeService
 
@@ -115,6 +122,58 @@ class MessageAttachmentProjector:
             logger.exception(f"同步文件到存储失败: {e}")
             raise
 
+    async def _resolve_final_attachment_from_revision(
+            self,
+            selected_revision: SelectedArtifactRevisionResult,
+    ) -> Optional[File]:
+        """最终附件只允许从已选 revision 的 file_storage 对象读取。"""
+        if not self._user_id:
+            raise RuntimeError("最终附件投影必须提供 user_id")
+
+        async with self._uow_factory() as uow:
+            workspace = await uow.workspace.get_by_session_id_for_user(
+                session_id=self._session_id,
+                user_id=self._user_id,
+            )
+            if workspace is None:
+                raise RuntimeError("artifact_scope_mismatch")
+            revision = await uow.workspace_artifact_revision.get_by_identity(
+                user_id=self._user_id,
+                workspace_id=workspace.id,
+                session_id=self._session_id,
+                artifact_id=selected_revision.artifact_id,
+                revision_id=selected_revision.revision_id,
+                content_hash=selected_revision.content_hash,
+            )
+            if revision is None:
+                raise RuntimeError("selected_artifact_revision_not_found")
+            if revision.storage_ref.storage_backend != ArtifactStorageBackend.FILE_STORAGE:
+                raise RuntimeError("selected_artifact_revision_not_file_storage")
+            file_id = str(revision.storage_ref.file_id or "").strip()
+            if not file_id:
+                raise RuntimeError("selected_artifact_revision_file_id_missing")
+            file = await uow.file.get_by_id_and_user_id(file_id, self._user_id)
+            if file is None:
+                raise RuntimeError("selected_artifact_revision_file_missing")
+
+        stream, storage_file = await self._file_storage.download_file(file_id, self._user_id)
+        content_hash = "sha256:" + hashlib.sha256(stream.read()).hexdigest()
+        if content_hash != revision.content_hash:
+            raise RuntimeError("selected_artifact_revision_content_hash_mismatch")
+
+        final_file = file.model_copy(deep=True)
+        final_file.filepath = revision.path
+        if not final_file.key:
+            final_file.key = storage_file.key
+        if not final_file.mime_type:
+            final_file.mime_type = storage_file.mime_type
+        if not final_file.size:
+            final_file.size = storage_file.size
+
+        async with self._uow_factory() as uow:
+            await uow.session.add_final_files(session_id=self._session_id, file=final_file)
+        return final_file
+
     async def project(self, event: MessageEvent) -> None:
         attachments: list[File] = []
         delivered_paths: list[str] = []
@@ -124,14 +183,14 @@ class MessageAttachmentProjector:
                 return
 
             allowed_final_paths: Optional[set[str]] = None
+            selected_revision_by_path = {}
             if event.stage == "final":
-                authoritative_paths = await self._workspace_runtime_service.resolve_authoritative_artifact_paths(
-                    paths=[
-                        str(attachment.filepath or "").strip()
-                        for attachment in event.attachments
-                    ],
-                )
-                allowed_final_paths = set(authoritative_paths)
+                for selected_revision in list(event.selected_artifact_revisions or []):
+                    path = str(selected_revision.path or "").strip()
+                    if not path:
+                        continue
+                    selected_revision_by_path[path] = selected_revision
+                allowed_final_paths = set(selected_revision_by_path.keys())
 
             for attachment in event.attachments:
                 filepath = str(attachment.filepath or "").strip()
@@ -140,16 +199,31 @@ class MessageAttachmentProjector:
                 if event.stage == "final" and allowed_final_paths is not None and filepath not in allowed_final_paths:
                     logger.info("最终附件[%s]未进入 workspace artifact 索引，跳过最终投影", filepath)
                     continue
-                file = await self.sync_file_to_storage(filepath, event.stage)
+                if event.stage == "final":
+                    selected_revision = selected_revision_by_path.get(filepath)
+                    if selected_revision is None:
+                        continue
+                    file = await self._resolve_final_attachment_from_revision(selected_revision)
+                else:
+                    file = await self.sync_file_to_storage(filepath, event.stage)
                 if file is not None:
                     attachments.append(file)
                     delivered_paths.append(filepath)
 
             event.attachments = attachments
             if event.stage == "final" and delivered_paths:
-                await self._workspace_runtime_service.mark_artifacts_delivery_state(
-                    paths=delivered_paths,
-                    delivery_state="selected",
+                selected_revision_identities = [
+                    ArtifactRevisionIdentity(
+                        artifact_id=selected_revision_by_path[path].artifact_id,
+                        revision_id=selected_revision_by_path[path].revision_id,
+                        content_hash=selected_revision_by_path[path].content_hash,
+                    )
+                    for path in delivered_paths
+                    if path in selected_revision_by_path
+                ]
+                await self._workspace_runtime_service.mark_artifact_revisions_delivery_state(
+                    revisions=selected_revision_identities,
+                    delivery_state=ArtifactDeliveryState.SELECTED,
                 )
         except Exception as e:
             logger.exception(f"同步消息附件到存储失败: {e}")

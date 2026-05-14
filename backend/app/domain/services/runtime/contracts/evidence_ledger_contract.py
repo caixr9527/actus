@@ -26,7 +26,12 @@ from app.domain.services.runtime.contracts.data_access_contract import (
 )
 
 from app.domain.services.runtime.contracts.document_input_contract import DocumentParseStatus
-from app.domain.services.runtime.contracts.artifact_governance_contract import ArtifactStorageRef
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionSourceKind,
+    ArtifactStorageRef,
+    ArtifactType,
+)
 
 
 class EvidenceScope(str, Enum):
@@ -220,7 +225,13 @@ class ArtifactEvidencePayload(_StrictPayload):
     content_hash: str
     storage_ref: ArtifactStorageRef
     artifact_path: str
-    artifact_type: str
+    artifact_type: ArtifactType
+    delivery_state: ArtifactDeliveryState = ArtifactDeliveryState.CANDIDATE
+    session_id: str = ""
+    run_id: str | None = None
+    source_run_id: str | None = None
+    source_step_id: str | None = None
+    source_kind: ArtifactRevisionSourceKind = ArtifactRevisionSourceKind.MANUAL_REGISTRATION
     source_fact_ids: list[str] = Field(default_factory=list)
     source_event_id: str | None = None
     delivery_candidate: bool
@@ -541,10 +552,15 @@ class EvidenceAvailableArtifactResult(BaseModel):
     content_hash: str
     storage_ref: ArtifactStorageRef
     path: str
-    artifact_type: str
+    artifact_type: ArtifactType
+    delivery_state: ArtifactDeliveryState
+    session_id: str
+    run_id: str | None = None
+    source_run_id: str | None = None
     source_event_id: str | None = None
     source_fact_ids: list[str] = Field(default_factory=list)
-    source_step_id: str
+    source_step_id: str | None = None
+    source_kind: ArtifactRevisionSourceKind
     source_evidence_ids: list[str]
     delivery_candidate: bool
     version_locked: Literal[True]

@@ -65,6 +65,17 @@ class WorkspaceArtifactRevisionRepository(Protocol):
         """按用户 + workspace + artifact_id 查询全部 revision。"""
         ...
 
+    async def get_latest_final_answer_snapshot(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            source_run_id: str,
+    ) -> Optional[WorkspaceArtifactRevision]:
+        """按同 session/run 范围读取最新 final answer snapshot revision。"""
+        ...
+
     async def update_delivery_state_by_identities(
             self,
             *,

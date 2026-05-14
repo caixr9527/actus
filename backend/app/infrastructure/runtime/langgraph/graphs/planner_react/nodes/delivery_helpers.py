@@ -8,12 +8,19 @@
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.domain.models import (
     ExecutionStatus,
+    SelectedArtifactRevisionResult,
     Step,
     StepOutcome,
+)
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionSourceKind,
+    ArtifactStorageBackend,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import (
     ATTACHMENT_DELIVERY_ALLOW_PATTERN,
@@ -30,7 +37,6 @@ from app.domain.services.runtime.normalizers import (
     normalize_step_result_text,
     normalize_text_list,
 )
-from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.infrastructure.runtime.langgraph.graphs.common.graph_parsers import normalize_attachments
 from .working_memory import _ensure_working_memory
 from ..parsers import merge_attachment_paths
@@ -147,24 +153,6 @@ def _collect_current_run_artifacts(state: PlannerReActLangGraphState) -> List[st
     )
 
 
-def _collect_completed_step_state_artifacts(state: PlannerReActLangGraphState) -> List[str]:
-    artifact_groups: List[List[str]] = []
-    for step_state in list(state.get("step_states") or []):
-        if not isinstance(step_state, dict):
-            continue
-        artifact_groups.append(
-            _normalize_successful_outcome_artifacts(
-                step_state.get("status"),
-                step_state.get("outcome"),
-            )
-        )
-    return _filter_runtime_temp_attachment_refs(
-        normalize_file_path_list(
-            merge_attachment_paths(*artifact_groups),
-        )
-    )
-
-
 def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> List[str]:
     """统一收口当前运行里可直接消费的文件路径，供执行器判断是否允许文件工具。"""
     return normalize_file_path_list(
@@ -180,52 +168,6 @@ def _collect_available_file_context_refs(state: PlannerReActLangGraphState) -> L
     )
 
 
-def _resolve_current_run_attachment_candidates(state: PlannerReActLangGraphState) -> List[str]:
-    """汇总当前运行中可验证的最终附件候选。
-
-    Phase B 起，summary 不再依赖历史重正文载荷，而是只从当前运行真实产出的
-    文件路径中选择可交付附件。
-    """
-    return _filter_runtime_temp_attachment_refs(
-        normalize_file_path_list(
-            merge_attachment_paths(
-                list(state.get("selected_artifacts") or []),
-                _collect_current_run_artifacts(state),
-            ),
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        )
-    )
-
-
-def _filter_attachment_refs_by_authoritative_paths(
-        refs: List[str],
-        authoritative_paths: List[str],
-) -> List[str]:
-    normalized_refs = normalize_file_path_list(
-        refs,
-        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-    )
-    if len(authoritative_paths) == 0:
-        return _filter_runtime_temp_attachment_refs(normalized_refs)
-    allowed_paths = set(
-        normalize_file_path_list(
-            authoritative_paths,
-            max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
-        )
-    )
-    return _filter_runtime_temp_attachment_refs([ref for ref in normalized_refs if ref in allowed_paths])
-
-
-def _resolve_summary_authoritative_paths(
-        *,
-        workspace_artifact_paths: List[str],
-        current_run_artifact_refs: List[str],
-) -> List[str]:
-    if len(workspace_artifact_paths) > 0:
-        return workspace_artifact_paths
-    return current_run_artifact_refs
-
-
 def _has_explicit_attachment_payload(parsed_attachments: Any) -> bool:
     if isinstance(parsed_attachments, str):
         return bool(parsed_attachments.strip())
@@ -234,42 +176,130 @@ def _has_explicit_attachment_payload(parsed_attachments: Any) -> bool:
     return False
 
 
-async def _resolve_summary_attachment_refs(
-        state: PlannerReActLangGraphState,
+def _extract_summary_available_artifacts(summary_context_packet: Dict[str, Any]) -> List[Dict[str, Any]]:
+    summary_context = summary_context_packet.get("summary_evidence_context")
+    if not isinstance(summary_context, dict):
+        return []
+    available_artifacts = summary_context.get("available_artifacts")
+    if not isinstance(available_artifacts, list):
+        return []
+    return [dict(item) for item in available_artifacts if isinstance(item, dict)]
+
+
+def _is_deliverable_available_artifact(item: Dict[str, Any]) -> bool:
+    storage_ref = item.get("storage_ref")
+    if not isinstance(storage_ref, dict):
+        return False
+    storage_backend = str(storage_ref.get("storage_backend") or "").strip()
+    source_kind = str(item.get("source_kind") or "").strip()
+    return (
+        item.get("version_locked") is True
+        and item.get("delivery_candidate") is True
+        and str(item.get("delivery_state") or "").strip() == ArtifactDeliveryState.CANDIDATE.value
+        and storage_backend == ArtifactStorageBackend.FILE_STORAGE.value
+        and source_kind != ArtifactRevisionSourceKind.FINAL_ANSWER_SNAPSHOT.value
+    )
+
+
+def _selected_revision_from_available_artifact(
+        item: Dict[str, Any],
+        *,
+        selected_reason: str,
+) -> Dict[str, Any] | None:
+    try:
+        selected = SelectedArtifactRevisionResult(
+            artifact_id=str(item.get("artifact_id") or ""),
+            revision_id=str(item.get("revision_id") or ""),
+            content_hash=str(item.get("content_hash") or ""),
+            path=str(item.get("path") or ""),
+            artifact_type=item.get("artifact_type") or "file",
+            delivery_state=item.get("delivery_state") or "candidate",
+            session_id=str(item.get("session_id") or ""),
+            run_id=str(item.get("run_id") or "") or None,
+            source_run_id=str(item.get("source_run_id") or item.get("run_id") or "") or None,
+            source_step_id=str(item.get("source_step_id") or "") or None,
+            source_event_id=str(item.get("source_event_id") or "") or None,
+            source_kind=item.get("source_kind"),
+            selected_reason=selected_reason,
+            selected_at=datetime.now(timezone.utc),
+        )
+    except Exception:
+        return None
+    return selected.model_dump(mode="json")
+
+
+def _dedupe_selected_revision_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        key = (
+            str(item.get("artifact_id") or ""),
+            str(item.get("revision_id") or ""),
+            str(item.get("content_hash") or ""),
+        )
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped[:MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS]
+
+
+def _resolve_summary_selected_artifact_revisions(
+        *,
+        summary_context_packet: Dict[str, Any],
         parsed_attachments: Any,
-        runtime_context_service: RuntimeContextService,
-) -> List[str]:
-    workspace_artifact_paths: List[str] = []
-    if runtime_context_service is not None:
-        workspace_artifact_paths = await runtime_context_service.list_workspace_artifact_paths()
+        previous_selected_artifacts: Any = None,
+) -> List[Dict[str, Any]]:
+    """只从 EvidenceDigest.available_artifacts 中选择最终附件 revision。"""
+    candidates = [
+        item
+        for item in _extract_summary_available_artifacts(summary_context_packet)
+        if _is_deliverable_available_artifact(item)
+    ]
+    if not candidates:
+        return []
 
-    selected_attachment_refs = _filter_runtime_temp_attachment_refs(
-        normalize_file_path_list(state.get("selected_artifacts"), max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS)
-    )
-    current_run_artifact_refs = _collect_completed_step_state_artifacts(state)
-    authoritative_paths = _resolve_summary_authoritative_paths(
-        workspace_artifact_paths=workspace_artifact_paths,
-        current_run_artifact_refs=current_run_artifact_refs,
-    )
-    explicit_attachment_refs = _filter_attachment_refs_by_authoritative_paths(
+    candidates_by_path: Dict[str, Dict[str, Any]] = {}
+    for item in candidates:
+        path = str(item.get("path") or "").strip()
+        if path and path not in candidates_by_path:
+            candidates_by_path[path] = item
+
+    requested_paths = normalize_file_path_list(
         normalize_attachments(parsed_attachments),
-        authoritative_paths,
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
-    if len(explicit_attachment_refs) > 0:
-        # selected_artifacts 是 summary 本阶段要写入的最终选择结果，不能作为显式附件的前置条件。
-        # 显式附件只要已命中 workspace artifact 或当前 run produced_artifacts，就允许进入最终交付。
-        return explicit_attachment_refs
+    selected: List[Dict[str, Any]] = []
+    for path in requested_paths:
+        candidate = candidates_by_path.get(path)
+        if candidate is None:
+            continue
+        selected_item = _selected_revision_from_available_artifact(
+            candidate,
+            selected_reason="summary_explicit_attachment",
+        )
+        if selected_item is not None:
+            selected.append(selected_item)
 
-    if _has_explicit_attachment_payload(parsed_attachments):
-        return []
+    if selected or _has_explicit_attachment_payload(parsed_attachments):
+        return _dedupe_selected_revision_results(selected)
 
-    if len(authoritative_paths) == 0:
-        return []
-
-    return _filter_attachment_refs_by_authoritative_paths(
-        selected_attachment_refs,
-        authoritative_paths,
+    fallback_paths = normalize_file_path_list(
+        previous_selected_artifacts,
+        max_items=MESSAGE_WINDOW_MAX_ATTACHMENT_PATHS,
     )
+    for path in fallback_paths:
+        candidate = candidates_by_path.get(path)
+        if candidate is None:
+            continue
+        selected_item = _selected_revision_from_available_artifact(
+            candidate,
+            selected_reason="summary_previous_selection",
+        )
+        if selected_item is not None:
+            selected.append(selected_item)
+
+    return _dedupe_selected_revision_results(selected)
 
 
 def _filter_runtime_temp_attachment_refs(refs: List[str]) -> List[str]:

@@ -50,7 +50,7 @@ from ..streaming import build_text_stream_events
 from .control_state import get_control_metadata as _get_control_metadata
 from .delivery_helpers import (
     _resolve_attachment_delivery_preference_for_summary,
-    _resolve_summary_attachment_refs,
+    _resolve_summary_selected_artifact_revisions,
 )
 from .evidence_context_guard import validate_stage_evidence_context_packet
 from .prompt_context_helpers import (
@@ -296,6 +296,7 @@ async def summarize_node(
         last_executed_step=last_executed_step,
     )
     if attachment_delivery_preference is False:
+        selected_artifact_revisions = []
         summary_attachment_refs = []
         log_runtime(
             logger,
@@ -305,19 +306,25 @@ async def summarize_node(
             step_id=str(getattr(last_executed_step, "id", "") or ""),
         )
     else:
-        summary_attachment_refs = await _resolve_summary_attachment_refs(
-            state,
-            parsed.get("attachments"),
-            runtime_context_service=runtime_context_service,
+        selected_artifact_revisions = _resolve_summary_selected_artifact_revisions(
+            summary_context_packet=summary_context_packet,
+            parsed_attachments=parsed.get("attachments"),
+            previous_selected_artifacts=state.get("selected_artifacts"),
         )
+        summary_attachment_refs = [
+            str(item.get("path") or "").strip()
+            for item in selected_artifact_revisions
+            if str(item.get("path") or "").strip()
+        ]
         log_runtime(
             logger,
             logging.INFO,
-            "总结附件过滤完成",
+            "总结 revision-aware 附件过滤完成",
             state=state,
             raw_attachment_count=len(normalize_attachments(parsed.get("attachments"))),
             final_attachment_count=len(summary_attachment_refs),
             final_attachment_paths=summary_attachment_refs,
+            selected_revision_count=len(selected_artifact_revisions),
         )
     summary_attachment_paths = [File(filepath=filepath) for filepath in summary_attachment_refs]
     final_answer_text_to_emit = _sanitize_final_answer_attachment_paths(
@@ -338,6 +345,7 @@ async def summarize_node(
             role="assistant",
             message=final_answer_text_to_emit,
             attachments=summary_attachment_paths,
+            selected_artifact_revisions=list(selected_artifact_revisions),
             stage="final",
         )
     ]
@@ -363,6 +371,7 @@ async def summarize_node(
         # 最终正文真相源只允许来自 summary/direct 阶段，不再借道 working_memory。
         "final_answer_text": final_answer_text_to_emit,
         "working_memory": working_memory,
+        "selected_artifact_revisions": list(selected_artifact_revisions),
         "selected_artifacts": list(summary_attachment_refs),
     }
     assert_state_update_allowed(

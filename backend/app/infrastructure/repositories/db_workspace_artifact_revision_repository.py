@@ -190,6 +190,37 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
             for record in records
         ]
 
+    async def get_latest_final_answer_snapshot(
+            self,
+            *,
+            user_id: str,
+            workspace_id: str,
+            session_id: str,
+            source_run_id: str,
+    ) -> WorkspaceArtifactRevision | None:
+        stmt = (
+            select(WorkspaceArtifactRevisionModel)
+            .where(
+                WorkspaceArtifactRevisionModel.user_id == user_id,
+                WorkspaceArtifactRevisionModel.workspace_id == workspace_id,
+                WorkspaceArtifactRevisionModel.session_id == session_id,
+                WorkspaceArtifactRevisionModel.source_run_id == source_run_id,
+                WorkspaceArtifactRevisionModel.source_kind == ArtifactRevisionSourceKind.FINAL_ANSWER_SNAPSHOT.value,
+            )
+            .order_by(
+                WorkspaceArtifactRevisionModel.created_at.desc(),
+                WorkspaceArtifactRevisionModel.revision_no.desc(),
+            )
+            .limit(1)
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record is None:
+            return None
+        if isinstance(record, WorkspaceArtifactRevision):
+            return record
+        return record.to_domain()
+
     async def update_delivery_state_by_identities(
             self,
             *,

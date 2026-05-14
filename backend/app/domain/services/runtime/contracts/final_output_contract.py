@@ -26,7 +26,7 @@ class RuntimeOutputStage(str, Enum):
 
 
 FINAL_TEXT_FIELDS = frozenset({"final_message", "final_answer_text"})
-FINAL_ATTACHMENT_FIELDS = frozenset({"selected_artifacts"})
+FINAL_ATTACHMENT_FIELDS = frozenset({"selected_artifacts", "selected_artifact_revisions"})
 FINAL_EVENT_STAGES = frozenset({"final"})
 
 
@@ -140,3 +140,10 @@ def assert_state_update_allowed(
         field_name="selected_artifacts",
     ) and not can_write_selected_artifacts(stage):
         raise ValueError(f"{stage.value} cannot write selected_artifacts")
+
+    if _has_changed(
+        before_state=before_state,
+        updates=updates,
+        field_name="selected_artifact_revisions",
+    ) and not can_write_selected_artifacts(stage):
+        raise ValueError(f"{stage.value} cannot write selected_artifact_revisions")

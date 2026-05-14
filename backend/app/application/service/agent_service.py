@@ -24,6 +24,8 @@ from app.application.service.runtime_access_control_service import RuntimeAccess
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.artifact_ledger_service import ArtifactLedgerService
 from app.application.service.artifact_revision_projector import ArtifactRevisionProjector
+from app.application.service.derived_export_projector import DerivedExportProjector
+from app.application.service.final_message_artifact_projector import FinalMessageArtifactProjector
 from app.application.service.sandbox_fact_event_projector import SandboxFactEventProjector
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
@@ -272,6 +274,17 @@ class AgentService:
             ),
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
+            final_message_artifact_projector=FinalMessageArtifactProjector(
+                uow_factory=self._uow_factory,
+                ledger_service=ArtifactLedgerService(uow_factory=self._uow_factory),
+                user_id=session.user_id,
+                session_id=session.id,
+            ),
+            derived_export_projector=DerivedExportProjector(
+                uow_factory=self._uow_factory,
+                ledger_service=ArtifactLedgerService(uow_factory=self._uow_factory),
+                file_storage=self._file_storage,
+            ),
             workspace_runtime_factory=lambda: WorkspaceRuntimeService(
                 session_id=session.id,
                 user_id=session.user_id,

@@ -24,6 +24,7 @@ from .search import FetchedPage, SearchResultItem
 from .tool_result import ToolResult
 from .wait import normalize_wait_payload
 from .sandbox_fact import SandboxFactKind
+from .artifact_governance import SelectedArtifactRevisionResult
 
 
 class PlanEventStatus(str, Enum):
@@ -88,6 +89,7 @@ class MessageEvent(BaseEvent):
     role: Literal["user", "assistant"] = "assistant"  # 消息发送者角色，用户或助手
     message: str = ""  # 消息内容
     attachments: List[File] = Field(default_factory=list)  # 消息附件列表
+    selected_artifact_revisions: List[SelectedArtifactRevisionResult] = Field(default_factory=list)
     stage: Literal["intermediate", "final"] = "intermediate"  # 消息阶段，中间消息或最终消息
 
 

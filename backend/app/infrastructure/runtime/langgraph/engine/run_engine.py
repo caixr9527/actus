@@ -46,6 +46,7 @@ from app.domain.services.runtime.contracts.evidence_runtime_ports import (
     EvidenceResultHandleResolverPort,
     EvidenceStepReconcilerPort,
 )
+from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.runtime.contracts.runtime_logging import (
     bind_trace_id,
     build_trace_id,
@@ -166,6 +167,7 @@ class LangGraphRunEngine(RunEngine):
             evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+            derived_export_projector: DerivedExportProjectorPort | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
@@ -182,6 +184,7 @@ class LangGraphRunEngine(RunEngine):
         self._evidence_result_handle_resolver = evidence_result_handle_resolver
         self._evidence_step_reconciler = evidence_step_reconciler
         self._runtime_tool_event_persistence = runtime_tool_event_persistence
+        self._derived_export_projector = derived_export_projector
         self._access_control_service = access_control_service or (
             RuntimeAccessControlService(uow_factory=uow_factory)
             if uow_factory is not None
@@ -211,6 +214,7 @@ class LangGraphRunEngine(RunEngine):
             evidence_result_handle_resolver=self._evidence_result_handle_resolver,
             evidence_step_reconciler=self._evidence_step_reconciler,
             runtime_tool_event_persistence=self._runtime_tool_event_persistence,
+            derived_export_projector=self._derived_export_projector,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -244,6 +248,7 @@ class LangGraphRunEngine(RunEngine):
             evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None,
+            derived_export_projector: DerivedExportProjectorPort | None,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
@@ -259,6 +264,7 @@ class LangGraphRunEngine(RunEngine):
         graph_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver
         graph_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
         graph_kwargs["runtime_tool_event_persistence"] = runtime_tool_event_persistence
+        graph_kwargs["derived_export_projector"] = derived_export_projector
 
         log_runtime(
             logger,

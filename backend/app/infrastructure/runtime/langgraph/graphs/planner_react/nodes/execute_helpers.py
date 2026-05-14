@@ -14,6 +14,7 @@
 
 import logging
 from dataclasses import dataclass
+import re
 from typing import Any, Dict, List, Optional
 
 from app.domain.external import LLM
@@ -27,6 +28,8 @@ from app.domain.models import (
     StepOutcome,
     ToolEvent,
 )
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.prompts import EXECUTION_PROMPT
 from app.domain.services.runtime.langgraph_events import append_events
 from app.domain.services.runtime.contracts.final_output_contract import (
@@ -80,6 +83,19 @@ from .working_memory import _ensure_working_memory
 from ..parsers import extract_write_file_paths_from_tool_events, merge_attachment_paths
 
 logger = logging.getLogger(__name__)
+
+DERIVED_EXPORT_REQUEST_PATTERN = re.compile(
+    r"("
+    r"(导出|保存|生成|输出|写入).{0,12}(上面|上述|上一轮|上一次|刚才|前面).{0,12}(回答|回复|内容|攻略|总结|方案|正文)"
+    r"|"
+    r"(上面|上述|上一轮|上一次|刚才|前面).{0,12}(回答|回复|内容|攻略|总结|方案|正文).{0,12}(导出|保存|生成|输出|写入)"
+    r"|"
+    r"\b(export|save|write|generate)\b.{0,16}\b(previous|last|above)\b.{0,16}\b(answer|response|content|summary)\b"
+    r"|"
+    r"\b(previous|last|above)\b.{0,16}\b(answer|response|content|summary)\b.{0,16}\b(export|save|write|generate)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -758,8 +774,26 @@ async def build_execute_completed_transition(
         is_entry_wait_execute_step: bool,
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+        derived_export_projector: DerivedExportProjectorPort | None = None,
 ) -> ExecuteStepCompletedTransition:
     """构造 execute 节点 completed 分支的结果落账与状态写回。"""
+    derived_export_result = None
+    derived_export_error = ""
+    if _should_project_derived_export(state=state, step=step, user_message=user_message):
+        source_run_id = _resolve_previous_final_answer_source_run_id(state)
+        if not source_run_id:
+            derived_export_error = "final_answer_snapshot_missing"
+        elif derived_export_projector is None:
+            derived_export_error = "final_answer_snapshot_missing"
+        else:
+            try:
+                derived_export_result = await derived_export_projector.export_latest_final_answer_as_markdown(
+                    scope=_build_derived_export_scope(state),
+                    source_run_id=source_run_id,
+                )
+            except Exception as exc:
+                derived_export_error = str(exc) or exc.__class__.__name__
+
     step_success = bool(normalized_execution.get("success", True))
     step_label = _build_step_label(step)
     step_summary = normalize_step_result_text(
@@ -779,13 +813,23 @@ async def build_execute_completed_transition(
         merge_attachment_paths(model_attachment_paths, tool_attachment_paths),
     )
     blockers = normalize_text_list(normalized_execution.get("blockers"))
-    if step_success and _step_requires_file_write_result(step) and len(tool_attachment_paths) == 0:
+    if derived_export_result is not None:
+        step_success = True
+        step_summary = "已基于上一轮最终回答生成受控导出文件。"
+        step_attachment_paths = [derived_export_result.path]
+        blockers = []
+    elif derived_export_error:
         step_success = False
-        blockers = [
-            *blockers,
-            "当前步骤要求产出文件，但缺少成功 write_file 或 replace_in_file 工具事件，已拒绝按文件产出成功落账。",
-        ]
         step_summary = f"步骤执行失败：{step_label}"
+        blockers = [*blockers, derived_export_error]
+    if step_success and _step_requires_file_write_result(step) and len(tool_attachment_paths) == 0:
+        if derived_export_result is None:
+            step_success = False
+            blockers = [
+                *blockers,
+                "当前步骤要求产出文件，但缺少成功 write_file 或 replace_in_file 工具事件，已拒绝按文件产出成功落账。",
+            ]
+            step_summary = f"步骤执行失败：{step_label}"
     open_questions = normalize_text_list(normalized_execution.get("open_questions"))
     evidence_backed_facts = _normalize_evidence_backed_facts(
         normalized_execution.get("evidence_backed_facts")
@@ -808,7 +852,12 @@ async def build_execute_completed_transition(
         tool_events=tool_events,
         runtime_tool_event_persistence=runtime_tool_event_persistence,
     )
-    if step_success and _step_requires_file_write_result(step) and _artifact_revision_count_from_tool_events(tool_events) <= 0:
+    if (
+            step_success
+            and _step_requires_file_write_result(step)
+            and derived_export_result is None
+            and _artifact_revision_count_from_tool_events(tool_events) <= 0
+    ):
         step_success = False
         step.status = ExecutionStatus.FAILED
         blockers = [
@@ -934,6 +983,60 @@ def _step_requires_file_write_result(step: Step) -> bool:
         output_mode == StepOutputMode.FILE.value
         or artifact_policy == StepArtifactPolicy.REQUIRE_FILE_OUTPUT.value
     )
+
+
+def _should_project_derived_export(
+        *,
+        state: PlannerReActLangGraphState,
+        step: Step,
+        user_message: str,
+) -> bool:
+    if not _step_requires_file_write_result(step):
+        return False
+    candidate_text = " ".join(
+        str(item or "").strip()
+        for item in [
+            user_message,
+            getattr(step, "title", ""),
+            getattr(step, "description", ""),
+        ]
+        if str(item or "").strip()
+    )
+    if not candidate_text:
+        return False
+    if not DERIVED_EXPORT_REQUEST_PATTERN.search(candidate_text):
+        return False
+    return bool(str(state.get("run_id") or "").strip())
+
+
+def _build_derived_export_scope(state: PlannerReActLangGraphState) -> AccessScopeResult:
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    workspace_id = str(state.get("workspace_id") or "").strip()
+    run_id = str(state.get("run_id") or "").strip()
+    if not user_id or not session_id or not workspace_id or not run_id:
+        raise RuntimeError("final_answer_snapshot_missing")
+    return AccessScopeResult(
+        tenant_id=user_id,
+        user_id=user_id,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        run_id=run_id,
+        current_step_id=str(state.get("current_step_id") or "").strip() or None,
+    )
+
+
+def _resolve_previous_final_answer_source_run_id(state: PlannerReActLangGraphState) -> str | None:
+    current_run_id = str(state.get("run_id") or "").strip()
+    if not current_run_id:
+        return None
+    for item in list(state.get("recent_run_briefs") or []):
+        if not isinstance(item, dict):
+            continue
+        run_id = str(item.get("run_id") or "").strip()
+        if run_id and run_id != current_run_id:
+            return run_id
+    return None
 
 
 def _is_valid_strong_page_evidence(record: object) -> bool:

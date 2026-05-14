@@ -235,7 +235,7 @@ def test_graph_state_contract_should_build_initial_state_from_workflow_run_snaps
     assert state["recent_attempt_briefs"][0]["status"] == WorkflowRunStatus.FAILED.value
     assert state["session_open_questions"] == ["已完成运行待确认", "失败运行待确认", "还需确认范围"]
     assert state["session_blockers"] == ["远端接口不可用"]
-    assert state["selected_artifacts"] == ["/tmp/final.md"]
+    assert state["selected_artifacts"] == []
     assert state["historical_artifact_paths"] == [
         "/tmp/snapshot-artifact.md",
         "/tmp/history-artifact.md",
@@ -563,7 +563,7 @@ def test_graph_state_contract_should_reduce_wait_interrupt_and_generate_runtime_
         "tags",
     ]
     assert contract["graph_state"]["pending_memory_writes"][0]["id"] == "pending-1"
-    assert contract["graph_state"]["selected_artifacts"] == ["/tmp/final.md"]
+    assert contract["graph_state"]["selected_artifacts"] == []
     assert sorted(contract["graph_state"]["step_states"][0].keys()) == [
         "artifact_policy",
         "description",

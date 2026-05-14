@@ -30,6 +30,7 @@ from app.domain.models import (
     WorkflowRun,
     WorkflowRunSummary,
     SessionContextSnapshot,
+    SelectedArtifactRevisionResult,
 )
 from app.domain.services.runtime.normalizers import (
     merge_unique_strings,
@@ -232,7 +233,9 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     session_open_questions: List[str]
     """会话级阻塞项集合；用于 prompt 上下文补充历史受阻信息。"""
     session_blockers: List[str]
-    """当前运行明确选中/确认的产物引用；用于总结输出和历史上下文投影。"""
+    """Summary 已选择的 revision-aware 最终附件身份锁。"""
+    selected_artifact_revisions: List[Dict[str, Any]]
+    """当前运行明确选中/确认的产物路径，只能由 selected_artifact_revisions 派生展示。"""
     selected_artifacts: List[str]
     """历史运行最终交付文件路径；用于当前运行 prompt 中补充跨轮文件上下文。"""
     historical_artifact_paths: List[str]
@@ -256,6 +259,8 @@ class PlannerReActLangGraphState(TypedDict, total=False):
     final_message: str
     """当前运行最新的最终正文；仅在 final/direct 输出阶段写入，作为用户可见正文真相源。"""
     final_answer_text: str
+    """Summary 已选择的 revision-aware 最终附件身份锁；旧 path list 只能由该字段派生。"""
+    selected_artifact_revisions: List[Dict[str, Any]]
     """当前 graph 已发射但尚未完成外部归并的事件序列；用于状态归并和流式事件去重。"""
     emitted_events: List[BaseEvent]
 
@@ -285,6 +290,7 @@ class GraphStateContractMapper:
         "recent_attempt_briefs",
         "session_open_questions",
         "session_blockers",
+        "selected_artifact_revisions",
         "selected_artifacts",
         "historical_artifact_paths",
         "plan",
@@ -591,6 +597,33 @@ class GraphStateContractMapper:
         return normalized
 
     @classmethod
+    def _normalize_selected_artifact_revisions(cls, raw: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw, list):
+            return []
+        normalized_items: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                selected = SelectedArtifactRevisionResult.model_validate(item)
+            except Exception:
+                continue
+            key = (selected.artifact_id, selected.revision_id, selected.content_hash)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append(selected.model_dump(mode="json"))
+        return normalized_items
+
+    @classmethod
+    def _derive_selected_artifact_paths(cls, selected_revisions: Any, fallback_paths: Any = None) -> List[str]:
+        normalized_revisions = cls._normalize_selected_artifact_revisions(selected_revisions)
+        if normalized_revisions:
+            return normalize_file_path_list([item.get("path") for item in normalized_revisions])
+        return []
+
+    @classmethod
     def _normalize_input_parts(cls, raw: Any) -> List[Dict[str, Any]]:
         return cls._normalize_list_memory(raw)
 
@@ -845,8 +878,14 @@ class GraphStateContractMapper:
         if not session_blockers:
             session_blockers = cls._build_blockers_from_summaries(recent_attempt_summaries)
 
-        # selected_artifacts 只承载最终可交付文件路径，避免历史普通引用污染附件链路。
-        selected_artifacts = normalize_file_path_list(graph_state_from_metadata.get("selected_artifacts"))
+        selected_artifact_revisions = cls._normalize_selected_artifact_revisions(
+            graph_state_from_metadata.get("selected_artifact_revisions")
+        )
+        # selected_artifacts 是 selected_artifact_revisions 派生的只读展示 path list。
+        selected_artifacts = cls._derive_selected_artifact_paths(
+            selected_artifact_revisions,
+            graph_state_from_metadata.get("selected_artifacts"),
+        )
 
         historical_artifact_paths = normalize_file_path_list(graph_state_from_metadata.get("historical_artifact_paths"))
         if not historical_artifact_paths:
@@ -902,6 +941,7 @@ class GraphStateContractMapper:
             "recent_attempt_briefs": recent_attempt_briefs,
             "session_open_questions": session_open_questions,
             "session_blockers": session_blockers,
+            "selected_artifact_revisions": selected_artifact_revisions,
             "selected_artifacts": selected_artifacts,
             "historical_artifact_paths": historical_artifact_paths,
             "plan": plan,
@@ -1086,7 +1126,13 @@ class GraphStateContractMapper:
         )
         normalized_state["session_open_questions"] = normalize_text_list(raw.get("session_open_questions"))
         normalized_state["session_blockers"] = normalize_text_list(raw.get("session_blockers"))
-        normalized_state["selected_artifacts"] = normalize_file_path_list(raw.get("selected_artifacts"))
+        normalized_state["selected_artifact_revisions"] = cls._normalize_selected_artifact_revisions(
+            raw.get("selected_artifact_revisions")
+        )
+        normalized_state["selected_artifacts"] = cls._derive_selected_artifact_paths(
+            normalized_state["selected_artifact_revisions"],
+            raw.get("selected_artifacts"),
+        )
         normalized_state["historical_artifact_paths"] = normalize_file_path_list(raw.get("historical_artifact_paths"))
 
         normalized_plan = normalize_plan_payload(raw.get("plan"))
@@ -1173,8 +1219,14 @@ class GraphStateContractMapper:
                     "recent_attempt_briefs": cls._to_json_safe(state.get("recent_attempt_briefs") or []),
                     "session_open_questions": cls._to_json_safe(state.get("session_open_questions") or []),
                     "session_blockers": cls._to_json_safe(state.get("session_blockers") or []),
+                    "selected_artifact_revisions": cls._to_json_safe(
+                        cls._normalize_selected_artifact_revisions(state.get("selected_artifact_revisions"))
+                    ),
                     "selected_artifacts": cls._to_json_safe(
-                        normalize_file_path_list(state.get("selected_artifacts"))
+                        cls._derive_selected_artifact_paths(
+                            state.get("selected_artifact_revisions"),
+                            state.get("selected_artifacts"),
+                        )
                     ),
                     "historical_artifact_paths": cls._to_json_safe(
                         normalize_file_path_list(state.get("historical_artifact_paths"))

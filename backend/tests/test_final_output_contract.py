@@ -146,7 +146,7 @@ class _SummaryLLM:
 
 def test_final_output_contract_should_define_owned_final_fields() -> None:
     assert FINAL_TEXT_FIELDS == frozenset({"final_message", "final_answer_text"})
-    assert FINAL_ATTACHMENT_FIELDS == frozenset({"selected_artifacts"})
+    assert FINAL_ATTACHMENT_FIELDS == frozenset({"selected_artifacts", "selected_artifact_revisions"})
     assert FINAL_EVENT_STAGES == frozenset({"final"})
 
 
@@ -164,11 +164,30 @@ def test_final_output_contract_should_allow_summary_to_write_final_output() -> N
             "final_message": "",
             "final_answer_text": "",
             "selected_artifacts": [],
+            "selected_artifact_revisions": [],
         },
         updates={
             "final_message": "轻量总结",
             "final_answer_text": "最终正文",
             "selected_artifacts": ["/tmp/final.md"],
+            "selected_artifact_revisions": [
+                {
+                    "artifact_id": "artifact-1",
+                    "revision_id": "revision-1",
+                    "content_hash": "sha256:" + "a" * 64,
+                    "path": "/tmp/final.md",
+                    "artifact_type": "file",
+                    "delivery_state": "selected",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "source_run_id": "run-1",
+                    "source_step_id": "step-1",
+                    "source_event_id": "event-1",
+                    "source_kind": "tool_write_file",
+                    "selected_reason": "summary_selected",
+                    "selected_at": "2026-05-14T10:00:00",
+                }
+            ],
         },
     )
 
@@ -187,6 +206,7 @@ def test_final_output_contract_should_allow_direct_answer_without_attachments() 
             "final_message": "",
             "final_answer_text": "",
             "selected_artifacts": [],
+            "selected_artifact_revisions": [],
         },
         updates={
             "final_message": "直接回答",
@@ -267,6 +287,7 @@ def test_final_output_contract_should_allow_execute_wait_reuse_same_value_retent
         "final_message": "已有轻量总结",
         "final_answer_text": "已有最终正文",
         "selected_artifacts": ["/tmp/final.md"],
+        "selected_artifact_revisions": [{"artifact_id": "artifact-1", "revision_id": "revision-1"}],
     }
 
     for stage in (
@@ -285,6 +306,7 @@ def test_final_output_contract_should_allow_execute_wait_reuse_same_value_retent
                 "final_message": "已有轻量总结",
                 "final_answer_text": "已有最终正文",
                 "selected_artifacts": ["/tmp/final.md"],
+                "selected_artifact_revisions": [{"artifact_id": "artifact-1", "revision_id": "revision-1"}],
             },
         )
 
@@ -294,11 +316,22 @@ def test_final_output_contract_should_reject_execute_wait_reuse_new_final_output
         "final_message": "已有轻量总结",
         "final_answer_text": "已有最终正文",
         "selected_artifacts": ["/tmp/final.md"],
+        "selected_artifact_revisions": [],
     }
     cases = [
         (RuntimeOutputStage.EXECUTE, {"final_answer_text": "新的最终正文"}, "final_answer_text"),
         (RuntimeOutputStage.WAIT, {"final_message": "等待恢复文本"}, "final_message"),
         (RuntimeOutputStage.REUSE, {"selected_artifacts": ["/tmp/reused.md"]}, "selected_artifacts"),
+        (
+            RuntimeOutputStage.DIRECT_ANSWER,
+            {"selected_artifact_revisions": [{"artifact_id": "artifact-1", "revision_id": "revision-1"}]},
+            "selected_artifact_revisions",
+        ),
+        (
+            RuntimeOutputStage.PLANNER_DIRECT_FALLBACK,
+            {"selected_artifact_revisions": [{"artifact_id": "artifact-1", "revision_id": "revision-1"}]},
+            "selected_artifact_revisions",
+        ),
     ]
 
     for stage, updates, field_name in cases:

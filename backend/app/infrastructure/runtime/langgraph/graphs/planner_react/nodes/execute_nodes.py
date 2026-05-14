@@ -12,6 +12,7 @@ from app.domain.models import ExecutionStatus, StepEvent, StepEventStatus, ToolE
 from app.domain.services.runtime import SkillGraphRuntime
 from app.domain.services.runtime.contracts.langgraph_settings import STEP_EXECUTION_TIMEOUT_SECONDS
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
+from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
@@ -62,6 +63,7 @@ async def execute_step_node(
         max_tool_iterations: int = 5,
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+        derived_export_projector: DerivedExportProjectorPort | None = None,
 ) -> PlannerReActLangGraphState:
     """执行单个步骤；当前批次未完成时继续跑后续步骤，整批完成后再统一重规划。"""
     started_at = now_perf()
@@ -276,6 +278,7 @@ async def execute_step_node(
         is_entry_wait_execute_step=is_entry_wait_execute_step,
         evidence_step_reconciler=evidence_step_reconciler,
         runtime_tool_event_persistence=runtime_tool_event_persistence,
+        derived_export_projector=derived_export_projector,
     )
     await emit_events(*completed_transition.events[len([started_event, *tool_events]):])
     log_runtime(

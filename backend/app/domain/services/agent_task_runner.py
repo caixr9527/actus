@@ -60,6 +60,10 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactProjectionContextBuilderPort,
     SandboxFactRecorderPort,
 )
+from app.domain.services.runtime.contracts.artifact_governance_ports import (
+    DerivedExportProjectorPort,
+    FinalMessageArtifactProjectorPort,
+)
 from app.domain.models import RuntimeEventProjection
 from app.domain.services.workspace_runtime import WorkspaceManager, WorkspaceRuntimeService
 from app.domain.services.workspace_runtime.projectors import (
@@ -98,6 +102,8 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+            final_message_artifact_projector: FinalMessageArtifactProjectorPort | None = None,
+            derived_export_projector: DerivedExportProjectorPort | None = None,
             workspace_runtime_factory: Callable[[], WorkspaceRuntimeService] | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
@@ -129,6 +135,8 @@ class AgentTaskRunner(TaskRunner):
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._evidence_step_reconciler = evidence_step_reconciler
         self._runtime_tool_event_persistence = runtime_tool_event_persistence
+        self._final_message_artifact_projector = final_message_artifact_projector
+        self._derived_export_projector = derived_export_projector
         self._tool_runtime_adapter = tool_runtime_adapter
         self._tool_event_projector = ToolEventProjector(
             adapter=tool_runtime_adapter,
@@ -180,6 +188,8 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+            final_message_artifact_projector: FinalMessageArtifactProjectorPort | None = None,
+            derived_export_projector: DerivedExportProjectorPort | None = None,
             workspace_runtime_factory: Callable[[], WorkspaceRuntimeService] | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
@@ -217,6 +227,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             evidence_step_reconciler=evidence_step_reconciler,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
+            derived_export_projector=derived_export_projector,
         )
         return cls(
             mcp_config=mcp_config,
@@ -238,6 +249,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_event_projector=sandbox_fact_event_projector,
             evidence_step_reconciler=evidence_step_reconciler,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
+            derived_export_projector=derived_export_projector,
         )
 
     @staticmethod
@@ -262,6 +274,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+            derived_export_projector: DerivedExportProjectorPort | None = None,
     ) -> RunEngine:
         return await run_engine_factory(
             llm=llm,
@@ -283,6 +296,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             evidence_step_reconciler=evidence_step_reconciler,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
+            derived_export_projector=derived_export_projector,
         )
 
     def _require_run_engine(self) -> RunEngine:
@@ -330,6 +344,7 @@ class AgentTaskRunner(TaskRunner):
             allow_status_transition: bool = True,
     ) -> str | None:
         event_id = None
+        event_persisted = False
         try:
             # 先把事件写入输出流，拿到流事件ID用于幂等与补偿。
             event_id = await self._put_stream_record(
@@ -350,22 +365,48 @@ class AgentTaskRunner(TaskRunner):
                 latest_message_at=latest_message_at,
                 increment_unread=increment_unread,
             )
-            await self._get_runtime_state_coordinator().persist_runtime_event(
+            persist_result = await self._get_runtime_state_coordinator().persist_runtime_event(
                 session_id=self._session_id,
                 event=persisted_event,
                 projection=projection,
                 allow_status_transition=allow_status_transition,
             )
+            event_persisted = True
+            if (
+                    isinstance(persisted_event, MessageEvent)
+                    and persisted_event.stage == "final"
+            ):
+                await self._project_final_message_snapshot(
+                    event=persisted_event,
+                    persisted_event_id=event_id,
+                    run_id=str(getattr(persist_result, "run_id", "") or ""),
+                )
             return event_id
         except Exception as e:
             # 落库失败时补偿删除输出流，尽量降低Redis/DB分叉概率。
             logger.error(f"写入输出流后保存事件历史失败: {e}")
-            if event_id is not None:
+            if event_id is not None and not event_persisted:
                 try:
                     await task.output_stream.delete_message(event_id)
                 except Exception as rollback_err:
                     logger.error(f"输出流补偿删除失败: {rollback_err}")
             raise
+
+    async def _project_final_message_snapshot(
+            self,
+            *,
+            event: MessageEvent,
+            persisted_event_id: str,
+            run_id: str,
+    ) -> None:
+        projector = getattr(self, "_final_message_artifact_projector", None)
+        if projector is None:
+            return
+        await projector.project_final_message(
+            event=event,
+            persisted_event_id=persisted_event_id,
+            run_id=run_id,
+        )
 
     async def _record_sandbox_facts_for_tool_event(
             self,

@@ -26,6 +26,7 @@ from app.domain.models import (
     TextStreamChannel,
     SessionStatus,
 )
+from app.domain.services.runtime.contracts.artifact_governance_contract import SelectedArtifactRevisionResult
 from app.application.service.runtime_observation_service import RuntimeObservableEventResult
 from app.domain.services.runtime.normalizers import normalize_event_payload
 
@@ -110,6 +111,7 @@ class MessageEventData(BaseEventData):
     role: Literal["user", "assistant"] = "assistant"
     message: str = ""
     attachments: List[File] = Field(default_factory=list)
+    selected_artifact_revisions: List[SelectedArtifactRevisionResult] = Field(default_factory=list)
     stage: Literal["intermediate", "final"] = "intermediate"
 
 
@@ -126,6 +128,7 @@ class MessageSSEEvent(BaseSSEEvent):
                 role=event.role,
                 message=event.message,
                 attachments=event.attachments,
+                selected_artifact_revisions=event.selected_artifact_revisions,
                 stage=event.stage,
             )
         )

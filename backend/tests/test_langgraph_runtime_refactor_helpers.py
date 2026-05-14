@@ -13,6 +13,7 @@ from unittest.mock import patch
 from app.domain.models import (
     ExecutionStatus,
     Plan,
+    ResolvedArtifactRevisionResult,
     Step,
     StepArtifactPolicy,
     StepEvent,
@@ -21,6 +22,11 @@ from app.domain.models import (
     ToolEvent,
     ToolEventStatus,
     ToolResult,
+)
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionSourceKind,
+    ArtifactType,
 )
 from app.domain.models.search import FetchedPage
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -93,9 +99,6 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools i
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import (
     build_loop_break_result,
-)
-from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.delivery_helpers import (
-    _resolve_summary_attachment_refs,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_helpers import (
     build_execute_completed_transition,
@@ -3781,40 +3784,6 @@ def test_evaluate_task_mode_policy_should_not_block_general_search_with_existing
     assert decision is None
 
 
-def test_resolve_summary_attachment_refs_should_filter_runtime_temp_files() -> None:
-    state = {
-        "selected_artifacts": [
-            "/workspace/final.md",
-            "/workspace/temp_response.json",
-            "/workspace/final_output.txt",
-        ]
-    }
-
-    class _FakeRuntimeContextService:
-        async def list_workspace_artifact_paths(self) -> List[str]:
-            return [
-                "/workspace/final.md",
-                "/workspace/temp_response.json",
-                "/workspace/final_output.txt",
-                "/workspace/directory_info.txt",
-            ]
-
-    result = asyncio.run(
-        _resolve_summary_attachment_refs(
-            state,  # type: ignore[arg-type]
-            [
-                "/workspace/final.md",
-                "/workspace/temp_response.json",
-                "/workspace/final_output.txt",
-                "/workspace/directory_info.txt",
-            ],
-            runtime_context_service=_FakeRuntimeContextService(),  # type: ignore[arg-type]
-        )
-    )
-
-    assert result == ["/workspace/final.md"]
-
-
 def test_normalize_tool_execution_args_should_force_overwrite_for_write_file() -> None:
     normalized_args = normalize_tool_execution_args(
         normalized_function_name="write_file",
@@ -4887,6 +4856,184 @@ def test_build_execute_completed_transition_should_use_successful_write_tool_art
     assert transition.artifact_count == 1
     assert step.outcome is not None
     assert step.outcome.produced_artifacts == ["/home/ubuntu/p1-3-reuse-test.md"]
+
+
+class _DerivedExportProjector:
+    def __init__(self, result: ResolvedArtifactRevisionResult | Exception) -> None:
+        self.result = result
+        self.calls: list[object] = []
+
+    async def export_latest_final_answer_as_markdown(self, *, scope, source_run_id: str, filename: str = "final-answer.md"):
+        self.calls.append({"scope": scope, "source_run_id": source_run_id})
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def _derived_export_result() -> ResolvedArtifactRevisionResult:
+    return ResolvedArtifactRevisionResult(
+        artifact_id="artifact-export",
+        revision_id="revision-export",
+        content_hash="sha256:" + "b" * 64,
+        path="/exports/file-export-1/final-answer.md",
+        artifact_type=ArtifactType.REPORT,
+        delivery_state=ArtifactDeliveryState.CANDIDATE,
+        session_id="session-1",
+        run_id="run-2",
+        source_run_id="run-1",
+        source_event_id="final-event-1",
+        source_kind=ArtifactRevisionSourceKind.DERIVED_EXPORT,
+    )
+
+
+def test_build_execute_completed_transition_should_project_derived_export_for_previous_answer_request() -> None:
+    step = Step(
+        id="step-export",
+        title="导出上面的回答",
+        description="将上面的回答导出为 Markdown 文件",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+    projector = _DerivedExportProjector(_derived_export_result())
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-2",
+                "current_step_id": "step-export",
+                "recent_run_briefs": [{"run_id": "run-1", "status": "completed"}],
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={
+                "success": True,
+                "summary": "模型尝试生成导出文件",
+                "attachments": ["/tmp/model-generated.md"],
+            },
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[],
+            user_message="导出上面的回答",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+            derived_export_projector=projector,
+        )
+    )
+
+    assert len(projector.calls) == 1
+    assert projector.calls[0]["scope"].run_id == "run-2"
+    assert projector.calls[0]["source_run_id"] == "run-1"
+    assert transition.step_success is True
+    assert transition.artifact_count == 1
+    assert step.outcome is not None
+    assert step.outcome.produced_artifacts == ["/exports/file-export-1/final-answer.md"]
+    assert step.status == ExecutionStatus.COMPLETED
+
+
+def test_build_execute_completed_transition_should_fail_previous_answer_export_without_snapshot() -> None:
+    step = Step(
+        id="step-export",
+        title="导出上面的回答",
+        description="将上面的回答导出为 Markdown 文件",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+    projector = _DerivedExportProjector(RuntimeError("final_answer_snapshot_missing"))
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-2",
+                "current_step_id": "step-export",
+                "recent_run_briefs": [{"run_id": "run-1", "status": "completed"}],
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={
+                "success": True,
+                "summary": "模型尝试生成导出文件",
+                "attachments": ["/tmp/model-generated.md"],
+            },
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[],
+            user_message="导出上面的回答",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+            derived_export_projector=projector,
+        )
+    )
+
+    assert transition.step_success is False
+    assert transition.artifact_count == 0
+    assert step.outcome is not None
+    assert step.outcome.done is False
+    assert step.outcome.produced_artifacts == []
+    assert "final_answer_snapshot_missing" in step.outcome.blockers
+    assert step.status == ExecutionStatus.FAILED
+
+
+def test_build_execute_completed_transition_should_not_use_current_run_as_derived_export_source() -> None:
+    step = Step(
+        id="step-export",
+        title="导出上面的回答",
+        description="将上面的回答导出为 Markdown 文件",
+        output_mode=StepOutputMode.FILE,
+        artifact_policy=StepArtifactPolicy.REQUIRE_FILE_OUTPUT,
+    )
+    plan = Plan(steps=[step])
+    projector = _DerivedExportProjector(_derived_export_result())
+
+    transition = asyncio.run(
+        build_execute_completed_transition(
+            state={
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "run_id": "run-2",
+                "current_step_id": "step-export",
+                "recent_run_briefs": [{"run_id": "run-2", "status": "completed"}],
+                "emitted_events": [],
+            },
+            plan=plan,
+            step=step,
+            control={},
+            runtime_context_service=RuntimeContextService(),
+            task_mode="file_processing",
+            execute_context_updates={},
+            runtime_recent_action={},
+            normalized_execution={"success": True, "summary": "模型尝试生成导出文件"},
+            started_event=StepEvent(step=step.model_copy(deep=True), status=StepEventStatus.STARTED),
+            tool_events=[],
+            user_message="导出上面的回答",
+            working_memory={},
+            is_entry_wait_execute_step=False,
+            derived_export_projector=projector,
+        )
+    )
+
+    assert projector.calls == []
+    assert transition.step_success is False
+    assert step.outcome is not None
+    assert "final_answer_snapshot_missing" in step.outcome.blockers
 
 
 def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_explicit_url_present() -> None:

@@ -8,7 +8,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from app.domain.models import ToolEvent
+from app.domain.models import MessageEvent, ToolEvent
 from app.domain.models.sandbox_fact import SandboxFactRecord
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.artifact_governance_contract import (
@@ -73,4 +73,30 @@ class ArtifactRevisionProjectorPort(Protocol):
             facts: list[SandboxFactRecord],
     ) -> ArtifactRevisionProjectionResult:
         """在 document input source event 和 DOCUMENT_CONTEXT fact 均已持久化后登记 revision。"""
+        ...
+
+
+class FinalMessageArtifactProjectorPort(Protocol):
+    """已持久化 final message 到 final_answer_snapshot revision 的后置投影端口。"""
+
+    async def project_final_message(
+            self,
+            *,
+            event: MessageEvent,
+            persisted_event_id: str,
+            run_id: str,
+    ) -> None:
+        ...
+
+
+class DerivedExportProjectorPort(Protocol):
+    """受控 final_answer_snapshot 派生导出端口。"""
+
+    async def export_latest_final_answer_as_markdown(
+            self,
+            *,
+            scope: AccessScopeResult,
+            source_run_id: str,
+            filename: str = "final-answer.md",
+    ) -> ResolvedArtifactRevisionResult:
         ...

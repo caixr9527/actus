@@ -11,6 +11,7 @@ from typing import Callable, Dict
 from app.application.service.artifact_ledger_service import ArtifactLedgerService
 from app.application.service.artifact_revision_projector import ArtifactRevisionProjector
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
+from app.application.service.derived_export_projector import DerivedExportProjector
 from app.application.service.evidence_digest_projector import EvidenceDigestProjector
 from app.application.service.evidence_fact_assembler import EvidenceFactAssembler
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
@@ -168,6 +169,11 @@ async def build_run_engine(
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
         evidence_step_reconciler=evidence_ledger_service,
         runtime_tool_event_persistence=runtime_tool_event_persistence,
+        derived_export_projector=DerivedExportProjector(
+            uow_factory=uow_factory,
+            ledger_service=ArtifactLedgerService(uow_factory=uow_factory),
+            file_storage=file_storage,
+        ),
         max_tool_iterations=max_tool_iterations,
         checkpointer=get_langgraph_checkpointer().get_checkpointer(),
         data_retention_policy_service=DataRetentionPolicyService(),

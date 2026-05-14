@@ -1,6 +1,8 @@
 import asyncio
+import hashlib
 import io
 import json
+from datetime import datetime
 from typing import Optional
 
 import pytest
@@ -49,6 +51,16 @@ from app.domain.models.sandbox_fact import (
 )
 from app.domain.models.tool_result import ToolResult
 from app.domain.services.agent_task_runner import AgentTaskRunner
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactDeliveryState,
+    ArtifactRevisionIdentity,
+    ArtifactRevisionSourceKind,
+    ArtifactStorageBackend,
+    ArtifactStorageRef,
+    ArtifactType,
+    SelectedArtifactRevisionResult,
+    WorkspaceArtifactRevision,
+)
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
 from app.domain.services.workspace_runtime.projectors import (
     BrowserScreenshotArtifactService,
@@ -570,6 +582,123 @@ class _ExistingFileUoW:
         return False
 
 
+class _FinalRevisionWorkspaceRepo:
+    async def get_by_session_id_for_user(self, *, session_id: str, user_id: str):
+        return Workspace(id="workspace-1", session_id=session_id, user_id=user_id, current_run_id="run-1")
+
+
+class _FinalRevisionRepo:
+    def __init__(self, revision: WorkspaceArtifactRevision | None = None) -> None:
+        self._revision = revision
+
+    async def get_by_identity(self, **kwargs):
+        if self._revision is None:
+            return None
+        if (
+                kwargs["artifact_id"] == self._revision.artifact_id
+                and kwargs["revision_id"] == self._revision.revision_id
+                and kwargs["content_hash"] == self._revision.content_hash
+        ):
+            return self._revision.model_copy(deep=True)
+        return None
+
+
+class _FinalRevisionFileRepo:
+    def __init__(self, file: File | None) -> None:
+        self._file = file
+
+    async def get_by_id_and_user_id(self, file_id: str, user_id: str):
+        if self._file is not None and self._file.id == file_id and self._file.user_id == user_id:
+            return self._file.model_copy(deep=True)
+        return None
+
+
+class _FinalRevisionSessionRepo:
+    def __init__(self) -> None:
+        self.added_final_files: list[File] = []
+
+    async def add_final_files(self, session_id: str, file: File) -> None:
+        self.added_final_files.append(file)
+
+
+class _FinalRevisionUoW:
+    def __init__(
+            self,
+            *,
+            revision: WorkspaceArtifactRevision | None,
+            file: File | None,
+            session_repo: _FinalRevisionSessionRepo,
+    ) -> None:
+        self.workspace = _FinalRevisionWorkspaceRepo()
+        self.workspace_artifact_revision = _FinalRevisionRepo(revision)
+        self.file = _FinalRevisionFileRepo(file)
+        self.session = session_repo
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FinalRevisionFileStorage:
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.download_calls: list[tuple[str, str | None]] = []
+
+    async def download_file(self, file_id: str, user_id=None):
+        self.download_calls.append((file_id, user_id))
+        return io.BytesIO(self.content), File(
+            id=file_id,
+            user_id=user_id,
+            filename="final.md",
+            key="objects/final.md",
+            mime_type="text/markdown",
+            size=len(self.content),
+        )
+
+
+class _ForbiddenFinalSandbox:
+    async def check_file_exists(self, file_path: str):
+        raise AssertionError("final attachment 不得读取 sandbox path")
+
+    async def download_file(self, file_path: str):
+        raise AssertionError("final attachment 不得下载 sandbox path")
+
+
+def _final_revision(*, content: bytes, revision_id: str = "revision-final") -> WorkspaceArtifactRevision:
+    content_hash = "sha256:" + hashlib.sha256(content).hexdigest()
+    return WorkspaceArtifactRevision(
+        artifact_id="artifact-final",
+        revision_no=1,
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
+        step_id="step-1",
+        path="/tmp/final.md",
+        storage_ref=ArtifactStorageRef(
+            storage_backend=ArtifactStorageBackend.FILE_STORAGE,
+            file_id="file-final-1",
+            object_key="objects/final.md",
+            storage_hash=content_hash,
+            size_bytes=len(content),
+            mime_type="text/markdown",
+        ),
+        content_hash=content_hash,
+        storage_hash=content_hash,
+        size_bytes=len(content),
+        mime_type="text/markdown",
+        artifact_type=ArtifactType.FILE,
+        delivery_state=ArtifactDeliveryState.CANDIDATE,
+        source_kind=ArtifactRevisionSourceKind.TOOL_WRITE_FILE,
+        source_event_id="event-1",
+        source_fact_ids=["fact-1"],
+        tool_call_id="tool-1",
+        function_name="write_file",
+    )
+
+
 class _ForbiddenFileStorage:
     async def upload_file(self, upload_file, user_id=None):
         raise AssertionError("存在会话文件时不应重新上传文件")
@@ -585,6 +714,15 @@ class _CaptureWorkspaceRuntimeService:
         self.delivery_calls.append(
             {
                 "paths": list(paths),
+                "delivery_state": delivery_state,
+            }
+        )
+        return []
+
+    async def mark_artifact_revisions_delivery_state(self, *, revisions, delivery_state):
+        self.delivery_calls.append(
+            {
+                "revisions": list(revisions),
                 "delivery_state": delivery_state,
             }
         )
@@ -611,6 +749,33 @@ class _CaptureWorkspaceRuntimeService:
 
     async def get_latest_shell_tool_result(self):
         return ToolResult(success=False, data={"console_records": []})
+
+
+def _selected_revision(path: str, revision_id: str) -> SelectedArtifactRevisionResult:
+    return SelectedArtifactRevisionResult(
+        artifact_id=f"artifact-{path}",
+        revision_id=revision_id,
+        content_hash="sha256:" + "a" * 64,
+        path=path,
+        artifact_type="file",
+        delivery_state="candidate",
+        session_id="session-1",
+        run_id="run-1",
+        source_run_id="run-1",
+        source_step_id="step-1",
+        source_event_id="event-1",
+        source_kind=ArtifactRevisionSourceKind.TOOL_WRITE_FILE,
+        selected_reason="summary_explicit_attachment",
+        selected_at=datetime.now(),
+    )
+
+
+def _identity_key(artifact_id: str, revision_id: str) -> ArtifactRevisionIdentity:
+    return ArtifactRevisionIdentity(
+        artifact_id=artifact_id,
+        revision_id=revision_id,
+        content_hash="sha256:" + "a" * 64,
+    )
 
 
 class _FreshFinalSandbox:
@@ -682,6 +847,127 @@ def test_sync_file_to_storage_should_fallback_to_existing_final_attachment_when_
     assert session_repo.added_final_files == [existing_file]
 
 
+def test_final_message_attachment_should_use_selected_revision_file_storage_not_sandbox_path() -> None:
+    selected_content = b"selected-version"
+    revision = _final_revision(content=selected_content)
+    selected_file = File(
+        id="file-final-1",
+        user_id="user-1",
+        filename="final.md",
+        filepath="/tmp/final.md",
+        key="objects/final.md",
+        mime_type="text/markdown",
+        size=len(selected_content),
+    )
+    session_repo = _FinalRevisionSessionRepo()
+    file_storage = _FinalRevisionFileStorage(selected_content)
+    workspace_runtime_service = _CaptureWorkspaceRuntimeService()
+    projector = _build_attachment_projector(
+        sandbox=_ForbiddenFinalSandbox(),
+        file_storage=file_storage,
+        workspace_runtime_service=workspace_runtime_service,
+        uow_factory=lambda: _FinalRevisionUoW(
+            revision=revision,
+            file=selected_file,
+            session_repo=session_repo,
+        ),
+    )
+    event = MessageEvent(
+        role="assistant",
+        message="最终结果",
+        stage="final",
+        selected_artifact_revisions=[
+            SelectedArtifactRevisionResult(
+                artifact_id=revision.artifact_id,
+                revision_id=revision.revision_id,
+                content_hash=revision.content_hash,
+                path=revision.path,
+                artifact_type=revision.artifact_type,
+                delivery_state=revision.delivery_state,
+                session_id=revision.session_id,
+                run_id=revision.run_id,
+                source_run_id=revision.source_run_id,
+                source_step_id=revision.step_id,
+                source_event_id=revision.source_event_id,
+                source_kind=revision.source_kind,
+                selected_reason="summary_explicit_attachment",
+                selected_at=datetime.now(),
+            )
+        ],
+        attachments=[File(filename="final.md", filepath="/tmp/final.md")],
+    )
+
+    asyncio.run(projector.project(event))
+
+    assert file_storage.download_calls == [("file-final-1", "user-1")]
+    assert [attachment.id for attachment in event.attachments] == ["file-final-1"]
+    assert session_repo.added_final_files[0].id == "file-final-1"
+    assert workspace_runtime_service.delivery_calls == [
+        {
+            "revisions": [
+                ArtifactRevisionIdentity(
+                    artifact_id=revision.artifact_id,
+                    revision_id=revision.revision_id,
+                    content_hash=revision.content_hash,
+                )
+            ],
+            "delivery_state": ArtifactDeliveryState.SELECTED,
+        }
+    ]
+
+
+def test_final_message_attachment_should_block_content_hash_mismatch() -> None:
+    revision = _final_revision(content=b"selected-version")
+    selected_file = File(
+        id="file-final-1",
+        user_id="user-1",
+        filename="final.md",
+        filepath="/tmp/final.md",
+        key="objects/final.md",
+        mime_type="text/markdown",
+        size=16,
+    )
+    session_repo = _FinalRevisionSessionRepo()
+    projector = _build_attachment_projector(
+        sandbox=_ForbiddenFinalSandbox(),
+        file_storage=_FinalRevisionFileStorage(b"mutated-version"),
+        uow_factory=lambda: _FinalRevisionUoW(
+            revision=revision,
+            file=selected_file,
+            session_repo=session_repo,
+        ),
+    )
+    event = MessageEvent(
+        role="assistant",
+        message="最终结果",
+        stage="final",
+        selected_artifact_revisions=[
+            SelectedArtifactRevisionResult(
+                artifact_id=revision.artifact_id,
+                revision_id=revision.revision_id,
+                content_hash=revision.content_hash,
+                path=revision.path,
+                artifact_type=revision.artifact_type,
+                delivery_state=revision.delivery_state,
+                session_id=revision.session_id,
+                run_id=revision.run_id,
+                source_run_id=revision.source_run_id,
+                source_step_id=revision.step_id,
+                source_event_id=revision.source_event_id,
+                source_kind=revision.source_kind,
+                selected_reason="summary_explicit_attachment",
+                selected_at=datetime.now(),
+            )
+        ],
+        attachments=[File(filename="final.md", filepath="/tmp/final.md")],
+    )
+
+    with pytest.raises(RuntimeError, match="selected_artifact_revision_content_hash_mismatch"):
+        asyncio.run(projector.project(event))
+
+    assert session_repo.added_final_files == []
+
+
 def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
     projector = _build_attachment_projector()
 
@@ -699,23 +985,54 @@ def test_sync_message_attachments_to_storage_re_raises_exception() -> None:
         asyncio.run(projector.project(event))
 
 
-def test_sync_message_attachments_to_storage_should_mark_final_artifacts_delivered() -> None:
+def test_sync_message_attachments_to_storage_should_mark_final_artifacts_selected() -> None:
     workspace_runtime_service = _CaptureWorkspaceRuntimeService()
+    content = b"selected-version"
+    revision = _final_revision(content=content)
+    selected_file = File(
+        id="file-final-1",
+        user_id="user-1",
+        filename="final.md",
+        filepath="/tmp/final.md",
+        key="objects/final.md",
+        mime_type="text/markdown",
+        size=len(content),
+    )
+    session_repo = _FinalRevisionSessionRepo()
     projector = _build_attachment_projector(
         workspace_runtime_service=workspace_runtime_service,
+        sandbox=_ForbiddenFinalSandbox(),
+        file_storage=_FinalRevisionFileStorage(content),
+        uow_factory=lambda: _FinalRevisionUoW(
+            revision=revision,
+            file=selected_file,
+            session_repo=session_repo,
+        ),
     )
-
-    async def _sync_file(filepath: str, _stage: str = "intermediate"):
-        return File(id=f"file-{filepath}", filename="final.md", filepath=filepath)
-
-    projector.sync_file_to_storage = _sync_file
     event = MessageEvent(
         role="assistant",
         message="最终结果",
         stage="final",
+        selected_artifact_revisions=[
+            SelectedArtifactRevisionResult(
+                artifact_id=revision.artifact_id,
+                revision_id=revision.revision_id,
+                content_hash=revision.content_hash,
+                path=revision.path,
+                artifact_type=revision.artifact_type,
+                delivery_state=revision.delivery_state,
+                session_id=revision.session_id,
+                run_id=revision.run_id,
+                source_run_id=revision.source_run_id,
+                source_step_id=revision.step_id,
+                source_event_id=revision.source_event_id,
+                source_kind=revision.source_kind,
+                selected_reason="summary_explicit_attachment",
+                selected_at=datetime.now(),
+            ),
+        ],
         attachments=[
             File(filename="final.md", filepath="/tmp/final.md"),
-            File(filename="report.md", filepath="/tmp/report.md"),
         ],
     )
 
@@ -723,35 +1040,67 @@ def test_sync_message_attachments_to_storage_should_mark_final_artifacts_deliver
 
     assert [attachment.filepath for attachment in event.attachments] == [
         "/tmp/final.md",
-        "/tmp/report.md",
     ]
     assert workspace_runtime_service.delivery_calls == [
         {
-            "paths": ["/tmp/final.md", "/tmp/report.md"],
-            "delivery_state": "selected",
+            "revisions": [
+                ArtifactRevisionIdentity(
+                    artifact_id=revision.artifact_id,
+                    revision_id=revision.revision_id,
+                    content_hash=revision.content_hash,
+                ),
+            ],
+            "delivery_state": ArtifactDeliveryState.SELECTED,
         }
     ]
 
 
 def test_sync_message_attachments_to_storage_should_filter_non_workspace_final_attachments() -> None:
-    workspace_runtime_service = _CaptureWorkspaceRuntimeService(
-        authoritative_paths=["/tmp/final.md"],
+    workspace_runtime_service = _CaptureWorkspaceRuntimeService()
+    content = b"selected-version"
+    revision = _final_revision(content=content)
+    selected_file = File(
+        id="file-final-1",
+        user_id="user-1",
+        filename="final.md",
+        filepath="/tmp/final.md",
+        key="objects/final.md",
+        mime_type="text/markdown",
+        size=len(content),
     )
+    session_repo = _FinalRevisionSessionRepo()
     projector = _build_attachment_projector(
         workspace_runtime_service=workspace_runtime_service,
+        sandbox=_ForbiddenFinalSandbox(),
+        file_storage=_FinalRevisionFileStorage(content),
+        uow_factory=lambda: _FinalRevisionUoW(
+            revision=revision,
+            file=selected_file,
+            session_repo=session_repo,
+        ),
     )
-
-    synced_paths: list[str] = []
-
-    async def _sync_file(filepath: str, _stage: str = "intermediate"):
-        synced_paths.append(filepath)
-        return File(id=f"file-{filepath}", filename="final.md", filepath=filepath)
-
-    projector.sync_file_to_storage = _sync_file
     event = MessageEvent(
         role="assistant",
         message="最终结果",
         stage="final",
+        selected_artifact_revisions=[
+            SelectedArtifactRevisionResult(
+                artifact_id=revision.artifact_id,
+                revision_id=revision.revision_id,
+                content_hash=revision.content_hash,
+                path=revision.path,
+                artifact_type=revision.artifact_type,
+                delivery_state=revision.delivery_state,
+                session_id=revision.session_id,
+                run_id=revision.run_id,
+                source_run_id=revision.source_run_id,
+                source_step_id=revision.step_id,
+                source_event_id=revision.source_event_id,
+                source_kind=revision.source_kind,
+                selected_reason="summary_explicit_attachment",
+                selected_at=datetime.now(),
+            ),
+        ],
         attachments=[
             File(filename="final.md", filepath="/tmp/final.md"),
             File(filename="rogue.md", filepath="/tmp/rogue.md"),
@@ -760,12 +1109,17 @@ def test_sync_message_attachments_to_storage_should_filter_non_workspace_final_a
 
     asyncio.run(projector.project(event))
 
-    assert synced_paths == ["/tmp/final.md"]
     assert [attachment.filepath for attachment in event.attachments] == ["/tmp/final.md"]
     assert workspace_runtime_service.delivery_calls == [
         {
-            "paths": ["/tmp/final.md"],
-            "delivery_state": "selected",
+            "revisions": [
+                ArtifactRevisionIdentity(
+                    artifact_id=revision.artifact_id,
+                    revision_id=revision.revision_id,
+                    content_hash=revision.content_hash,
+                ),
+            ],
+            "delivery_state": ArtifactDeliveryState.SELECTED,
         }
     ]
 

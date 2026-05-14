@@ -19,6 +19,7 @@ from app.domain.services.runtime.contracts.evidence_runtime_ports import (
     EvidenceResultHandleResolverPort,
     EvidenceStepReconcilerPort,
 )
+from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
@@ -64,6 +65,7 @@ def build_planner_react_langgraph_graph(
         evidence_result_handle_resolver: EvidenceResultHandleResolverPort | None = None,
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+        derived_export_projector: DerivedExportProjectorPort | None = None,
         *,
         runtime_context_service: RuntimeContextService,
 ) -> Any:
@@ -128,6 +130,8 @@ def build_planner_react_langgraph_graph(
             execute_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
         if runtime_tool_event_persistence is not None:
             execute_kwargs["runtime_tool_event_persistence"] = runtime_tool_event_persistence
+        if derived_export_projector is not None:
+            execute_kwargs["derived_export_projector"] = derived_export_projector
         return await execute_step_node(
             state,
             stage_llm_map["executor"],

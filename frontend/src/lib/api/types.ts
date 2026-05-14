@@ -186,6 +186,55 @@ export type CreateSessionParams = {
   [key: string]: unknown;
 };
 
+export type ArtifactDeliveryState =
+  | "candidate"
+  | "selected"
+  | "delivered"
+  | "rejected"
+  | "expired"
+  | "quarantined";
+
+export type ArtifactRevisionSourceKind =
+  | "tool_write_file"
+  | "tool_replace_file"
+  | "browser_screenshot"
+  | "browser_snapshot"
+  | "page_snapshot"
+  | "document_input"
+  | "user_upload"
+  | "final_answer_snapshot"
+  | "derived_export"
+  | "rag_chunk_index"
+  | "manual_registration";
+
+export type ArtifactType =
+  | "file"
+  | "screenshot"
+  | "browser_snapshot"
+  | "page_snapshot"
+  | "dataset"
+  | "report"
+  | "log_excerpt"
+  | "final_answer_snapshot"
+  | "rag_chunk_index";
+
+export type SelectedArtifactRevision = {
+  artifact_id: string;
+  revision_id: string;
+  content_hash: string;
+  path: string;
+  artifact_type: ArtifactType;
+  delivery_state: ArtifactDeliveryState;
+  session_id: string;
+  run_id?: string | null;
+  source_run_id?: string | null;
+  source_step_id?: string | null;
+  source_event_id?: string | null;
+  source_kind: ArtifactRevisionSourceKind;
+  selected_reason: string;
+  selected_at: string;
+};
+
 /**
  * 聊天消息
  */
@@ -201,6 +250,7 @@ export type ChatMessage = {
     filename: string;
     [key: string]: unknown;
   }>;
+  selected_artifact_revisions?: SelectedArtifactRevision[];
   [key: string]: unknown;
 };
 

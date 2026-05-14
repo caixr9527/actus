@@ -69,6 +69,8 @@ class RuntimeEventPersistResult(BaseModel):
     """Runtime 事件持久化后的状态收敛结果。"""
 
     event_inserted: bool
+    run_id: str | None = None
+    event_id: str | None = None
     transition_applied: bool
     from_session_status: SessionStatus
     to_session_status: SessionStatus
