@@ -4,6 +4,46 @@ general:
   debug: false
   instance_name: "Actus Sandbox SearXNG"
 
+outgoing:
+  # 请求超时（秒），建议 10~15 秒，避免引擎响应慢时被误判超时
+  request_timeout: 5.0
+  # 重试次数，避免网络波动导致的一次性失败
+  retries: 2
+
+  # 全局 User-Agent（模拟 2025/2026 年主流 Windows Chrome）
+  useragent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+  # 全局伪装请求头（会合并到每一次搜索引擎请求中）
+  extra_args:
+    headers:
+      # 语言偏好：中文优先，英文其次
+      Accept-Language: "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6"
+      # 接受的内容类型
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+      # 接受的编码（通常不需要加，requests 会自行处理，但可显式声明）
+      # Accept-Encoding: "gzip, deflate, br"  # 一般情况下不设也可以
+      # 缓存控制
+      Cache-Control: "max-age=0"
+      # 连接类型
+      Connection: "keep-alive"
+      # 禁止追踪（部分网站尊重此头，能增加真人概率）
+      DNT: "1"
+      # 升级不安全请求
+      Upgrade-Insecure-Requests: "1"
+      # 客户端提示：告诉服务器我们是真实 Chrome，运行在 Windows 上
+      Sec-Ch-Ua: "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\""
+      Sec-Ch-Ua-Mobile: "?0"
+      Sec-Ch-Ua-Platform: "\"Windows\""
+      # 请求来源策略
+      Sec-Fetch-Dest: "document"
+      Sec-Fetch-Mode: "navigate"
+      Sec-Fetch-Site: "none"           # 跨站请求时改为 cross-site，此处默认同站
+      Sec-Fetch-User: "?1"
+      # 浏览上下文
+      Sec-GPC: "1"                     # 全球隐私控制（可选）
+      # 优先级（部分新版浏览器特性，可加可不加）
+      # Priority: "u=0, i"
+
 
 engines:
   - name: baidu
