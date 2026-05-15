@@ -21,9 +21,15 @@ class _WorkspaceRuntime:
     session_id = "session-1"
 
 
+class _Projector:
+    pass
+
+
 def test_agent_task_runner_should_build_run_engine_with_task_scoped_tools() -> None:
     captured = {}
     engine = _DummyRunEngine()
+    final_message_projector = _Projector()
+    derived_export_projector = _Projector()
 
     async def _factory(**kwargs):
         captured.update(kwargs)
@@ -48,6 +54,8 @@ def test_agent_task_runner_should_build_run_engine_with_task_scoped_tools() -> N
                 capability_registry=CapabilityRegistry.default_v1(),
             ),
             runtime_tool_snapshot_recorder=_Recorder(),
+            final_message_artifact_projector=final_message_projector,
+            derived_export_projector=derived_export_projector,
             workspace_runtime_factory=lambda: _WorkspaceRuntime(),
         )
     )
@@ -58,6 +66,8 @@ def test_agent_task_runner_should_build_run_engine_with_task_scoped_tools() -> N
     assert captured["a2a_tool"] is runner._a2a_tool
     assert isinstance(captured["tool_runtime_adapter"], ToolRuntimeAdapter)
     assert captured["runtime_tool_snapshot_recorder"] is not None
+    assert captured["derived_export_projector"] is derived_export_projector
+    assert runner._final_message_artifact_projector is final_message_projector
 
 
 def test_agent_task_runner_should_fail_fast_when_run_engine_factory_missing() -> None:

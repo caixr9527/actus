@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
 from app.application.service.agent_service import AgentService
+from app.application.service.artifact_delivery_service import ArtifactDeliveryService
 from app.application.service import (
     AppConfigService,
     FileService,
@@ -94,6 +95,23 @@ def get_file_service(
 
     # 构建服务并返回
     return FileService(
+        uow_factory=get_uow,
+        file_storage=file_storage,
+        access_control_service=get_runtime_access_control_service(),
+    )
+
+
+@lru_cache()
+def get_artifact_delivery_service(
+        cos: Cos = Depends(get_cos),
+) -> ArtifactDeliveryService:
+    file_storage = CosFileStorage(
+        bucket=settings.cos_bucket,
+        public_base_url=f"{settings.cos_scheme}://{settings.cos_bucket}.cos.{settings.cos_region}.myqcloud.com",
+        cos=cos,
+        uow_factory=get_uow,
+    )
+    return ArtifactDeliveryService(
         uow_factory=get_uow,
         file_storage=file_storage,
         access_control_service=get_runtime_access_control_service(),

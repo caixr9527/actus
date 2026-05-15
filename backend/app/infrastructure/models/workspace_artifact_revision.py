@@ -111,6 +111,7 @@ class WorkspaceArtifactRevisionModel(Base):
     def from_domain(cls, revision: WorkspaceArtifactRevision) -> "WorkspaceArtifactRevisionModel":
         payload = revision.model_dump(mode="json")
         payload["revision_metadata"] = payload.pop("metadata", {})
+        payload["created_at"] = revision.created_at
         return cls(**payload)
 
     def to_domain(self) -> WorkspaceArtifactRevision:

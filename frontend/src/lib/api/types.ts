@@ -235,6 +235,51 @@ export type SelectedArtifactRevision = {
   selected_at: string;
 };
 
+export type ArtifactRevisionEventRef = {
+  artifact_id: string;
+  revision_id: string;
+  content_hash: string;
+  path: string;
+  artifact_type: ArtifactType;
+  delivery_state: ArtifactDeliveryState;
+  source_event_id?: string | null;
+};
+
+export type ArtifactEventPayload = {
+  artifact_refs?: Array<{
+    artifact_id: string;
+    path: string;
+    artifact_type: ArtifactType;
+    delivery_state: ArtifactDeliveryState;
+    current_revision_id?: string | null;
+    latest_content_hash?: string | null;
+  }>;
+  revision_refs: ArtifactRevisionEventRef[];
+  counts?: Record<string, number>;
+  summary?: string;
+  source_event_ids?: string[];
+  runtime_metadata?: Record<string, unknown>;
+};
+
+export type ArtifactEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
+  payload: ArtifactEventPayload;
+  [key: string]: unknown;
+};
+
+export type ArtifactEventData = ArtifactEvent;
+
+export type ArtifactRevisionFileParams = {
+  session_id: string;
+  artifact_id: string;
+  revision_id: string;
+  content_hash: string;
+  run_id?: string | null;
+  source_run_id?: string | null;
+};
+
 /**
  * 聊天消息
  */
@@ -581,6 +626,7 @@ export type SSEEventType =
   | "plan"
   | "step"
   | "tool"
+  | "artifact"
   | "sandbox_fact"
   | "wait"
   | "done"
@@ -606,6 +652,7 @@ export type SSEEventData =
   | { type: "plan"; data: PlanEvent }
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
+  | { type: "artifact"; data: ArtifactEvent }
   | { type: "sandbox_fact"; data: SandboxFactEvent }
   | { type: "wait"; data: WaitEventData }
   | {

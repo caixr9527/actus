@@ -20,13 +20,17 @@ from app.domain.models import (
     ToolEventStatus,
     SandboxFactEvent,
     EvidenceEvent,
+    ArtifactEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
     TextStreamChannel,
     SessionStatus,
 )
-from app.domain.services.runtime.contracts.artifact_governance_contract import SelectedArtifactRevisionResult
+from app.domain.services.runtime.contracts.artifact_governance_contract import (
+    ArtifactEventPayload,
+    SelectedArtifactRevisionResult,
+)
 from app.application.service.runtime_observation_service import RuntimeObservableEventResult
 from app.domain.services.runtime.normalizers import normalize_event_payload
 
@@ -104,6 +108,19 @@ class CommonSSEEvent(BaseSSEEvent):
     """通用事件"""
     event: str
     data: CommonEventData
+
+
+class ArtifactEventData(BaseEventData):
+    """ArtifactEvent 数据，只暴露 revision_refs 快照。"""
+
+    payload: ArtifactEventPayload
+
+
+class ArtifactSSEEvent(BaseSSEEvent):
+    """Artifact revision 投影事件。"""
+
+    event: Literal["artifact"] = "artifact"
+    data: ArtifactEventData
 
 
 class MessageEventData(BaseEventData):
@@ -473,6 +490,7 @@ AgentSSEEvent = Union[
     ToolSSEEvent,
     SandboxFactSSEEvent,
     EvidenceSSEEvent,
+    ArtifactSSEEvent,
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,

@@ -25,6 +25,7 @@ from app.domain.models import AgentConfig, MCPConfig
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime import RunEngine
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
+from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.runtime.contracts.sandbox_capability_profile_ports import RuntimeToolSnapshotRecorderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
@@ -109,6 +110,7 @@ async def build_run_engine(
         sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort | None = None,
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
+        derived_export_projector: DerivedExportProjectorPort | None = None,
 ) -> RunEngine:
     """根据配置选择运行时引擎（BE-LG-12 起仅支持 LangGraph）。"""
     settings = get_settings()
@@ -169,7 +171,7 @@ async def build_run_engine(
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
         evidence_step_reconciler=evidence_ledger_service,
         runtime_tool_event_persistence=runtime_tool_event_persistence,
-        derived_export_projector=DerivedExportProjector(
+        derived_export_projector=derived_export_projector or DerivedExportProjector(
             uow_factory=uow_factory,
             ledger_service=ArtifactLedgerService(uow_factory=uow_factory),
             file_storage=file_storage,

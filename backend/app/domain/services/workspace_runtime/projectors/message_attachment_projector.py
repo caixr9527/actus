@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import logging
-import hashlib
 from typing import Any, Callable, Optional
 
+from app.domain.services.runtime.artifact_file_hash import (
+    ArtifactFileHashMismatchError,
+    verify_file_storage_stream,
+)
 from app.domain.external import FileStorage, FileUploadPayload, Sandbox
 from app.domain.models import File, MessageEvent
 from app.domain.repositories import IUnitOfWork
@@ -157,18 +160,24 @@ class MessageAttachmentProjector:
                 raise RuntimeError("selected_artifact_revision_file_missing")
 
         stream, storage_file = await self._file_storage.download_file(file_id, self._user_id)
-        content_hash = "sha256:" + hashlib.sha256(stream.read()).hexdigest()
-        if content_hash != revision.content_hash:
-            raise RuntimeError("selected_artifact_revision_content_hash_mismatch")
+        try:
+            verified = verify_file_storage_stream(
+                stream=stream,
+                file=storage_file,
+                expected_content_hash=revision.content_hash,
+                trusted_storage_hash=None,
+            )
+        except ArtifactFileHashMismatchError as exc:
+            raise RuntimeError("selected_artifact_revision_content_hash_mismatch") from exc
 
         final_file = file.model_copy(deep=True)
         final_file.filepath = revision.path
         if not final_file.key:
-            final_file.key = storage_file.key
+            final_file.key = verified.file.key
         if not final_file.mime_type:
-            final_file.mime_type = storage_file.mime_type
+            final_file.mime_type = verified.file.mime_type
         if not final_file.size:
-            final_file.size = storage_file.size
+            final_file.size = verified.file.size
 
         async with self._uow_factory() as uow:
             await uow.session.add_final_files(session_id=self._session_id, file=final_file)

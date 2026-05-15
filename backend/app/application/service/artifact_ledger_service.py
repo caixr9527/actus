@@ -4,19 +4,25 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Callable
 
-from app.domain.models import WorkspaceArtifact, WorkspaceArtifactRevision
+from app.domain.models import ArtifactEvent, WorkspaceArtifact, WorkspaceArtifactRevision
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.artifact_governance_contract import (
     ArtifactDeliveryState,
+    ArtifactEventArtifactRef,
+    ArtifactEventPayload,
     ArtifactRevisionIdentity,
+    ArtifactRevisionEventRef,
     ArtifactRevisionRegistrationCommand,
     ArtifactStatus,
     ResolvedArtifactRevisionResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactLedgerError(RuntimeError):
@@ -83,6 +89,7 @@ class ArtifactLedgerService:
                 metadata=dict(command.metadata or {}),
             )
             saved = await uow.workspace_artifact_revision.append_revision_for_artifact(revision)
+            await self._persist_artifact_event_if_possible(uow=uow, revision=saved)
         return self._to_resolved(saved)
 
     async def resolve_authoritative_artifact_revisions(
@@ -215,6 +222,94 @@ class ArtifactLedgerService:
             source_event_id=revision.source_event_id,
             source_kind=revision.source_kind,
         )
+
+    @staticmethod
+    async def _persist_artifact_event_if_possible(
+            *,
+            uow: IUnitOfWork,
+            revision: WorkspaceArtifactRevision,
+    ) -> None:
+        """revision 成功后补写 ArtifactEvent，失败只记录诊断。"""
+        run_id = str(revision.run_id or revision.source_run_id or "").strip()
+        if not run_id:
+            logger.warning(
+                "artifact_event_projection_failed",
+                extra={
+                    "user_id": revision.user_id,
+                    "session_id": revision.session_id,
+                    "workspace_id": revision.workspace_id,
+                    "artifact_id": revision.artifact_id,
+                    "revision_id": revision.revision_id,
+                    "reason_code": "artifact_event_run_id_missing",
+                },
+            )
+            return
+        event = ArtifactEvent(
+            id=f"artifact-revision:{revision.revision_id}",
+            payload=ArtifactEventPayload(
+                artifact_refs=[
+                    ArtifactEventArtifactRef(
+                        artifact_id=revision.artifact_id,
+                        path=revision.path,
+                        artifact_type=revision.artifact_type,
+                        delivery_state=revision.delivery_state,
+                        current_revision_id=revision.revision_id,
+                        latest_content_hash=revision.content_hash,
+                    )
+                ],
+                revision_refs=[
+                    ArtifactRevisionEventRef(
+                        artifact_id=revision.artifact_id,
+                        revision_id=revision.revision_id,
+                        content_hash=revision.content_hash,
+                        path=revision.path,
+                        artifact_type=revision.artifact_type,
+                        delivery_state=revision.delivery_state,
+                        source_event_id=revision.source_event_id,
+                    )
+                ],
+                counts={"revision_count": 1},
+                summary="artifact revision registered",
+                source_event_ids=[revision.source_event_id] if revision.source_event_id else [],
+                runtime_metadata={
+                    "schema_version": "artifact_event.v1",
+                    "source_kind": revision.source_kind.value,
+                },
+            )
+        )
+        try:
+            workflow_run_repo = getattr(uow, "workflow_run", None)
+            if workflow_run_repo is None or not hasattr(workflow_run_repo, "add_event_record_if_absent"):
+                raise AttributeError("workflow_run repository missing")
+            await workflow_run_repo.add_event_record_if_absent(
+                session_id=revision.session_id,
+                run_id=run_id,
+                event=event,
+            )
+        except AttributeError:
+            logger.warning(
+                "artifact_event_projection_failed",
+                extra={
+                    "user_id": revision.user_id,
+                    "session_id": revision.session_id,
+                    "workspace_id": revision.workspace_id,
+                    "artifact_id": revision.artifact_id,
+                    "revision_id": revision.revision_id,
+                    "reason_code": "artifact_event_repository_missing",
+                },
+            )
+        except Exception:
+            logger.exception(
+                "artifact_event_projection_failed",
+                extra={
+                    "user_id": revision.user_id,
+                    "session_id": revision.session_id,
+                    "workspace_id": revision.workspace_id,
+                    "artifact_id": revision.artifact_id,
+                    "revision_id": revision.revision_id,
+                    "reason_code": "artifact_event_projection_failed",
+                },
+            )
 
 
 def _normalize_unique_paths(paths: list[str]) -> list[str]:

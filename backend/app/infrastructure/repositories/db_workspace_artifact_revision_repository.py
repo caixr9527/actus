@@ -382,4 +382,5 @@ class DBWorkspaceArtifactRevisionRepository(WorkspaceArtifactRevisionRepository)
     def _to_insert_values(revision: WorkspaceArtifactRevision) -> dict:
         payload = revision.model_dump(mode="json")
         payload["metadata"] = payload.pop("metadata", {})
+        payload["created_at"] = revision.created_at
         return payload

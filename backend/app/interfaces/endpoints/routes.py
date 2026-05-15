@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from app.interfaces.endpoints import (
     status_routes,
     app_config_routes,
+    artifact_routes,
     file_routes,
     session_routes,
     auth_routes,
@@ -24,6 +25,7 @@ def create_api_route() -> APIRouter:
 
     api_router.include_router(status_routes.router)
     api_router.include_router(app_config_routes.router, dependencies=[Depends(get_current_user)])
+    api_router.include_router(artifact_routes.router, dependencies=[Depends(get_current_user)])
     api_router.include_router(file_routes.router, dependencies=[Depends(get_current_user)])
     api_router.include_router(session_routes.router, dependencies=[Depends(get_current_user)])
     api_router.include_router(users_routes.router, dependencies=[Depends(get_current_user)])

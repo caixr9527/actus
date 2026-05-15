@@ -1,5 +1,5 @@
 import { ApiError, get, getApiBaseUrl, post, requestRaw } from "./fetch"
-import type { FileInfo, FileUploadParams } from "./types"
+import type { ArtifactRevisionFileParams, FileInfo, FileUploadParams } from "./types"
 import { translateRuntime } from "../i18n/runtime"
 
 type FileDownloadErrorPayload = {
@@ -83,6 +83,26 @@ export const fileApi = {
   },
 
   /**
+   * 下载 artifact revision 文件。
+   */
+  downloadArtifactRevision: async (
+    params: ArtifactRevisionFileParams,
+    options?: { signal?: AbortSignal },
+  ): Promise<Blob> => {
+    return fetchArtifactRevisionFile(params, "download", options)
+  },
+
+  /**
+   * 预览 artifact revision 文件。
+   */
+  previewArtifactRevision: async (
+    params: ArtifactRevisionFileParams,
+    options?: { signal?: AbortSignal },
+  ): Promise<Blob> => {
+    return fetchArtifactRevisionFile(params, "preview", options)
+  },
+
+  /**
    * 下载文件并获取 URL（用于直接下载或预览）
    * @param fileId 文件 ID
    * @returns 文件下载 URL
@@ -90,4 +110,48 @@ export const fileApi = {
   getFileDownloadUrl: (fileId: string): string => {
     return `${getApiBaseUrl()}/files/${fileId}/download`
   },
+}
+
+async function fetchArtifactRevisionFile(
+  params: ArtifactRevisionFileParams,
+  mode: "download" | "preview",
+  options?: { signal?: AbortSignal },
+): Promise<Blob> {
+  const query = new URLSearchParams()
+  query.set("content_hash", params.content_hash)
+  if (params.run_id) query.set("run_id", params.run_id)
+  if (params.source_run_id) query.set("source_run_id", params.source_run_id)
+  const response = await requestRaw(
+    `/sessions/${params.session_id}/artifacts/${params.artifact_id}/revisions/${params.revision_id}/${mode}?${query.toString()}`,
+    {
+      method: "GET",
+      signal: options?.signal,
+    },
+  )
+
+  if (!response.ok) {
+    let errorMessage = response.statusText || translateRuntime("fileApi.downloadFailed")
+    let errorData: FileDownloadErrorPayload | null = null
+    try {
+      const contentType = response.headers.get("content-type")
+      if (contentType?.includes("application/json")) {
+        errorData = (await response.json()) as FileDownloadErrorPayload
+        errorMessage = errorData?.msg || errorData?.message || errorMessage
+      } else {
+        const text = await response.text()
+        errorMessage = text || errorMessage
+      }
+    } catch {
+      // ignore parse error and fallback to statusText
+    }
+    throw new ApiError(
+      response.status,
+      errorMessage,
+      errorData?.data ?? null,
+      errorData?.error_key ?? null,
+      errorData?.error_params ?? null,
+    )
+  }
+
+  return response.blob()
 }

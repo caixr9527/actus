@@ -80,6 +80,30 @@ test('normalizeEvent should accept sandbox_fact events', () => {
   assert.equal(event?.data.summary, '记录了 1 条事实')
 })
 
+test('normalizeEvent should accept hidden artifact events with revision refs', () => {
+  const event = normalizeEvent({
+    event: 'artifact',
+    data: {
+      runtime: { ...runtime, visibility: 'hidden' },
+      payload: {
+        revision_refs: [{
+          artifact_id: 'artifact-1',
+          revision_id: 'revision-1',
+          content_hash: 'sha256:' + 'a'.repeat(64),
+          path: '/workspace/report.md',
+          artifact_type: 'file',
+          delivery_state: 'candidate',
+          source_event_id: 'event-1',
+        }],
+      },
+    },
+  })
+
+  assert.equal(event?.type, 'artifact')
+  assert.equal(event?.data.payload.revision_refs[0]?.revision_id, 'revision-1')
+  assert.equal(event?.data.runtime.visibility, 'hidden')
+})
+
 test('assertSessionDetailRuntime should reject detail snapshots without runtime', () => {
   assert.throws(
     () => assertSessionDetailRuntime({

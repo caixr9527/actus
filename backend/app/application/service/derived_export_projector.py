@@ -12,6 +12,7 @@ from app.application.service.artifact_ledger_service import ArtifactLedgerServic
 from app.domain.external import FileStorage, FileUploadPayload
 from app.domain.models import MessageEvent, WorkspaceArtifactRevision
 from app.domain.repositories import IUnitOfWork
+from app.domain.services.runtime.artifact_file_hash import verify_file_storage_stream
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.artifact_governance_contract import (
     ArtifactDeliveryState,
@@ -77,6 +78,13 @@ class DerivedExportProjector:
                 size=len(content),
             ),
             user_id=scope.user_id,
+        )
+        stream, storage_file = await self._file_storage.download_file(uploaded.id, scope.user_id)
+        verify_file_storage_stream(
+            stream=stream,
+            file=storage_file,
+            expected_content_hash=content_hash,
+            trusted_storage_hash=None,
         )
         storage_hash = content_hash
         return await self._ledger_service.register_revision(

@@ -249,6 +249,7 @@ class AgentTaskRunner(TaskRunner):
             sandbox_fact_event_projector=sandbox_fact_event_projector,
             evidence_step_reconciler=evidence_step_reconciler,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
+            final_message_artifact_projector=final_message_artifact_projector,
             derived_export_projector=derived_export_projector,
         )
 

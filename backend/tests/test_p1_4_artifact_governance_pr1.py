@@ -197,6 +197,18 @@ def test_artifact_storage_ref_should_support_three_backends_with_missing_field_r
         )
 
 
+def test_workspace_artifact_revision_persistence_payload_should_keep_created_at_datetime() -> None:
+    revision = _revision()
+
+    insert_values = DBWorkspaceArtifactRevisionRepository._to_insert_values(revision)
+    orm_model = WorkspaceArtifactRevisionModel.from_domain(revision)
+
+    assert isinstance(insert_values["created_at"], datetime)
+    assert insert_values["created_at"] == revision.created_at
+    assert isinstance(orm_model.created_at, datetime)
+    assert orm_model.created_at == revision.created_at
+
+
 def test_workspace_artifact_revision_should_enforce_enums_and_final_answer_hash() -> None:
     source_hash = "sha256:" + "c" * 64
     revision_payload = _revision(content_hash=source_hash).model_dump(mode="json")

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import io
 
 import pytest
 
@@ -289,10 +290,11 @@ def test_final_message_projector_should_use_persisted_run_id_when_current_run_ch
 class _DerivedExportFileStorage:
     def __init__(self) -> None:
         self.uploaded_content: bytes | None = None
+        self.uploaded_file: File | None = None
 
     async def upload_file(self, upload_file, user_id=None):
         self.uploaded_content = upload_file.file.read()
-        return File(
+        self.uploaded_file = File(
             id="file-export-1",
             user_id=user_id,
             filename=upload_file.filename,
@@ -300,6 +302,13 @@ class _DerivedExportFileStorage:
             mime_type=upload_file.content_type,
             size=upload_file.size,
         )
+        return self.uploaded_file.model_copy(deep=True)
+
+    async def download_file(self, file_id, user_id=None):
+        assert file_id == "file-export-1"
+        assert self.uploaded_content is not None
+        assert self.uploaded_file is not None
+        return io.BytesIO(self.uploaded_content), self.uploaded_file.model_copy(deep=True)
 
 
 def _scope(run_id: str = "run-2") -> AccessScopeResult:

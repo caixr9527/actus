@@ -24,7 +24,7 @@ from .search import FetchedPage, SearchResultItem
 from .tool_result import ToolResult
 from .wait import normalize_wait_payload
 from .sandbox_fact import SandboxFactKind
-from .artifact_governance import SelectedArtifactRevisionResult
+from .artifact_governance import ArtifactEventPayload, SelectedArtifactRevisionResult
 
 
 class PlanEventStatus(str, Enum):
@@ -237,6 +237,13 @@ class EvidenceEvent(BaseEvent):
     runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ArtifactEvent(BaseEvent):
+    """Artifact revision runtime 投影事件，不承载文件读取权限。"""
+
+    type: Literal["artifact"] = "artifact"
+    payload: ArtifactEventPayload
+
+
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
@@ -310,6 +317,7 @@ Event = Annotated[
         ToolEvent,
         SandboxFactEvent,
         EvidenceEvent,
+        ArtifactEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,

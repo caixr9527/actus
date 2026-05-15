@@ -582,6 +582,12 @@ class ArtifactEventPayload(BaseModel):
     source_event_ids: list[str] = Field(default_factory=list)
     runtime_metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _validate_revision_refs(self) -> "ArtifactEventPayload":
+        if not self.revision_refs:
+            raise ValueError("artifact event payload 必须包含 revision_refs")
+        return self
+
 
 __all__ = [
     "ArtifactDeliveryState",
