@@ -58,6 +58,7 @@ from app.domain.services.runtime.contracts.runtime_logging import (
 )
 from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import SandboxFactProjectionContextBuilderPort
+from app.domain.models.safety_audit import SafetyAuditRecorderPort
 from app.domain.services.runtime.langgraph_state import (
     GraphStateContractMapper,
     PlannerReActLangGraphState,
@@ -168,6 +169,7 @@ class LangGraphRunEngine(RunEngine):
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
             derived_export_projector: DerivedExportProjectorPort | None = None,
+            safety_audit_recorder: SafetyAuditRecorderPort | None = None,
     ) -> None:
         if runtime_context_service is None:
             raise ValueError("runtime_context_service 不能为空")
@@ -185,6 +187,7 @@ class LangGraphRunEngine(RunEngine):
         self._evidence_step_reconciler = evidence_step_reconciler
         self._runtime_tool_event_persistence = runtime_tool_event_persistence
         self._derived_export_projector = derived_export_projector
+        self._safety_audit_recorder = safety_audit_recorder
         self._access_control_service = access_control_service or (
             RuntimeAccessControlService(uow_factory=uow_factory)
             if uow_factory is not None
@@ -215,6 +218,8 @@ class LangGraphRunEngine(RunEngine):
             evidence_step_reconciler=self._evidence_step_reconciler,
             runtime_tool_event_persistence=self._runtime_tool_event_persistence,
             derived_export_projector=self._derived_export_projector,
+            access_control_service=self._access_control_service,
+            safety_audit_recorder=self._safety_audit_recorder,
         )
         self._checkpoint_adapter = (
             CheckpointStoreAdapter(session_id=session_id, uow_factory=uow_factory)
@@ -249,6 +254,8 @@ class LangGraphRunEngine(RunEngine):
             evidence_step_reconciler: EvidenceStepReconcilerPort | None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None,
             derived_export_projector: DerivedExportProjectorPort | None,
+            access_control_service: RuntimeAccessControlService | None,
+            safety_audit_recorder: SafetyAuditRecorderPort | None,
     ) -> Any:
         graph_kwargs: Dict[str, Any] = {
             "stage_llms": stage_llms,
@@ -265,6 +272,8 @@ class LangGraphRunEngine(RunEngine):
         graph_kwargs["evidence_step_reconciler"] = evidence_step_reconciler
         graph_kwargs["runtime_tool_event_persistence"] = runtime_tool_event_persistence
         graph_kwargs["derived_export_projector"] = derived_export_projector
+        graph_kwargs["access_control_service"] = access_control_service
+        graph_kwargs["safety_audit_recorder"] = safety_audit_recorder
 
         log_runtime(
             logger,

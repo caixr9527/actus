@@ -57,6 +57,13 @@ from app.domain.models.evidence import (
     validate_evidence_payload,
     build_evidence_result_handle,
 )
+from app.domain.models.safety_audit import (
+    SafetyAuditRecordCommand,
+    SafetyAuditRecordResult,
+    SafetyAuditRiskLevel,
+    SafetyAuditWriteResult,
+    SafetyAuditWriteStatus,
+)
 from app.domain.models.sandbox_fact import (
     SandboxFactKind,
     SandboxFactRecord,
@@ -100,9 +107,13 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.constraint_engine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.graph import build_planner_react_langgraph_graph
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_context import ExecutionContext
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.execution_state import ExecutionState
-from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import execute_step_with_prompt
+from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
+    execute_step_with_prompt as _execute_step_with_prompt,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import ToolPolicyEngine
-from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_nodes import execute_step_node
+from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.execute_nodes import (
+    execute_step_node as _execute_step_node,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes.evidence_completion_gate import (
     reconcile_step_evidence_before_state_return,
 )
@@ -258,6 +269,58 @@ def _scope(current_step_id: str = "step-2") -> AccessScopeResult:
         run_id="run-1",
         current_step_id=current_step_id,
     )
+
+
+class _AccessControlService:
+    async def assert_session_access(self, *, user_id: str, session_id: str, action) -> AccessScopeResult:
+        return AccessScopeResult(
+            tenant_id=user_id,
+            user_id=user_id,
+            session_id=session_id,
+            workspace_id="workspace-1",
+            run_id="run-1",
+            current_step_id=None,
+        )
+
+
+class _SafetyAuditRecorder:
+    def __init__(self) -> None:
+        self.commands: list[SafetyAuditRecordCommand] = []
+
+    async def record_constraint_decision(self, command: SafetyAuditRecordCommand) -> SafetyAuditWriteResult:
+        self.commands.append(command)
+        audit_id = f"audit-{len(self.commands)}"
+        record = SafetyAuditRecordResult(
+            audit_id=audit_id,
+            action_id=f"action-{audit_id}",
+            decision=command.decision,
+            risk_level=SafetyAuditRiskLevel.MEDIUM,
+            reason_code=command.reason_code,
+            run_id=command.run_id,
+            step_id=command.step_id,
+            tool_call_id=command.tool_call_id,
+        )
+        return SafetyAuditWriteResult(
+            audit_id=audit_id,
+            record=record,
+            status=SafetyAuditWriteStatus.CREATED,
+            reason_code=command.reason_code,
+        )
+
+
+async def execute_step_with_prompt(**kwargs):
+    step = kwargs.get("step")
+    if "access_scope" not in kwargs and step is not None:
+        kwargs["access_scope"] = _scope(str(getattr(step, "id", "") or "step-2"))
+    if "safety_audit_recorder" not in kwargs:
+        kwargs["safety_audit_recorder"] = _SafetyAuditRecorder()
+    return await _execute_step_with_prompt(**kwargs)
+
+
+async def execute_step_node(*args, **kwargs):
+    kwargs.setdefault("access_control_service", _AccessControlService())
+    kwargs.setdefault("safety_audit_recorder", _SafetyAuditRecorder())
+    return await _execute_step_node(*args, **kwargs)
 
 
 def _ledger_service(*, uow_factory) -> EvidenceLedgerService:

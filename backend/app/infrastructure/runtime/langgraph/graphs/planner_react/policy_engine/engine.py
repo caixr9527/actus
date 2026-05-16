@@ -4,7 +4,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from app.domain.models import Step, ToolResult
 from app.domain.models.evidence import EvidenceReuseSnapshot
@@ -59,6 +59,8 @@ class PolicyEvaluationResult:
     executed_function_args: Dict[str, Any] = field(default_factory=dict)
     final_matched_tool: Optional[BaseTool] = None
     final_tool_name: str = ""
+    audit_id: str = ""
+    safety_audit_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class ToolPolicyEngine:
@@ -99,6 +101,7 @@ class ToolPolicyEngine:
             evidence_reuse_snapshot: EvidenceReuseSnapshot | None = None,
             has_previous_completed_steps: bool = False,
             previous_completed_step_task_modes: Optional[Dict[str, str]] = None,
+            after_guard_decision: Callable[[Any], Awaitable[Any]] | None = None,
     ) -> PolicyEvaluationResult:
         """统一执行 `constraint guard -> executor -> effects`。
 
@@ -188,6 +191,8 @@ class ToolPolicyEngine:
         )
         guard_decision = engine_result.constraint_decision
         guard_reason_code = str(guard_decision.reason_code or "")
+        if after_guard_decision is not None:
+            await after_guard_decision(engine_result)
 
         if guard_decision.action == "allow":
             # P3-一次性收口：调用前计数只对最终真实执行目标入账一次。

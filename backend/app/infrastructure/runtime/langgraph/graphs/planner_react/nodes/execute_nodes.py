@@ -10,11 +10,14 @@ from typing import Dict, List, Optional
 from app.domain.external import LLM
 from app.domain.models import ExecutionStatus, StepEvent, StepEventStatus, ToolEvent
 from app.domain.services.runtime import SkillGraphRuntime
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.data_access_contract import DataAccessAction
 from app.domain.services.runtime.contracts.langgraph_settings import STEP_EXECUTION_TIMEOUT_SECONDS
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceStepReconcilerPort
 from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
+from app.domain.models.safety_audit import SafetyAuditRecorderPort
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.tools import BaseTool
 from app.domain.services.workspace_runtime.context import RuntimeContextService
@@ -64,6 +67,8 @@ async def execute_step_node(
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
         derived_export_projector: DerivedExportProjectorPort | None = None,
+        access_control_service=None,
+        safety_audit_recorder: SafetyAuditRecorderPort | None = None,
 ) -> PlannerReActLangGraphState:
     """执行单个步骤；当前批次未完成时继续跑后续步骤，整批完成后再统一重规划。"""
     started_at = now_perf()
@@ -89,6 +94,11 @@ async def execute_step_node(
     if is_entry_wait_execute_step:
         # 确认后的执行阶段必须继续消费原始请求，而不是“继续/确认”这类恢复文本。
         user_message = _get_entry_contract(control).source.user_message
+    safety_audit_scope = await _build_safety_audit_scope(
+        state=state,
+        step=step,
+        access_control_service=access_control_service,
+    )
     prepared_execute_input = await prepare_execute_step_input(
         state=state,
         step=step,
@@ -144,6 +154,8 @@ async def execute_step_node(
                     previous_completed_step_task_modes=prepared_execute_input.previous_completed_step_task_modes,
                     evidence_result_handle_resolver=evidence_result_handle_resolver,
                     evidence_resolution_state=state,
+                    access_scope=safety_audit_scope,
+                    safety_audit_recorder=safety_audit_recorder,
                 )
                 tool_cost_ms = elapsed_ms(tool_started_at)
 
@@ -302,3 +314,39 @@ async def execute_step_node(
         updates=completed_transition.updates,
         events=completed_transition.events,
     )
+
+
+async def _build_safety_audit_scope(
+        *,
+        state: PlannerReActLangGraphState,
+        step,
+        access_control_service,
+) -> AccessScopeResult | None:
+    if access_control_service is None:
+        return None
+    user_id = str(state.get("user_id") or "").strip()
+    session_id = str(state.get("session_id") or "").strip()
+    step_id = str(getattr(step, "id", "") or "").strip()
+    if not user_id or not session_id or not step_id:
+        return None
+    scope = await access_control_service.assert_session_access(
+        user_id=user_id,
+        session_id=session_id,
+        action=DataAccessAction.READ,
+    )
+    scope_step_id = str(scope.current_step_id or "").strip()
+    if scope_step_id and scope_step_id != step_id:
+        log_runtime(
+            logger,
+            logging.ERROR,
+            "safety_audit_scope_step_mismatch",
+            state=state,
+            step_id=step_id,
+            scope_step_id=scope_step_id,
+            reason_code="safety_audit_scope_step_mismatch",
+        )
+        return None
+    if scope_step_id != step_id:
+        # 只允许用 graph 当前权威 step 补齐空 scope；已有不同 step 必须在上方 fail closed。
+        scope = scope.model_copy(update={"current_step_id": step_id})
+    return scope

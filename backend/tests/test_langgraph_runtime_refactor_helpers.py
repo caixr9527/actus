@@ -29,6 +29,14 @@ from app.domain.services.runtime.contracts.artifact_governance_contract import (
     ArtifactType,
 )
 from app.domain.models.search import FetchedPage
+from app.domain.models.safety_audit import (
+    SafetyAuditRecordCommand,
+    SafetyAuditRecordResult,
+    SafetyAuditRiskLevel,
+    SafetyAuditWriteResult,
+    SafetyAuditWriteStatus,
+)
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.policies import (
     build_browser_high_level_failure_key,
@@ -3468,6 +3476,22 @@ def test_web_reading_completion_progress_should_not_use_runtime_summary_as_evide
     assert progress["contract_satisfied"] is False
 
 
+def test_web_reading_model_only_success_should_allow_current_loop_browser_observation() -> None:
+    assert WebReadingConvergenceJudge.should_allow_model_only_success(
+        task_mode="web_reading",
+        runtime_recent_action={
+            "last_successful_tool_call": {
+                "function_name": "browser_extract_main_content",
+                "data": {
+                    "url": "https://docs.langchain.com/langgraph-platform/human-in-the-loop",
+                    "title": "LangGraph HITL",
+                    "content": "页面正文包含 interrupt、resume 与人工审批能力说明。",
+                },
+            }
+        },
+    ) is True
+
+
 def test_runtime_context_service_should_project_research_evidence_into_web_reading_digest() -> None:
     context_service = RuntimeContextService()
     state = {
@@ -3832,6 +3856,42 @@ class _FakeSequentialToolCallLLM:
         return dict(self._messages.pop(0))
 
 
+def _safety_audit_scope(step_id: str) -> AccessScopeResult:
+    return AccessScopeResult(
+        tenant_id="user-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        run_id="run-1",
+        current_step_id=step_id,
+    )
+
+
+class _SafetyAuditRecorder:
+    def __init__(self) -> None:
+        self.commands: List[SafetyAuditRecordCommand] = []
+
+    async def record_constraint_decision(self, command: SafetyAuditRecordCommand) -> SafetyAuditWriteResult:
+        self.commands.append(command)
+        audit_id = f"audit-{len(self.commands)}"
+        record = SafetyAuditRecordResult(
+            audit_id=audit_id,
+            action_id=f"action-{audit_id}",
+            decision=command.decision,
+            risk_level=SafetyAuditRiskLevel.MEDIUM,
+            reason_code=command.reason_code,
+            run_id=command.run_id,
+            step_id=command.step_id,
+            tool_call_id=command.tool_call_id,
+        )
+        return SafetyAuditWriteResult(
+            audit_id=audit_id,
+            record=record,
+            status=SafetyAuditWriteStatus.CREATED,
+            reason_code=command.reason_code,
+        )
+
+
 class _FakeSearchFetchTool:
     name = "search"
 
@@ -4044,6 +4104,8 @@ def test_execute_step_with_prompt_should_converge_success_when_file_output_writt
             max_tool_iterations=1,
             task_mode="general",
             user_message="生成周末出行方案文件",
+            access_scope=_safety_audit_scope("step-file"),
+            safety_audit_recorder=_SafetyAuditRecorder(),
         )
     )
 
@@ -5068,7 +5130,7 @@ def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_e
         ]
     )
     tool = _FakeSearchFetchTool()
-    step = Step(description="读取URL https://www.sohu.com/a/880046224_121956422 的页面内容")
+    step = Step(id="step-rewrite", description="读取URL https://www.sohu.com/a/880046224_121956422 的页面内容")
 
     payload, tool_events = asyncio.run(
         execute_step_with_prompt(
@@ -5078,6 +5140,8 @@ def test_execute_step_with_prompt_should_rewrite_search_web_to_fetch_page_when_e
             task_mode="research",
             max_tool_iterations=2,
             user_content=[{"type": "text", "text": "请读取这个链接并总结"}],
+            access_scope=_safety_audit_scope("step-rewrite"),
+            safety_audit_recorder=_SafetyAuditRecorder(),
         )
     )
 

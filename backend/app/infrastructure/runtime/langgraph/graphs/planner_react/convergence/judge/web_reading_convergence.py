@@ -99,7 +99,11 @@ class WebReadingConvergenceJudge:
         if str(task_mode or "").strip().lower() != "web_reading":
             return True
         contract_state = cls.get_completion_contract_state(runtime_recent_action=runtime_recent_action)
-        return bool(contract_state["has_strong_evidence"] or contract_state["degraded"])
+        return bool(
+            contract_state["has_strong_evidence"]
+            or contract_state["degraded"]
+            or _has_current_loop_browser_tool_observation(runtime_recent_action)
+        )
 
     def evaluate_after_iteration(
             self,
@@ -370,6 +374,33 @@ def _infer_required_count(candidate_text: str, *, pattern: str, default: int) ->
     if matched is None:
         return default
     return max(default, _parse_count_text(matched.group(1)))
+
+
+def _has_current_loop_browser_tool_observation(runtime_recent_action: Optional[Dict[str, Any]]) -> bool:
+    recent_action = dict(runtime_recent_action or {})
+    last_success = dict(recent_action.get("last_successful_tool_call") or {})
+    function_name = str(last_success.get("function_name") or "").strip().lower()
+    if function_name not in {
+        "browser_view",
+        "browser_read_current_page_structured",
+        "browser_extract_main_content",
+        "browser_extract_cards",
+        "browser_find_link_by_text",
+        "browser_click",
+        "browser_find_actionable_elements",
+    }:
+        return False
+    data = last_success.get("data")
+    if not isinstance(data, dict):
+        return False
+    return bool(
+        str(data.get("url") or data.get("final_url") or "").strip()
+        or str(data.get("title") or data.get("main_heading") or "").strip()
+        or str(data.get("content") or data.get("text") or data.get("excerpt") or "").strip()
+        or list(data.get("cards") or [])
+        or list(data.get("elements") or data.get("actionable_elements") or [])
+        or str(data.get("matched_text") or "").strip()
+    )
 
 
 def _parse_count_text(raw_value: str) -> int:

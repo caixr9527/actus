@@ -4,6 +4,15 @@ import json
 from app.domain.models import ExecutionStatus, Plan, Step, ToolEventStatus, ToolResult
 from app.domain.services.workspace_runtime.context import RuntimeContextService
 from app.domain.services.workspace_runtime.entry import EntryCompiler
+from app.domain.services.workspace_runtime.entry.contracts import (
+    EntryContextProfile,
+    EntryContract,
+    EntryRiskLevel,
+    EntryRoute,
+    EntrySourceSnapshot,
+    EntryToolBudget,
+    EntryUpgradePolicy,
+)
 from app.domain.services.tools.base import BaseTool, tool
 from app.domain.services.tools.message import MessageTool
 from app.infrastructure.runtime.langgraph.graphs.planner_react.nodes import (
@@ -16,7 +25,13 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.routing import (
     route_after_wait,
 )
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
-    execute_step_with_prompt,
+    execute_step_with_prompt as _execute_step_with_prompt,
+)
+from tests.safety_audit_test_helpers import (
+    FakeAccessControlService,
+    FakeRuntimeToolEventPersistence,
+    FakeSafetyAuditRecorder,
+    execute_step_with_fake_safety_audit,
 )
 
 
@@ -36,12 +51,51 @@ def _entry_contract_control(user_message: str):
     return {"entry_contract": contract.model_dump(mode="json")}
 
 
+def _atomic_entry_contract_control(user_message: str):
+    contract = EntryContract(
+        route=EntryRoute.ATOMIC_ACTION,
+        task_mode="file_processing",
+        context_profile=EntryContextProfile.WORKSPACE,
+        tool_budget=EntryToolBudget.SMALL_LOOP,
+        needs_summary=True,
+        plan_only=False,
+        risk_level=EntryRiskLevel.LOW,
+        complexity_score=0,
+        tool_need_score=5,
+        freshness_score=0,
+        context_need_score=0,
+        reason_codes=["test_atomic_action"],
+        upgrade_policy=EntryUpgradePolicy(
+            allow_upgrade=True,
+            max_tool_calls_before_upgrade=3,
+            upgrade_on_second_tool_family=True,
+            upgrade_on_user_confirmation_required=True,
+            upgrade_on_file_output_required=True,
+            upgrade_on_open_questions=True,
+        ),
+        source=EntrySourceSnapshot(user_message=user_message),
+    )
+    return {"entry_contract": contract.model_dump(mode="json")}
+
+
 async def execute_step_node(*args, **kwargs):
     kwargs.setdefault("runtime_context_service", _TEST_RUNTIME_CONTEXT_SERVICE)
+    if args and isinstance(args[0], dict):
+        args[0].setdefault("user_id", "user-1")
+        args[0].setdefault("session_id", "session-1")
+        args[0].setdefault("workspace_id", "workspace-1")
+        args[0].setdefault("run_id", "run-1")
+    kwargs.setdefault("access_control_service", FakeAccessControlService())
+    kwargs.setdefault("safety_audit_recorder", FakeSafetyAuditRecorder())
+    kwargs.setdefault("runtime_tool_event_persistence", FakeRuntimeToolEventPersistence())
     return await _execute_step_node(
         *args,
         **kwargs,
     )
+
+
+async def execute_step_with_prompt(**kwargs):
+    return await execute_step_with_fake_safety_audit(_execute_step_with_prompt, **kwargs)
 
 
 class _DummyTool(BaseTool):
@@ -70,7 +124,7 @@ class _WriteFileTool(BaseTool):
         required=["filepath", "content"],
     )
     async def write_file(self, filepath: str, content: str):
-        return {"success": True, "data": {"filepath": filepath, "content": content}}
+        return ToolResult(success=True, data={"filepath": filepath, "content": content})
 
 
 class _SearchTool(BaseTool):
@@ -1114,7 +1168,7 @@ def test_atomic_action_should_upgrade_to_replan_when_open_questions_remain() -> 
         "plan": plan,
         "current_step_id": "atomic-action-step",
         "pending_interrupt": {},
-        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "graph_metadata": {"control": _atomic_entry_contract_control(user_message)},
         "message_window": [],
         "working_memory": {},
         "execution_count": 0,
@@ -1156,7 +1210,7 @@ def test_atomic_action_should_upgrade_to_replan_when_second_tool_family_is_used(
         "plan": plan,
         "current_step_id": "atomic-action-step",
         "pending_interrupt": {},
-        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "graph_metadata": {"control": _atomic_entry_contract_control(user_message)},
         "message_window": [],
         "working_memory": {},
         "execution_count": 0,
@@ -1180,7 +1234,7 @@ def test_atomic_action_should_upgrade_to_replan_when_second_tool_family_is_used(
 
 
 def test_atomic_action_should_upgrade_to_replan_when_file_output_is_produced() -> None:
-    user_message = "读取 /tmp/course.txt"
+    user_message = "把课程列表保存到 /tmp/course.txt"
     plan = Plan(
         title="原子动作",
         goal=user_message,
@@ -1191,6 +1245,8 @@ def test_atomic_action_should_upgrade_to_replan_when_file_output_is_produced() -
                 title="执行用户请求",
                 description=user_message,
                 task_mode_hint="file_processing",
+                output_mode="file",
+                artifact_policy="allow_file_output",
                 status=ExecutionStatus.PENDING,
             )
         ],
@@ -1199,7 +1255,7 @@ def test_atomic_action_should_upgrade_to_replan_when_file_output_is_produced() -
         "plan": plan,
         "current_step_id": "atomic-action-step",
         "pending_interrupt": {},
-        "graph_metadata": {"control": _entry_contract_control(user_message)},
+        "graph_metadata": {"control": _atomic_entry_contract_control(user_message)},
         "message_window": [],
         "working_memory": {},
         "execution_count": 0,

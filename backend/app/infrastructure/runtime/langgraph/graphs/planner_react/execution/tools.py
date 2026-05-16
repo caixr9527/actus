@@ -27,6 +27,7 @@ from app.domain.services.runtime.contracts.langgraph_settings import (
 )
 from app.domain.services.runtime.contracts.runtime_logging import elapsed_ms, log_runtime, now_perf
 from app.domain.services.runtime.contracts.evidence_ledger_contract import RuntimeEvidenceContextResult
+from app.domain.models.safety_audit import SafetyAuditRecorderPort
 from app.domain.services.runtime.normalizers import (
     normalize_url_value,
     normalize_file_path_list,
@@ -51,6 +52,11 @@ from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.contr
 from app.infrastructure.runtime.langgraph.graphs.planner_react.convergence.engine import ConvergenceEngine
 from app.infrastructure.runtime.langgraph.graphs.planner_react.loop_breaks import build_loop_break_result
 from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.engine import ToolPolicyEngine
+from app.infrastructure.runtime.langgraph.graphs.planner_react.policy_engine.safety_audit_orchestrator import (
+    SafetyAuditToolCallContext,
+    SafetyAuditToolCallError,
+    SafetyAuditToolCallOrchestrator,
+)
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_effects import build_interrupt_payload, \
     extract_interrupt_request
 from app.infrastructure.runtime.langgraph.graphs.planner_react.tool_runtime.tool_events import (
@@ -477,6 +483,8 @@ async def execute_step_with_prompt(
         previous_completed_step_task_modes: Optional[Dict[str, str]] = None,
         evidence_result_handle_resolver: Any = None,
         evidence_resolution_state: Optional[Dict[str, Any]] = None,
+        access_scope: AccessScopeResult | None = None,
+        safety_audit_recorder: SafetyAuditRecorderPort | None = None,
 ) -> Tuple[Dict[str, Any], List[ToolEvent]]:
     """执行单步任务，支持“模型决策 -> 调工具 -> 回传模型”的最小循环。
 
@@ -492,6 +500,15 @@ async def execute_step_with_prompt(
         on_tool_event=on_tool_event,
     )
     policy_engine = ToolPolicyEngine(logger=logger)
+    safety_audit_orchestrator = (
+        SafetyAuditToolCallOrchestrator(
+            policy_engine=policy_engine,
+            recorder=safety_audit_recorder,
+            logger=logger,
+        )
+        if safety_audit_recorder is not None
+        else None
+    )
     convergence_engine = ConvergenceEngine(logger=logger)
     step_file_context: Dict[str, Any] = {
         "called_functions": set(),
@@ -767,31 +784,58 @@ async def execute_step_with_prompt(
         requested_function_name = str(lifecycle.function_name or "")
         matched_tool = _resolve_tool_by_function_name(function_name=lifecycle.function_name,
                                                       runtime_tools=runtime_tools)
-        policy_result = await policy_engine.evaluate_tool_call(
-            step=step,
-            task_mode=task_mode,
-            function_name=lifecycle.function_name,
-            normalized_function_name=lifecycle.normalized_function_name,
-            function_args=lifecycle.function_args,
-            matched_tool=matched_tool,
-            runtime_tools=runtime_tools,
-            browser_route_state_key=iteration_context.browser_route_state_key,
-            iteration_blocked_function_names=iteration_context.iteration_blocked_function_names,
-            execution_context=execution_context,
-            execution_state=execution_state,
-            started_at=started_at,
-            evidence_reuse_snapshot=(
-                runtime_evidence_context.evidence_reuse_snapshot
-                if runtime_evidence_context is not None
-                else None
-            ),
-            has_previous_completed_steps=(
-                bool(has_previous_completed_steps or runtime_evidence_context.has_previous_completed_steps)
-                if runtime_evidence_context is not None
-                else bool(has_previous_completed_steps)
-            ),
-            previous_completed_step_task_modes=dict(previous_completed_step_task_modes or {}),
-        )
+        if safety_audit_orchestrator is None or access_scope is None:
+            log_runtime(
+                logger,
+                logging.ERROR,
+                "safety_audit_runtime_dependency_missing",
+                step_id=str(step.id or ""),
+                function_name=str(lifecycle.function_name or ""),
+                has_access_scope=access_scope is not None,
+                has_safety_audit_recorder=safety_audit_orchestrator is not None,
+                reason_code="safety_audit_runtime_dependency_missing",
+            )
+            return _build_loop_break_payload(
+                step=step,
+                blocker="Safety Audit 运行时依赖缺失，已停止当前工具调用。",
+                next_hint="请确认 SafetyAuditRecorderPort 与 AccessScopeResult 已装配后重试。",
+            ), event_dispatcher.emitted_events
+        try:
+            policy_result = await safety_audit_orchestrator.evaluate_tool_call(
+                SafetyAuditToolCallContext(
+                    scope=access_scope,
+                    step=step,
+                    task_mode=task_mode,
+                    tool_call_id=lifecycle.tool_call_id,
+                    function_name=lifecycle.function_name,
+                    normalized_function_name=lifecycle.normalized_function_name,
+                    function_args=dict(lifecycle.function_args or {}),
+                    matched_tool=matched_tool,
+                    runtime_tools=runtime_tools,
+                    browser_route_state_key=iteration_context.browser_route_state_key,
+                    iteration_blocked_function_names=iteration_context.iteration_blocked_function_names,
+                    execution_context=execution_context,
+                    execution_state=execution_state,
+                    started_at=started_at,
+                    evidence_reuse_snapshot=(
+                        runtime_evidence_context.evidence_reuse_snapshot
+                        if runtime_evidence_context is not None
+                        else None
+                    ),
+                    has_previous_completed_steps=(
+                        bool(has_previous_completed_steps or runtime_evidence_context.has_previous_completed_steps)
+                        if runtime_evidence_context is not None
+                        else bool(has_previous_completed_steps)
+                    ),
+                    previous_completed_step_task_modes=dict(previous_completed_step_task_modes or {}),
+                )
+            )
+        except SafetyAuditToolCallError:
+            return _build_loop_break_payload(
+                step=step,
+                blocker="Safety Audit 记录写入失败，已停止当前工具调用。",
+                next_hint="请稍后重试；如持续失败，请联系管理员检查审计账本服务。",
+            ), event_dispatcher.emitted_events
         log_runtime(
             logger,
             logging.INFO,
@@ -810,6 +854,10 @@ async def execute_step_with_prompt(
         ).strip().lower()
         lifecycle.function_args = dict(
             policy_result.executed_function_args or policy_result.final_function_args or lifecycle.function_args or {})
+        lifecycle.runtime_metadata = _with_safety_audit_metadata(
+            lifecycle.runtime_metadata,
+            policy_result.safety_audit_metadata,
+        )
         matched_tool = policy_result.final_matched_tool
         lifecycle.tool_name = str(
             policy_result.final_tool_name or (matched_tool.name if matched_tool is not None else ""))
@@ -1185,6 +1233,21 @@ def _build_resolver_scope(
         run_id=run_id,
         current_step_id=current_step_id or str(state.get("current_step_id") or "").strip() or None,
     )
+
+
+def _with_safety_audit_metadata(
+        runtime_metadata: Dict[str, Any] | None,
+        safety_audit_metadata: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    metadata = dict(runtime_metadata or {})
+    safety_audit = dict(safety_audit_metadata or {})
+    if safety_audit:
+        metadata["safety_audit"] = {
+            key: safety_audit[key]
+            for key in ("audit_id", "action_id", "decision", "risk_level", "reason_code")
+            if key in safety_audit
+        }
+    return metadata
 
 
 def _log_pending_evidence_resolution(

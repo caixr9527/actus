@@ -22,6 +22,7 @@ from app.domain.services.runtime.contracts.evidence_runtime_ports import (
 from app.domain.services.runtime.contracts.artifact_governance_ports import DerivedExportProjectorPort
 from app.domain.services.runtime.contracts.sandbox_fact_ports import RuntimeToolEventPersistencePort
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
+from app.domain.models.safety_audit import SafetyAuditRecorderPort
 from app.domain.services.runtime.langgraph_state import PlannerReActLangGraphState
 from app.domain.services.runtime.stage_llm import ensure_required_stage_llms
 from app.domain.services.tools import BaseTool
@@ -66,6 +67,8 @@ def build_planner_react_langgraph_graph(
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
         derived_export_projector: DerivedExportProjectorPort | None = None,
+        access_control_service=None,
+        safety_audit_recorder: SafetyAuditRecorderPort | None = None,
         *,
         runtime_context_service: RuntimeContextService,
 ) -> Any:
@@ -123,6 +126,8 @@ def build_planner_react_langgraph_graph(
             "runtime_tools": runtime_tools,
             "runtime_context_service": runtime_context_service,
             "max_tool_iterations": max_tool_iterations,
+            "access_control_service": access_control_service,
+            "safety_audit_recorder": safety_audit_recorder,
         }
         if evidence_result_handle_resolver is not None:
             execute_kwargs["evidence_result_handle_resolver"] = evidence_result_handle_resolver

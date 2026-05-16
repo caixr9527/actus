@@ -18,6 +18,7 @@ from app.application.service.evidence_result_handle_resolver import EvidenceResu
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.safety_audit_ledger_service import SafetyAuditLedgerService
 from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.domain.external import LLM, JSONParser, Browser, Sandbox, SearchEngine, FileStorage
@@ -154,6 +155,7 @@ async def build_run_engine(
         assembler=EvidenceFactAssembler(),
         step_projection=evidence_digest_projector,
     )
+    safety_audit_recorder = SafetyAuditLedgerService(uow_factory=uow_factory)
     return LangGraphRunEngine(
         session_id=session_id,
         stage_llms=_build_stage_llms(llm),
@@ -171,6 +173,7 @@ async def build_run_engine(
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
         evidence_step_reconciler=evidence_ledger_service,
         runtime_tool_event_persistence=runtime_tool_event_persistence,
+        safety_audit_recorder=safety_audit_recorder,
         derived_export_projector=derived_export_projector or DerivedExportProjector(
             uow_factory=uow_factory,
             ledger_service=ArtifactLedgerService(uow_factory=uow_factory),

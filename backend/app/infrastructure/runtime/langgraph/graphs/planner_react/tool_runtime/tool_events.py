@@ -5,7 +5,7 @@
 import inspect
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from app.domain.models import ToolEvent, ToolEventStatus, ToolResult
@@ -22,6 +22,7 @@ class ToolCallLifecycle:
     normalized_function_name: str
     function_args: Dict[str, Any]
     tool_name: str = "unknown"
+    runtime_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def build_tool_call_lifecycle(
@@ -61,6 +62,7 @@ def build_calling_event(lifecycle: ToolCallLifecycle) -> ToolEvent:
         function_name=lifecycle.function_name,
         function_args=lifecycle.function_args,
         status=ToolEventStatus.CALLING,
+        runtime_metadata=dict(lifecycle.runtime_metadata or {}),
     )
 
 
@@ -73,6 +75,7 @@ def build_called_event(lifecycle: ToolCallLifecycle, tool_result: ToolResult) ->
         function_args=lifecycle.function_args,
         function_result=tool_result,
         status=ToolEventStatus.CALLED,
+        runtime_metadata=dict(lifecycle.runtime_metadata or {}),
     )
 
 

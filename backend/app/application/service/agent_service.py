@@ -21,6 +21,7 @@ from app.application.service.evidence_ledger_service import EvidenceLedgerServic
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.safety_audit_ledger_service import SafetyAuditLedgerService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.artifact_ledger_service import ArtifactLedgerService
 from app.application.service.artifact_revision_projector import ArtifactRevisionProjector
@@ -230,6 +231,7 @@ class AgentService:
             runtime_state_coordinator=self._get_runtime_state_coordinator(),
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
+            safety_audit_recorder=SafetyAuditLedgerService(uow_factory=self._uow_factory),
             sandbox_fact_event_projector=sandbox_fact_event_projector,
             artifact_revision_projector=ArtifactRevisionProjector(
                 ledger_service=ArtifactLedgerService(uow_factory=self._uow_factory),

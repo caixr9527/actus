@@ -192,6 +192,7 @@ class ToolEvent(BaseEvent):
     function_args: Dict[str, Any]  # 工具调用的函数参数
     function_result: Optional[ToolResult] = None  # 工具调用结果
     status: ToolEventStatus = ToolEventStatus.CALLING  # 工具事件状态
+    runtime_metadata: Dict[str, Any] = Field(default_factory=dict)
     runtime_fact_projection: Dict[str, Any] = Field(default_factory=dict, exclude=True)
 
 

@@ -22,8 +22,13 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     ToolEventDisplayProjectorPort,
     ToolEventFactProjectionResult,
 )
+from app.domain.models.safety_audit import SafetyAuditRecorderPort
 
 logger = logging.getLogger(__name__)
+
+
+class SafetyAuditSourceAttachError(RuntimeError):
+    """Safety Audit source linkage 回填失败，与 fact 投影失败分开记录。"""
 
 
 class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
@@ -38,6 +43,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             runtime_state_coordinator,
             sandbox_fact_recorder: SandboxFactRecorderPort,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort,
+            safety_audit_recorder: SafetyAuditRecorderPort | None = None,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             tool_event_display_projector: ToolEventDisplayProjectorPort | None = None,
             artifact_revision_projector: ArtifactRevisionProjectorPort | None = None,
@@ -48,6 +54,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         self._runtime_state_coordinator = runtime_state_coordinator
         self._sandbox_fact_recorder = sandbox_fact_recorder
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
+        self._safety_audit_recorder = safety_audit_recorder
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._tool_event_display_projector = tool_event_display_projector
         self._artifact_revision_projector = artifact_revision_projector
@@ -107,6 +114,11 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 )
                 if str(run_id or "").strip() and str(context.scope.run_id or "").strip() != str(run_id or "").strip():
                     raise ValueError("ToolEvent run_id 与投影上下文不一致")
+                await self._attach_safety_audit_source_event(
+                    event=event,
+                    source_event_id=source_event_id,
+                    context=context,
+                )
                 facts = await self._sandbox_fact_recorder.record_from_tool_event(
                     context=context,
                     event=event,
@@ -129,6 +141,18 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 "event_inserted": bool(getattr(persist_result, "event_inserted", False)),
                 "artifact_revision_count": artifact_projection.revision_count,
             }
+        except SafetyAuditSourceAttachError:
+            logger.exception(
+                "tool_event_safety_audit_source_attach_failed_after_source_event_persisted",
+                extra={
+                    "session_id": self._session_id,
+                    "source_event_id": source_event_id,
+                    "function_name": event.function_name,
+                    "tool_call_id": event.tool_call_id,
+                    "reason_code": "safety_audit_source_event_attach_failed_after_source_event_persisted",
+                },
+            )
+            raise
         except Exception:
             if not db_event_persisted:
                 try:
@@ -171,6 +195,44 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         if self._tool_event_display_projector is None:
             return
         await self._tool_event_display_projector.project(event)
+
+    async def _attach_safety_audit_source_event(
+            self,
+            *,
+            event: ToolEvent,
+            source_event_id: str,
+            context,
+    ) -> None:
+        safety_audit = dict((event.runtime_metadata or {}).get("safety_audit") or {})
+        audit_id = str(safety_audit.get("audit_id") or "").strip()
+        if not audit_id:
+            return
+        if self._safety_audit_recorder is None:
+            raise ValueError("Safety Audit recorder 未装配，无法回填 ToolEvent source linkage")
+        try:
+            await self._safety_audit_recorder.attach_tool_event_source(
+                audit_id,
+                source_event_id,
+                scope=context.scope,
+            )
+        except Exception as exc:
+            logger.exception(
+                "safety_audit_source_event_attach_failed",
+                extra={
+                    "user_id": getattr(context.scope, "user_id", None),
+                    "session_id": getattr(context.scope, "session_id", None),
+                    "run_id": getattr(context.scope, "run_id", None),
+                    "step_id": getattr(context, "current_step_id", None)
+                               or getattr(context.scope, "current_step_id", None),
+                    "source_event_id": source_event_id,
+                    "audit_id": audit_id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "safety_audit_source_event_attach_failed",
+                },
+            )
+            raise SafetyAuditSourceAttachError(str(exc) or "safety_audit_source_event_attach_failed") from exc
 
     async def _project_sandbox_fact_event(
             self,

@@ -7,8 +7,13 @@ from app.application.service.model_input_policy import (
 from app.domain.models import Step, ToolEventStatus
 from app.domain.services.tools.base import BaseTool, tool
 from app.infrastructure.runtime.langgraph.graphs.planner_react.execution.tools import (
-    execute_step_with_prompt,
+    execute_step_with_prompt as _execute_step_with_prompt,
 )
+from tests.safety_audit_test_helpers import execute_step_with_fake_safety_audit
+
+
+async def execute_step_with_prompt(**kwargs):
+    return await execute_step_with_fake_safety_audit(_execute_step_with_prompt, **kwargs)
 
 
 class _FakeLLM:
