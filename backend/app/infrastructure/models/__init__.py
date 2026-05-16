@@ -11,6 +11,7 @@ from .file import FileModel
 from .llm_model_config import LLMModelConfigModel
 from .long_term_memory import LongTermMemoryModel
 from .sandbox_fact import SandboxFactModel
+from .safety_audit import SafetyAuditRecordModel
 from .session import SessionModel
 from .session_context_snapshot import SessionContextSnapshotModel
 from .user import UserModel
@@ -33,6 +34,7 @@ __all__ = [
     "LLMModelConfigModel",
     "LongTermMemoryModel",
     "SandboxFactModel",
+    "SafetyAuditRecordModel",
     "SessionContextSnapshotModel",
     "WorkflowRunModel",
     "WorkflowRunEventModel",
