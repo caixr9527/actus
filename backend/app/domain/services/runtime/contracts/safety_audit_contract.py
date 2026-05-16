@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 from pathlib import PurePosixPath
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -27,6 +27,7 @@ from app.domain.services.runtime.contracts.data_access_contract import (
     PrivacyLevel,
     RetentionPolicyKind,
 )
+from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.sensitive_data_policy import detect_sensitive_text
 
 
@@ -46,6 +47,18 @@ class SafetyAuditRiskLevel(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+class SafetyAuditWriteStatus(str, Enum):
+    CREATED = "created"
+    REUSED = "reused"
+
+
+class SafetyAuditNonToolActionKind(str, Enum):
+    ARTIFACT_DOWNLOAD = "artifact_download"
+    ARTIFACT_PREVIEW = "artifact_preview"
+    DOCUMENT_PREFLIGHT = "document_preflight"
+    EXTERNAL_CAPABILITY_GOVERNANCE = "external_capability_governance"
 
 
 class SafetyAuditPolicyTraceEntry(BaseModel):
@@ -307,6 +320,190 @@ class SafetyAuditRecord(BaseModel):
         if self.decision != SafetyAuditDecision.REWRITE and self.rewrite_applied and not self.rewrite_reason:
             raise ValueError("非 rewrite 决策如标记 rewrite_applied 必须提供 rewrite_reason")
         return self
+
+
+class SafetyAuditRecordCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    scope: AccessScopeResult
+    user_id: str
+    session_id: str
+    workspace_id: str
+    run_id: str
+    step_id: str | None = None
+    tool_call_id: str | None = None
+    capability_id: str
+    tool_family: str
+    function_name: str
+    normalized_function_name: str
+    requested_args: dict[str, Any] = Field(default_factory=dict)
+    final_function_name: str
+    final_normalized_function_name: str
+    final_args: dict[str, Any] = Field(default_factory=dict)
+    decision: SafetyAuditDecision
+    reason_code: str
+    policy_trace: list[SafetyAuditPolicyTraceEntry] = Field(default_factory=list)
+    winning_policy: str
+    tool_call_fingerprint: str
+    rewrite_applied: bool = False
+    rewrite_reason: str | None = None
+    rewrite_metadata: dict[str, Any] = Field(default_factory=dict)
+    confirmation_id: str | None = None
+    related_fact_ids: list[str] = Field(default_factory=list)
+    related_evidence_ids: list[str] = Field(default_factory=list)
+    related_artifact_revisions: list[SafetyAuditRelatedArtifactRevisionRef] = Field(default_factory=list)
+    profile_hash: str | None = None
+    data_classification: SafetyAuditDataClassification | None = None
+    risk_input: SafetyAuditRiskClassificationInput | None = None
+    safe_path_roots: list[str] = Field(default_factory=list)
+
+
+class NonToolSafetyAuditCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    scope: AccessScopeResult
+    action_kind: SafetyAuditNonToolActionKind
+    user_id: str
+    session_id: str
+    workspace_id: str
+    run_id: str
+    step_id: str | None = None
+    action_id_hint: str | None = None
+    capability_id: str
+    tool_family: str = "non_tool"
+    function_name: str
+    requested_args: dict[str, Any] = Field(default_factory=dict)
+    final_args: dict[str, Any] = Field(default_factory=dict)
+    decision: SafetyAuditDecision
+    reason_code: str
+    artifact_delivery_state: str | None = None
+    external_provider: str | None = None
+    related_artifact_revisions: list[SafetyAuditRelatedArtifactRevisionRef] = Field(default_factory=list)
+    data_classification: SafetyAuditDataClassification | None = None
+    safe_path_roots: list[str] = Field(default_factory=list)
+
+
+class SafetyAuditRecordResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: str
+    action_id: str
+    decision: SafetyAuditDecision
+    risk_level: SafetyAuditRiskLevel
+    reason_code: str
+    run_id: str
+    step_id: str | None = None
+    tool_call_id: str | None = None
+
+
+class SafetyAuditWriteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: str
+    record: SafetyAuditRecordResult
+    status: SafetyAuditWriteStatus
+    reason_code: str
+
+
+class SafetyAuditDecisionCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allow: int = 0
+    block: int = 0
+    rewrite: int = 0
+    require_confirmation: int = 0
+    confirmation_approved: int = 0
+    confirmation_rejected: int = 0
+    correction: int = 0
+    superseded: int = 0
+
+
+class SafetyAuditRiskCounts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    low: int = 0
+    medium: int = 0
+    high: int = 0
+    critical: int = 0
+
+
+class SafetyAuditSnapshotRecordRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: str
+    decision: SafetyAuditDecision
+    risk_level: SafetyAuditRiskLevel
+    reason_code: str
+    step_id: str | None = None
+    tool_call_id: str | None = None
+    function_name: str
+    created_at: datetime
+
+
+class SafetyAuditSnapshotResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    audit_cursor: str | None = None
+    decision_counts: SafetyAuditDecisionCounts
+    risk_counts: SafetyAuditRiskCounts
+    blocked_actions: list[SafetyAuditSnapshotRecordRef] = Field(default_factory=list)
+    rewritten_actions: list[SafetyAuditSnapshotRecordRef] = Field(default_factory=list)
+    confirmation_decisions: list[SafetyAuditSnapshotRecordRef] = Field(default_factory=list)
+    critical_findings: list[SafetyAuditSnapshotRecordRef] = Field(default_factory=list)
+    latest_records: list[SafetyAuditSnapshotRecordRef] = Field(default_factory=list)
+
+
+class SafetyAuditRecorderPort(Protocol):
+    async def record_constraint_decision(self, command: SafetyAuditRecordCommand) -> SafetyAuditWriteResult:
+        ...
+
+    async def attach_tool_event_source(
+            self,
+            audit_id: str,
+            tool_event_source_event_id: str,
+            *,
+            scope: AccessScopeResult,
+    ) -> SafetyAuditWriteResult:
+        ...
+
+    async def attach_decision_event(
+            self,
+            audit_id: str,
+            decision_event_id: str,
+            *,
+            scope: AccessScopeResult,
+    ) -> SafetyAuditWriteResult:
+        ...
+
+    async def attach_confirmation_event(
+            self,
+            audit_id: str,
+            confirmation_event_id: str,
+            *,
+            scope: AccessScopeResult,
+    ) -> SafetyAuditWriteResult:
+        ...
+
+    async def record_confirmation_decision(self, command: SafetyAuditRecordCommand) -> SafetyAuditWriteResult:
+        ...
+
+    async def record_non_tool_action(self, command: NonToolSafetyAuditCommand) -> SafetyAuditWriteResult:
+        ...
+
+
+class NonToolSafetyAuditRecorderPort(Protocol):
+    async def record_artifact_download_decision(self, command: NonToolSafetyAuditCommand) -> SafetyAuditWriteResult:
+        ...
+
+    async def record_artifact_preview_decision(self, command: NonToolSafetyAuditCommand) -> SafetyAuditWriteResult:
+        ...
+
+    async def record_document_preflight_decision(self, command: NonToolSafetyAuditCommand) -> SafetyAuditWriteResult:
+        ...
+
+    async def record_external_capability_governance_decision(self, command: NonToolSafetyAuditCommand) -> SafetyAuditWriteResult:
+        ...
 
 
 def stable_json_dumps(payload: Any) -> str:
