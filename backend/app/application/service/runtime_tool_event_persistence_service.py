@@ -23,6 +23,7 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     ToolEventFactProjectionResult,
 )
 from app.domain.models.safety_audit import SafetyAuditRecorderPort
+from app.domain.services.runtime.contracts.safety_audit_contract import SafetyAuditEventProjectorPort
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             sandbox_fact_recorder: SandboxFactRecorderPort,
             sandbox_fact_context_builder: SandboxFactProjectionContextBuilderPort,
             safety_audit_recorder: SafetyAuditRecorderPort | None = None,
+            safety_audit_event_projector: SafetyAuditEventProjectorPort | None = None,
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             tool_event_display_projector: ToolEventDisplayProjectorPort | None = None,
             artifact_revision_projector: ArtifactRevisionProjectorPort | None = None,
@@ -55,6 +57,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         self._sandbox_fact_recorder = sandbox_fact_recorder
         self._sandbox_fact_context_builder = sandbox_fact_context_builder
         self._safety_audit_recorder = safety_audit_recorder
+        self._safety_audit_event_projector = safety_audit_event_projector
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._tool_event_display_projector = tool_event_display_projector
         self._artifact_revision_projector = artifact_revision_projector
@@ -115,6 +118,11 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 if str(run_id or "").strip() and str(context.scope.run_id or "").strip() != str(run_id or "").strip():
                     raise ValueError("ToolEvent run_id 与投影上下文不一致")
                 await self._attach_safety_audit_source_event(
+                    event=event,
+                    source_event_id=source_event_id,
+                    context=context,
+                )
+                await self._project_safety_audit_event(
                     event=event,
                     source_event_id=source_event_id,
                     context=context,
@@ -233,6 +241,40 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                 },
             )
             raise SafetyAuditSourceAttachError(str(exc) or "safety_audit_source_event_attach_failed") from exc
+
+    async def _project_safety_audit_event(
+            self,
+            *,
+            event: ToolEvent,
+            source_event_id: str,
+            context,
+    ) -> None:
+        safety_audit = dict((event.runtime_metadata or {}).get("safety_audit") or {})
+        audit_id = str(safety_audit.get("audit_id") or "").strip()
+        if not audit_id or self._safety_audit_event_projector is None:
+            return
+        try:
+            await self._safety_audit_event_projector.project_tool_event_source(
+                scope=context.scope,
+                tool_event_source_event_id=source_event_id,
+            )
+        except Exception as exc:
+            logger.exception(
+                "safety_audit_event_projection_failed",
+                extra={
+                    "user_id": getattr(context.scope, "user_id", None),
+                    "session_id": getattr(context.scope, "session_id", None),
+                    "run_id": getattr(context.scope, "run_id", None),
+                    "step_id": getattr(context, "current_step_id", None)
+                               or getattr(context.scope, "current_step_id", None),
+                    "source_event_id": source_event_id,
+                    "audit_id": audit_id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "safety_audit_event_projection_failed",
+                },
+            )
 
     async def _project_sandbox_fact_event(
             self,

@@ -18,9 +18,11 @@ from .evidence_runtime_context_provider import EvidenceRuntimeContextProvider
 from .file_service import FileService
 from .model_config_service import ModelConfigService
 from .model_runtime_resolver import ModelRuntimeResolver
+from .projecting_safety_audit_recorder import ProjectingSafetyAuditRecorder
 from .runtime_access_control_service import RuntimeAccessControlService
 from .runtime_observation_service import RuntimeObservationService
 from .runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
+from .safety_audit_event_projector import SafetyAuditEventProjector
 from .sandbox_capability_profile_service import SandboxCapabilityProfileService
 from .sandbox_fact_event_projector import SandboxFactEventProjector
 from .sandbox_fact_ledger_service import SandboxFactLedgerService
@@ -45,9 +47,11 @@ __all__ = [
     "FileService",
     "ModelConfigService",
     "ModelRuntimeResolver",
+    "ProjectingSafetyAuditRecorder",
     "RuntimeAccessControlService",
     "RuntimeObservationService",
     "RuntimeToolEventPersistenceService",
+    "SafetyAuditEventProjector",
     "SandboxCapabilityProfileService",
     "SandboxFactEventProjector",
     "SandboxFactLedgerService",

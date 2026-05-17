@@ -21,6 +21,7 @@ from app.domain.models import (
     SandboxFactEvent,
     EvidenceEvent,
     ArtifactEvent,
+    SafetyAuditEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
@@ -30,6 +31,9 @@ from app.domain.models import (
 from app.domain.services.runtime.contracts.artifact_governance_contract import (
     ArtifactEventPayload,
     SelectedArtifactRevisionResult,
+)
+from app.domain.services.runtime.contracts.safety_audit_contract import (
+    SafetyAuditEventPayload,
 )
 from app.application.service.runtime_observation_service import RuntimeObservableEventResult
 from app.domain.services.runtime.normalizers import normalize_event_payload
@@ -121,6 +125,28 @@ class ArtifactSSEEvent(BaseSSEEvent):
 
     event: Literal["artifact"] = "artifact"
     data: ArtifactEventData
+
+
+class SafetyAuditEventData(BaseEventData):
+    """Safety Audit hidden event 数据。"""
+
+    payload: SafetyAuditEventPayload
+
+
+class SafetyAuditSSEEvent(BaseSSEEvent):
+    """Safety Audit runtime observation 事件，普通 timeline 默认隐藏。"""
+
+    event: Literal["safety_audit"] = "safety_audit"
+    data: SafetyAuditEventData
+
+    @classmethod
+    def from_event(cls, event: SafetyAuditEvent, runtime: RuntimeEventMeta) -> Self:
+        return cls(
+            data=SafetyAuditEventData(
+                **BaseEventData.base_event_data(event, runtime),
+                payload=event.payload,
+            )
+        )
 
 
 class MessageEventData(BaseEventData):
@@ -491,6 +517,7 @@ AgentSSEEvent = Union[
     SandboxFactSSEEvent,
     EvidenceSSEEvent,
     ArtifactSSEEvent,
+    SafetyAuditSSEEvent,
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,

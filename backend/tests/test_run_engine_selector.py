@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from app.application.service.run_engine_selector import build_run_engine
+from app.application.service.projecting_safety_audit_recorder import ProjectingSafetyAuditRecorder
 from app.domain.models import AgentConfig
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import RuntimeToolCapabilitySnapshot
 from app.domain.services.tools import CapabilityRegistry, ToolRuntimeAdapter
@@ -192,6 +193,47 @@ def test_build_run_engine_should_pass_evidence_step_reconciler_to_langgraph(monk
     )
 
     assert captured["evidence_step_reconciler"] is reconciler
+
+
+def test_build_run_engine_should_use_projecting_safety_audit_recorder(monkeypatch) -> None:
+    captured = {}
+
+    class _FakeEngine:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_settings",
+        lambda: type("S", (), {"agent_runtime_engine": "langgraph"})(),
+    )
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.get_langgraph_checkpointer",
+        lambda: _FakeCheckpointerProvider(None),
+    )
+    monkeypatch.setattr(
+        "app.application.service.run_engine_selector.LangGraphRunEngine",
+        _FakeEngine,
+    )
+
+    _build_engine(
+        llm=_DummyLLM(),
+        agent_config=AgentConfig(),
+        session_id="session-1",
+        file_storage=object(),
+        uow_factory=lambda: None,
+        json_parser=object(),
+        browser=object(),
+        sandbox=object(),
+        search_engine=object(),
+        mcp_tool=_DummyTool(),
+        a2a_tool=_DummyTool(),
+        workspace_runtime_service=_FakeWorkspaceRuntimeService(),
+        tool_runtime_adapter=_build_tool_runtime_adapter(),
+        user_id="user-1",
+        runtime_tool_snapshot_recorder=_FakeRecorder(),
+    )
+
+    assert isinstance(captured["safety_audit_recorder"], ProjectingSafetyAuditRecorder)
 
 
 def test_build_run_engine_should_pass_derived_export_projector_to_langgraph(monkeypatch) -> None:

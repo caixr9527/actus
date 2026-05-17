@@ -12,6 +12,7 @@ from app.application.service.runtime_tool_event_persistence_service import (
     RuntimeToolEventPersistenceService,
 )
 from app.domain.models import Step, ToolEvent, ToolEventStatus, ToolResult
+from app.domain.models.sandbox_fact import SandboxFactRecord
 from app.domain.models.evidence import (
     EvidenceDoNotRepeatResult,
     EvidenceDuplicateDecision,
@@ -33,9 +34,19 @@ from app.domain.models.safety_audit import (
     SafetyAuditWriteStatus,
 )
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
+from app.domain.services.runtime.contracts.artifact_governance_ports import ArtifactRevisionProjectionResult
 from app.domain.services.runtime.contracts.evidence_key_normalizer import hash_query
 from app.domain.services.runtime.contracts.sandbox_fact_ports import (
     SandboxFactProjectionContext,
+)
+from app.domain.services.runtime.contracts.sandbox_fact_contract import (
+    SandboxFactKind,
+    SandboxFactScope,
+    SandboxFactSourceRef,
+    SandboxFactSourceType,
+    SandboxFactSubjectRef,
+    build_sandbox_fact_idempotency_key,
+    build_sandbox_fact_payload_hash,
 )
 from app.domain.services.runtime.contracts.langgraph_settings import ASK_USER_FUNCTION_NAME
 from app.domain.services.tools import BaseTool
@@ -450,19 +461,104 @@ class _FactContextBuilder:
 
 
 class _FactRecorder:
+    def __init__(self, *, facts: list[SandboxFactRecord] | None = None) -> None:
+        self.calls = 0
+        self.facts = list(facts or [])
+
     async def record_from_tool_event(self, *, context, event):
-        return []
+        self.calls += 1
+        return list(self.facts)
 
 
-def _persistence_service(*, task: _Task, coordinator: _Coordinator, recorder: _SafetyAuditRecorder):
+class _ArtifactRevisionProjector:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def project_from_tool_event_facts(self, *, scope, event, facts):
+        self.calls.append({"scope": scope, "event": event, "facts": list(facts or [])})
+        return ArtifactRevisionProjectionResult(revision_count=len(list(facts or [])))
+
+    async def project_from_document_facts(self, *, scope, facts):
+        return ArtifactRevisionProjectionResult()
+
+
+class _FailingSafetyAuditEventProjector:
+    async def project_tool_event_source(self, **_kwargs):
+        raise RuntimeError("projection failed")
+
+
+def _search_result_fact(*, source_event_id: str = "evt-1", tool_call_id: str = "call-1") -> SandboxFactRecord:
+    payload = {
+        "query_hash": hash_query("safety audit"),
+        "query_excerpt": "safety audit",
+        "result_count": 0,
+        "top_results": [],
+        "is_truncated": False,
+        "missing_fields": None,
+        "reason_code": None,
+    }
+    payload_hash = build_sandbox_fact_payload_hash(payload)
+    source_ref = SandboxFactSourceRef(
+        source_type=SandboxFactSourceType.SANDBOX_API,
+        source_event_id=source_event_id,
+        source_event_status="available",
+        tool_event_id=source_event_id,
+        tool_call_id=tool_call_id,
+        function_name="search_web",
+    )
+    subject_ref = SandboxFactSubjectRef(
+        subject_type="search",
+        subject_key="search:safety audit",
+    )
+    return SandboxFactRecord(
+        id="fact-1",
+        user_id="user-1",
+        session_id="session-1",
+        workspace_id="workspace-1",
+        fact_scope=SandboxFactScope.STEP,
+        run_id="run-1",
+        step_id="step-1",
+        fact_kind=SandboxFactKind.SEARCH_RESULT,
+        source_ref=source_ref,
+        subject_ref=subject_ref,
+        summary="search fact",
+        payload=payload,
+        payload_hash=payload_hash,
+        idempotency_key=build_sandbox_fact_idempotency_key(
+            user_id="user-1",
+            session_id="session-1",
+            workspace_id="workspace-1",
+            fact_scope=SandboxFactScope.STEP,
+            run_id="run-1",
+            step_id="step-1",
+            fact_kind=SandboxFactKind.SEARCH_RESULT,
+            source_event_id=source_event_id,
+            tool_call_id=tool_call_id,
+            subject_key=subject_ref.subject_key,
+            payload_hash=payload_hash,
+        ),
+    )
+
+
+def _persistence_service(
+        *,
+        task: _Task,
+        coordinator: _Coordinator,
+        recorder: _SafetyAuditRecorder,
+        fact_recorder: _FactRecorder | None = None,
+        safety_audit_event_projector=None,
+        artifact_revision_projector=None,
+):
     return RuntimeToolEventPersistenceService(
         session_id="session-1",
         task=task,
         uow_factory=lambda: None,
         runtime_state_coordinator=coordinator,
-        sandbox_fact_recorder=_FactRecorder(),
+        sandbox_fact_recorder=fact_recorder or _FactRecorder(),
         sandbox_fact_context_builder=_FactContextBuilder(),
         safety_audit_recorder=recorder,
+        safety_audit_event_projector=safety_audit_event_projector,
+        artifact_revision_projector=artifact_revision_projector,
     )
 
 
@@ -532,6 +628,51 @@ def test_runtime_tool_event_persistence_keeps_persisted_event_when_audit_attach_
     assert coordinator.persisted_event_ids == ["evt-1"]
     assert "safety_audit_source_event_attach_failed" in caplog.text
     assert "tool_event_safety_audit_source_attach_failed_after_source_event_persisted" in caplog.text
+    assert "tool_event_fact_projection_contract_failed" not in caplog.text
+
+
+def test_runtime_tool_event_persistence_continues_when_audit_event_projection_fails(caplog) -> None:
+    task = _Task()
+    coordinator = _Coordinator()
+    recorder = _SafetyAuditRecorder()
+    fact_recorder = _FactRecorder(facts=[_search_result_fact()])
+    artifact_projector = _ArtifactRevisionProjector()
+    event = ToolEvent(
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="search",
+        function_name="search_web",
+        function_args={"query": "safety audit"},
+        function_result=ToolResult(success=True, data={}),
+        status=ToolEventStatus.CALLED,
+        runtime_metadata={"safety_audit": {"audit_id": "audit-1"}},
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(_persistence_service(
+            task=task,
+            coordinator=coordinator,
+            recorder=recorder,
+            fact_recorder=fact_recorder,
+            safety_audit_event_projector=_FailingSafetyAuditEventProjector(),
+            artifact_revision_projector=artifact_projector,
+        ).persist_tool_event_and_record_facts(
+            event=event,
+            run_id="run-1",
+            session_id="session-1",
+            current_step_id="step-1",
+        ))
+
+    assert result.source_event_id == "evt-1"
+    assert fact_recorder.calls == 1
+    assert result.fact_count == 1
+    assert result.artifact_revision_count == 1
+    assert event.runtime_fact_projection["fact_count"] == 1
+    assert event.runtime_fact_projection["artifact_revision_count"] == 1
+    assert len(artifact_projector.calls) == 1
+    assert artifact_projector.calls[0]["facts"][0].id == "fact-1"
+    assert recorder.attach_calls[0]["tool_event_source_event_id"] == "evt-1"
+    assert "safety_audit_event_projection_failed" in caplog.text
     assert "tool_event_fact_projection_contract_failed" not in caplog.text
 
 

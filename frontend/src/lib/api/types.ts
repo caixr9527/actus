@@ -271,6 +271,52 @@ export type ArtifactEvent = {
 
 export type ArtifactEventData = ArtifactEvent;
 
+export type SafetyAuditDecision =
+  | "allow"
+  | "block"
+  | "rewrite"
+  | "require_confirmation"
+  | "confirmation_approved"
+  | "confirmation_rejected"
+  | "correction"
+  | "superseded";
+
+export type SafetyAuditRiskLevel = "low" | "medium" | "high" | "critical";
+
+export type SafetyAuditEventRef = {
+  audit_id: string;
+  decision: SafetyAuditDecision;
+  risk_level: SafetyAuditRiskLevel;
+  reason_code: string;
+  step_id?: string | null;
+  tool_call_id?: string | null;
+  function_name: string;
+};
+
+export type SafetyAuditEventPayload = {
+  audit_refs: SafetyAuditEventRef[];
+  source_event_ids: string[];
+  decision_counts: Partial<Record<SafetyAuditDecision, number>>;
+  risk_counts: Partial<Record<SafetyAuditRiskLevel, number>>;
+  blocked_count: number;
+  rewrite_count: number;
+  confirmation_count: number;
+  summary: string;
+  runtime_metadata: {
+    visibility: "hidden";
+    projection_key: string;
+    schema_version: "safety_audit_event.v1";
+  };
+};
+
+export type SafetyAuditEvent = {
+  event_id?: string | null;
+  created_at?: number;
+  runtime: RuntimeEventMeta;
+  payload: SafetyAuditEventPayload;
+  [key: string]: unknown;
+};
+
 export type ArtifactRevisionFileParams = {
   session_id: string;
   artifact_id: string;
@@ -627,6 +673,7 @@ export type SSEEventType =
   | "step"
   | "tool"
   | "artifact"
+  | "safety_audit"
   | "sandbox_fact"
   | "wait"
   | "done"
@@ -653,6 +700,7 @@ export type SSEEventData =
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
   | { type: "artifact"; data: ArtifactEvent }
+  | { type: "safety_audit"; data: SafetyAuditEvent }
   | { type: "sandbox_fact"; data: SandboxFactEvent }
   | { type: "wait"; data: WaitEventData }
   | {

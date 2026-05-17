@@ -182,6 +182,9 @@ export function buildRunTimeline(events: SSEEventData[], locale: AppLocale = 'zh
       sandbox_fact: () => {
         // 事实事件用于审计和后续 Evidence，不进入普通用户运行时间线。
       },
+      safety_audit: () => {
+        // 安全审计事件默认隐藏，避免把策略账本噪音混入普通运行时间线。
+      },
       wait: (waitEvent) => {
         items.push({
           ...base,

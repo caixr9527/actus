@@ -17,7 +17,10 @@ from app.application.service.evidence_fact_assembler import EvidenceFactAssemble
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
+from app.application.service.projecting_safety_audit_recorder import ProjectingSafetyAuditRecorder
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
+from app.application.service.safety_audit_event_projector import SafetyAuditEventProjector
 from app.application.service.safety_audit_ledger_service import SafetyAuditLedgerService
 from app.application.service.sandbox_fact_document_input_projector import SandboxFactDocumentInputProjector
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
@@ -155,7 +158,16 @@ async def build_run_engine(
         assembler=EvidenceFactAssembler(),
         step_projection=evidence_digest_projector,
     )
-    safety_audit_recorder = SafetyAuditLedgerService(uow_factory=uow_factory)
+    safety_audit_ledger = SafetyAuditLedgerService(uow_factory=uow_factory)
+    safety_audit_event_projector = SafetyAuditEventProjector(
+        uow_factory=uow_factory,
+        runtime_state_coordinator=RuntimeStateCoordinator(uow_factory=uow_factory),
+        recorder=safety_audit_ledger,
+    )
+    safety_audit_recorder = ProjectingSafetyAuditRecorder(
+        recorder=safety_audit_ledger,
+        projector=safety_audit_event_projector,
+    )
     return LangGraphRunEngine(
         session_id=session_id,
         stage_llms=_build_stage_llms(llm),

@@ -460,6 +460,9 @@ export function appendTimelineEvent(
     sandbox_fact: () => {
       // 事实事件用于审计和后续 Evidence，不进入普通用户对话 timeline。
     },
+    safety_audit: () => {
+      // 安全审计事件只供运行详情/安全视图消费，不进入普通用户对话 timeline。
+    },
     error: (event) => appendErrorEvent(context, event.data, locale),
   });
 }

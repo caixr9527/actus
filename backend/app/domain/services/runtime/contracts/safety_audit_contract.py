@@ -454,6 +454,49 @@ class SafetyAuditSnapshotResult(BaseModel):
     latest_records: list[SafetyAuditSnapshotRecordRef] = Field(default_factory=list)
 
 
+class SafetyAuditEventRef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: str
+    decision: SafetyAuditDecision
+    risk_level: SafetyAuditRiskLevel
+    reason_code: str
+    step_id: str | None = None
+    tool_call_id: str | None = None
+    function_name: str
+
+
+class SafetyAuditEventRuntimeMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    visibility: Literal["hidden"] = "hidden"
+    projection_key: str
+    schema_version: Literal["safety_audit_event.v1"] = "safety_audit_event.v1"
+
+
+class SafetyAuditEventPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_refs: list[SafetyAuditEventRef] = Field(default_factory=list)
+    source_event_ids: list[str] = Field(default_factory=list)
+    decision_counts: SafetyAuditDecisionCounts
+    risk_counts: SafetyAuditRiskCounts
+    blocked_count: int = 0
+    rewrite_count: int = 0
+    confirmation_count: int = 0
+    summary: str
+    runtime_metadata: SafetyAuditEventRuntimeMetadata
+
+
+class SafetyAuditEventProjectResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str | None = None
+    projected: bool = False
+    audit_ids: list[str] = Field(default_factory=list)
+    reason_code: str = ""
+
+
 class SafetyAuditRecorderPort(Protocol):
     async def record_constraint_decision(self, command: SafetyAuditRecordCommand) -> SafetyAuditWriteResult:
         ...
@@ -503,6 +546,24 @@ class NonToolSafetyAuditRecorderPort(Protocol):
         ...
 
     async def record_external_capability_governance_decision(self, command: NonToolSafetyAuditCommand) -> SafetyAuditWriteResult:
+        ...
+
+
+class SafetyAuditEventProjectorPort(Protocol):
+    async def project_tool_event_source(
+            self,
+            *,
+            scope: AccessScopeResult,
+            tool_event_source_event_id: str,
+    ) -> SafetyAuditEventProjectResult:
+        ...
+
+    async def project_single_audit(
+            self,
+            *,
+            scope: AccessScopeResult,
+            audit_id: str,
+    ) -> SafetyAuditEventProjectResult:
         ...
 
 

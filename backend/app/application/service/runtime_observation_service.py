@@ -26,6 +26,7 @@ from app.domain.models import (
     WaitEvent,
     EvidenceEvent,
     ArtifactEvent,
+    SafetyAuditEvent,
     RuntimeStateSnapshot,
     RuntimeStateSource,
     WorkflowRunEventRecord,
@@ -303,7 +304,7 @@ class RuntimeObservationService:
         """为历史详情或 SSE 事件补充 runtime 元数据。"""
         durability: Literal["persistent", "live_only"] = "persistent"
         visibility: Literal["timeline", "draft", "control", "hidden"] = "timeline"
-        if isinstance(event, (EvidenceEvent, ArtifactEvent)):
+        if isinstance(event, (EvidenceEvent, ArtifactEvent, SafetyAuditEvent)):
             visibility = "hidden"
         if not should_persist_event(event):
             durability = "live_only"

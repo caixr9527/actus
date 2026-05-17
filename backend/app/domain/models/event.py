@@ -25,6 +25,7 @@ from .tool_result import ToolResult
 from .wait import normalize_wait_payload
 from .sandbox_fact import SandboxFactKind
 from .artifact_governance import ArtifactEventPayload, SelectedArtifactRevisionResult
+from app.domain.services.runtime.contracts.safety_audit_contract import SafetyAuditEventPayload
 
 
 class PlanEventStatus(str, Enum):
@@ -245,6 +246,13 @@ class ArtifactEvent(BaseEvent):
     payload: ArtifactEventPayload
 
 
+class SafetyAuditEvent(BaseEvent):
+    """Safety Audit 轻量 runtime 投影事件，不承载 raw args 或敏感内容。"""
+
+    type: Literal["safety_audit"] = "safety_audit"
+    payload: SafetyAuditEventPayload
+
+
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
@@ -319,6 +327,7 @@ Event = Annotated[
         SandboxFactEvent,
         EvidenceEvent,
         ArtifactEvent,
+        SafetyAuditEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,

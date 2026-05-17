@@ -20,7 +20,9 @@ from app.application.service.evidence_fact_assembler import EvidenceFactAssemble
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
+from app.application.service.projecting_safety_audit_recorder import ProjectingSafetyAuditRecorder
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
+from app.application.service.safety_audit_event_projector import SafetyAuditEventProjector
 from app.application.service.safety_audit_ledger_service import SafetyAuditLedgerService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.artifact_ledger_service import ArtifactLedgerService
@@ -224,6 +226,16 @@ class AgentService:
             user_id=session.user_id,
             session_id=session.id,
         )
+        safety_audit_ledger = SafetyAuditLedgerService(uow_factory=self._uow_factory)
+        safety_audit_event_projector = SafetyAuditEventProjector(
+            uow_factory=self._uow_factory,
+            runtime_state_coordinator=self._get_runtime_state_coordinator(),
+            recorder=safety_audit_ledger,
+        )
+        safety_audit_recorder = ProjectingSafetyAuditRecorder(
+            recorder=safety_audit_ledger,
+            projector=safety_audit_event_projector,
+        )
         runtime_tool_event_persistence = RuntimeToolEventPersistenceService(
             session_id=session.id,
             task=task,
@@ -231,7 +243,8 @@ class AgentService:
             runtime_state_coordinator=self._get_runtime_state_coordinator(),
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
-            safety_audit_recorder=SafetyAuditLedgerService(uow_factory=self._uow_factory),
+            safety_audit_recorder=safety_audit_recorder,
+            safety_audit_event_projector=safety_audit_event_projector,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
             artifact_revision_projector=ArtifactRevisionProjector(
                 ledger_service=ArtifactLedgerService(uow_factory=self._uow_factory),
