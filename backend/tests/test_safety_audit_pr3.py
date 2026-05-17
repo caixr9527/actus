@@ -407,16 +407,27 @@ def test_build_safety_audit_scope_fills_empty_step_from_graph_authority() -> Non
     assert scope.current_step_id == "step-1"
 
 
-def test_build_safety_audit_scope_fails_closed_on_step_mismatch(caplog) -> None:
-    with caplog.at_level(logging.ERROR):
+def test_build_safety_audit_scope_rebases_stale_step_from_graph_authority(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
         scope = asyncio.run(_build_safety_audit_scope(
             state={"user_id": "user-1", "session_id": "session-1"},
             step=Step(id="step-1", description="读取 /workspace/a.txt"),
             access_control_service=_AccessControlService(_scope(step_id="other-step")),
         ))
 
+    assert scope is not None
+    assert scope.current_step_id == "step-1"
+    assert "safety_audit_scope_step_rebased_from_graph_state" in caplog.text
+
+
+def test_build_safety_audit_scope_still_fails_closed_without_identity() -> None:
+    scope = asyncio.run(_build_safety_audit_scope(
+        state={"user_id": "user-1", "session_id": "session-1"},
+        step=Step(id="", description="读取 /workspace/a.txt"),
+        access_control_service=_AccessControlService(_scope(step_id="other-step")),
+    ))
+
     assert scope is None
-    assert "safety_audit_scope_step_mismatch" in caplog.text
 
 
 class _OutputStream:

@@ -338,15 +338,14 @@ async def _build_safety_audit_scope(
     if scope_step_id and scope_step_id != step_id:
         log_runtime(
             logger,
-            logging.ERROR,
-            "safety_audit_scope_step_mismatch",
+            logging.WARNING,
+            "safety_audit_scope_step_rebased_from_graph_state",
             state=state,
             step_id=step_id,
             scope_step_id=scope_step_id,
-            reason_code="safety_audit_scope_step_mismatch",
+            reason_code="safety_audit_scope_step_rebased_from_graph_state",
         )
-        return None
     if scope_step_id != step_id:
-        # 只允许用 graph 当前权威 step 补齐空 scope；已有不同 step 必须在上方 fail closed。
+        # 权限归属仍由 AccessScopeResult 承担；当前执行 step 以 graph state 为权威。
         scope = scope.model_copy(update={"current_step_id": step_id})
     return scope
