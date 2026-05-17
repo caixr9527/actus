@@ -198,6 +198,30 @@ class SafetyAuditDataClassification(BaseModel):
     data_categories: list[str] = Field(default_factory=list)
 
 
+class SafetyAuditExternalCapabilityGovernanceDigest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    external_provider: str | None = None
+    manifest_ref: str | None = None
+    permission_claims: list[str] = Field(default_factory=list)
+    network_required: bool = False
+    filesystem_access: Literal["none", "read", "write", "delete", "overwrite", "read_write"] = "none"
+
+    @field_validator("external_provider", "manifest_ref")
+    @classmethod
+    def _optional_text_must_be_trimmed(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @field_validator("permission_claims")
+    @classmethod
+    def _permission_claims_must_be_normalized(cls, value: list[str]) -> list[str]:
+        normalized = sorted({str(item or "").strip().lower() for item in value if str(item or "").strip()})
+        return normalized
+
+
 class SafetyAuditRiskClassificationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -210,6 +234,7 @@ class SafetyAuditRiskClassificationInput(BaseModel):
     scope_result: str | None = None
     artifact_delivery_state: str | None = None
     external_provider: str | None = None
+    external_capability: SafetyAuditExternalCapabilityGovernanceDigest | None = None
 
 
 class SafetyAuditRiskClassificationResult(BaseModel):
@@ -271,6 +296,7 @@ class SafetyAuditRecord(BaseModel):
     related_fact_ids: list[str] = Field(default_factory=list)
     related_evidence_ids: list[str] = Field(default_factory=list)
     related_artifact_revisions: list[SafetyAuditRelatedArtifactRevisionRef] = Field(default_factory=list)
+    external_capability_governance: SafetyAuditExternalCapabilityGovernanceDigest | None = None
     profile_hash: str | None = None
     origin: DataOrigin = DataOrigin.SYSTEM_OPERATIONAL
     trust_level: DataTrustLevel = DataTrustLevel.SYSTEM_GENERATED
@@ -356,6 +382,7 @@ class SafetyAuditRecordCommand(BaseModel):
     data_classification: SafetyAuditDataClassification | None = None
     risk_input: SafetyAuditRiskClassificationInput | None = None
     safe_path_roots: list[str] = Field(default_factory=list)
+    external_capability_governance: SafetyAuditExternalCapabilityGovernanceDigest | None = None
 
 
 class NonToolSafetyAuditCommand(BaseModel):
@@ -378,6 +405,7 @@ class NonToolSafetyAuditCommand(BaseModel):
     reason_code: str
     artifact_delivery_state: str | None = None
     external_provider: str | None = None
+    external_capability: SafetyAuditExternalCapabilityGovernanceDigest | None = None
     related_artifact_revisions: list[SafetyAuditRelatedArtifactRevisionRef] = Field(default_factory=list)
     data_classification: SafetyAuditDataClassification | None = None
     safe_path_roots: list[str] = Field(default_factory=list)
@@ -912,6 +940,7 @@ class SafetyAuditRiskClassifier:
         capability_id = str(input_data.capability_id or "").lower()
         action_kind = str(input_data.action_kind or "").lower()
         scope_result = str(input_data.scope_result or "").strip()
+        external_capability = input_data.external_capability
 
         if reason_code == "constraint_engine_error":
             return _classification(SafetyAuditRiskLevel.CRITICAL, "constraint_engine_error")
@@ -919,8 +948,16 @@ class SafetyAuditRiskClassifier:
             return _classification(SafetyAuditRiskLevel.CRITICAL, "critical_scope_result")
         if _has_secret_or_cross_scope_reason(reason_code):
             return _classification(SafetyAuditRiskLevel.CRITICAL, "secret_or_cross_scope_reason")
+        if external_capability is not None and _has_sensitive_permission_claims(external_capability.permission_claims):
+            return _classification(SafetyAuditRiskLevel.CRITICAL, "sensitive_external_permission_claim")
         if _has_unknown_identity(function_name, tool_family, capability_id, action_kind):
             return _classification(SafetyAuditRiskLevel.HIGH, "unknown_identity")
+        if _is_external_capability_high_risk(
+                tool_family=tool_family,
+                external_provider=input_data.external_provider,
+                external_capability=external_capability,
+        ):
+            return _classification(SafetyAuditRiskLevel.HIGH, "external_capability_high_risk")
         if _is_high_risk_action(function_name, tool_family, capability_id, action_kind):
             return _classification(SafetyAuditRiskLevel.HIGH, "high_risk_action")
         if input_data.decision == SafetyAuditDecision.REQUIRE_CONFIRMATION:
@@ -960,6 +997,41 @@ def _contains_any(value: str, tokens: set[str]) -> bool:
     return any(token in normalized for token in tokens)
 
 
+def _has_sensitive_permission_claims(permission_claims: list[str]) -> bool:
+    sensitive_tokens = {
+        "user_data_export",
+        "user data export",
+        "secret",
+        "credential",
+        "external_send",
+        "external send",
+        "remote_execution",
+        "remote execution",
+    }
+    return any(_contains_any(str(claim or ""), sensitive_tokens) for claim in permission_claims)
+
+
+def _is_external_capability_high_risk(
+        *,
+        tool_family: str,
+        external_provider: str | None,
+        external_capability: SafetyAuditExternalCapabilityGovernanceDigest | None,
+) -> bool:
+    if tool_family in {"mcp", "a2a"}:
+        return True
+    if str(external_provider or "").strip():
+        return True
+    if external_capability is None:
+        return False
+    if str(external_capability.external_provider or "").strip():
+        return True
+    if external_capability.network_required:
+        return True
+    if external_capability.filesystem_access in {"write", "delete", "overwrite", "read_write"}:
+        return True
+    return False
+
+
 def _has_unknown_identity(function_name: str, tool_family: str, capability_id: str, action_kind: str) -> bool:
     values = [function_name, tool_family, capability_id, action_kind]
     unknown_markers = {"unknown", "unsupported", "invalid"}
@@ -980,6 +1052,8 @@ def _is_high_risk_action(function_name: str, tool_family: str, capability_id: st
         "write_file",
         "replace_file",
         "external_api",
+        "mcp",
+        "a2a",
         "download",
         "preview",
         "skill_install",

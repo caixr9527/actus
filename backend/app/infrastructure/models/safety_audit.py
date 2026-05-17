@@ -123,6 +123,11 @@ class SafetyAuditRecordModel(Base):
                 "artifact_revisions": [
                     ref.model_dump(mode="json") for ref in record.related_artifact_revisions
                 ],
+                "external_capability_governance": (
+                    record.external_capability_governance.model_dump(mode="json")
+                    if record.external_capability_governance
+                    else None
+                ),
             },
             classification=record.classification.model_dump(mode="json") if record.classification else {},
             risk_classification_digest=(
@@ -171,6 +176,7 @@ class SafetyAuditRecordModel(Base):
                 "related_fact_ids": list(related_refs.get("fact_ids") or []),
                 "related_evidence_ids": list(related_refs.get("evidence_ids") or []),
                 "related_artifact_revisions": list(related_refs.get("artifact_revisions") or []),
+                "external_capability_governance": related_refs.get("external_capability_governance") or None,
                 "profile_hash": self.profile_hash,
                 "origin": self.origin,
                 "trust_level": self.trust_level,

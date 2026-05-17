@@ -383,6 +383,7 @@ class SafetyAuditLedgerService(SafetyAuditRecorderPort, NonToolSafetyAuditRecord
             }),
             related_artifact_revisions=command.related_artifact_revisions,
             data_classification=command.data_classification,
+            external_capability_governance=command.external_capability,
             risk_input=SafetyAuditRiskClassificationInput(
                 decision=command.decision,
                 normalized_function_name=normalized_function_name,
@@ -392,6 +393,7 @@ class SafetyAuditLedgerService(SafetyAuditRecorderPort, NonToolSafetyAuditRecord
                 reason_code=command.reason_code,
                 artifact_delivery_state=command.artifact_delivery_state,
                 external_provider=command.external_provider,
+                external_capability=command.external_capability,
             ),
             safe_path_roots=command.safe_path_roots,
         )
@@ -447,6 +449,7 @@ class SafetyAuditLedgerService(SafetyAuditRecorderPort, NonToolSafetyAuditRecord
             related_evidence_ids=command.related_evidence_ids,
             related_artifact_revisions=command.related_artifact_revisions,
             profile_hash=command.profile_hash,
+            external_capability_governance=command.external_capability_governance,
             origin=classification.origin,
             trust_level=classification.trust_level,
             privacy_level=classification.privacy_level,
