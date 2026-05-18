@@ -7,6 +7,7 @@
 """
 from .app_config_repository import AppConfigRepository
 from .evidence_repository import EvidenceRepository
+from .feedback_repository import FeedbackRepository
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .long_term_memory_repository import LongTermMemoryRepository
@@ -25,6 +26,7 @@ from .workspace_repository import WorkspaceRepository
 __all__ = [
     "AppConfigRepository",
     "EvidenceRepository",
+    "FeedbackRepository",
     "SessionRepository",
     "FileRepository",
     "LLMModelConfigRepository",

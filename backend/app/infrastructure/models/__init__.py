@@ -7,6 +7,7 @@
 """
 from .base import Base
 from .evidence import EvidenceModel
+from .feedback import FeedbackRecordModel
 from .file import FileModel
 from .llm_model_config import LLMModelConfigModel
 from .long_term_memory import LongTermMemoryModel
@@ -27,6 +28,7 @@ from .workspace_artifact_revision import WorkspaceArtifactRevisionModel
 __all__ = [
     "Base",
     "EvidenceModel",
+    "FeedbackRecordModel",
     "SessionModel",
     "FileModel",
     "UserModel",

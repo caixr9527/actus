@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.domain.repositories import IUnitOfWork
 from .db_evidence_repository import DBEvidenceRepository
+from .db_feedback_repository import DBFeedbackRepository
 from .db_file_repository import DBFileRepository
 from .db_llm_model_config_repository import DBLLMModelConfigRepository
 from .db_long_term_memory_repository import DBLongTermMemoryRepository
@@ -66,6 +67,7 @@ class DBUnitOfWork(IUnitOfWork):
 
         # 初始化所有数据库仓库。
         self.evidence = DBEvidenceRepository(db_session=self.db_session)
+        self.feedback = DBFeedbackRepository(db_session=self.db_session)
         self.file = DBFileRepository(db_session=self.db_session)
         self.session = DBSessionRepository(db_session=self.db_session)
         self.user = DBUserRepository(db_session=self.db_session)

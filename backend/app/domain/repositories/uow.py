@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from typing import TypeVar
 
 from .evidence_repository import EvidenceRepository
+from .feedback_repository import FeedbackRepository
 from .file_repository import FileRepository
 from .llm_model_config_repository import LLMModelConfigRepository
 from .long_term_memory_repository import LongTermMemoryRepository
@@ -29,6 +30,7 @@ T = TypeVar("T", bound="IUnitOfWork")
 class IUnitOfWork(ABC):
     """Uow模式协议接口"""
     evidence: EvidenceRepository
+    feedback: FeedbackRepository
     file: FileRepository
     session: SessionRepository
     user: UserRepository
