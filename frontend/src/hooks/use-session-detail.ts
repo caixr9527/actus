@@ -33,8 +33,17 @@ import {
   advanceDisplayedTextStreams,
   syncDisplayedTextStreams,
 } from '@/lib/session-text-stream-playback'
-import type { ListModelItem, SessionDetail, SessionStatus, SSEEventData, SessionFile } from '@/lib/api/types'
+import type {
+  ListModelItem,
+  SessionDetail,
+  SessionStatus,
+  SSEEventData,
+  SessionFile,
+  SubmitFeedbackParams,
+} from '@/lib/api/types'
 import { useI18n } from '@/lib/i18n'
+import { getApiErrorMessage } from '@/lib/api'
+import { toast } from 'sonner'
 
 export type UseSessionDetailResult = {
   session: SessionDetail | null
@@ -45,6 +54,8 @@ export type UseSessionDetailResult = {
   loading: boolean
   modelsLoading: boolean
   modelUpdating: boolean
+  feedbackSubmitting: boolean
+  feedbackError: Error | null
   error: Error | null
   refresh: (options?: { resetRealtime?: boolean }) => Promise<void>
   refreshFiles: () => Promise<void>
@@ -52,6 +63,7 @@ export type UseSessionDetailResult = {
   sendMessage: (message: string, attachmentIds: string[]) => Promise<void>
   resumeWaitingRun: (resumeValue: unknown) => Promise<void>
   continueCancelledRun: () => Promise<void>
+  submitFeedback: (params: SubmitFeedbackParams) => Promise<void>
   streaming: boolean
   plannerTextStream: ActiveTextStream | null
   finalTextStream: ActiveTextStream | null
@@ -129,6 +141,8 @@ export function useSessionDetail(
   const [loading, setLoading] = useState(true)
   const [modelsLoading, setModelsLoading] = useState(true)
   const [modelUpdating, setModelUpdating] = useState(false)
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [feedbackError, setFeedbackError] = useState<Error | null>(null)
   const [error, setError] = useState<Error | null>(null)
   const [streaming, setStreaming] = useState(false)
   const [textStreams, setTextStreams] = useState<TextStreamState>({})
@@ -785,6 +799,27 @@ export function useSessionDetail(
     [enabled, sessionId],
   )
 
+  const submitFeedback = useCallback(
+    async (params: SubmitFeedbackParams) => {
+      if (!sessionId || !enabled) return
+      setFeedbackSubmitting(true)
+      setFeedbackError(null)
+      try {
+        await sessionApi.submitFeedback(sessionId, params)
+        await refresh()
+        toast.success(t('sessionDetail.feedbackSuccess'))
+      } catch (error) {
+        const nextError = error instanceof Error ? error : new Error(String(error))
+        setFeedbackError(nextError)
+        toast.error(getApiErrorMessage(error, 'sessionDetail.feedbackFailed', t))
+        throw error
+      } finally {
+        setFeedbackSubmitting(false)
+      }
+    },
+    [enabled, refresh, sessionId, t],
+  )
+
   return {
     session,
     files,
@@ -794,6 +829,8 @@ export function useSessionDetail(
     loading,
     modelsLoading,
     modelUpdating,
+    feedbackSubmitting,
+    feedbackError,
     error,
     refresh,
     refreshFiles,
@@ -801,6 +838,7 @@ export function useSessionDetail(
     sendMessage,
     resumeWaitingRun,
     continueCancelledRun,
+    submitFeedback,
     streaming,
     plannerTextStream,
     finalTextStream,

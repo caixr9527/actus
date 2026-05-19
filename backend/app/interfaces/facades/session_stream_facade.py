@@ -155,6 +155,11 @@ class SessionStreamFacade:
                     user_id=user_id,
                     message=request.message,
                     attachments=request.attachments,
+                    feedback_intent=(
+                        request.feedback_intent.model_dump(mode="json")
+                        if request.feedback_intent is not None
+                        else None
+                    ),
                     resume=request.resume.value if request.resume is not None else None,
                     command=request.command.model_dump(mode="json") if request.command is not None else None,
                     latest_event_id=live_attach_after_event_id,

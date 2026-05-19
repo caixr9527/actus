@@ -2,19 +2,21 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
-import { Ban, CheckCircle2, ChevronDown, Clock3, Languages, Loader2, XCircle } from 'lucide-react'
+import { Ban, CheckCircle2, ChevronDown, Clock3, Languages, Loader2, PencilLine, ThumbsDown, ThumbsUp, XCircle } from 'lucide-react'
 import { ManusIcon } from '@/components/manus-icon'
 import { ToolUse } from '@/components/tool-use'
 import { AttachmentsMessage } from '@/components/attachments-message'
 import { MarkdownContent } from '@/components/markdown-content'
+import { Button } from '@/components/ui/button'
 import { useI18n } from '@/lib/i18n'
 import { getUserMessageTextClassName, normalizeUserMessageText } from '@/lib/user-message-text'
 import type { AppLocale } from '@/lib/i18n'
-import type { StepEvent, ToolEvent } from '@/lib/api/types'
+import type { StepEvent, SubmitFeedbackParams, ToolEvent } from '@/lib/api/types'
 import { type TimelineItem, type AttachmentFile, getToolTimeLabel } from '@/lib/session-events'
 import { resolveStepDetail } from '@/lib/run-timeline'
 import { resolveStepProcessSectionOrder } from '@/lib/step-process-display'
 import { resolveAssistantTurnSummary } from '@/lib/assistant-turn-summary'
+import { buildFinalMessageFeedbackTarget } from '@/lib/feedback-targets'
 import {
   getInitialAssistantTurnExpandedState,
   resolveAssistantTurnExpandedState,
@@ -26,6 +28,7 @@ import type { AssistantTurnItem, ConversationItem } from '@/lib/assistant-turns'
 export interface ChatMessageProps {
   className?: string
   item: ConversationItem
+  onSubmitFeedback?: (params: SubmitFeedbackParams) => Promise<void>
   onViewAllFiles?: () => void
   onFileClick?: (file: AttachmentFile) => void
   onToolClick?: (tool: ToolEvent) => void
@@ -76,6 +79,7 @@ function ToolRow({
 export function ChatMessage({
   className,
   item,
+  onSubmitFeedback,
   onViewAllFiles,
   onFileClick,
   onToolClick,
@@ -97,18 +101,25 @@ export function ChatMessage({
   }
 
   if (item.kind === 'assistant') {
-    return <AssistantMessageBlock item={item} className={className} />
+    return (
+      <AssistantMessageBlock
+        item={item}
+        className={className}
+        onSubmitFeedback={onSubmitFeedback}
+      />
+    )
   }
 
   if (item.kind === 'assistant_turn') {
     return (
-      <AssistantTurnBlock
-        item={item}
-        className={className}
-        onViewAllFiles={onViewAllFiles}
-        onFileClick={onFileClick}
-        onToolClick={onToolClick}
-        locale={locale}
+        <AssistantTurnBlock
+          item={item}
+          className={className}
+          onSubmitFeedback={onSubmitFeedback}
+          onViewAllFiles={onViewAllFiles}
+          onFileClick={onFileClick}
+          onToolClick={onToolClick}
+          locale={locale}
       />
     )
   }
@@ -186,9 +197,11 @@ function UserMessageText({ message }: { message?: string | null }) {
 function AssistantMessageBlock({
   item,
   className,
+  onSubmitFeedback,
 }: {
   item: Extract<TimelineItem, { kind: 'assistant' }>
   className?: string
+  onSubmitFeedback?: (params: SubmitFeedbackParams) => Promise<void>
 }) {
   return (
     <div
@@ -200,9 +213,8 @@ function AssistantMessageBlock({
           <ManusIcon />
         </div>
       </div>
-      <div className="max-w-none p-0 m-0 text-gray-700">
-        <MarkdownContent content={item.data.message ?? ''} />
-      </div>
+      <AssistantFinalMessageContent item={item} />
+      <AssistantFinalFeedbackActions item={item} onSubmitFeedback={onSubmitFeedback} />
     </div>
   )
 }
@@ -222,6 +234,7 @@ function getAssistantTurnSummary(item: AssistantTurnItem, t: ReturnType<typeof u
 function AssistantTurnBlock({
   item,
   className,
+  onSubmitFeedback,
   onViewAllFiles,
   onFileClick,
   onToolClick,
@@ -229,6 +242,7 @@ function AssistantTurnBlock({
 }: {
   item: AssistantTurnItem
   className?: string
+  onSubmitFeedback?: (params: SubmitFeedbackParams) => Promise<void>
   onViewAllFiles?: () => void
   onFileClick?: (file: AttachmentFile) => void
   onToolClick?: (tool: ToolEvent) => void
@@ -284,7 +298,10 @@ function AssistantTurnBlock({
       )}
 
       {item.finalMessage && (
-        <AssistantTurnFinalMessage item={item.finalMessage} className={hasProcess && !expanded ? 'pt-4' : undefined} />
+        <AssistantFinalMessageContent
+          item={item.finalMessage}
+          className={hasProcess && !expanded ? 'pt-4' : undefined}
+        />
       )}
 
       {item.attachments.map((attachment) => (
@@ -296,11 +313,18 @@ function AssistantTurnBlock({
           onFileClick={onFileClick}
         />
       ))}
+
+      {item.finalMessage && (
+        <AssistantFinalFeedbackActions
+          item={item.finalMessage}
+          onSubmitFeedback={onSubmitFeedback}
+        />
+      )}
     </div>
   )
 }
 
-function AssistantTurnFinalMessage({
+function AssistantFinalMessageContent({
   item,
   className,
 }: {
@@ -311,6 +335,95 @@ function AssistantTurnFinalMessage({
     <div className={cn('max-w-none p-0 m-0 text-gray-700', className)}>
       <MarkdownContent content={item.data.message ?? ''} />
     </div>
+  )
+}
+
+function AssistantFinalFeedbackActions({
+  item,
+  onSubmitFeedback,
+}: {
+  item: Extract<TimelineItem, { kind: 'assistant' }>
+  onSubmitFeedback?: (params: SubmitFeedbackParams) => Promise<void>
+}) {
+  const { t } = useI18n()
+  const [pendingAction, setPendingAction] = useState<string | null>(null)
+  const finalTarget = buildFinalMessageFeedbackTarget(item.data)
+
+  const submitFinalFeedback = async (
+    intentKind: SubmitFeedbackParams['intent_kind'],
+    reasonCode: SubmitFeedbackParams['reason_code'],
+  ) => {
+    if (!onSubmitFeedback || !finalTarget) return
+    const actionKey = `final:${intentKind}`
+    setPendingAction(actionKey)
+    try {
+      await onSubmitFeedback({
+        source_action: 'final_satisfaction',
+        intent_kind: intentKind,
+        target_ref: finalTarget,
+        reason_code: reasonCode,
+      })
+    } finally {
+      setPendingAction(null)
+    }
+  }
+
+  if (!onSubmitFeedback || !finalTarget) return null
+
+  return (
+    <div
+      className="mt-2 flex items-center gap-3"
+      aria-label="final message feedback"
+    >
+      <FeedbackIconButton
+        icon={<ThumbsUp className="size-3.5" />}
+        label={t('feedback.finalSatisfied')}
+        disabled={pendingAction !== null}
+        onClick={() => void submitFinalFeedback('satisfaction', 'user_reported_satisfaction')}
+      />
+      <FeedbackIconButton
+        icon={<ThumbsDown className="size-3.5" />}
+        label={t('feedback.finalDissatisfied')}
+        disabled={pendingAction !== null}
+        onClick={() => void submitFinalFeedback('dissatisfaction', 'user_reported_dissatisfaction')}
+      />
+      <FeedbackIconButton
+        icon={<PencilLine className="size-3.5" />}
+        label={t('feedback.finalCorrection')}
+        disabled={pendingAction !== null}
+        onClick={() => void submitFinalFeedback('correction', 'user_corrected_requirement')}
+      />
+    </div>
+  )
+}
+
+function FeedbackIconButton({
+  icon,
+  label,
+  disabled,
+  onClick,
+}: {
+  icon: React.ReactNode
+  label: string
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        'group/feedback relative h-7 w-7 rounded-none bg-transparent p-0 text-stone-400 shadow-none',
+        'hover:bg-transparent hover:text-stone-700 focus-visible:bg-transparent',
+      )}
+    >
+      {icon}
+    </Button>
   )
 }
 

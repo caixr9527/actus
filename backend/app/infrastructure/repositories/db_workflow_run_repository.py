@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import (
@@ -17,6 +18,7 @@ from app.domain.models import (
     ErrorEvent,
     Event,
     ExecutionStatus,
+    FeedbackInputEvent,
     Plan,
     PlanEvent,
     StepEvent,
@@ -341,7 +343,12 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             event_payload=event.model_dump(mode="json"),
             created_at=event.created_at,
         )
-        self.db_session.add(event_record)
+        try:
+            async with self.db_session.begin_nested():
+                self.db_session.add(event_record)
+                await self.db_session.flush()
+        except IntegrityError:
+            return False
         return True
 
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
@@ -422,6 +429,34 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         result = await self.db_session.execute(stmt)
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
+
+    async def get_event_record_by_type_and_hash(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            run_id: str,
+            event_type: str,
+            input_hash: str,
+    ) -> Optional[WorkflowRunEventRecord]:
+        stmt = select(WorkflowRunEventModel).where(
+            WorkflowRunEventModel.user_id == user_id,
+            WorkflowRunEventModel.session_id == session_id,
+            WorkflowRunEventModel.run_id == run_id,
+            WorkflowRunEventModel.event_type == event_type,
+            WorkflowRunEventModel.event_payload[("payload", "input_hash")].astext == input_hash,
+        ).order_by(
+            WorkflowRunEventModel.created_at.desc(),
+            WorkflowRunEventModel.id.desc(),
+        ).limit(1)
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record is None:
+            return None
+        domain_record = record.to_domain()
+        if not isinstance(domain_record.event_payload, FeedbackInputEvent):
+            return None
+        return domain_record
 
     async def list_events_by_session(self, session_id: str) -> List[Event]:
         records = await self.list_event_records_by_session(session_id=session_id)

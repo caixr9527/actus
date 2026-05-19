@@ -10,11 +10,12 @@ from app.application.service.feedback_ledger_service import (
     FeedbackScopeValidationError,
 )
 from app.application.service.feedback_snapshot_builder import FeedbackSnapshotBuilder, FeedbackSnapshotPolicy
-from app.domain.models import ArtifactEvent, MessageEvent, ToolEvent, WaitEvent, WorkflowRunEventRecord
+from app.domain.models import ArtifactEvent, FeedbackInputEvent, MessageEvent, ToolEvent, WaitEvent, WorkflowRunEventRecord
 from app.domain.models.feedback import (
     FeedbackCategory,
     FeedbackClassificationResult,
     FeedbackDataOrigin,
+    FeedbackInputEventPayloadResult,
     FeedbackGapKind,
     FeedbackGapResult,
     FeedbackKind,
@@ -632,7 +633,25 @@ def _event_record(
     elif event_type == "wait":
         payload = WaitEvent(id=event_id, interrupt_id="interrupt-1", payload={"type": "confirm"})
     elif event_type == "feedback_input":
-        payload = MessageEvent(id=event_id, role="user", message="feedback input")
+        target_ref = _target_ref(target_type=FeedbackTargetType.MESSAGE_EVENT, target_id="evt-target-1")
+        payload = FeedbackInputEvent(
+            id=event_id,
+            payload=FeedbackInputEventPayloadResult(
+                source_action="final_satisfaction",
+                intent_kind=UserFeedbackIntentKind.DISSATISFACTION,
+                target_ref=target_ref,
+                reason_code=FeedbackReasonCode.USER_REPORTED_DISSATISFACTION,
+                sanitized_summary="用户反馈上一轮答案不满意",
+                input_hash=f"feedback_input:{event_id}",
+                runtime_metadata={
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "workspace_id": "workspace-1",
+                    "source_run_id": run_id,
+                    "target_run_id": target_ref.target_run_id,
+                },
+            ),
+        )
     elif event_type == "artifact":
         payload = ArtifactEvent(
             id=event_id,
@@ -946,6 +965,155 @@ def test_build_snapshot_should_merge_runtime_gaps_and_keep_top_level_current_run
         assert "fb-current" in snapshot.included_feedback_ids
         assert "fb-old" not in snapshot.included_feedback_ids
         assert any(ref.feedback_id == "fb-old" and ref.excluded_by.value == "ttl" for ref in snapshot.excluded_feedback_refs)
+
+    asyncio.run(_run())
+
+
+def test_build_session_snapshot_should_include_continue_cancelled_targeting_old_run_wait_event() -> None:
+    async def _run() -> None:
+        record = _record(
+            feedback_id="fb-continue-cancelled",
+            scope_kind=FeedbackScopeKind.SESSION,
+            scope_id="session-1",
+            run_id="run-2",
+            source_run_id="run-2",
+            target_run_id="run-1",
+            category=FeedbackCategory.CONTINUE_CANCELLED,
+            reason_code=FeedbackReasonCode.USER_CONTINUED_CANCELLED,
+            severity=FeedbackSeverity.INFO,
+            source_kind=FeedbackSourceKind.FEEDBACK_INPUT,
+            source_event_id="evt-feedback-input-continue",
+            target_type=FeedbackTargetType.WAIT_EVENT,
+            target_id="evt-wait-old",
+            decay_policy="session_window",
+        )
+        feedback_repo = _FeedbackRepo(records=[record])
+        service = _service(uow=_UoW(feedback_repo=feedback_repo, workflow_run_repo=_WorkflowRunRepo()))
+
+        snapshot = await service.build_snapshot(
+            access_scope=_access_scope(run_id="run-2"),
+            stage=FeedbackSnapshotStage.FUTURE_REVIEW,
+            feedback_scope_kind=FeedbackScopeKind.SESSION,
+        )
+
+        assert snapshot.scope.current_run_id_at_snapshot_time == "run-2"
+        assert snapshot.source_run_id == "run-2"
+        assert snapshot.included_feedback_ids == ["fb-continue-cancelled"]
+        assert snapshot.open_feedback_items[0].source_run_id == "run-2"
+        assert snapshot.open_feedback_items[0].target_run_id == "run-1"
+        assert snapshot.open_feedback_items[0].target_ref.target_id == "evt-wait-old"
+
+    asyncio.run(_run())
+
+
+def test_record_continue_cancelled_run_scope_should_be_rejected_for_cross_run_target() -> None:
+    async def _run() -> None:
+        workflow_repo = _WorkflowRunRepo(
+            {
+                "evt-feedback-input-continue": _event_record(
+                    event_id="evt-feedback-input-continue",
+                    run_id="run-2",
+                    event_type="feedback_input",
+                ),
+                "evt-wait-old": _event_record(
+                    event_id="evt-wait-old",
+                    run_id="run-1",
+                    event_type="wait",
+                ),
+            }
+        )
+        service = _service(uow=_UoW(feedback_repo=_FeedbackRepo(), workflow_run_repo=workflow_repo))
+        command = _user_command(
+            access_scope=_access_scope(run_id="run-2"),
+            source_ref=_source_ref(
+                source_kind=FeedbackSourceKind.FEEDBACK_INPUT,
+                source_event_id="evt-feedback-input-continue",
+                source_run_id="run-2",
+                source_record_refs=[
+                    {"event_id": "evt-feedback-input-continue", "run_id": "run-2"},
+                    {"event_id": "evt-wait-old", "run_id": "run-1"},
+                ],
+            ),
+            target_ref=_target_ref(
+                target_type=FeedbackTargetType.WAIT_EVENT,
+                target_id="evt-wait-old",
+                target_run_id="run-1",
+            ),
+            category=FeedbackCategory.CONTINUE_CANCELLED,
+            reason_code=FeedbackReasonCode.USER_CONTINUED_CANCELLED,
+            summary_hint="用户继续执行已取消任务",
+        ).model_copy(
+            update={
+                "requested_feedback_scope_kind": FeedbackScopeKind.RUN,
+                "requested_scope_id": "run-2",
+                "current_run_id_at_record_time": "run-2",
+                "step_id": None,
+                "intent": UserFeedbackIntent(
+                    intent_kind=UserFeedbackIntentKind.CONTINUE_CANCELLED,
+                    target_ref=_target_ref(
+                        target_type=FeedbackTargetType.WAIT_EVENT,
+                        target_id="evt-wait-old",
+                        target_run_id="run-1",
+                    ),
+                    reason_code=FeedbackReasonCode.USER_CONTINUED_CANCELLED,
+                    summary_hint="用户继续执行已取消任务",
+                ),
+            }
+        )
+
+        try:
+            await service.record_user_feedback(command)
+        except FeedbackRequiredRecordError:
+            return
+        raise AssertionError("expected FeedbackRequiredRecordError")
+
+    asyncio.run(_run())
+
+
+def test_record_continue_cancelled_should_reject_forged_message_source() -> None:
+    async def _run() -> None:
+        workflow_repo = _WorkflowRunRepo(
+            {
+                "evt-source-1": _event_record(event_id="evt-source-1", event_type="message"),
+                "evt-wait-old": _event_record(event_id="evt-wait-old", event_type="wait"),
+            }
+        )
+        feedback_repo = _FeedbackRepo()
+        service = _service(uow=_UoW(feedback_repo=feedback_repo, workflow_run_repo=workflow_repo))
+        target_ref = _target_ref(
+            target_type=FeedbackTargetType.WAIT_EVENT,
+            target_id="evt-wait-old",
+            target_run_id="run-1",
+        )
+        command = _user_command(
+            source_ref=_source_ref(
+                source_kind=FeedbackSourceKind.MESSAGE_EVENT,
+                source_event_id="evt-source-1",
+                source_run_id="run-1",
+            ),
+            target_ref=target_ref,
+            category=FeedbackCategory.CONTINUE_CANCELLED,
+            reason_code=FeedbackReasonCode.USER_CONTINUED_CANCELLED,
+            summary_hint="用户继续执行已取消任务",
+        ).model_copy(
+            update={
+                "requested_feedback_scope_kind": FeedbackScopeKind.SESSION,
+                "requested_scope_id": "session-1",
+                "intent": UserFeedbackIntent(
+                    intent_kind=UserFeedbackIntentKind.CONTINUE_CANCELLED,
+                    target_ref=target_ref,
+                    reason_code=FeedbackReasonCode.USER_CONTINUED_CANCELLED,
+                    summary_hint="用户继续执行已取消任务",
+                ),
+            }
+        )
+
+        try:
+            await service.record_user_feedback(command)
+        except FeedbackRequiredRecordError:
+            assert feedback_repo.saved == []
+            return
+        raise AssertionError("expected FeedbackRequiredRecordError")
 
     asyncio.run(_run())
 

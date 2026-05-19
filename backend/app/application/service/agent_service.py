@@ -20,6 +20,7 @@ from app.application.service.evidence_fact_assembler import EvidenceFactAssemble
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
+from app.application.service.feedback_ledger_service import FeedbackRequiredRecordError
 from app.application.service.projecting_safety_audit_recorder import ProjectingSafetyAuditRecorder
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.safety_audit_event_projector import SafetyAuditEventProjector
@@ -33,6 +34,7 @@ from app.application.service.sandbox_fact_event_projector import SandboxFactEven
 from app.application.service.sandbox_fact_projection_context_builder import SandboxFactProjectionContextBuilder
 from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
 from app.application.service.sandbox_capability_profile_service import SandboxCapabilityProfileService
+from app.application.service.user_feedback_ingress_service import UserFeedbackIngressService
 from app.application.service.runtime_state_coordinator import RuntimeStateCoordinator
 from app.application.service.data_retention_policy_service import DataRetentionPolicyService
 from app.application.errors import error_keys
@@ -98,6 +100,7 @@ class AgentService:
             graph_runtime: Optional[GraphRuntime] = None,
             access_control_service: RuntimeAccessControlService | None = None,
             document_input_preflight_policy: DocumentInputPreflightPolicy | None = None,
+            user_feedback_ingress_service: UserFeedbackIngressService | None = None,
     ) -> None:
         self._sandbox_cls = sandbox_cls
         self._task_cls = task_cls
@@ -119,6 +122,7 @@ class AgentService:
         self._access_control_service = access_control_service or RuntimeAccessControlService(
             uow_factory=self._uow_factory,
         )
+        self._user_feedback_ingress_service = user_feedback_ingress_service
         self._sandbox_capability_profile_service = SandboxCapabilityProfileService(
             uow_factory=self._uow_factory,
             sandbox_cls=self._sandbox_cls,
@@ -164,6 +168,9 @@ class AgentService:
             access_control_service = RuntimeAccessControlService(uow_factory=self._uow_factory)
             self._access_control_service = access_control_service
         return access_control_service
+
+    def _get_user_feedback_ingress_service(self) -> UserFeedbackIngressService | None:
+        return getattr(self, "_user_feedback_ingress_service", None)
 
     async def _load_and_validate_message_attachments(
             self,
@@ -501,6 +508,45 @@ class AgentService:
             error_params={"session_id": session.id},
         )
 
+    async def _load_continue_cancelled_wait_event(self, *, session: Session, user_id: str):
+        old_run_id = str(session.current_run_id or "").strip()
+        if not old_run_id:
+            raise BadRequestError(
+                msg="当前已取消任务缺少旧运行记录，无法继续",
+                error_key=error_keys.SESSION_CANCELLED_CONTINUE_UNAVAILABLE,
+                error_params={"session_id": session.id},
+            )
+        async with self._uow_factory() as uow:
+            old_run = await uow.workflow_run.get_by_id_for_user_session(
+                run_id=old_run_id,
+                user_id=user_id,
+                session_id=session.id,
+            )
+            if old_run is None:
+                raise BadRequestError(
+                    msg="当前已取消任务的旧运行不属于当前会话，无法继续",
+                    error_key=error_keys.SESSION_CANCELLED_CONTINUE_UNAVAILABLE,
+                    error_params={"session_id": session.id},
+                )
+            latest_wait_event = await uow.workflow_run.get_latest_event_record_by_session(
+                session_id=session.id,
+                event_type="wait",
+                run_id=old_run_id,
+            )
+        if latest_wait_event is None:
+            raise BadRequestError(
+                msg="当前已取消任务缺少可追溯的等待事件，无法继续",
+                error_key=error_keys.SESSION_CANCELLED_CONTINUE_UNAVAILABLE,
+                error_params={"session_id": session.id},
+            )
+        if latest_wait_event.run_id != old_run_id or latest_wait_event.event_type != "wait":
+            raise BadRequestError(
+                msg="当前已取消任务的等待事件与旧运行不一致，无法继续",
+                error_key=error_keys.SESSION_CANCELLED_CONTINUE_UNAVAILABLE,
+                error_params={"session_id": session.id},
+            )
+        return latest_wait_event
+
     @staticmethod
     def _reject_unresolved_runtime_conflict(*, session: Session, reconcile_result: Any) -> None:
         warnings = set(getattr(reconcile_result, "warnings", []) or [])
@@ -524,6 +570,7 @@ class AgentService:
             user_id: str,
             message: Optional[str] = None,
             attachments: Optional[List[str]] = None,
+            feedback_intent: Optional[dict[str, Any]] = None,
             resume: Any = None,
             command: Optional[dict[str, Any]] = None,
             latest_event_id: Optional[str] = None,
@@ -574,6 +621,7 @@ class AgentService:
             is_resume_request = resume is not None
             is_message_request = bool(str(message or "").strip())
             is_continue_cancelled_request = self._is_continue_cancelled_request(command)
+            continue_cancelled_wait_event = None
 
             if session.status == SessionStatus.WAITING and is_message_request:
                 raise BadRequestError(
@@ -596,6 +644,10 @@ class AgentService:
                 )
             if is_continue_cancelled_request:
                 self._ensure_continue_cancelled_available(session)
+                continue_cancelled_wait_event = await self._load_continue_cancelled_wait_event(
+                    session=session,
+                    user_id=user_id,
+                )
 
             # 处理用户发送的消息
             if is_message_request:
@@ -660,6 +712,22 @@ class AgentService:
                         logger.error(f"会话{session_id}输入流补偿删除失败: {compensate_err}")
                     raise
 
+                if feedback_intent is not None:
+                    feedback_ingress_service = self._get_user_feedback_ingress_service()
+                    if feedback_ingress_service is None:
+                        raise FeedbackRequiredRecordError("UserFeedbackIngressService 未注入")
+                    access_scope = await self._get_access_control_service().resolve_session_scope(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    capture_result = feedback_ingress_service.capture_feedback_payload(feedback_intent)
+                    if capture_result.captured:
+                        await feedback_ingress_service.record_feedback_from_message_event(
+                            access_scope=access_scope,
+                            message_event=message_event,
+                            capture_result=capture_result,
+                        )
+
                 yield message_event
 
                 # 启动任务执行
@@ -695,6 +763,26 @@ class AgentService:
                         logger.error(f"会话{session_id}恢复输入流补偿删除失败: {compensate_err}")
                     raise
 
+                feedback_ingress_service = self._get_user_feedback_ingress_service()
+                if feedback_ingress_service is not None:
+                    access_scope = await self._get_access_control_service().resolve_session_scope(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    async with self._uow_factory() as uow:
+                        latest_wait_event = await uow.workflow_run.get_latest_event_record_by_session(
+                            session_id=session_id,
+                            event_type="wait",
+                            run_id=str(access_scope.run_id) if access_scope.run_id else None,
+                        )
+                    if latest_wait_event is not None:
+                        await feedback_ingress_service.record_feedback_from_wait_resume(
+                            access_scope=access_scope,
+                            wait_event_id=latest_wait_event.event_id,
+                            wait_payload=inspection.pending_interrupt,
+                            resume_value=resume,
+                        )
+
                 await task.invoke()
                 logger.info("会话%s, 已写入恢复请求并启动执行", session_id)
             elif is_continue_cancelled_request:
@@ -724,6 +812,18 @@ class AgentService:
                     except Exception as compensate_err:
                         logger.error(f"会话{session_id}继续取消任务输入流补偿删除失败: {compensate_err}")
                     raise
+
+                feedback_ingress_service = self._get_user_feedback_ingress_service()
+                if feedback_ingress_service is not None and continue_cancelled_wait_event is not None:
+                    access_scope = await self._get_access_control_service().resolve_session_scope(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    await feedback_ingress_service.record_continue_cancelled_feedback(
+                        access_scope=access_scope,
+                        old_wait_event_id=continue_cancelled_wait_event.event_id,
+                        old_cancelled_run_id=continue_cancelled_wait_event.run_id,
+                    )
 
                 await task.invoke()
                 logger.info("会话%s, 已写入继续已取消任务命令并启动执行", session_id)
@@ -829,7 +929,7 @@ class AgentService:
                     logger.warning(f"会话[{session_id}]无法创建后台任务更新未读消息计数")
 
     async def stop_session(self, session_id: str, user_id: str) -> None:
-        await self._get_access_control_service().assert_session_access(
+        access_scope = await self._get_access_control_service().assert_session_access(
             user_id=user_id,
             session_id=session_id,
             action=DataAccessAction.UPDATE,
@@ -852,13 +952,16 @@ class AgentService:
             # 避免前端 refresh 时只看到 session.cancelled、却看不到 step/plan.cancelled。
             cancelled = await runtime.cancel_task(session=session)
             if cancelled:
+                await self._record_cancel_feedback_if_configured(access_scope=access_scope)
                 return
         else:
             task = await self._get_task(session)
             if task and await task.cancel():
+                await self._record_cancel_feedback_if_configured(access_scope=access_scope)
                 return
 
         await self._persist_cancelled_session_state(session_id=session_id)
+        await self._record_cancel_feedback_if_configured(access_scope=access_scope)
 
     async def _persist_cancelled_session_state(self, session_id: str) -> None:
         """在没有活跃 task 实例时，通过 coordinator 收敛 cancelled 状态。"""
@@ -877,3 +980,17 @@ class AgentService:
             # 兼容历史测试中 object.__new__ 未注入 GraphRuntime 的构造方式。
             await self._task_cls.destroy()
         logger.info("会话服务已关闭")
+
+    async def _record_cancel_feedback_if_configured(self, *, access_scope) -> None:
+        feedback_ingress_service = self._get_user_feedback_ingress_service()
+        if feedback_ingress_service is None:
+            return
+        try:
+            await feedback_ingress_service.record_cancel_feedback(access_scope=access_scope)
+        except Exception as exc:
+            logger.warning(
+                "feedback_cancel_record_failed session_id=%s run_id=%s detail=%s",
+                getattr(access_scope, "session_id", None),
+                getattr(access_scope, "run_id", None),
+                exc,
+            )

@@ -15,8 +15,10 @@ from starlette.datastructures import State
 
 from app.application.service.agent_service import AgentService
 from app.application.service.artifact_delivery_service import ArtifactDeliveryService
+from app.application.service.artifact_revision_resolver import ArtifactRevisionResolver
 from app.application.service import (
     AppConfigService,
+    FeedbackLedgerService,
     FileService,
     ModelConfigService,
     ModelRuntimeResolver,
@@ -25,6 +27,7 @@ from app.application.service import (
     SandboxCapabilityProfileService,
     StatusService,
     AuthService,
+    UserFeedbackIngressService,
     UserService,
 )
 from app.interfaces.facades import SessionStreamFacade
@@ -217,6 +220,24 @@ def get_runtime_observation_service() -> RuntimeObservationService:
 
 
 @lru_cache()
+def get_feedback_ledger_service() -> FeedbackLedgerService:
+    """获取 Feedback Ledger 应用服务。"""
+    return FeedbackLedgerService(
+        uow_factory=get_uow,
+        artifact_revision_resolver=ArtifactRevisionResolver(uow_factory=get_uow),
+    )
+
+
+@lru_cache()
+def get_user_feedback_ingress_service() -> UserFeedbackIngressService:
+    """获取用户反馈入口编排服务。"""
+    return UserFeedbackIngressService(
+        uow_factory=get_uow,
+        feedback_service=get_feedback_ledger_service(),
+    )
+
+
+@lru_cache()
 def get_sandbox_capability_profile_service() -> SandboxCapabilityProfileService:
     """获取 Sandbox Capability Profile 应用服务。"""
     return SandboxCapabilityProfileService(
@@ -263,6 +284,7 @@ def build_agent_service(cos: Cos) -> AgentService:
         llm_factory=get_openai_llm_factory(),
         run_engine_factory=build_run_engine,
         access_control_service=get_runtime_access_control_service(),
+        user_feedback_ingress_service=get_user_feedback_ingress_service(),
     )
 
 

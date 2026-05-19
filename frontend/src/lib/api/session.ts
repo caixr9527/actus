@@ -8,6 +8,7 @@ import type {
   CreateSessionParams,
   ChatParams,
   SessionFile,
+  SubmitFeedbackParams,
   ViewFileParams,
   ViewShellParams,
   SSEEventHandler,
@@ -141,6 +142,13 @@ export const sessionApi = {
     params: UpdateSessionModelParams,
   ): Promise<UpdateSessionModelResponse> => {
     return post<UpdateSessionModelResponse>(`/sessions/${sessionId}/model`, params);
+  },
+
+  submitFeedback: (
+    sessionId: string,
+    params: SubmitFeedbackParams,
+  ): Promise<Record<string, unknown>> => {
+    return post<Record<string, unknown>>(`/sessions/${sessionId}/feedback`, params)
   },
 
   /**

@@ -4,8 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Image from 'next/image'
 import { fileApi, getApiErrorMessage } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import { Download, FileText, X } from 'lucide-react'
+import { CircleCheck, CircleOff, Download, FileText, MessageSquareWarning, X } from 'lucide-react'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { formatFileSize } from '@/lib/utils'
 import { toast } from 'sonner'
 import type { AttachmentFile } from '@/lib/session-events'
@@ -16,20 +17,24 @@ import {
   parseDelimitedPreview,
   resolveFilePreviewType,
 } from '@/lib/file-preview'
+import { buildArtifactRevisionFeedbackTarget } from '@/lib/feedback-targets'
+import type { SubmitFeedbackParams } from '@/lib/api/types'
 
 export interface FilePreviewPanelProps {
   /** 要预览的文件信息 */
   file: AttachmentFile | null
   /** 关闭回调 */
   onClose: () => void
+  onSubmitFeedback?: (params: SubmitFeedbackParams) => Promise<void>
 }
 
-export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
+export function FilePreviewPanel({ file, onClose, onSubmitFeedback }: FilePreviewPanelProps) {
   const { t } = useI18n()
   const [content, setContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const [pendingFeedback, setPendingFeedback] = useState<SubmitFeedbackParams['intent_kind'] | null>(null)
   const previewRequestIdRef = useRef(0)
   const previewAbortControllerRef = useRef<AbortController | null>(null)
   const previewObjectUrlRef = useRef<string | null>(null)
@@ -37,6 +42,9 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
   const fileType = file
     ? resolveFilePreviewType(file.extension, (file as { content_type?: string | null }).content_type)
     : { kind: 'unsupported' as const, binary: true }
+  const artifactFeedbackTarget = file?.artifactRevision
+    ? buildArtifactRevisionFeedbackTarget(file.artifactRevision)
+    : null
 
   const cleanupPreviewObjectUrl = useCallback(() => {
     if (!previewObjectUrlRef.current) return
@@ -112,6 +120,24 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
     }
   }, [file, t])
 
+  const handleArtifactFeedback = useCallback(async (
+    intentKind: SubmitFeedbackParams['intent_kind'],
+    reasonCode: SubmitFeedbackParams['reason_code'],
+  ) => {
+    if (!onSubmitFeedback || !artifactFeedbackTarget) return
+    setPendingFeedback(intentKind)
+    try {
+      await onSubmitFeedback({
+        source_action: 'artifact_satisfaction',
+        intent_kind: intentKind,
+        target_ref: artifactFeedbackTarget,
+        reason_code: reasonCode,
+      })
+    } finally {
+      setPendingFeedback(null)
+    }
+  }, [artifactFeedbackTarget, onSubmitFeedback])
+
   // 当文件改变时加载内容
   useEffect(() => {
     if (file && file.id) {
@@ -149,6 +175,55 @@ export function FilePreviewPanel({ file, onClose }: FilePreviewPanelProps) {
           </div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
+          {onSubmitFeedback && artifactFeedbackTarget && (
+            <>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={pendingFeedback !== null}
+                    onClick={() => void handleArtifactFeedback('satisfaction', 'user_reported_satisfaction')}
+                    aria-label={t('feedback.artifactUsable')}
+                    className="cursor-pointer text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700"
+                  >
+                    <CircleCheck size={17} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t('feedback.artifactUsable')}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={pendingFeedback !== null}
+                    onClick={() => void handleArtifactFeedback('dissatisfaction', 'user_reported_dissatisfaction')}
+                    aria-label={t('feedback.artifactUnusable')}
+                    className="cursor-pointer text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                  >
+                    <CircleOff size={17} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t('feedback.artifactUnusable')}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={pendingFeedback !== null}
+                    onClick={() => void handleArtifactFeedback('correction', 'user_corrected_requirement')}
+                    aria-label={t('feedback.artifactIncorrect')}
+                    className="cursor-pointer text-amber-600 hover:bg-amber-50 hover:text-amber-700"
+                  >
+                    <MessageSquareWarning size={17} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t('feedback.artifactIncorrect')}</TooltipContent>
+              </Tooltip>
+            </>
+          )}
           <Button
             variant="ghost"
             size="icon-sm"

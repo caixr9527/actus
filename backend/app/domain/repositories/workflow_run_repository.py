@@ -150,6 +150,18 @@ class WorkflowRunRepository(Protocol):
         """按 session/run/event_type 读取最新一条运行事件记录。"""
         ...
 
+    async def get_event_record_by_type_and_hash(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            run_id: str,
+            event_type: str,
+            input_hash: str,
+    ) -> Optional[WorkflowRunEventRecord]:
+        """按 user/session/run/event_type/input_hash 强过滤读取幂等 source event。"""
+        ...
+
     async def get_event_record_by_event_id(
             self,
             *,

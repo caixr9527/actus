@@ -17,7 +17,12 @@ from websockets import ConnectionClosed
 
 from app.application.errors import NotFoundError
 from app.application.errors import error_keys
-from app.application.service import SessionService, RuntimeObservationService
+from app.application.service import (
+    RuntimeAccessControlService,
+    RuntimeObservationService,
+    SessionService,
+    UserFeedbackIngressService,
+)
 from app.application.service.agent_service import AgentService
 from app.domain.models import User
 from app.interfaces.facades import SessionStreamFacade
@@ -35,7 +40,8 @@ from app.interfaces.schemas import (
     FileReadResponse,
     FileReadRequest,
     ConsoleRecord,
-    ShellReadResponse
+    ShellReadResponse,
+    SubmitFeedbackRequest,
 )
 from app.interfaces.schemas import Response
 from app.interfaces.dependencies.auth import get_current_user
@@ -44,6 +50,8 @@ from app.interfaces.dependencies.services import (
     get_agent_service,
     get_session_stream_facade,
     get_runtime_observation_service,
+    get_runtime_access_control_service,
+    get_user_feedback_ingress_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -276,6 +284,34 @@ async def stop_session(
     """根据传递的指定会话id停止对应任务会话"""
     await agent_service.stop_session(session_id=session_id, user_id=current_user.id)
     return Response.success(msg="停止任务会话成功")
+
+
+@router.post(
+    path="/{session_id}/feedback",
+    response_model=Response[dict],
+    summary="提交结构化用户反馈",
+    description="向指定会话提交 final message / artifact revision 等结构化用户反馈",
+)
+async def submit_feedback(
+        session_id: str,
+        request: SubmitFeedbackRequest,
+        current_user: User = Depends(get_current_user),
+        user_feedback_ingress_service: UserFeedbackIngressService = Depends(get_user_feedback_ingress_service),
+        access_control_service: RuntimeAccessControlService = Depends(get_runtime_access_control_service),
+) -> Response[dict]:
+    """提交结构化用户反馈。"""
+    access_scope = await access_control_service.resolve_session_scope(
+        user_id=current_user.id,
+        session_id=session_id,
+    )
+    result = await user_feedback_ingress_service.submit_explicit_feedback(
+        access_scope=access_scope,
+        request=request,
+    )
+    return Response.success(
+        msg="提交用户反馈成功",
+        data=result.model_dump(mode="json"),
+    )
 
 
 @router.get(

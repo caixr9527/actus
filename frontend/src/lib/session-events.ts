@@ -14,6 +14,7 @@ import type {
   StepEvent,
   ToolEvent,
   SessionFile,
+  SelectedArtifactRevision,
 } from "./api/types";
 import { visitSessionEvent } from "./session-event-adapter";
 import { getApiErrorMessageFromPayload } from "./api/error-i18n";
@@ -38,6 +39,7 @@ export type AttachmentFile = {
   extension: string;
   size: number;
   sizeLabel?: string;
+  artifactRevision?: SelectedArtifactRevision;
 };
 
 /** 从 SessionFile 转为 AttachmentFile */
@@ -50,16 +52,40 @@ export function sessionFileToAttachment(f: SessionFile): AttachmentFile {
   };
 }
 
+function normalizePathBasename(value: string | null | undefined): string {
+  const normalized = String(value || "").trim()
+  if (!normalized) return ""
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized
+}
+
+function findAttachmentArtifactRevision(
+  attachment: { filename: string; filepath?: string; path?: string; [key: string]: unknown },
+  revisions: SelectedArtifactRevision[] | undefined,
+): SelectedArtifactRevision | undefined {
+  if (!revisions || revisions.length === 0) return undefined
+  const attachmentPath = String(attachment.filepath || attachment.path || "").trim()
+  if (attachmentPath) {
+    const exactMatch = revisions.find((revision) => revision.path === attachmentPath)
+    if (exactMatch) return exactMatch
+  }
+  const filename = normalizePathBasename(attachment.filename)
+  if (!filename) return undefined
+  return revisions.find((revision) => normalizePathBasename(revision.path) === filename)
+}
+
 /** 从 ChatMessage.attachments 项转为 AttachmentFile（无 size 时用 0） */
 export function chatAttachmentToDisplay(
-  a: { file_id?: string; id?: string; filename: string; size?: number; [key: string]: unknown }
+  a: { file_id?: string; id?: string; filename: string; filepath?: string; path?: string; size?: number; [key: string]: unknown },
+  artifactRevisions?: SelectedArtifactRevision[],
 ): AttachmentFile {
   const ext = (a.filename || "").split(".").pop() || "";
+  const artifactRevision = findAttachmentArtifactRevision(a, artifactRevisions)
   return {
     id: a.file_id || a.id || "",
     filename: a.filename || "",
     extension: ext,
     size: typeof a.size === "number" ? a.size : 0,
+    ...(artifactRevision ? { artifactRevision } : {}),
   };
 }
 
@@ -265,7 +291,7 @@ function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): vo
         kind: "attachments",
         id: stableId("att", context.messageIndex, "user"),
         role: "user",
-        files: msg.attachments.map(chatAttachmentToDisplay),
+        files: msg.attachments.map((attachment) => chatAttachmentToDisplay(attachment)),
       });
     }
     return;
@@ -282,7 +308,9 @@ function appendMessageEvent(context: TimelineBuildContext, msg: ChatMessage): vo
         kind: "attachments",
         id: stableId("att", context.messageIndex, "assistant"),
         role: "assistant",
-        files: msg.attachments.map(chatAttachmentToDisplay),
+        files: msg.attachments.map((attachment) => (
+          chatAttachmentToDisplay(attachment, msg.selected_artifact_revisions)
+        )),
       });
     }
   }
@@ -459,6 +487,9 @@ export function appendTimelineEvent(
     tool: (event) => appendToolEvent(context, event.data as ToolEvent, locale),
     sandbox_fact: () => {
       // 事实事件用于审计和后续 Evidence，不进入普通用户对话 timeline。
+    },
+    feedback_input: () => {
+      // feedback_input 只作为 hidden source event 回放，不进入普通 timeline。
     },
     safety_audit: () => {
       // 安全审计事件只供运行详情/安全视图消费，不进入普通用户对话 timeline。

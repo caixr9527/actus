@@ -349,6 +349,80 @@ export type ChatCommand = {
   type: "continue_cancelled_task";
 };
 
+export type FeedbackTargetType =
+  | "run"
+  | "step"
+  | "tool_call"
+  | "message_event"
+  | "wait_event"
+  | "evidence"
+  | "evidence_gap"
+  | "sandbox_fact"
+  | "safety_audit"
+  | "artifact_revision"
+  | "self_review"
+  | "final_delivery"
+  | "user_goal";
+
+export type FeedbackReasonCode =
+  | "user_confirmed"
+  | "user_rejected"
+  | "user_selected_option"
+  | "user_provided_clarification"
+  | "user_corrected_requirement"
+  | "user_set_preference"
+  | "user_cancelled"
+  | "user_continued_cancelled"
+  | "user_reported_satisfaction"
+  | "user_reported_dissatisfaction";
+
+export type MessageFeedbackIntentKind =
+  | "correction"
+  | "preference"
+  | "clarification"
+  | "satisfaction"
+  | "dissatisfaction";
+
+export type FeedbackInputEventIntentKind =
+  | MessageFeedbackIntentKind
+  | "confirmation"
+  | "selection"
+  | "cancel"
+  | "continue_cancelled"
+  | "takeover";
+
+export type FeedbackTargetRef = {
+  target_type: FeedbackTargetType;
+  target_id: string;
+  target_run_id?: string | null;
+  target_revision_id?: string | null;
+  target_content_hash?: string | null;
+};
+
+export type FeedbackIntent = {
+  intent_kind: MessageFeedbackIntentKind;
+  target_ref: FeedbackTargetRef;
+  reason_code: FeedbackReasonCode;
+  summary_hint?: string | null;
+};
+
+export type SubmitFeedbackParams = {
+  source_action:
+    | "final_satisfaction"
+    | "artifact_satisfaction"
+    | "explicit_correction"
+    | "explicit_preference";
+  intent_kind:
+    | "satisfaction"
+    | "dissatisfaction"
+    | "correction"
+    | "preference";
+  target_ref: FeedbackTargetRef;
+  reason_code: FeedbackReasonCode;
+  summary_hint?: string | null;
+  client_request_id?: string | null;
+};
+
 export type RuntimeAction = "send_message" | "resume" | "cancel" | "continue_cancelled";
 
 export type RuntimeEventMeta = {
@@ -417,6 +491,7 @@ export type ChatParams = {
   message?: string;
   attachments?: string[];
   event_id?: string;
+  feedback_intent?: FeedbackIntent;
   resume?: {
     value: unknown;
   };
@@ -673,6 +748,7 @@ export type SSEEventType =
   | "step"
   | "tool"
   | "artifact"
+  | "feedback_input"
   | "safety_audit"
   | "sandbox_fact"
   | "wait"
@@ -700,6 +776,23 @@ export type SSEEventData =
   | { type: "step"; data: StepEvent }
   | { type: "tool"; data: ToolEvent }
   | { type: "artifact"; data: ArtifactEvent }
+  | {
+      type: "feedback_input";
+      data: {
+        event_id?: string | null;
+        created_at?: number;
+        runtime: RuntimeEventMeta;
+        payload: {
+          source_action: string;
+          intent_kind: FeedbackInputEventIntentKind;
+          target_ref: FeedbackTargetRef;
+          reason_code: FeedbackReasonCode;
+          sanitized_summary?: string | null;
+          input_hash: string;
+          runtime_metadata: Record<string, string | number | boolean | null>;
+        };
+      };
+    }
   | { type: "safety_audit"; data: SafetyAuditEvent }
   | { type: "sandbox_fact"; data: SandboxFactEvent }
   | { type: "wait"; data: WaitEventData }

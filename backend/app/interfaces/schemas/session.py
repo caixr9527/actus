@@ -8,9 +8,10 @@
 from datetime import datetime
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.models import SessionStatus, File
+from app.domain.models.feedback import FeedbackReasonCode, FeedbackTargetRefResult, UserFeedbackIntentKind
 from app.application.service.runtime_observation_service import (
     RuntimeObservationResult,
 )
@@ -123,6 +124,22 @@ class RuntimeObservationResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    class FeedbackIntentPayload(BaseModel):
+        """message 请求附带的结构化反馈意图。"""
+
+        model_config = ConfigDict(extra="forbid")
+
+        intent_kind: Literal[
+            UserFeedbackIntentKind.CORRECTION,
+            UserFeedbackIntentKind.PREFERENCE,
+            UserFeedbackIntentKind.CLARIFICATION,
+            UserFeedbackIntentKind.SATISFACTION,
+            UserFeedbackIntentKind.DISSATISFACTION,
+        ]
+        target_ref: FeedbackTargetRefResult
+        reason_code: FeedbackReasonCode
+        summary_hint: Optional[str] = None
+
     class ResumePayload(BaseModel):
         """恢复 LangGraph interrupt 的请求体。"""
 
@@ -136,6 +153,7 @@ class ChatRequest(BaseModel):
     """聊天请求结构"""
     message: Optional[str] = None  # 人类消息
     attachments: Optional[List[str]] = Field(default_factory=list)  # 附件列表(传递的是文件id列表)
+    feedback_intent: Optional[FeedbackIntentPayload] = None  # 结构化反馈意图，仅 message 请求允许
     resume: Optional[ResumePayload] = None  # 恢复 LangGraph interrupt 的载荷
     command: Optional[CommandPayload] = None  # 显式结构化命令
     event_id: Optional[str] = None  # 最新事件id
@@ -153,7 +171,32 @@ class ChatRequest(BaseModel):
             raise ValueError("纯监听请求不允许携带 attachments")
         if (has_resume or has_command) and len(self.attachments or []) > 0:
             raise ValueError("resume 或 command 请求不允许携带 attachments")
+        if self.feedback_intent is not None and not has_message:
+            raise ValueError("feedback_intent 只能附加在 message 请求中")
         return self
+
+
+class SubmitFeedbackRequest(BaseModel):
+    """显式用户反馈请求体。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_action: Literal[
+        "final_satisfaction",
+        "artifact_satisfaction",
+        "explicit_correction",
+        "explicit_preference",
+    ]
+    intent_kind: Literal[
+        UserFeedbackIntentKind.SATISFACTION,
+        UserFeedbackIntentKind.DISSATISFACTION,
+        UserFeedbackIntentKind.CORRECTION,
+        UserFeedbackIntentKind.PREFERENCE,
+    ]
+    target_ref: FeedbackTargetRefResult
+    reason_code: FeedbackReasonCode
+    summary_hint: Optional[str] = None
+    client_request_id: Optional[str] = None
 
 
 class GetSessionResponse(BaseModel):

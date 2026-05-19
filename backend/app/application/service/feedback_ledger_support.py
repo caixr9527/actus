@@ -12,8 +12,9 @@ from app.application.service.feedback_ledger_common import (
     SOURCE_EVENT_TYPE_BY_KIND,
     TARGET_EVENT_TYPE_BY_TYPE,
 )
-from app.domain.models import WorkflowRunEventRecord
+from app.domain.models import FeedbackInputEvent, WorkflowRunEventRecord
 from app.domain.models.feedback import (
+    FeedbackCategory,
     FeedbackGapKind,
     FeedbackKind,
     FeedbackReasonCode,
@@ -63,6 +64,7 @@ class FeedbackScopeValidator:
             access_scope=access_scope,
             command=command,
         )
+        self._validate_controlled_user_feedback_source(command=command, source_event=source_event)
         effective_source_run_id = command.source_ref.source_run_id or source_event.run_id
         await self._validate_source_owned_refs(
             uow=uow,
@@ -183,6 +185,46 @@ class FeedbackScopeValidator:
         if expected_event_type and record.event_type != expected_event_type:
             raise self._issue(FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH, FeedbackGapKind.RECORD_FAILED, f"source event_type 必须是 {expected_event_type}")
         return record
+
+    def _validate_controlled_user_feedback_source(
+            self,
+            *,
+            command: UserFeedbackCommand | RuntimeFeedbackCommand | QualityFeedbackCommand,
+            source_event: WorkflowRunEventRecord,
+    ) -> None:
+        if command.kind != FeedbackKind.USER_FEEDBACK or command.category != FeedbackCategory.CONTINUE_CANCELLED:
+            return
+        if command.source_ref.source_kind != FeedbackSourceKind.FEEDBACK_INPUT:
+            raise self._issue(
+                FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH,
+                FeedbackGapKind.RECORD_FAILED,
+                "continue_cancelled 必须使用 feedback_input source event",
+            )
+        if command.target_ref.target_type != FeedbackTargetType.WAIT_EVENT:
+            raise self._issue(
+                FeedbackReasonCode.FEEDBACK_TARGET_SCOPE_MISMATCH,
+                FeedbackGapKind.RECORD_FAILED,
+                "continue_cancelled 必须指向 wait_event target",
+            )
+        if not isinstance(source_event.event_payload, FeedbackInputEvent):
+            raise self._issue(
+                FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH,
+                FeedbackGapKind.RECORD_FAILED,
+                "continue_cancelled source event payload 必须是 feedback_input",
+            )
+        payload = source_event.event_payload.payload
+        if payload.source_action != "continue_cancelled":
+            raise self._issue(
+                FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH,
+                FeedbackGapKind.RECORD_FAILED,
+                "continue_cancelled source_action 不匹配",
+            )
+        if payload.target_ref != command.target_ref:
+            raise self._issue(
+                FeedbackReasonCode.FEEDBACK_TARGET_SCOPE_MISMATCH,
+                FeedbackGapKind.RECORD_FAILED,
+                "continue_cancelled source event target 与 command target 不一致",
+            )
 
     async def _load_resolution_source_event(
             self,

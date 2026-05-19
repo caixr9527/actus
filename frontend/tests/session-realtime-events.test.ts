@@ -5,6 +5,7 @@ import {
   appendSessionRealtimeEvent,
   buildSessionRealtimeStateFromSnapshot,
 } from '../src/lib/session-realtime-events'
+import { eventsToTimeline } from '../src/lib/session-events'
 import {
   classifyMessageStreamCloseReason,
   shouldReloadSnapshotAfterMessageStreamClose,
@@ -171,6 +172,44 @@ test('live-only text stream should not enter timeline or update persistent curso
   assert.equal(next.state.lastEventId, 'evt-1')
   assert.deepEqual(Array.from(next.state.seenPersistentCursorIds), ['evt-1'])
   assert.equal(next.state.textStreams['stream-1']?.text, 'draft')
+})
+
+test('hidden feedback_input should not enter normal timeline but should keep persistent cursor', () => {
+  const feedbackInputEvent = eventOf('feedback_input', {
+    runtime: runtime({
+      source_event_id: 'evt-feedback-input',
+      cursor_event_id: 'evt-feedback-input',
+      visibility: 'hidden',
+    }),
+    event_id: 'evt-feedback-input',
+    payload: {
+      source_action: 'final_satisfaction',
+      intent_kind: 'dissatisfaction',
+      target_ref: {
+        target_type: 'message_event',
+        target_id: 'evt-final',
+        target_run_id: 'run-1',
+      },
+      reason_code: 'user_reported_dissatisfaction',
+      sanitized_summary: '用户反馈上一轮答案不满意',
+      input_hash: 'feedback_input:hash',
+      runtime_metadata: {
+        session_id: 'session-1',
+        workspace_id: 'workspace-1',
+        run_id: 'run-1',
+      },
+    },
+  })
+
+  const state = buildSessionRealtimeStateFromSnapshot({
+    rawEvents: [messageEvent('evt-1', 'persisted'), feedbackInputEvent],
+    snapshotLatestEventId: 'evt-feedback-input',
+  })
+
+  assert.equal(state.events.length, 2)
+  assert.equal(state.lastEventId, 'evt-feedback-input')
+  assert.deepEqual(Array.from(state.seenPersistentCursorIds), ['evt-1', 'evt-feedback-input'])
+  assert.equal(eventsToTimeline(state.events).length, 1)
 })
 
 test('snapshot state should use last persistent event over runtime cursor and ignore text streams', () => {

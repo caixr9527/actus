@@ -25,6 +25,7 @@ from .tool_result import ToolResult
 from .wait import normalize_wait_payload
 from .sandbox_fact import SandboxFactKind
 from .artifact_governance import ArtifactEventPayload, SelectedArtifactRevisionResult
+from .feedback import FeedbackInputEventPayloadResult
 from app.domain.services.runtime.contracts.safety_audit_contract import SafetyAuditEventPayload
 
 
@@ -253,6 +254,13 @@ class SafetyAuditEvent(BaseEvent):
     payload: SafetyAuditEventPayload
 
 
+class FeedbackInputEvent(BaseEvent):
+    """HTTP feedback/satisfaction 的受控 source event。"""
+
+    type: Literal["feedback_input"] = "feedback_input"
+    payload: FeedbackInputEventPayloadResult
+
+
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
@@ -328,6 +336,7 @@ Event = Annotated[
         EvidenceEvent,
         ArtifactEvent,
         SafetyAuditEvent,
+        FeedbackInputEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,

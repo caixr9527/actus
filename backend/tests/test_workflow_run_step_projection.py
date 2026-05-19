@@ -3,6 +3,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from sqlalchemy.dialects import postgresql
+
 from app.domain.models import (
     ExecutionStatus,
     MessageEvent,
@@ -21,6 +23,14 @@ from app.domain.models import (
 )
 from app.infrastructure.models.workflow_run_step import WorkflowRunStepModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
+
+
+class _NestedTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
 
 
 class _ExecuteQueue:
@@ -54,6 +64,8 @@ def _build_event_insert_repo() -> DBWorkflowRunRepository:
             SimpleNamespace(scalar_one_or_none=lambda: run_record),
         ),
         add=MagicMock(),
+        begin_nested=MagicMock(return_value=_NestedTransaction()),
+        flush=AsyncMock(),
     )
     return DBWorkflowRunRepository(db_session=db_session)
 
@@ -240,6 +252,7 @@ def test_upsert_step_from_event_should_update_existing_snapshot_and_clear_curren
         "next_hint": None,
         "reused_from_run_id": None,
         "reused_from_step_id": None,
+        "evidence_reconcile_metadata": {},
     }
 
 
@@ -430,6 +443,32 @@ def test_list_event_records_by_session_should_return_full_event_records() -> Non
         ("run-1", "evt-1"),
         ("run-2", "evt-2"),
     ]
+
+
+def test_get_event_record_by_type_and_hash_should_filter_input_hash_in_sql() -> None:
+    execute_result = SimpleNamespace(scalar_one_or_none=lambda: None)
+    repo = _build_repo(execute_result)
+
+    record = asyncio.run(
+        repo.get_event_record_by_type_and_hash(
+            user_id="user-1",
+            session_id="session-1",
+            run_id="run-1",
+            event_type="feedback_input",
+            input_hash="feedback_input:hash-1",
+        )
+    )
+
+    assert record is None
+    statement = repo.db_session.execute.await_args.args[0]
+    compiled_sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert "workflow_run_events.user_id" in compiled_sql
+    assert "workflow_run_events.session_id" in compiled_sql
+    assert "workflow_run_events.run_id" in compiled_sql
+    assert "workflow_run_events.event_type" in compiled_sql
+    assert "#>>" in compiled_sql
+    assert statement.compile(dialect=postgresql.dialect()).params["event_payload_1"] == ("payload", "input_hash")
+    assert "LIMIT" in compiled_sql
 
 
 def test_get_latest_event_record_by_session_should_return_single_record() -> None:

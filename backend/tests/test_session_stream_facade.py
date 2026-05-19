@@ -234,6 +234,48 @@ def test_stream_chat_should_map_events() -> None:
     assert runtime_observation_service.event_context_calls == 1
 
 
+def test_stream_chat_should_forward_feedback_intent_payload() -> None:
+    facade = SessionStreamFacade()
+    session_service = _SessionServiceForChat()
+    agent_service = _AgentServiceForChat()
+    runtime_observation_service = _RuntimeObservationServiceForChat()
+    request = ChatRequest(
+        message="这版答案不对",
+        feedback_intent=ChatRequest.FeedbackIntentPayload(
+            intent_kind="correction",
+            target_ref={
+                "target_type": "message_event",
+                "target_id": "evt-final",
+                "target_run_id": "run-1",
+            },
+            reason_code="user_corrected_requirement",
+            summary_hint="上一轮最终答案不符合要求",
+        ),
+    )
+
+    async def _collect() -> None:
+        iterator = await facade.stream_chat(
+            user_id="user-1",
+            session_id="session-1",
+            request=request,
+            session_service=session_service,
+            agent_service=agent_service,
+            runtime_observation_service=runtime_observation_service,
+        )
+        async for _ in iterator:
+            pass
+
+    asyncio.run(_collect())
+
+    assert len(agent_service.calls) == 1
+    forwarded = agent_service.calls[0]["feedback_intent"]
+    assert forwarded is not None
+    assert forwarded["intent_kind"] == "correction"
+    assert forwarded["target_ref"]["target_type"] == "message_event"
+    assert forwarded["target_ref"]["target_id"] == "evt-final"
+    assert forwarded["reason_code"] == "user_corrected_requirement"
+
+
 def test_stream_chat_should_forward_resume_payload() -> None:
     facade = SessionStreamFacade()
     session_service = _SessionServiceForChat()

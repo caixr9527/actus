@@ -16,6 +16,7 @@ import { getToolKind } from '@/components/tool-use/utils'
 import {
   eventsToTimeline,
   isEvidenceReuseVirtualToolEvent,
+  sessionFileToAttachment,
 } from '@/lib/session-events'
 import { timelineToConversationItems } from '@/lib/assistant-turns'
 import { buildStepViewState } from '@/lib/run-timeline'
@@ -92,6 +93,11 @@ function removeInitQueryParamFromUrl(): void {
 const TIMELINE_WINDOW_SIZE = 120
 const PREVIEW_PANEL_ANIMATION_MS = 260
 
+function scheduleEffectAction(action: () => void): () => void {
+  const frameId = requestAnimationFrame(action)
+  return () => cancelAnimationFrame(frameId)
+}
+
 type PreviewPanelState =
   | { kind: 'none' }
   | { kind: 'file'; file: AttachmentFile; closing: boolean }
@@ -137,6 +143,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     sendMessage,
     resumeWaitingRun,
     continueCancelledRun,
+    submitFeedback,
     streaming,
     plannerTextStream,
     finalTextStream,
@@ -492,7 +499,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       return
     }
 
-    scrollToLatest('smooth')
+    return scheduleEffectAction(() => scrollToLatest('smooth'))
   }, [
     conversationItems,
     finalTextStream?.text,
@@ -514,7 +521,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
       return
     }
     initialScrollToLatestDoneRef.current = true
-    scrollToLatest('auto')
+    return scheduleEffectAction(() => scrollToLatest('auto'))
   }, [
     hasVisibleTextStreamDraft,
     loading,
@@ -712,6 +719,7 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                   <ChatMessage
                     key={item.id}
                     item={item}
+                    onSubmitFeedback={submitFeedback}
                     onViewAllFiles={handleViewAllFiles}
                     onFileClick={handleFileClick}
                     onToolClick={handleToolClick}
@@ -823,7 +831,15 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
                 : 'flex-shrink-0 h-full w-[420px] lg:w-[520px] xl:w-[600px]'
             )}
           >
-            <FilePreviewPanel file={previewPanel.file} onClose={handleClosePreview} />
+            <FilePreviewPanel
+              file={
+                previewPanel.file.artifactRevision
+                  ? previewPanel.file
+                  : sessionFileToAttachment(previewPanel.file)
+              }
+              onClose={handleClosePreview}
+              onSubmitFeedback={submitFeedback}
+            />
           </div>
         )}
 

@@ -271,6 +271,12 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
     ) -> FeedbackWriteResult:
         now = datetime.now()
         try:
+            if (
+                    command.kind == FeedbackKind.USER_FEEDBACK
+                    and command.category == FeedbackCategory.CONTINUE_CANCELLED
+                    and command.requested_feedback_scope_kind != FeedbackScopeKind.SESSION
+            ):
+                raise FeedbackRequiredRecordError("continue_cancelled 用户反馈必须使用 session scope")
             retention = self._retention_policy.decide(
                 kind=command.kind,
                 category=command.category,

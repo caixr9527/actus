@@ -19,6 +19,7 @@ const KNOWN_SSE_EVENT_TYPES: ReadonlySet<SSEEventType> = new Set<SSEEventType>([
   'step',
   'tool',
   'artifact',
+  'feedback_input',
   'safety_audit',
   'sandbox_fact',
   'wait',
