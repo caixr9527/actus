@@ -216,6 +216,31 @@ class DBFeedbackRepository(FeedbackRepository):
             limit=limit,
         )
 
+    async def list_by_scope(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            feedback_scope_kind: FeedbackScopeKind,
+            scope_id: str,
+            limit: int = 100,
+    ) -> list[FeedbackRecord]:
+        self._require_user_session_scope(user_id=user_id, session_id=session_id)
+        scope_id = self._require_text(scope_id, "scope_id")
+        stmt = (
+            select(FeedbackRecordModel)
+            .where(
+                FeedbackRecordModel.user_id == user_id,
+                FeedbackRecordModel.session_id == session_id,
+                FeedbackRecordModel.feedback_scope_kind == feedback_scope_kind.value,
+                FeedbackRecordModel.scope_id == scope_id,
+            )
+            .order_by(FeedbackRecordModel.created_at.desc())
+            .limit(self._normalize_limit(limit))
+        )
+        result = await self.db_session.execute(stmt)
+        return [model.to_domain() for model in result.scalars().all()]
+
     async def list_active_by_scope(
             self,
             *,

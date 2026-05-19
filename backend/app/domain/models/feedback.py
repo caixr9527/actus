@@ -52,6 +52,10 @@ from app.domain.services.runtime.contracts.feedback_contract import (
     build_feedback_record_result,
     map_feedback_data_origin_to_data_origin,
 )
+from app.domain.services.runtime.contracts.feedback_runtime_ports import (
+    FeedbackRecorderPort,
+    FeedbackSnapshotProviderPort,
+)
 
 __all__ = [
     "ExcludedFeedbackRefResult",
@@ -65,6 +69,7 @@ __all__ = [
     "FeedbackInputEventPayloadResult",
     "FeedbackKind",
     "FeedbackPromptSafeSummaryResult",
+    "FeedbackRecorderPort",
     "FeedbackReasonCode",
     "FeedbackRecord",
     "FeedbackRecordCommand",
@@ -80,6 +85,7 @@ __all__ = [
     "FeedbackSnapshotResult",
     "FeedbackSnapshotScopeResult",
     "FeedbackSnapshotStage",
+    "FeedbackSnapshotProviderPort",
     "FeedbackSourceConfidence",
     "FeedbackSourceKind",
     "FeedbackSourceRefResult",

@@ -79,6 +79,18 @@ class FeedbackRepository(Protocol):
         """按用户、会话和 feedback scope 查询活跃反馈。"""
         ...
 
+    async def list_by_scope(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            feedback_scope_kind: FeedbackScopeKind,
+            scope_id: str,
+            limit: int = 100,
+    ) -> list[FeedbackRecord]:
+        """按用户、会话和 feedback scope 查询反馈记录，不限制 status。"""
+        ...
+
     async def list_by_target(
             self,
             *,

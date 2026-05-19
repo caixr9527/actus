@@ -81,6 +81,22 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None
 
+    async def get_by_id_for_user_session(
+            self,
+            *,
+            run_id: str,
+            user_id: str,
+            session_id: str,
+    ) -> Optional[WorkflowRun]:
+        stmt = select(WorkflowRunModel).where(
+            WorkflowRunModel.id == run_id,
+            WorkflowRunModel.user_id == user_id,
+            WorkflowRunModel.session_id == session_id,
+        )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
     async def get_by_id_for_update(self, run_id: str) -> Optional[WorkflowRun]:
         record = await self._get_record_with_lock(run_id=run_id)
         return record.to_domain() if record is not None else None
@@ -425,6 +441,25 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             WorkflowRunEventModel.run_id == run_id,
             WorkflowRunEventModel.event_id == event_id,
         )
+        result = await self.db_session.execute(stmt)
+        record = result.scalar_one_or_none()
+        return record.to_domain() if record is not None else None
+
+    async def get_event_record_by_event_id_in_session(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            event_id: str,
+    ) -> Optional[WorkflowRunEventRecord]:
+        stmt = select(WorkflowRunEventModel).where(
+            WorkflowRunEventModel.user_id == user_id,
+            WorkflowRunEventModel.session_id == session_id,
+            WorkflowRunEventModel.event_id == event_id,
+        ).order_by(
+            WorkflowRunEventModel.created_at.desc(),
+            WorkflowRunEventModel.id.desc(),
+        ).limit(1)
         result = await self.db_session.execute(stmt)
         record = result.scalar_one_or_none()
         return record.to_domain() if record is not None else None

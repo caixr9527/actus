@@ -44,6 +44,16 @@ class WorkflowRunRepository(Protocol):
         """根据运行ID与用户归属查询运行主记录"""
         ...
 
+    async def get_by_id_for_user_session(
+            self,
+            *,
+            run_id: str,
+            user_id: str,
+            session_id: str,
+    ) -> Optional[WorkflowRun]:
+        """按 user/session/run 强过滤查询运行主记录。"""
+        ...
+
     async def get_by_id_for_update(self, run_id: str) -> Optional[WorkflowRun]:
         """按运行ID加锁查询运行主记录"""
         ...
@@ -149,4 +159,14 @@ class WorkflowRunRepository(Protocol):
             event_id: str,
     ) -> Optional[WorkflowRunEventRecord]:
         """按 user/session/run/event 强过滤读取运行事件，禁止裸 event id 查询。"""
+        ...
+
+    async def get_event_record_by_event_id_in_session(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            event_id: str,
+    ) -> Optional[WorkflowRunEventRecord]:
+        """按 user/session/event 强过滤读取运行事件，供跨 run session scope 回链使用。"""
         ...

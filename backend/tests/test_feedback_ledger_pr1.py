@@ -528,6 +528,7 @@ def test_feedback_resolution_command_should_reject_caller_supplied_scope_source_
                 "scope": _scope().model_dump(mode="json"),
                 "resolution": _resolution(status=FeedbackStatus.RESOLVED).model_dump(mode="json"),
                 "updated_at": datetime(2026, 5, 18, 12, 0, 0).isoformat(),
+                "resolution_batch_id": "batch-1",
             }
         )
 
@@ -539,6 +540,7 @@ def test_feedback_resolution_command_should_reject_caller_supplied_scope_source_
                 "source_ref": _source_ref().model_dump(mode="json"),
                 "resolution": _resolution(status=FeedbackStatus.RESOLVED).model_dump(mode="json"),
                 "updated_at": datetime(2026, 5, 18, 12, 0, 0).isoformat(),
+                "resolution_batch_id": "batch-1",
             }
         )
 
@@ -550,8 +552,48 @@ def test_feedback_resolution_command_should_reject_caller_supplied_scope_source_
                 "target_ref": _target_ref().model_dump(mode="json"),
                 "resolution": _resolution(status=FeedbackStatus.RESOLVED).model_dump(mode="json"),
                 "updated_at": datetime(2026, 5, 18, 12, 0, 0).isoformat(),
+                "resolution_batch_id": "batch-1",
             }
         )
+
+
+def test_feedback_resolution_command_should_require_exactly_one_resolution_source() -> None:
+    base_payload = {
+        "access_scope": _access_scope().model_dump(mode="json"),
+        "feedback_id": "fb-1",
+        "requested_feedback_scope_kind": FeedbackScopeKind.RUN.value,
+        "requested_scope_id": "run-1",
+        "resolution": _resolution(status=FeedbackStatus.RESOLVED).model_dump(mode="json"),
+        "updated_at": datetime(2026, 5, 18, 12, 0, 0).isoformat(),
+    }
+
+    with pytest.raises(ValidationError):
+        FeedbackResolutionCommand.model_validate(base_payload)
+
+    with pytest.raises(ValidationError):
+        FeedbackResolutionCommand.model_validate(
+            {
+                **base_payload,
+                "resolution_source_event_id": "evt-resolution-1",
+                "resolution_batch_id": "batch-1",
+            }
+        )
+
+    command = FeedbackResolutionCommand.model_validate(
+        {
+            **base_payload,
+            "resolution_source_event_id": "evt-resolution-1",
+        }
+    )
+    assert command.resolution_source_event_id == "evt-resolution-1"
+
+    batch_command = FeedbackResolutionCommand.model_validate(
+        {
+            **base_payload,
+            "resolution_batch_id": "batch-1",
+        }
+    )
+    assert batch_command.resolution_batch_id == "batch-1"
 
 
 def test_runtime_signal_should_be_rejected_for_record_command_result_and_snapshot_item() -> None:

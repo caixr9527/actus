@@ -810,13 +810,23 @@ class FeedbackResolutionCommand(_StrictModel):
     requested_scope_id: str | None = None
     resolution: FeedbackResolutionResult
     updated_at: datetime
+    resolution_source_event_id: str | None = None
+    resolution_batch_id: str | None = None
 
-    @field_validator("feedback_id", "requested_scope_id")
+    @field_validator("feedback_id", "requested_scope_id", "resolution_source_event_id", "resolution_batch_id")
     @classmethod
     def _normalize_required_or_optional_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         return _require_text(value, "FeedbackResolutionCommand 字段")
+
+    @model_validator(mode="after")
+    def _validate_resolution_source_fields(self) -> "FeedbackResolutionCommand":
+        has_source_event = self.resolution_source_event_id is not None
+        has_batch_id = self.resolution_batch_id is not None
+        if has_source_event == has_batch_id:
+            raise ValueError("resolution_source_event_id 与 resolution_batch_id 必须且只能提供一个")
+        return self
 
 
 class FeedbackGapResult(_StrictModel):

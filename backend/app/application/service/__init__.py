@@ -15,6 +15,7 @@ from .evidence_digest_projector import EvidenceDigestProjector
 from .evidence_fact_assembler import EvidenceFactAssembler
 from .evidence_result_handle_resolver import EvidenceResultHandleResolver
 from .evidence_runtime_context_provider import EvidenceRuntimeContextProvider
+from .feedback_ledger_service import FeedbackLedgerService
 from .file_service import FileService
 from .model_config_service import ModelConfigService
 from .model_runtime_resolver import ModelRuntimeResolver
@@ -43,6 +44,7 @@ __all__ = [
     "EvidenceFactAssembler",
     "EvidenceResultHandleResolver",
     "EvidenceRuntimeContextProvider",
+    "FeedbackLedgerService",
     "StatusService",
     "FileService",
     "ModelConfigService",
