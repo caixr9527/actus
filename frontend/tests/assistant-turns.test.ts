@@ -95,3 +95,55 @@ test('timelineToConversationItems should keep virtual tool calls invisible throu
     assert.equal(items[1].processItems.some((item) => item.kind === 'tool'), false)
   }
 })
+
+test('timelineToConversationItems should keep current run working while failed step replans', () => {
+  const timeline = eventsToTimeline([
+    eventOf('message', { role: 'user', message: '执行任务' }),
+    eventOf('step', { id: 's-1', status: 'running', description: '第一次尝试' }),
+    eventOf('step', { id: 's-1', status: 'failed', description: '第一次尝试' }),
+    eventOf('plan', {
+      steps: [
+        { id: 's-2', status: 'running', description: '重新规划后的步骤' },
+      ],
+    }),
+    eventOf('step', { id: 's-2', status: 'running', description: '重新规划后的步骤' }),
+  ])
+
+  const items = timelineToConversationItems(timeline, {
+    currentRunId: 'run-1',
+    runtimeStatus: 'running',
+  })
+
+  assert.equal(items[1]?.kind, 'assistant_turn')
+  if (items[1]?.kind === 'assistant_turn') {
+    assert.equal(items[1].status, 'running')
+  }
+})
+
+test('timelineToConversationItems should not mark current run done before runtime terminal event', () => {
+  const timeline = eventsToTimeline([
+    eventOf('message', { role: 'user', message: '执行任务' }),
+    eventOf('step', { id: 's-1', status: 'completed', description: '完成执行' }),
+    eventOf('message', { role: 'assistant', stage: 'final', message: '最终回答。' }),
+  ])
+
+  const runningItems = timelineToConversationItems(timeline, {
+    currentRunId: 'run-1',
+    runtimeStatus: 'running',
+  })
+
+  assert.equal(runningItems[1]?.kind, 'assistant_turn')
+  if (runningItems[1]?.kind === 'assistant_turn') {
+    assert.equal(runningItems[1].status, 'running')
+  }
+
+  const completedItems = timelineToConversationItems(timeline, {
+    currentRunId: 'run-1',
+    runtimeStatus: 'completed',
+  })
+
+  assert.equal(completedItems[1]?.kind, 'assistant_turn')
+  if (completedItems[1]?.kind === 'assistant_turn') {
+    assert.equal(completedItems[1].status, 'completed')
+  }
+})

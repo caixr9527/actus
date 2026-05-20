@@ -1,7 +1,12 @@
-import type { ChatMessage, ExecutionStatus } from './api/types'
+import type { ChatMessage, ExecutionStatus, SessionStatus } from './api/types'
 import type { TimelineItem } from './session-events'
 
 export type AssistantTurnStatus = 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'idle'
+
+export type AssistantTurnRuntimeOptions = {
+  currentRunId?: string | null
+  runtimeStatus?: SessionStatus | null
+}
 
 export type AssistantTurnItem = {
   kind: 'assistant_turn'
@@ -40,7 +45,12 @@ function rankStepStatus(status: ExecutionStatus | undefined): number {
 function resolveTurnStatus(
   processItems: AssistantTurnItem['processItems'],
   finalMessage: AssistantTurnItem['finalMessage'],
+  runtimeOptions: AssistantTurnRuntimeOptions = {},
 ): AssistantTurnStatus {
+  const runId = resolveTurnRunId(processItems, finalMessage)
+  const runtimeStatus = resolveRuntimeStatusForTurn(runId, runtimeOptions)
+  if (runtimeStatus) return runtimeStatus
+
   let strongest: ExecutionStatus | undefined
   for (const item of processItems) {
     if (item.kind === 'error') return 'failed'
@@ -57,11 +67,44 @@ function resolveTurnStatus(
   return 'idle'
 }
 
+function normalizeRuntimeStatus(status: SessionStatus | null | undefined): AssistantTurnStatus | null {
+  if (status === 'pending') return 'idle'
+  return status ?? null
+}
+
+function resolveRuntimeStatusForTurn(
+  runId: string | null,
+  runtimeOptions: AssistantTurnRuntimeOptions,
+): AssistantTurnStatus | null {
+  const currentRunId = runtimeOptions.currentRunId ?? null
+  if (!currentRunId || !runId || currentRunId !== runId) return null
+  return normalizeRuntimeStatus(runtimeOptions.runtimeStatus)
+}
+
+function extractRunId(item: AssistantTurnItem['processItems'][number] | AssistantTurnItem['finalMessage']): string | null {
+  if (!item) return null
+  if (item.kind === 'error') return null
+  return item.data.runtime.run_id ?? null
+}
+
+function resolveTurnRunId(
+  processItems: AssistantTurnItem['processItems'],
+  finalMessage: AssistantTurnItem['finalMessage'],
+): string | null {
+  if (finalMessage) return extractRunId(finalMessage)
+  for (const item of processItems) {
+    const runId = extractRunId(item)
+    if (runId) return runId
+  }
+  return null
+}
+
 function buildAssistantTurn(
   index: number,
   processItems: AssistantTurnItem['processItems'],
   finalMessage: AssistantTurnItem['finalMessage'],
   attachments: AssistantTurnItem['attachments'] = [],
+  runtimeOptions: AssistantTurnRuntimeOptions = {},
 ): AssistantTurnItem {
   const stepItems = processItems.filter((item): item is Extract<TimelineItem, { kind: 'step' }> => item.kind === 'step')
   const standaloneToolCount = processItems.filter((item) => item.kind === 'tool').length
@@ -74,21 +117,24 @@ function buildAssistantTurn(
     processItems,
     finalMessage,
     attachments,
-    status: resolveTurnStatus(processItems, finalMessage),
+    status: resolveTurnStatus(processItems, finalMessage, runtimeOptions),
     stepCount: stepItems.length,
     completedStepCount: stepItems.filter((item) => item.data.status === 'completed').length,
     toolCount: standaloneToolCount + nestedToolCount,
   }
 }
 
-export function timelineToConversationItems(timeline: TimelineItem[]): ConversationItem[] {
+export function timelineToConversationItems(
+  timeline: TimelineItem[],
+  runtimeOptions: AssistantTurnRuntimeOptions = {},
+): ConversationItem[] {
   const result: ConversationItem[] = []
   let processBuffer: AssistantTurnItem['processItems'] = []
   let turnIndex = 0
 
   const flushProcessBuffer = () => {
     if (processBuffer.length === 0) return
-    result.push(buildAssistantTurn(turnIndex++, processBuffer, null))
+    result.push(buildAssistantTurn(turnIndex++, processBuffer, null, [], runtimeOptions))
     processBuffer = []
   }
 
@@ -119,7 +165,7 @@ export function timelineToConversationItems(timeline: TimelineItem[]): Conversat
           attachments.push(next)
           i += 1
         }
-        result.push(buildAssistantTurn(turnIndex++, processBuffer, item, attachments))
+        result.push(buildAssistantTurn(turnIndex++, processBuffer, item, attachments, runtimeOptions))
         processBuffer = []
         continue
       }

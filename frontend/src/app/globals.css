@@ -169,3 +169,44 @@
         @apply bg-background text-foreground;
     }
 }
+
+@layer components {
+    .assistant-turn-summary-shimmer {
+        color: transparent;
+        background-image: linear-gradient(
+            105deg,
+            rgb(120 113 108) 0%,
+            rgb(120 113 108) 30%,
+            rgb(68 64 60) 41%,
+            rgb(255 255 255) 50%,
+            rgb(68 64 60) 59%,
+            rgb(120 113 108) 70%,
+            rgb(120 113 108) 100%
+        );
+        background-size: 220% 100%;
+        background-position: 130% 50%;
+        background-clip: text;
+        -webkit-background-clip: text;
+        animation: assistant-turn-summary-sweep 2.4s linear infinite;
+        text-shadow: 0 0 0.01px rgb(120 113 108 / 0.65);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .assistant-turn-summary-shimmer {
+            color: rgb(120 113 108);
+            background-image: none;
+            animation: none;
+            text-shadow: none;
+        }
+    }
+}
+
+@keyframes assistant-turn-summary-sweep {
+    from {
+        background-position: 130% 50%;
+    }
+
+    to {
+        background-position: -130% 50%;
+    }
+}
