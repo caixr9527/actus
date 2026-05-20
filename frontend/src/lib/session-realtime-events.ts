@@ -23,6 +23,21 @@ export type SessionRealtimeAppendResult = {
   shouldUpdateDisplayedTextStreams: boolean
 }
 
+export function shouldCommitDuplicatePersistentEvent(event: SSEEventData): boolean {
+  return event.type === 'feedback'
+}
+
+export function buildDuplicatePersistentEventCommit(
+  appendResult: SessionRealtimeAppendResult,
+): { state: SessionRealtimeState; events: SSEEventData[] } | null {
+  if (!appendResult.duplicatePersistentEvent) return null
+  if (!shouldCommitDuplicatePersistentEvent(appendResult.event)) return null
+  return {
+    state: appendResult.state,
+    events: appendResult.state.events,
+  }
+}
+
 export function buildSessionRealtimeStateFromSnapshot(params: {
   rawEvents: unknown
   snapshotLatestEventId: string | null
@@ -55,6 +70,20 @@ export function appendSessionRealtimeEvent(
   const eventId = getSessionEventId(eventToAppend)
 
   if (eventId && state.seenPersistentCursorIds.has(eventId)) {
+    if (eventToAppend.type === 'feedback') {
+      return {
+        state: {
+          ...state,
+          events: state.events.map((current) =>
+            getSessionEventId(current) === eventId ? eventToAppend : current,
+          ),
+        },
+        event: eventToAppend,
+        appendedToTimeline: false,
+        duplicatePersistentEvent: true,
+        shouldUpdateDisplayedTextStreams: false,
+      }
+    }
     return {
       state,
       event: eventToAppend,

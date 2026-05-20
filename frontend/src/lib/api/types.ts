@@ -749,6 +749,7 @@ export type SSEEventType =
   | "tool"
   | "artifact"
   | "feedback_input"
+  | "feedback"
   | "safety_audit"
   | "sandbox_fact"
   | "wait"
@@ -789,6 +790,24 @@ export type SSEEventData =
           reason_code: FeedbackReasonCode;
           sanitized_summary?: string | null;
           input_hash: string;
+          runtime_metadata: Record<string, string | number | boolean | null>;
+        };
+      };
+    }
+  | {
+      type: "feedback";
+      data: {
+        event_id?: string | null;
+        created_at?: number;
+        runtime: RuntimeEventMeta;
+        payload: {
+          feedback_refs: string[];
+          counts: Record<string, number>;
+          severity_counts: Record<string, number>;
+          status_counts: Record<string, number>;
+          kind_counts: Record<string, number>;
+          summary?: string | null;
+          source_event_ids: string[];
           runtime_metadata: Record<string, string | number | boolean | null>;
         };
       };

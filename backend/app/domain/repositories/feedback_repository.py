@@ -115,6 +115,30 @@ class FeedbackRepository(Protocol):
         """按 source event 回链查询反馈记录。"""
         ...
 
+    async def list_by_source_event_for_projection(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            source_run_id: str,
+            source_event_id: str,
+            limit: int = 100,
+    ) -> list[FeedbackRecord]:
+        """按 FeedbackEvent 写入聚合键查询记录，强制 source_run_id 归属。"""
+        ...
+
+    async def list_by_resolution_aggregation_key(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            source_run_id: str,
+            resolution_aggregation_key: str,
+            limit: int = 100,
+    ) -> list[FeedbackRecord]:
+        """按 resolution 聚合键查询已完成 lifecycle 更新的反馈。"""
+        ...
+
     async def update_resolution(
             self,
             *,

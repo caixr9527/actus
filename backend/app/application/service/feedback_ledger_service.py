@@ -49,6 +49,7 @@ from app.domain.models.feedback import (
 from app.domain.repositories import IUnitOfWork
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.feedback_runtime_ports import ArtifactRevisionResolverPort
+from app.domain.services.runtime.contracts.feedback_runtime_ports import FeedbackEventProjectorPort
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
             retention_policy: FeedbackRetentionPolicy | None = None,
             snapshot_policy: FeedbackSnapshotPolicy | None = None,
             artifact_revision_resolver: ArtifactRevisionResolverPort | None = None,
+            feedback_event_projector: FeedbackEventProjectorPort | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._sanitizer = sanitizer or FeedbackSanitizer()
@@ -79,6 +81,7 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
             policy=self._snapshot_policy,
             sanitizer=self._sanitizer,
         )
+        self._feedback_event_projector = feedback_event_projector
 
     async def record_user_feedback(self, command: UserFeedbackCommand) -> FeedbackWriteResult:
         return await self._record(command=command, required=True)
@@ -94,13 +97,14 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
         try:
             async with self._uow_factory() as uow:
                 scope = await self._scope_validator.validate_resolution_command(uow=uow, command=command)
+                resolution = self._normalize_resolution_aggregation(command)
                 record = await uow.feedback.update_resolution(
                     user_id=scope.user_id,
                     session_id=scope.session_id,
                     feedback_scope_kind=scope.feedback_scope_kind,
                     scope_id=scope.scope_id,
                     feedback_id=command.feedback_id,
-                    resolution=command.resolution,
+                    resolution=resolution,
                     updated_at=command.updated_at,
                 )
                 logger.info(
@@ -112,7 +116,7 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
                     record.id,
                     record.status.value,
                 )
-                return FeedbackWriteResult(
+                result = FeedbackWriteResult(
                     success=True,
                     created=False,
                     reused=False,
@@ -126,6 +130,8 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
                     gap=None,
                     created_at=record.created_at,
                 )
+            await self._project_resolution_updated(result)
+            return result
         except FeedbackScopeValidationError as exc:
             gap = self._build_resolution_gap(issue=exc.issue, command=command, now=now)
             logger.warning("feedback_scope_validation_failed detail=%s", exc)
@@ -385,7 +391,7 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
                     saved.category.value,
                     saved.severity.value,
                 )
-                return FeedbackWriteResult(
+                result = FeedbackWriteResult(
                     success=True,
                     created=created,
                     reused=not created,
@@ -399,6 +405,8 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
                     gap=None,
                     created_at=saved.created_at,
                 )
+            await self._project_record_written(result)
+            return result
         except FeedbackScopeValidationError as exc:
             gap = self._build_gap_from_issue(
                 issue=exc.issue,
@@ -431,6 +439,51 @@ class FeedbackLedgerService(FeedbackRecorderPort, FeedbackSnapshotProviderPort):
                 gap=gap,
                 created_at=None,
             )
+
+    async def _project_record_written(self, result: FeedbackWriteResult) -> None:
+        if self._feedback_event_projector is None or not result.success:
+            return
+        try:
+            await self._feedback_event_projector.project_record_written(result)
+        except Exception:
+            logger.warning(
+                "feedback_event_projection_failed feedback_id=%s reason=record_written_projector_exception",
+                result.feedback_id,
+                exc_info=True,
+            )
+
+    async def _project_resolution_updated(self, result: FeedbackWriteResult) -> None:
+        if self._feedback_event_projector is None or not result.success:
+            return
+        try:
+            await self._feedback_event_projector.project_resolution_updated(result)
+        except Exception:
+            logger.warning(
+                "feedback_event_projection_failed feedback_id=%s reason=resolution_projector_exception",
+                result.feedback_id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _normalize_resolution_aggregation(command: FeedbackResolutionCommand) -> FeedbackResolutionResult:
+        resolved_by_ref = dict(command.resolution.resolved_by_ref or {})
+        if command.resolution_source_event_id is not None:
+            resolved_by_ref.update(
+                {
+                    "resolution_source_event_id": command.resolution_source_event_id,
+                    "resolution_aggregation_key": command.resolution_source_event_id,
+                    "resolution_aggregation_kind": "source_event",
+                }
+            )
+        else:
+            resolved_by_ref.update(
+                {
+                    "resolution_batch_id": command.resolution_batch_id,
+                    "resolution_aggregation_key": command.resolution_batch_id,
+                    "resolution_aggregation_kind": "batch",
+                }
+            )
+        return command.resolution.model_copy(update={"resolved_by_ref": resolved_by_ref})
 
     def _infer_gap_stage(
             self,

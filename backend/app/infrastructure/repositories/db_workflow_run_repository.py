@@ -351,6 +351,64 @@ class DBWorkflowRunRepository(WorkflowRunRepository):
             return False
         return True
 
+    async def upsert_feedback_event_record(
+            self,
+            session_id: str,
+            run_id: str,
+            event: BaseEvent,
+    ) -> WorkflowRunEventRecord | None:
+        """只允许 FeedbackEvent 使用 replace 语义，避免污染普通事件 add-only 合同。"""
+        if str(getattr(event, "type", "") or "") != "feedback":
+            raise ValueError("upsert_feedback_event_record 只允许 event_type=feedback")
+        if not should_persist_event(event) or not run_id:
+            return None
+
+        run_record = await self._get_record_with_lock(run_id)
+        if run_record is None:
+            return None
+        if str(run_record.session_id) != str(session_id):
+            return None
+
+        stmt = select(WorkflowRunEventModel).where(
+            WorkflowRunEventModel.run_id == run_id,
+            WorkflowRunEventModel.event_id == str(event.id),
+        )
+        result = await self.db_session.execute(stmt)
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            if existing.event_type != "feedback":
+                return None
+            event = event.model_copy(update={"created_at": existing.created_at})
+            existing.event_type = event.type
+            existing.event_payload = event.model_dump(mode="json")
+            await self.db_session.flush()
+            return existing.to_domain()
+
+        event_record = WorkflowRunEventModel(
+            run_id=run_id,
+            session_id=session_id,
+            user_id=run_record.user_id,
+            event_id=str(event.id),
+            event_type=event.type,
+            event_payload=event.model_dump(mode="json"),
+            created_at=event.created_at,
+        )
+        try:
+            async with self.db_session.begin_nested():
+                self.db_session.add(event_record)
+                await self.db_session.flush()
+        except IntegrityError:
+            result = await self.db_session.execute(stmt)
+            existing = result.scalar_one_or_none()
+            if existing is None or existing.event_type != "feedback":
+                return None
+            event = event.model_copy(update={"created_at": existing.created_at})
+            existing.event_type = event.type
+            existing.event_payload = event.model_dump(mode="json")
+            await self.db_session.flush()
+            return existing.to_domain()
+        return event_record.to_domain()
+
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
         run_record = await self._get_record_with_lock(run_id)
         if run_record is None:

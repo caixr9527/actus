@@ -22,6 +22,7 @@ from app.domain.models import (
     ToolEventStatus,
     ToolResult,
     WaitEvent,
+    FeedbackEvent,
 )
 from app.application.service.runtime_observation_service import (
     RuntimeEventMetaResult,
@@ -39,6 +40,7 @@ from app.interfaces.schemas.event import (
     RuntimeEventMeta,
 )
 from app.infrastructure.models.workflow_run_event import WorkflowRunEventModel
+from app.domain.models.feedback import FeedbackEventPayloadResult
 
 
 def _map_event(event, *, run_id: str | None = "run-1"):
@@ -476,6 +478,46 @@ def test_observable_event_mapper_should_mark_text_stream_as_live_only() -> None:
     assert payload["data"]["runtime"]["visibility"] == "draft"
     assert payload["data"]["runtime"]["source_event_id"] is None
     assert payload["data"]["runtime"]["cursor_event_id"] is None
+
+
+def test_observable_event_mapper_should_project_feedback_event_as_hidden_payload() -> None:
+    event = FeedbackEvent(
+        id="feedback:run-1:evt-source",
+        created_at=datetime(2026, 5, 20, 12, 0, 0),
+        payload=FeedbackEventPayloadResult(
+            feedback_refs=["fb-1", "fb-2"],
+            counts={"feedback_count": 2},
+            severity_counts={"error": 2},
+            status_counts={"open": 2},
+            kind_counts={"runtime_feedback": 2},
+            summary="Feedback Ledger 投影",
+            source_event_ids=["evt-source"],
+            runtime_metadata={
+                "schema_version": "feedback_event.v1",
+                "source_run_id": "run-1",
+                "aggregation_key": "evt-source",
+                "aggregation_kind": "source_event",
+            },
+        ),
+    )
+    envelope = RuntimeObservableEventResult(
+        event=event,
+        runtime=RuntimeEventMetaResult(
+            session_id="session-1",
+            run_id="run-1",
+            source_event_id=event.id,
+            cursor_event_id=event.id,
+            visibility="hidden",
+        ),
+    )
+
+    payload = EventMapper.observable_event_to_sse_event(envelope).model_dump(mode="json")
+
+    assert payload["event"] == "feedback"
+    assert payload["data"]["event_id"] == "feedback:run-1:evt-source"
+    assert payload["data"]["runtime"]["visibility"] == "hidden"
+    assert payload["data"]["payload"]["feedback_refs"] == ["fb-1", "fb-2"]
+    assert "raw" not in payload["data"]["payload"]
 
 
 def test_workflow_run_event_model_should_normalize_historical_step_event_outcome_on_read() -> None:

@@ -318,6 +318,63 @@ class DBFeedbackRepository(FeedbackRepository):
         result = await self.db_session.execute(stmt)
         return [model.to_domain() for model in result.scalars().all()]
 
+    async def list_by_source_event_for_projection(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            source_run_id: str,
+            source_event_id: str,
+            limit: int = 100,
+    ) -> list[FeedbackRecord]:
+        self._require_user_session_scope(user_id=user_id, session_id=session_id)
+        source_run_id = self._require_text(source_run_id, "source_run_id")
+        source_event_id = self._require_text(source_event_id, "source_event_id")
+        stmt = (
+            select(FeedbackRecordModel)
+            .where(
+                FeedbackRecordModel.user_id == user_id,
+                FeedbackRecordModel.session_id == session_id,
+                FeedbackRecordModel.source_run_id == source_run_id,
+                FeedbackRecordModel.source_event_id == source_event_id,
+            )
+            .order_by(FeedbackRecordModel.created_at.asc(), FeedbackRecordModel.id.asc())
+            .limit(self._normalize_limit(limit))
+        )
+        result = await self.db_session.execute(stmt)
+        return [model.to_domain() for model in result.scalars().all()]
+
+    async def list_by_resolution_aggregation_key(
+            self,
+            *,
+            user_id: str,
+            session_id: str,
+            source_run_id: str,
+            resolution_aggregation_key: str,
+            limit: int = 100,
+    ) -> list[FeedbackRecord]:
+        self._require_user_session_scope(user_id=user_id, session_id=session_id)
+        source_run_id = self._require_text(source_run_id, "source_run_id")
+        resolution_aggregation_key = self._require_text(
+            resolution_aggregation_key,
+            "resolution_aggregation_key",
+        )
+        stmt = (
+            select(FeedbackRecordModel)
+            .where(
+                FeedbackRecordModel.user_id == user_id,
+                FeedbackRecordModel.session_id == session_id,
+                FeedbackRecordModel.source_run_id == source_run_id,
+                FeedbackRecordModel.status != FeedbackStatus.OPEN.value,
+                FeedbackRecordModel.resolution[("resolved_by_ref", "resolution_aggregation_key")].astext
+                == resolution_aggregation_key,
+            )
+            .order_by(FeedbackRecordModel.updated_at.asc(), FeedbackRecordModel.id.asc())
+            .limit(self._normalize_limit(limit))
+        )
+        result = await self.db_session.execute(stmt)
+        return [model.to_domain() for model in result.scalars().all()]
+
     async def update_resolution(
             self,
             *,

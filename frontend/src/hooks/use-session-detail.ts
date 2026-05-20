@@ -26,6 +26,7 @@ import {
 } from '@/lib/session-text-stream-state'
 import {
   appendSessionRealtimeEvent,
+  buildDuplicatePersistentEventCommit,
   buildSessionRealtimeStateFromSnapshot,
   type SessionRealtimeState,
 } from '@/lib/session-realtime-events'
@@ -227,7 +228,15 @@ export function useSessionDetail(
       displayedTextStreams: {},
     }
     const appendResult = appendSessionRealtimeEvent(baseRealtimeState, ev)
-    if (appendResult.duplicatePersistentEvent) return
+    if (appendResult.duplicatePersistentEvent) {
+      const commit = buildDuplicatePersistentEventCommit(appendResult)
+      if (!commit) return
+      realtimeStateRef.current = commit.state
+      seenPersistentCursorIdsRef.current = commit.state.seenPersistentCursorIds
+      lastEventIdRef.current = commit.state.lastEventId
+      setEvents(commit.events)
+      return
+    }
 
     realtimeStateRef.current = appendResult.state
     seenPersistentCursorIdsRef.current = appendResult.state.seenPersistentCursorIds

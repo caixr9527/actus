@@ -3,7 +3,9 @@ import test from 'node:test'
 
 import {
   appendSessionRealtimeEvent,
+  buildDuplicatePersistentEventCommit,
   buildSessionRealtimeStateFromSnapshot,
+  shouldCommitDuplicatePersistentEvent,
 } from '../src/lib/session-realtime-events'
 import { eventsToTimeline } from '../src/lib/session-events'
 import {
@@ -210,6 +212,62 @@ test('hidden feedback_input should not enter normal timeline but should keep per
   assert.equal(state.lastEventId, 'evt-feedback-input')
   assert.deepEqual(Array.from(state.seenPersistentCursorIds), ['evt-1', 'evt-feedback-input'])
   assert.equal(eventsToTimeline(state.events).length, 1)
+})
+
+test('hidden feedback projection should dedupe by event id and replace live payload', () => {
+  const feedbackEvent = (refs: string[]): SSEEventData => eventOf('feedback', {
+    runtime: runtime({
+      source_event_id: 'feedback:run-1:evt-source',
+      cursor_event_id: 'feedback:run-1:evt-source',
+      visibility: 'hidden',
+    }),
+    event_id: 'feedback:run-1:evt-source',
+    payload: {
+      feedback_refs: refs,
+      counts: { feedback_count: refs.length },
+      severity_counts: { error: refs.length },
+      status_counts: { open: refs.length },
+      kind_counts: { runtime_feedback: refs.length },
+      summary: 'Feedback Ledger 投影',
+      source_event_ids: ['evt-source'],
+      runtime_metadata: {
+        schema_version: 'feedback_event.v1',
+        source_run_id: 'run-1',
+        aggregation_key: 'evt-source',
+        aggregation_kind: 'source_event',
+      },
+    },
+  })
+  const initial = buildSessionRealtimeStateFromSnapshot({
+    rawEvents: [messageEvent('evt-1', 'persisted'), feedbackEvent(['fb-1'])],
+    snapshotLatestEventId: 'feedback:run-1:evt-source',
+  })
+
+  const updated = appendSessionRealtimeEvent(initial, feedbackEvent(['fb-1', 'fb-2']))
+  const projected = updated.state.events.find((event) => event.type === 'feedback')
+
+  assert.equal(updated.duplicatePersistentEvent, true)
+  assert.equal(updated.appendedToTimeline, false)
+  assert.equal(updated.state.events.length, 2)
+  assert.equal(eventsToTimeline(updated.state.events).length, 1)
+  assert.deepEqual(
+    projected?.type === 'feedback' ? projected.data.payload.feedback_refs : [],
+    ['fb-1', 'fb-2'],
+  )
+  assert.equal(shouldCommitDuplicatePersistentEvent(updated.event), true)
+  assert.equal(shouldCommitDuplicatePersistentEvent(messageEvent('evt-1', 'duplicate')), false)
+
+  let committedEvents: SSEEventData[] = []
+  const commit = buildDuplicatePersistentEventCommit(updated)
+  if (commit) committedEvents = commit.events
+  assert.deepEqual(
+    committedEvents.find((event) => event.type === 'feedback')?.type === 'feedback'
+      ? committedEvents.find((event) => event.type === 'feedback')?.data.payload.feedback_refs
+      : [],
+    ['fb-1', 'fb-2'],
+  )
+  assert.equal(eventsToTimeline(committedEvents).length, 1)
+  assert.equal(buildDuplicatePersistentEventCommit(appendSessionRealtimeEvent(initial, messageEvent('evt-1', 'duplicate'))), null)
 })
 
 test('snapshot state should use last persistent event over runtime cursor and ignore text streams', () => {

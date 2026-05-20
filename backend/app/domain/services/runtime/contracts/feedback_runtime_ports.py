@@ -55,6 +55,16 @@ class FeedbackSnapshotProviderPort(Protocol):
         ...
 
 
+class FeedbackEventProjectorPort(Protocol):
+    """FeedbackRecord 成功写入或 lifecycle 更新后的统一投影端口。"""
+
+    async def project_record_written(self, record_ref: FeedbackWriteResult) -> None:
+        ...
+
+    async def project_resolution_updated(self, record_ref: FeedbackWriteResult) -> None:
+        ...
+
+
 class RuntimeFeedbackGapSinkPort(Protocol):
     """当前执行上下文内的 transient feedback gap 收集端口。"""
 

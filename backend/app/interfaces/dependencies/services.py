@@ -16,6 +16,7 @@ from starlette.datastructures import State
 from app.application.service.agent_service import AgentService
 from app.application.service.artifact_delivery_service import ArtifactDeliveryService
 from app.application.service.artifact_revision_resolver import ArtifactRevisionResolver
+from app.application.service.feedback_event_projector import FeedbackEventProjector
 from app.application.service import (
     AppConfigService,
     FeedbackLedgerService,
@@ -225,6 +226,7 @@ def get_feedback_ledger_service() -> FeedbackLedgerService:
     return FeedbackLedgerService(
         uow_factory=get_uow,
         artifact_revision_resolver=ArtifactRevisionResolver(uow_factory=get_uow),
+        feedback_event_projector=FeedbackEventProjector(uow_factory=get_uow),
     )
 
 

@@ -25,7 +25,7 @@ from .tool_result import ToolResult
 from .wait import normalize_wait_payload
 from .sandbox_fact import SandboxFactKind
 from .artifact_governance import ArtifactEventPayload, SelectedArtifactRevisionResult
-from .feedback import FeedbackInputEventPayloadResult
+from .feedback import FeedbackEventPayloadResult, FeedbackInputEventPayloadResult
 from app.domain.services.runtime.contracts.safety_audit_contract import SafetyAuditEventPayload
 
 
@@ -261,6 +261,13 @@ class FeedbackInputEvent(BaseEvent):
     payload: FeedbackInputEventPayloadResult
 
 
+class FeedbackEvent(BaseEvent):
+    """Feedback Ledger 的轻量 runtime 投影事件。"""
+
+    type: Literal["feedback"] = "feedback"
+    payload: FeedbackEventPayloadResult
+
+
 class WaitEvent(BaseEvent):
     """等待事件模型"""
     type: Literal["wait"] = "wait"
@@ -337,6 +344,7 @@ Event = Annotated[
         ArtifactEvent,
         SafetyAuditEvent,
         FeedbackInputEvent,
+        FeedbackEvent,
         WaitEvent,
         ErrorEvent,
         DoneEvent,

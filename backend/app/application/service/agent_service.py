@@ -20,6 +20,7 @@ from app.application.service.evidence_fact_assembler import EvidenceFactAssemble
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
+from app.application.service.feedback_event_projector import FeedbackEventProjector
 from app.application.service.feedback_ledger_service import FeedbackLedgerService, FeedbackRequiredRecordError
 from app.application.service.runtime_feedback_adapter import RuntimeFeedbackAdapter
 from app.application.service.runtime_feedback_gap_buffer import RuntimeFeedbackGapBuffer
@@ -222,6 +223,7 @@ class AgentService:
         feedback_ledger_service = FeedbackLedgerService(
             uow_factory=self._uow_factory,
             artifact_revision_resolver=ArtifactRevisionResolver(uow_factory=self._uow_factory),
+            feedback_event_projector=FeedbackEventProjector(uow_factory=self._uow_factory),
         )
         runtime_feedback_gap_buffer = RuntimeFeedbackGapBuffer()
         sandbox_fact_recorder = SandboxFactToolEventProjector(

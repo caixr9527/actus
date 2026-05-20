@@ -54,6 +54,7 @@ from app.domain.services.runtime.contracts.feedback_contract import (
     map_feedback_data_origin_to_data_origin,
 )
 from app.domain.services.runtime.contracts.feedback_runtime_ports import (
+    FeedbackEventProjectorPort,
     FeedbackRecorderPort,
     FeedbackSnapshotProviderPort,
     RuntimeFeedbackGapSinkPort,
@@ -69,6 +70,7 @@ __all__ = [
     "FeedbackGapKind",
     "FeedbackGapResult",
     "FeedbackInputEventPayloadResult",
+    "FeedbackEventProjectorPort",
     "FeedbackKind",
     "FeedbackPromptSafeSummaryResult",
     "FeedbackRecorderPort",

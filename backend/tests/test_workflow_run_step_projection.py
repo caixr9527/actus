@@ -18,9 +18,13 @@ from app.domain.models import (
     StepOutcome,
     StepOutputMode,
     StepTaskModeHint,
+    FeedbackEvent,
     WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
+from app.domain.models.feedback import FeedbackEventPayloadResult
+from app.infrastructure.models.workflow_run import WorkflowRunModel
+from app.infrastructure.models.workflow_run_event import WorkflowRunEventModel
 from app.infrastructure.models.workflow_run_step import WorkflowRunStepModel
 from app.infrastructure.repositories.db_workflow_run_repository import DBWorkflowRunRepository
 
@@ -144,6 +148,120 @@ def test_add_event_if_absent_should_sync_step_projection_for_plan_event() -> Non
     repo._refresh_run_status_by_event.assert_not_awaited()
     repo.replace_steps_from_plan.assert_awaited_once()
     repo.upsert_step_from_event.assert_not_awaited()
+
+
+def test_upsert_feedback_event_record_should_preserve_row_and_payload_created_at_on_replace() -> None:
+    first_created_at = datetime(2026, 5, 20, 9, 0, 0)
+    replacement_created_at = datetime(2026, 5, 20, 9, 5, 0)
+    run_record = WorkflowRunModel(
+        id="run-1",
+        session_id="session-1",
+        user_id="user-1",
+        status=WorkflowRunStatus.RUNNING.value,
+    )
+    existing_event = FeedbackEvent(
+        id="feedback:run-1:evt-source",
+        created_at=first_created_at,
+        payload=FeedbackEventPayloadResult(
+            feedback_refs=["fb-1"],
+            counts={"feedback_count": 1},
+            severity_counts={"error": 1},
+            status_counts={"open": 1},
+            kind_counts={"runtime_feedback": 1},
+            summary="first",
+            source_event_ids=["evt-source"],
+            runtime_metadata={"schema_version": "feedback_event.v1"},
+        ),
+    )
+    event_record = WorkflowRunEventModel(
+        id="workflow-event-row-1",
+        run_id="run-1",
+        session_id="session-1",
+        user_id="user-1",
+        event_id=existing_event.id,
+        event_type="feedback",
+        event_payload=existing_event.model_dump(mode="json"),
+        created_at=first_created_at,
+    )
+    db_session = SimpleNamespace(
+        execute=_ExecuteQueue(
+            SimpleNamespace(scalar_one_or_none=lambda: run_record),
+            SimpleNamespace(scalar_one_or_none=lambda: event_record),
+        ),
+        flush=AsyncMock(),
+    )
+    repo = DBWorkflowRunRepository(db_session=db_session)
+    replacement = FeedbackEvent(
+        id=existing_event.id,
+        created_at=replacement_created_at,
+        payload=FeedbackEventPayloadResult(
+            feedback_refs=["fb-1", "fb-2"],
+            counts={"feedback_count": 2},
+            severity_counts={"error": 2},
+            status_counts={"open": 2},
+            kind_counts={"runtime_feedback": 2},
+            summary="replacement",
+            source_event_ids=["evt-source"],
+            runtime_metadata={"schema_version": "feedback_event.v1"},
+        ),
+    )
+
+    result = asyncio.run(
+        repo.upsert_feedback_event_record(
+            session_id="session-1",
+            run_id="run-1",
+            event=replacement,
+        )
+    )
+
+    assert result is not None
+    assert result.created_at == first_created_at
+    assert result.event_payload.created_at == first_created_at
+    assert result.event_payload.payload.feedback_refs == ["fb-1", "fb-2"]
+    assert event_record.created_at == first_created_at
+    assert event_record.event_payload["created_at"] == first_created_at.isoformat()
+
+
+def test_upsert_feedback_event_record_should_reject_session_mismatch_without_write() -> None:
+    run_record = WorkflowRunModel(
+        id="run-1",
+        session_id="other-session",
+        user_id="user-1",
+        status=WorkflowRunStatus.RUNNING.value,
+    )
+    db_session = SimpleNamespace(
+        execute=_ExecuteQueue(SimpleNamespace(scalar_one_or_none=lambda: run_record)),
+        add=MagicMock(),
+        begin_nested=MagicMock(return_value=_NestedTransaction()),
+        flush=AsyncMock(),
+    )
+    repo = DBWorkflowRunRepository(db_session=db_session)
+    event = FeedbackEvent(
+        id="feedback:run-1:evt-source",
+        created_at=datetime(2026, 5, 20, 9, 0, 0),
+        payload=FeedbackEventPayloadResult(
+            feedback_refs=["fb-1"],
+            counts={"feedback_count": 1},
+            severity_counts={"error": 1},
+            status_counts={"open": 1},
+            kind_counts={"runtime_feedback": 1},
+            summary="feedback",
+            source_event_ids=["evt-source"],
+            runtime_metadata={"schema_version": "feedback_event.v1"},
+        ),
+    )
+
+    result = asyncio.run(
+        repo.upsert_feedback_event_record(
+            session_id="session-1",
+            run_id="run-1",
+            event=event,
+        )
+    )
+
+    assert result is None
+    db_session.add.assert_not_called()
+    db_session.flush.assert_not_awaited()
 
 
 def test_upsert_step_from_event_should_create_step_snapshot_and_update_current_step() -> None:

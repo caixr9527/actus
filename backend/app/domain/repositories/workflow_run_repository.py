@@ -106,6 +106,15 @@ class WorkflowRunRepository(Protocol):
         """按事件ID幂等写入运行事件，不进行业务状态推导"""
         ...
 
+    async def upsert_feedback_event_record(
+            self,
+            session_id: str,
+            run_id: str,
+            event: BaseEvent,
+    ) -> WorkflowRunEventRecord | None:
+        """专用于 event_type=feedback 的 upsert/replace，普通事件仍保持 add-only。"""
+        ...
+
     async def replace_steps_from_plan(self, run_id: str, plan: Plan) -> None:
         """用计划快照替换运行步骤快照"""
         ...

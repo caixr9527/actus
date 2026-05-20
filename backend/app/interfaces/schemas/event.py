@@ -23,6 +23,7 @@ from app.domain.models import (
     ArtifactEvent,
     SafetyAuditEvent,
     FeedbackInputEvent,
+    FeedbackEvent,
     PlanEvent,
     PlanEventStatus,
     StepEvent,
@@ -33,7 +34,10 @@ from app.domain.services.runtime.contracts.artifact_governance_contract import (
     ArtifactEventPayload,
     SelectedArtifactRevisionResult,
 )
-from app.domain.services.runtime.contracts.feedback_contract import FeedbackInputEventPayloadResult
+from app.domain.services.runtime.contracts.feedback_contract import (
+    FeedbackEventPayloadResult,
+    FeedbackInputEventPayloadResult,
+)
 from app.domain.services.runtime.contracts.safety_audit_contract import (
     SafetyAuditEventPayload,
 )
@@ -167,6 +171,28 @@ class FeedbackInputSSEEvent(BaseSSEEvent):
     def from_event(cls, event: FeedbackInputEvent, runtime: RuntimeEventMeta) -> Self:
         return cls(
             data=FeedbackInputEventData(
+                **BaseEventData.base_event_data(event, runtime),
+                payload=event.payload,
+            )
+        )
+
+
+class FeedbackEventData(BaseEventData):
+    """feedback hidden projection event 数据。"""
+
+    payload: FeedbackEventPayloadResult
+
+
+class FeedbackSSEEvent(BaseSSEEvent):
+    """Feedback Ledger runtime observation 事件，普通 timeline 默认隐藏。"""
+
+    event: Literal["feedback"] = "feedback"
+    data: FeedbackEventData
+
+    @classmethod
+    def from_event(cls, event: FeedbackEvent, runtime: RuntimeEventMeta) -> Self:
+        return cls(
+            data=FeedbackEventData(
                 **BaseEventData.base_event_data(event, runtime),
                 payload=event.payload,
             )
@@ -543,6 +569,7 @@ AgentSSEEvent = Union[
     ArtifactSSEEvent,
     SafetyAuditSSEEvent,
     FeedbackInputSSEEvent,
+    FeedbackSSEEvent,
     DoneSSEEvent,
     ErrorSSEEvent,
     WaitSSEEvent,
