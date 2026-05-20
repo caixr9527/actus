@@ -231,6 +231,10 @@ function getAssistantTurnSummary(item: AssistantTurnItem, t: ReturnType<typeof u
   return resolveAssistantTurnSummary(item.status, t)
 }
 
+function shouldAnimateAssistantTurnSummary(status: AssistantTurnItem['status']): boolean {
+  return status === 'running' || status === 'waiting' || status === 'idle'
+}
+
 function AssistantTurnBlock({
   item,
   className,
@@ -255,6 +259,7 @@ function AssistantTurnBlock({
   }))
   const previousStatusRef = useRef<AssistantTurnItem['status'] | null>(null)
   const hasProcess = item.processItems.length > 0
+  const summaryText = getAssistantTurnSummary(item, t)
 
   useEffect(() => {
     const previousStatus = previousStatusRef.current
@@ -276,8 +281,13 @@ function AssistantTurnBlock({
             className="flex w-full items-center gap-1 border-b border-stone-200/80 pb-3 text-left text-[17px] leading-6 text-stone-500 transition-colors hover:text-stone-700 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-stone-300"
             onClick={() => setExpanded((prev) => !prev)}
           >
-            <span className="min-w-0 truncate">
-              {getAssistantTurnSummary(item, t)}
+            <span
+              className={cn(
+                'min-w-0 truncate',
+                shouldAnimateAssistantTurnSummary(item.status) && 'assistant-turn-summary-shimmer'
+              )}
+            >
+              {summaryText}
             </span>
             <ChevronDown className={cn('size-5 shrink-0 text-stone-400 transition-transform duration-200', expanded ? 'rotate-180' : '-rotate-90')} />
           </button>

@@ -229,7 +229,10 @@ function SessionDetailViewSessionScope({ sessionId, initialMessage, initialAttac
     if (showFullTimeline || timeline.length <= TIMELINE_WINDOW_SIZE) return timeline
     return timeline.slice(-TIMELINE_WINDOW_SIZE)
   }, [showFullTimeline, timeline])
-  const conversationItems = useMemo(() => timelineToConversationItems(visibleTimeline), [visibleTimeline])
+  const conversationItems = useMemo(() => timelineToConversationItems(visibleTimeline, {
+    currentRunId: session?.runtime.run_id,
+    runtimeStatus,
+  }), [visibleTimeline, session?.runtime.run_id, runtimeStatus])
   const hiddenTimelineCount = timeline.length - visibleTimeline.length
   const collapseLeftSidebar = useCallback(() => {
     setOpen(false)
