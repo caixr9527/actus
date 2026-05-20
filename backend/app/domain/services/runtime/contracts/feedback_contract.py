@@ -854,6 +854,29 @@ class FeedbackGapResult(_StrictModel):
         return self
 
 
+def build_evidence_snapshot_missing_gap(
+        *,
+        stage: FeedbackSnapshotStage,
+        scope: FeedbackSnapshotScopeResult | None = None,
+        diagnostic_summary: str | None = None,
+        created_at: datetime | None = None,
+) -> FeedbackGapResult:
+    """构造 evidence snapshot 缺失的 transient gap，不代表可持久化反馈记录。"""
+    return FeedbackGapResult(
+        gap_kind=FeedbackGapKind.SOURCE_INCOMPLETE,
+        reason_code=FeedbackReasonCode.EVIDENCE_SNAPSHOT_MISSING,
+        source_ref=None,
+        target_ref=None,
+        stage=stage,
+        scope=scope,
+        diagnostic_summary=_require_text(
+            diagnostic_summary or "Evidence context/snapshot 缺失，当前 prompt 只能 fail closed 使用 transient gap。",
+            "diagnostic_summary",
+        ),
+        created_at=created_at or datetime.now(),
+    )
+
+
 class FeedbackWriteResult(_StrictModel):
     success: bool
     created: bool

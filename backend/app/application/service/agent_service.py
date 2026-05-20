@@ -20,13 +20,16 @@ from app.application.service.evidence_fact_assembler import EvidenceFactAssemble
 from app.application.service.evidence_ledger_service import EvidenceLedgerService
 from app.application.service.evidence_result_handle_resolver import EvidenceResultHandleResolver
 from app.application.service.evidence_runtime_context_provider import EvidenceRuntimeContextProvider
-from app.application.service.feedback_ledger_service import FeedbackRequiredRecordError
+from app.application.service.feedback_ledger_service import FeedbackLedgerService, FeedbackRequiredRecordError
+from app.application.service.runtime_feedback_adapter import RuntimeFeedbackAdapter
+from app.application.service.runtime_feedback_gap_buffer import RuntimeFeedbackGapBuffer
 from app.application.service.projecting_safety_audit_recorder import ProjectingSafetyAuditRecorder
 from app.application.service.runtime_access_control_service import RuntimeAccessControlService
 from app.application.service.safety_audit_event_projector import SafetyAuditEventProjector
 from app.application.service.safety_audit_ledger_service import SafetyAuditLedgerService
 from app.application.service.sandbox_fact_ledger_service import SandboxFactLedgerService
 from app.application.service.artifact_ledger_service import ArtifactLedgerService
+from app.application.service.artifact_revision_resolver import ArtifactRevisionResolver
 from app.application.service.artifact_revision_projector import ArtifactRevisionProjector
 from app.application.service.derived_export_projector import DerivedExportProjector
 from app.application.service.final_message_artifact_projector import FinalMessageArtifactProjector
@@ -216,6 +219,11 @@ class AgentService:
     ) -> AgentTaskRunner:
         """构建任务执行器，供 GraphRuntime 在创建任务时回调。"""
         evidence_step_projection = EvidenceDigestProjector(uow_factory=self._uow_factory)
+        feedback_ledger_service = FeedbackLedgerService(
+            uow_factory=self._uow_factory,
+            artifact_revision_resolver=ArtifactRevisionResolver(uow_factory=self._uow_factory),
+        )
+        runtime_feedback_gap_buffer = RuntimeFeedbackGapBuffer()
         sandbox_fact_recorder = SandboxFactToolEventProjector(
             ledger_service=SandboxFactLedgerService(uow_factory=self._uow_factory),
         )
@@ -243,6 +251,16 @@ class AgentService:
             recorder=safety_audit_ledger,
             projector=safety_audit_event_projector,
         )
+        runtime_feedback_adapter = RuntimeFeedbackAdapter(
+            feedback_recorder=feedback_ledger_service,
+            feedback_gap_sink=runtime_feedback_gap_buffer,
+        )
+        evidence_ledger_service = EvidenceLedgerService(
+            uow_factory=self._uow_factory,
+            assembler=EvidenceFactAssembler(),
+            step_projection=evidence_step_projection,
+            runtime_feedback_adapter=runtime_feedback_adapter,
+        )
         runtime_tool_event_persistence = RuntimeToolEventPersistenceService(
             session_id=session.id,
             task=task,
@@ -253,6 +271,7 @@ class AgentService:
             safety_audit_recorder=safety_audit_recorder,
             safety_audit_event_projector=safety_audit_event_projector,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
+            runtime_feedback_adapter=runtime_feedback_adapter,
             artifact_revision_projector=ArtifactRevisionProjector(
                 ledger_service=ArtifactLedgerService(uow_factory=self._uow_factory),
             ),
@@ -289,11 +308,7 @@ class AgentService:
             runtime_tool_snapshot_recorder=self._sandbox_capability_profile_service,
             sandbox_fact_recorder=sandbox_fact_recorder,
             sandbox_fact_event_projector=sandbox_fact_event_projector,
-            evidence_step_reconciler=EvidenceLedgerService(
-                uow_factory=self._uow_factory,
-                assembler=EvidenceFactAssembler(),
-                step_projection=evidence_step_projection,
-            ),
+            evidence_step_reconciler=evidence_ledger_service,
             sandbox_fact_context_builder=sandbox_fact_context_builder,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
             final_message_artifact_projector=FinalMessageArtifactProjector(
@@ -312,6 +327,15 @@ class AgentService:
                 user_id=session.user_id,
                 uow_factory=self._uow_factory,
                 artifact_ledger=ArtifactLedgerService(uow_factory=self._uow_factory),
+            ),
+            runtime_context_service_factory=lambda workspace_runtime_service: RuntimeContextService(
+                workspace_runtime_service=workspace_runtime_service,
+                evidence_context_provider=EvidenceRuntimeContextProvider(
+                    ledger_service=evidence_ledger_service,
+                    projector=evidence_step_projection,
+                ),
+                feedback_snapshot_provider=feedback_ledger_service,
+                feedback_gap_sink=runtime_feedback_gap_buffer,
             ),
         )
 
@@ -426,6 +450,10 @@ class AgentService:
                         step_projection=evidence_digest_projector,
                     ),
                     projector=evidence_digest_projector,
+                ),
+                feedback_snapshot_provider=FeedbackLedgerService(
+                    uow_factory=self._uow_factory,
+                    artifact_revision_resolver=ArtifactRevisionResolver(uow_factory=self._uow_factory),
                 ),
             ),
             evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=self._uow_factory),

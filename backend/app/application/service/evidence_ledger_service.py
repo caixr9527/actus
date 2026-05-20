@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from app.application.service.evidence_ledger_inputs import EvidenceQueryInput
 from app.application.service.evidence_ledger_inputs import EvidenceRecordInput
+from app.application.service.runtime_feedback_adapter import RuntimeFeedbackAdapter
 from app.domain.models import Step
 from app.domain.models.event import EvidenceEvent, EvidenceEventRef
 from app.domain.models.evidence import (
@@ -103,10 +104,12 @@ class EvidenceLedgerService:
             uow_factory,
             assembler: EvidenceStepAssembler,
             step_projection: EvidenceStepProjectionPort | None = None,
+            runtime_feedback_adapter: RuntimeFeedbackAdapter | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._assembler = assembler
         self._step_projection = step_projection
+        self._runtime_feedback_adapter = runtime_feedback_adapter
 
     async def record_evidence(
             self,
@@ -204,7 +207,37 @@ class EvidenceLedgerService:
                 saved.id,
                 saved.evidence_kind.value,
             )
-            return saved
+        await self._record_evidence_gap_feedback(scope=scope, evidence=saved)
+        return saved
+
+    async def _record_evidence_gap_feedback(
+            self,
+            *,
+            scope: AccessScopeResult,
+            evidence: EvidenceRecord,
+    ) -> None:
+        if self._runtime_feedback_adapter is None:
+            return
+        if evidence.evidence_kind != EvidenceKind.EVIDENCE_GAP:
+            return
+        try:
+            await self._runtime_feedback_adapter.record_evidence_gap(
+                scope=scope,
+                evidence=evidence,
+            )
+        except Exception as exc:
+            logger.exception(
+                "evidence_gap_runtime_feedback_projection_failed",
+                extra={
+                    "user_id": scope.user_id,
+                    "session_id": str(scope.session_id),
+                    "run_id": scope.run_id,
+                    "step_id": scope.current_step_id,
+                    "evidence_id": evidence.id,
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "feedback_record_failed",
+                },
+            )
 
     async def list_reusable_by_run(
             self,

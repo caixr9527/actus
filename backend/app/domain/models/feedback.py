@@ -48,6 +48,7 @@ from app.domain.services.runtime.contracts.feedback_contract import (
     UserFeedbackCommand,
     UserFeedbackIntent,
     UserFeedbackIntentKind,
+    build_evidence_snapshot_missing_gap,
     build_feedback_record_from_result,
     build_feedback_record_result,
     map_feedback_data_origin_to_data_origin,
@@ -55,6 +56,7 @@ from app.domain.services.runtime.contracts.feedback_contract import (
 from app.domain.services.runtime.contracts.feedback_runtime_ports import (
     FeedbackRecorderPort,
     FeedbackSnapshotProviderPort,
+    RuntimeFeedbackGapSinkPort,
 )
 
 __all__ = [
@@ -97,10 +99,12 @@ __all__ = [
     "FeedbackWriteResult",
     "QualityFeedbackCommand",
     "RuntimeFeedbackCommand",
+    "RuntimeFeedbackGapSinkPort",
     "UserFeedbackCaptureResult",
     "UserFeedbackCommand",
     "UserFeedbackIntent",
     "UserFeedbackIntentKind",
+    "build_evidence_snapshot_missing_gap",
     "build_feedback_record_from_result",
     "build_feedback_record_result",
     "map_feedback_data_origin_to_data_origin",

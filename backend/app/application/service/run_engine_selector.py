@@ -115,6 +115,7 @@ async def build_run_engine(
         evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
         runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
         derived_export_projector: DerivedExportProjectorPort | None = None,
+        runtime_context_service: RuntimeContextService | None = None,
 ) -> RunEngine:
     """根据配置选择运行时引擎（BE-LG-12 起仅支持 LangGraph）。"""
     settings = get_settings()
@@ -168,6 +169,13 @@ async def build_run_engine(
         recorder=safety_audit_ledger,
         projector=safety_audit_event_projector,
     )
+    resolved_runtime_context_service = runtime_context_service or RuntimeContextService(
+        workspace_runtime_service=workspace_runtime_service,
+        evidence_context_provider=EvidenceRuntimeContextProvider(
+            ledger_service=evidence_ledger_service,
+            projector=evidence_digest_projector,
+        ),
+    )
     return LangGraphRunEngine(
         session_id=session_id,
         stage_llms=_build_stage_llms(llm),
@@ -175,13 +183,7 @@ async def build_run_engine(
         user_id=user_id,
         uow_factory=uow_factory,
         runtime_tools=runtime_tools_with_snapshot.runtime_tools,
-        runtime_context_service=RuntimeContextService(
-            workspace_runtime_service=workspace_runtime_service,
-            evidence_context_provider=EvidenceRuntimeContextProvider(
-                ledger_service=evidence_ledger_service,
-                projector=evidence_digest_projector,
-            ),
-        ),
+        runtime_context_service=resolved_runtime_context_service,
         evidence_result_handle_resolver=EvidenceResultHandleResolver(uow_factory=uow_factory),
         evidence_step_reconciler=evidence_ledger_service,
         runtime_tool_event_persistence=runtime_tool_event_persistence,

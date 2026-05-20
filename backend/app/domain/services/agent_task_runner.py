@@ -105,6 +105,7 @@ class AgentTaskRunner(TaskRunner):
             final_message_artifact_projector: FinalMessageArtifactProjectorPort | None = None,
             derived_export_projector: DerivedExportProjectorPort | None = None,
             workspace_runtime_factory: Callable[[], WorkspaceRuntimeService] | None = None,
+            runtime_context_service_factory: Callable[[WorkspaceRuntimeService], Any] | None = None,
     ) -> None:
         if tool_runtime_adapter is None:
             raise ValueError("tool_runtime_adapter 不能为空")
@@ -191,6 +192,7 @@ class AgentTaskRunner(TaskRunner):
             final_message_artifact_projector: FinalMessageArtifactProjectorPort | None = None,
             derived_export_projector: DerivedExportProjectorPort | None = None,
             workspace_runtime_factory: Callable[[], WorkspaceRuntimeService] | None = None,
+            runtime_context_service_factory: Callable[[WorkspaceRuntimeService], Any] | None = None,
     ) -> "AgentTaskRunner":
         if run_engine_factory is None:
             raise RuntimeError(
@@ -206,6 +208,11 @@ class AgentTaskRunner(TaskRunner):
         mcp_tool = MCPTool()
         a2a_tool = A2ATool()
         workspace_runtime_service = workspace_runtime_factory()
+        runtime_context_service = (
+            runtime_context_service_factory(workspace_runtime_service)
+            if runtime_context_service_factory is not None
+            else None
+        )
         run_engine = await cls._build_run_engine(
             llm=llm,
             agent_config=agent_config,
@@ -228,6 +235,7 @@ class AgentTaskRunner(TaskRunner):
             evidence_step_reconciler=evidence_step_reconciler,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
             derived_export_projector=derived_export_projector,
+            runtime_context_service=runtime_context_service,
         )
         return cls(
             mcp_config=mcp_config,
@@ -251,6 +259,7 @@ class AgentTaskRunner(TaskRunner):
             runtime_tool_event_persistence=runtime_tool_event_persistence,
             final_message_artifact_projector=final_message_artifact_projector,
             derived_export_projector=derived_export_projector,
+            runtime_context_service_factory=runtime_context_service_factory,
         )
 
     @staticmethod
@@ -276,6 +285,7 @@ class AgentTaskRunner(TaskRunner):
             evidence_step_reconciler: EvidenceStepReconcilerPort | None = None,
             runtime_tool_event_persistence: RuntimeToolEventPersistencePort | None = None,
             derived_export_projector: DerivedExportProjectorPort | None = None,
+            runtime_context_service: Any = None,
     ) -> RunEngine:
         return await run_engine_factory(
             llm=llm,
@@ -298,6 +308,7 @@ class AgentTaskRunner(TaskRunner):
             evidence_step_reconciler=evidence_step_reconciler,
             runtime_tool_event_persistence=runtime_tool_event_persistence,
             derived_export_projector=derived_export_projector,
+            runtime_context_service=runtime_context_service,
         )
 
     def _require_run_engine(self) -> RunEngine:

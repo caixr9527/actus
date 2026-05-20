@@ -7,6 +7,9 @@ from typing import Optional
 
 import pytest
 
+from app.application.service.feedback_ledger_service import FeedbackLedgerService
+from app.application.service.runtime_feedback_adapter import RuntimeFeedbackAdapter
+from app.application.service.runtime_feedback_gap_buffer import RuntimeFeedbackGapBuffer
 from app.domain.models import (
     ContinueCancelledTaskInput,
     DoneEvent,
@@ -36,6 +39,7 @@ from app.domain.models import (
     Workspace,
     WorkspaceArtifact,
     WorkflowRun,
+    WorkflowRunEventRecord,
     WorkflowRunStatus,
 )
 from app.application.service.runtime_tool_event_persistence_service import RuntimeToolEventPersistenceService
@@ -48,6 +52,15 @@ from app.domain.models.sandbox_fact import (
     SandboxFactSubjectRef,
     build_sandbox_fact_idempotency_key,
     build_sandbox_fact_payload_hash,
+    classify_sandbox_fact_data,
+    validate_sandbox_fact_payload,
+)
+from app.domain.models.feedback import (
+    FeedbackCategory,
+    FeedbackKind,
+    FeedbackReasonCode,
+    FeedbackSourceKind,
+    FeedbackTargetType,
 )
 from app.domain.models.tool_result import ToolResult
 from app.domain.services.agent_task_runner import AgentTaskRunner
@@ -2147,6 +2160,76 @@ def test_runtime_tool_event_persistence_should_project_artifact_revision_after_f
     assert event.runtime_fact_projection["artifact_revision_count"] == 1
 
 
+def test_runtime_tool_event_persistence_should_record_feedback_after_tool_failure_fact_saved() -> None:
+    task = _SerialInvokeTask([])
+    calls: list[dict] = []
+    feedback_repo = _FeedbackRepoForRuntimeToolPersistence(calls=calls)
+    sandbox_fact_repo = _SandboxFactRepoForRuntimeToolPersistence()
+    workflow_run_repo = _RuntimeToolWorkflowRunRepo()
+    uow = _RuntimeFeedbackUoW(
+        workflow_run_repo=workflow_run_repo,
+        sandbox_fact_repo=sandbox_fact_repo,
+        feedback_repo=feedback_repo,
+    )
+    uow.calls = calls
+    fact_recorder = _ToolFailureFactRecorder(sandbox_fact_repo=sandbox_fact_repo)
+    fact_recorder._uow = uow
+    service = RuntimeToolEventPersistenceService(
+        session_id="session-1",
+        task=task,
+        uow_factory=lambda: uow,
+        runtime_state_coordinator=_RuntimeFeedbackCoordinator(workflow_run_repo, uow),
+        sandbox_fact_recorder=fact_recorder,
+        sandbox_fact_context_builder=_StaticFactContextBuilder(),
+        runtime_feedback_adapter=RuntimeFeedbackAdapter(
+            feedback_recorder=FeedbackLedgerService(uow_factory=lambda: uow),
+            feedback_gap_sink=RuntimeFeedbackGapBuffer(),
+        ),
+    )
+    event = ToolEvent(
+        id="tool-event-1",
+        step_id="step-1",
+        tool_call_id="call-1",
+        tool_name="file",
+        function_name="read_file",
+        function_args={"path": "/workspace/missing.txt"},
+        function_result=ToolResult(success=False, message="file missing"),
+        status=ToolEventStatus.CALLED,
+    )
+
+    result = asyncio.run(service.persist_tool_event_and_record_facts(
+        event=event,
+        run_id="run-1",
+        session_id="session-1",
+        current_step_id="step-1",
+    ))
+
+    assert result.source_event_id == "evt-1"
+    assert [call["step"] for call in uow.calls] == [
+        "persist_tool_event",
+        "record_sandbox_fact",
+        "save_feedback",
+    ]
+    assert workflow_run_repo.records["evt-1"].event_payload.tool_call_id == "call-1"
+    assert sandbox_fact_repo.records["fact-tool-failure"].source_ref.source_event_id == "evt-1"
+    assert len(feedback_repo.saved) == 1
+    saved_feedback = feedback_repo.saved[0]
+    assert saved_feedback.kind == FeedbackKind.RUNTIME_FEEDBACK
+    assert saved_feedback.category == FeedbackCategory.TOOL_FAILURE
+    assert saved_feedback.reason_code == FeedbackReasonCode.TOOL_FAILED
+    assert saved_feedback.source_kind == FeedbackSourceKind.SANDBOX_FACT
+    assert saved_feedback.source_event_id == "evt-1"
+    assert saved_feedback.source_record_refs == [
+        {
+            "fact_id": "fact-tool-failure",
+            "source_event_id": "evt-1",
+            "tool_call_id": "call-1",
+        }
+    ]
+    assert saved_feedback.target_type == FeedbackTargetType.TOOL_CALL
+    assert saved_feedback.target_id == "call-1"
+
+
 def test_runtime_tool_event_persistence_should_keep_stream_when_fact_projection_fails_after_db_persist() -> None:
     task = _SerialInvokeTask([])
     coordinator = _PersistingCoordinator()
@@ -2232,6 +2315,186 @@ class _CapturingCoordinator:
     async def persist_runtime_event(self, *, session_id, event, projection=None, allow_status_transition=True):
         self.persisted_events.append(event)
         return type("PersistResult", (), {"event_inserted": True})()
+
+
+class _RuntimeToolWorkflowRunRepo:
+    def __init__(self) -> None:
+        self.records: dict[str, WorkflowRunEventRecord] = {}
+        self.calls: list[dict] = []
+
+    def add_tool_event(self, event: ToolEvent) -> None:
+        self.records[event.id] = WorkflowRunEventRecord(
+            run_id="run-1",
+            session_id="session-1",
+            user_id="user-1",
+            event_id=event.id,
+            event_type="tool",
+            event_payload=event,
+        )
+
+    async def get_event_record_by_event_id(self, *, user_id: str, session_id: str, run_id: str, event_id: str):
+        self.calls.append({"method": "get_event_record_by_event_id", "event_id": event_id, "run_id": run_id})
+        record = self.records.get(event_id)
+        if record is None:
+            return None
+        if record.user_id != user_id or record.session_id != session_id or record.run_id != run_id:
+            return None
+        return record
+
+    async def get_event_record_by_event_id_in_session(self, *, user_id: str, session_id: str, event_id: str):
+        self.calls.append({"method": "get_event_record_by_event_id_in_session", "event_id": event_id})
+        record = self.records.get(event_id)
+        if record is None:
+            return None
+        if record.user_id != user_id or record.session_id != session_id:
+            return None
+        return record
+
+    async def get_by_id_for_user_session(self, *, run_id: str, user_id: str, session_id: str):
+        if run_id != "run-1":
+            return None
+        return WorkflowRun(id=run_id, user_id=user_id, session_id=session_id)
+
+
+class _RuntimeFeedbackCoordinator:
+    def __init__(self, workflow_run_repo: _RuntimeToolWorkflowRunRepo, uow) -> None:
+        self._workflow_run_repo = workflow_run_repo
+        self._uow = uow
+
+    async def persist_runtime_event(self, *, session_id, event, projection=None, allow_status_transition=True):
+        self._uow.calls.append({"step": "persist_tool_event", "event_id": event.id})
+        self._workflow_run_repo.add_tool_event(event)
+        return type("PersistResult", (), {"event_inserted": True})()
+
+
+class _SandboxFactRepoForRuntimeToolPersistence:
+    def __init__(self) -> None:
+        self.records: dict[str, SandboxFactRecord] = {}
+
+    async def list_by_ids(self, *, user_id: str, session_id: str, fact_ids: list[str], limit: int = 100):
+        return [
+            fact
+            for fact_id in fact_ids[:limit]
+            if (fact := self.records.get(fact_id)) is not None
+            and fact.user_id == user_id
+            and fact.session_id == session_id
+        ]
+
+
+class _FeedbackRepoForRuntimeToolPersistence:
+    def __init__(self, *, calls: list[dict] | None = None) -> None:
+        self.saved = []
+        self._calls = calls
+
+    async def save_once(self, record):
+        if self._calls is not None:
+            self._calls.append({"step": "save_feedback", "feedback_id": record.id})
+        self.saved.append(record)
+        return record
+
+    async def list_by_scope(self, **_kwargs):
+        return []
+
+
+class _EmptySafetyAuditRepo:
+    async def get_by_scope(self, **_kwargs):
+        return None
+
+
+class _RuntimeFeedbackUoW:
+    def __init__(
+            self,
+            *,
+            workflow_run_repo: _RuntimeToolWorkflowRunRepo,
+            sandbox_fact_repo: _SandboxFactRepoForRuntimeToolPersistence,
+            feedback_repo: _FeedbackRepoForRuntimeToolPersistence,
+    ) -> None:
+        self.workflow_run = workflow_run_repo
+        self.sandbox_fact = sandbox_fact_repo
+        self.feedback = feedback_repo
+        self.safety_audit = _EmptySafetyAuditRepo()
+        self.calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def commit(self):
+        return None
+
+    async def rollback(self):
+        return None
+
+
+class _ToolFailureFactRecorder:
+    def __init__(self, *, sandbox_fact_repo: _SandboxFactRepoForRuntimeToolPersistence) -> None:
+        self._sandbox_fact_repo = sandbox_fact_repo
+
+    async def record_from_tool_event(self, *, context, event):
+        payload = validate_sandbox_fact_payload(
+            fact_kind=SandboxFactKind.TOOL_FAILURE,
+            payload={
+                "function_name": event.function_name,
+                "reason_code": "file_missing",
+                "message_excerpt": "file missing",
+                "retry_count": 0,
+                "timeout": False,
+                "diagnostic_type": "tool_error",
+            },
+        ).model_dump(mode="json")
+        payload_hash = build_sandbox_fact_payload_hash(payload)
+        source_ref = SandboxFactSourceRef(
+            source_type=SandboxFactSourceType.TOOL_EVENT,
+            source_event_id=context.source_event_id,
+            source_event_status="available",
+            tool_event_id=event.id,
+            tool_call_id=event.tool_call_id,
+            function_name=event.function_name,
+        )
+        subject_ref = SandboxFactSubjectRef(subject_type="file", subject_key="file:/workspace/missing.txt")
+        classification = classify_sandbox_fact_data(
+            fact_kind=SandboxFactKind.TOOL_FAILURE,
+            source_type=SandboxFactSourceType.TOOL_EVENT,
+        )
+        fact = SandboxFactRecord(
+            id="fact-tool-failure",
+            user_id="user-1",
+            session_id="session-1",
+            workspace_id="workspace-1",
+            fact_scope=SandboxFactScope.STEP,
+            run_id="run-1",
+            step_id="step-1",
+            fact_kind=SandboxFactKind.TOOL_FAILURE,
+            source_ref=source_ref,
+            subject_ref=subject_ref,
+            summary="tool failure fact",
+            payload=payload,
+            payload_hash=payload_hash,
+            idempotency_key=build_sandbox_fact_idempotency_key(
+                user_id="user-1",
+                session_id="session-1",
+                workspace_id="workspace-1",
+                fact_scope=SandboxFactScope.STEP,
+                run_id="run-1",
+                step_id="step-1",
+                fact_kind=SandboxFactKind.TOOL_FAILURE,
+                source_event_id=context.source_event_id,
+                tool_call_id=event.tool_call_id,
+                subject_key=subject_ref.subject_key,
+                payload_hash=payload_hash,
+            ),
+            origin=classification.origin,
+            trust_level=classification.trust_level,
+            privacy_level=classification.privacy_level,
+            retention_policy=classification.retention_policy,
+        )
+        self._sandbox_fact_repo.records[fact.id] = fact
+        context_uow = getattr(self, "_uow", None)
+        if context_uow is not None:
+            context_uow.calls.append({"step": "record_sandbox_fact", "fact_id": fact.id})
+        return [fact]
 
 
 class _FailingCoordinator:

@@ -55,6 +55,16 @@ class FeedbackSnapshotProviderPort(Protocol):
         ...
 
 
+class RuntimeFeedbackGapSinkPort(Protocol):
+    """当前执行上下文内的 transient feedback gap 收集端口。"""
+
+    def append_feedback_gap(self, gap: FeedbackGapResult) -> None:
+        ...
+
+    def get_feedback_gaps(self) -> list[FeedbackGapResult]:
+        ...
+
+
 class ArtifactRevisionResolverPort(Protocol):
     """Feedback 侧依赖的 artifact revision 解析端口。"""
 

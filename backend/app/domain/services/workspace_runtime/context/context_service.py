@@ -19,6 +19,16 @@ from app.domain.models import (
 from app.domain.services.runtime.contracts.access_scope_contract import AccessScopeResult
 from app.domain.services.runtime.contracts.runtime_logging import log_runtime
 from app.domain.services.runtime.contracts.evidence_runtime_ports import EvidenceRuntimeContextProviderPort
+from app.domain.services.runtime.contracts.feedback_runtime_ports import (
+    FeedbackSnapshotProviderPort,
+    RuntimeFeedbackGapSinkPort,
+)
+from app.domain.models.feedback import (
+    FeedbackScopeKind,
+    FeedbackSnapshotScopeResult,
+    FeedbackSnapshotStage,
+    build_evidence_snapshot_missing_gap,
+)
 from app.domain.services.runtime.contracts.sandbox_capability_profile_contract import (
     SANDBOX_CAPABILITY_PROFILE_ENVIRONMENT_KEY,
     validate_sandbox_capability_profile_payload,
@@ -65,9 +75,13 @@ class RuntimeContextService:
             self,
             workspace_runtime_service: Optional[WorkspaceRuntimeService] = None,
             evidence_context_provider: EvidenceRuntimeContextProviderPort | None = None,
+            feedback_snapshot_provider: FeedbackSnapshotProviderPort | None = None,
+            feedback_gap_sink: RuntimeFeedbackGapSinkPort | None = None,
     ) -> None:
         self._workspace_runtime_service = workspace_runtime_service
         self._evidence_context_provider = evidence_context_provider
+        self._feedback_snapshot_provider = feedback_snapshot_provider
+        self._feedback_gap_sink = feedback_gap_sink
 
     def build_packet(
             self,
@@ -157,11 +171,23 @@ class RuntimeContextService:
                 "stage": stage,
                 "completed_step_ids": self._collect_completed_step_ids_for_error(state=state),
             }
+            self._append_evidence_snapshot_missing_gap(stage=stage, state=state, step=step)
             packet["prompt_visible_fields"] = [
                 field_name
                 for field_name in list(packet.get("prompt_visible_fields") or [])
                 if field_name != "evidence_context_error"
             ]
+        feedback_snapshots = await self._build_feedback_snapshots(stage=stage, state=state, step=step)
+        if feedback_snapshots is not None:
+            packet.update(self._build_feedback_packet_fields(feedback_snapshots=feedback_snapshots))
+            visible_fields = [
+                field_name
+                for field_name in list(packet.get("prompt_visible_fields") or [])
+                if field_name not in {"feedback_snapshot", "feedback_gaps"}
+            ]
+            if "feedback_snapshot" not in visible_fields:
+                visible_fields.append("feedback_snapshot")
+            packet["prompt_visible_fields"] = visible_fields
         return packet
 
     def _build_packet(
@@ -276,6 +302,104 @@ class RuntimeContextService:
             step=step,
             task_mode=task_mode,
         )
+
+    async def _build_feedback_snapshots(
+            self,
+            *,
+            stage: PromptStage,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+    ):
+        if self._feedback_snapshot_provider is None or stage not in {"execute", "replan", "summary"}:
+            return None
+        scope = self._build_access_scope(state=state, step=step)
+        if scope is None:
+            return None
+        snapshot_stage = self._feedback_snapshot_stage(stage)
+        runtime_gaps = self._feedback_gap_sink.get_feedback_gaps() if self._feedback_gap_sink is not None else []
+        run_snapshot = await self._feedback_snapshot_provider.build_snapshot(
+            access_scope=scope,
+            stage=snapshot_stage,
+            feedback_scope_kind=FeedbackScopeKind.RUN,
+            requested_scope_id=scope.run_id,
+            runtime_gaps=runtime_gaps,
+        )
+        session_snapshot = await self._feedback_snapshot_provider.build_snapshot(
+            access_scope=scope,
+            stage=snapshot_stage,
+            feedback_scope_kind=FeedbackScopeKind.SESSION,
+            requested_scope_id=str(scope.session_id),
+            runtime_gaps=[],
+        )
+        return {"run": run_snapshot, "session": session_snapshot}
+
+    def _append_evidence_snapshot_missing_gap(
+            self,
+            *,
+            stage: PromptStage,
+            state: PlannerReActLangGraphState,
+            step: Optional[Step],
+    ) -> None:
+        """Evidence context 缺失只进入当前 runtime gap buffer，不持久化为 FeedbackRecord。"""
+        if self._feedback_gap_sink is None:
+            return
+        scope = self._build_access_scope(state=state, step=step)
+        if scope is None:
+            return
+        snapshot_stage = self._feedback_snapshot_stage(stage)
+        snapshot_scope = FeedbackSnapshotScopeResult(
+            user_id=scope.user_id,
+            session_id=str(scope.session_id),
+            workspace_id=str(scope.workspace_id),
+            feedback_scope_kind=FeedbackScopeKind.RUN,
+            scope_id=str(scope.run_id),
+            current_run_id_at_snapshot_time=str(scope.run_id),
+        )
+        self._feedback_gap_sink.append_feedback_gap(
+            build_evidence_snapshot_missing_gap(
+                stage=snapshot_stage,
+                scope=snapshot_scope,
+                diagnostic_summary="Evidence context/snapshot 缺失，当前 prompt 只能 fail closed 使用 transient gap。",
+            )
+        )
+
+    @staticmethod
+    def _feedback_snapshot_stage(stage: PromptStage) -> FeedbackSnapshotStage:
+        return {
+            "execute": FeedbackSnapshotStage.EXECUTE,
+            "replan": FeedbackSnapshotStage.REPLAN,
+            "summary": FeedbackSnapshotStage.SUMMARY,
+        }[stage]
+
+    @staticmethod
+    def _build_feedback_packet_fields(*, feedback_snapshots: Dict[str, Any]) -> Dict[str, Any]:
+        run_payload = feedback_snapshots["run"].model_dump(mode="json")
+        session_payload = feedback_snapshots["session"].model_dump(mode="json")
+        return {
+            "feedback_snapshot": {
+                "run": RuntimeContextService._prompt_feedback_snapshot_projection(run_payload),
+                "session": RuntimeContextService._prompt_feedback_snapshot_projection(session_payload),
+            },
+            "feedback_gaps": run_payload.get("feedback_gaps", []),
+        }
+
+    @staticmethod
+    def _prompt_feedback_snapshot_projection(snapshot_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "snapshot_id": snapshot_payload.get("snapshot_id"),
+            "stage": snapshot_payload.get("stage"),
+            "active_user_feedback": snapshot_payload.get("active_user_feedback", []),
+            "active_runtime_feedback": snapshot_payload.get("active_runtime_feedback", []),
+            "active_quality_feedback": snapshot_payload.get("active_quality_feedback", []),
+            "open_feedback_items": snapshot_payload.get("open_feedback_items", []),
+            "do_not_repeat_feedback": snapshot_payload.get("do_not_repeat_feedback", []),
+            "user_constraints": snapshot_payload.get("user_constraints", []),
+            "replan_hints": snapshot_payload.get("replan_hints", []),
+            "review_hints": snapshot_payload.get("review_hints", []),
+            "final_gate_hints": snapshot_payload.get("final_gate_hints", []),
+            "feedback_gaps": snapshot_payload.get("feedback_gaps", []),
+            "cursor": snapshot_payload.get("cursor", {}),
+        }
 
     @staticmethod
     def _build_stage_evidence_packet_fields(

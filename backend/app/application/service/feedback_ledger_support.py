@@ -171,6 +171,14 @@ class FeedbackScopeValidator:
                 run_id=str(command.source_ref.source_run_id),
                 event_id=event_id,
             )
+            if record is None:
+                session_record = await workflow_run.get_event_record_by_event_id_in_session(
+                    user_id=access_scope.user_id,
+                    session_id=str(access_scope.session_id),
+                    event_id=event_id,
+                )
+                if session_record is not None:
+                    raise self._issue(FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH, FeedbackGapKind.RECORD_FAILED, "source event 与 source_run_id 不一致")
         else:
             record = await workflow_run.get_event_record_by_event_id_in_session(
                 user_id=access_scope.user_id,
@@ -181,9 +189,10 @@ class FeedbackScopeValidator:
             raise self._source_issue_for_command(command, "source event 不存在或不属于当前 session")
         if command.source_ref.source_run_id and record.run_id != command.source_ref.source_run_id:
             raise self._issue(FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH, FeedbackGapKind.RECORD_FAILED, "source event 与 source_run_id 不一致")
-        expected_event_type = SOURCE_EVENT_TYPE_BY_KIND.get(command.source_ref.source_kind)
-        if expected_event_type and record.event_type != expected_event_type:
-            raise self._issue(FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH, FeedbackGapKind.RECORD_FAILED, f"source event_type 必须是 {expected_event_type}")
+        expected_event_types = self._expected_source_event_types(command)
+        if expected_event_types and record.event_type not in expected_event_types:
+            expected = "/".join(sorted(expected_event_types))
+            raise self._issue(FeedbackReasonCode.FEEDBACK_SOURCE_EVENT_MISMATCH, FeedbackGapKind.RECORD_FAILED, f"source event_type 必须是 {expected}")
         return record
 
     def _validate_controlled_user_feedback_source(
@@ -272,6 +281,7 @@ class FeedbackScopeValidator:
             facts = await uow.sandbox_fact.list_by_ids(user_id=access_scope.user_id, session_id=str(access_scope.session_id), fact_ids=fact_ids, limit=len(fact_ids))
             if len(facts) != len(set(fact_ids)):
                 raise self._issue(FeedbackReasonCode.FEEDBACK_SOURCE_RECORD_MISSING, FeedbackGapKind.SOURCE_INCOMPLETE, "sandbox_fact source 引用不存在或不属于当前 session")
+            self._validate_sandbox_fact_source_event_ids(command=command, facts=facts)
             self._validate_source_record_run_ids(
                 source_kind=source_kind,
                 source_run_id=effective_source_run_id,
@@ -493,6 +503,39 @@ class FeedbackScopeValidator:
             if normalized:
                 values.append(normalized)
         return values
+
+    def _expected_source_event_types(
+            self,
+            command: UserFeedbackCommand | RuntimeFeedbackCommand | QualityFeedbackCommand,
+    ) -> set[str]:
+        expected_event_type = SOURCE_EVENT_TYPE_BY_KIND.get(command.source_ref.source_kind)
+        if expected_event_type is None:
+            return set()
+        if command.source_ref.source_kind == FeedbackSourceKind.SANDBOX_FACT:
+            # TOOL_FAILURE fact 按 PR4 以 fact.source_ref.source_event_id 回链原始 ToolEvent，
+            # record 归属和 source_event_id 一致性由 _validate_source_owned_refs 继续强校验。
+            return {expected_event_type, "tool"}
+        if command.source_ref.source_kind == FeedbackSourceKind.SAFETY_AUDIT:
+            # Safety audit runtime feedback 回链触发安全审计的 ToolEvent。
+            return {expected_event_type, "tool"}
+        return {expected_event_type}
+
+    def _validate_sandbox_fact_source_event_ids(
+            self,
+            *,
+            command: UserFeedbackCommand | RuntimeFeedbackCommand | QualityFeedbackCommand,
+            facts: list[object],
+    ) -> None:
+        expected_source_event_id = str(command.source_ref.source_event_id or "").strip()
+        for fact in facts:
+            fact_source_ref = getattr(fact, "source_ref", None)
+            fact_source_event_id = str(getattr(fact_source_ref, "source_event_id", "") or "").strip()
+            if fact_source_event_id != expected_source_event_id:
+                raise self._issue(
+                    FeedbackReasonCode.FEEDBACK_SOURCE_RECORD_MISSING,
+                    FeedbackGapKind.SOURCE_INCOMPLETE,
+                    "sandbox_fact source 引用的 source_event_id 与 command source_event_id 不一致",
+                )
 
     def _validate_source_record_run_ids(
             self,

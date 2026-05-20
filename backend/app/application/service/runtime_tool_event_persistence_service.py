@@ -24,6 +24,7 @@ from app.domain.services.runtime.contracts.sandbox_fact_ports import (
 )
 from app.domain.models.safety_audit import SafetyAuditRecorderPort
 from app.domain.services.runtime.contracts.safety_audit_contract import SafetyAuditEventProjectorPort
+from app.application.service.runtime_feedback_adapter import RuntimeFeedbackAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
             sandbox_fact_event_projector: SandboxFactEventProjectorPort | None = None,
             tool_event_display_projector: ToolEventDisplayProjectorPort | None = None,
             artifact_revision_projector: ArtifactRevisionProjectorPort | None = None,
+            runtime_feedback_adapter: RuntimeFeedbackAdapter | None = None,
     ) -> None:
         self._session_id = str(session_id or "").strip()
         self._task = task
@@ -61,6 +63,7 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         self._sandbox_fact_event_projector = sandbox_fact_event_projector
         self._tool_event_display_projector = tool_event_display_projector
         self._artifact_revision_projector = artifact_revision_projector
+        self._runtime_feedback_adapter = runtime_feedback_adapter
 
     async def persist_tool_event_and_record_facts(
             self,
@@ -131,15 +134,23 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
                     context=context,
                     event=event,
                 )
-                fact_count = len(list(facts or []))
+                facts = list(facts or [])
+                fact_count = len(facts)
+                await self._record_tool_runtime_feedback(
+                    event=event,
+                    source_event_id=source_event_id,
+                    context=context,
+                    facts=facts,
+                )
+                await self._record_safety_runtime_feedback(context=context, event=event)
                 artifact_projection = await self._project_artifact_revisions(
                     context=context,
                     event=event,
-                    facts=list(facts or []),
+                    facts=facts,
                 )
                 sandbox_fact_event_persisted = await self._project_sandbox_fact_event(
                     context=context,
-                    facts=list(facts or []),
+                    facts=facts,
                 )
             event.runtime_fact_projection = {
                 "graph_main_chain": True,
@@ -203,6 +214,77 @@ class RuntimeToolEventPersistenceService(RuntimeToolEventPersistencePort):
         if self._tool_event_display_projector is None:
             return
         await self._tool_event_display_projector.project(event)
+
+    async def _record_tool_runtime_feedback(
+            self,
+            *,
+            event: ToolEvent,
+            source_event_id: str,
+            context,
+            facts,
+    ) -> None:
+        if self._runtime_feedback_adapter is None:
+            return
+        try:
+            await self._runtime_feedback_adapter.record_tool_event_feedback(
+                scope=context.scope,
+                event=event,
+                source_event_id=source_event_id,
+                facts=list(facts or []),
+            )
+        except Exception as exc:
+            logger.exception(
+                "tool_runtime_feedback_projection_failed",
+                extra={
+                    "user_id": getattr(context.scope, "user_id", None),
+                    "session_id": getattr(context.scope, "session_id", None),
+                    "run_id": getattr(context.scope, "run_id", None),
+                    "step_id": getattr(context, "current_step_id", None)
+                               or getattr(context.scope, "current_step_id", None),
+                    "source_event_id": source_event_id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "feedback_record_failed",
+                },
+            )
+
+    async def _record_safety_runtime_feedback(self, *, context, event: ToolEvent) -> None:
+        if self._runtime_feedback_adapter is None:
+            return
+        safety_audit = dict((event.runtime_metadata or {}).get("safety_audit") or {})
+        audit_id = str(safety_audit.get("audit_id") or "").strip()
+        if not audit_id:
+            return
+        try:
+            async with self._uow_factory() as uow:
+                audit = await uow.safety_audit.get_by_scope(
+                    user_id=context.scope.user_id,
+                    session_id=str(context.scope.session_id),
+                    audit_id=audit_id,
+                )
+            if audit is None:
+                return
+            await self._runtime_feedback_adapter.record_safety_audit_feedback(
+                scope=context.scope,
+                audit=audit,
+            )
+        except Exception as exc:
+            logger.exception(
+                "safety_runtime_feedback_projection_failed",
+                extra={
+                    "user_id": getattr(context.scope, "user_id", None),
+                    "session_id": getattr(context.scope, "session_id", None),
+                    "run_id": getattr(context.scope, "run_id", None),
+                    "step_id": getattr(context, "current_step_id", None)
+                               or getattr(context.scope, "current_step_id", None),
+                    "audit_id": audit_id,
+                    "tool_call_id": event.tool_call_id,
+                    "function_name": event.function_name,
+                    "error_type": exc.__class__.__name__,
+                    "reason_code": "feedback_record_failed",
+                },
+            )
 
     async def _attach_safety_audit_source_event(
             self,
